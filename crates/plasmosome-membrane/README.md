@@ -239,8 +239,10 @@ with `EOPNOTSUPP` and the bind refuses with `Permissions` rather than fall back 
 follows a symlink. Closing or dropping the listener removes the path only while that same socket is
 there, with the code `membraned` uses for its control socket, below. The inspection, the bind and
 the identity read are separate calls, so the path must be in a directory only the supervisor can
-write. The cell, plasmosome-7em, which is not built yet, is to check that directory; another process
-of the same uid is owner gate O-4 on `plasmosome-qep`.
+write. The socket also listens before it is set to 0600: until the chmod it has the mode the umask
+leaves, and a connection made then stays queued. So the directory must also be one no other
+principal can search. The cell, plasmosome-7em, which is not built yet, is to check that directory;
+another process of the same uid is owner gate O-4 on `plasmosome-qep`.
 
 `accept_ready` accepts one pending connection without blocking and reads the peer's process id right
 after the accept. What that pid names differs by platform. On Linux it is `SO_PEERCRED`'s: the
@@ -257,10 +259,13 @@ the pid it had. `accept_ready` returns an error only when the listener's own acc
 process that connects and leaves cannot make the listener look broken.
 
 `DiagnosticTranscript` reads the read end of the diagnostic pipe that `HelperExec::prepare` returns,
-on a thread of its own, so a helper that writes a lot never blocks on descriptor 2. It keeps the
-first 1,048,576 bytes and counts the rest. `finish(wait)` waits up to `wait` for end of file and
-returns within `wait` plus one 25 ms poll interval, unless the machine is too loaded to schedule its
-thread. `eof` is true only when every holder of the write end has closed it.
+on a thread of its own, so a helper that writes a lot never blocks on descriptor 2. Start it before
+`VmmChild::spawn`, so a thread that cannot start refuses the launch before anything forks. It keeps
+the first 1,048,576 bytes and counts the rest. `finish(wait)` waits up to `wait` for end of file,
+then tells the thread to stop. The thread then reads what the pipe holds without waiting, so bytes
+written before `finish` are kept even with no wait. It checks for the stop every 25 ms, so `finish`
+typically returns within `wait` plus 25 ms; on a loaded machine the scheduler adds to that. `eof` is
+true only when every holder of the write end has closed it.
 
 ## Control-socket ownership
 

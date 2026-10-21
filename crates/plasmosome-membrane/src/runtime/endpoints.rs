@@ -19,8 +19,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// A control or data listener the supervisor binds at a recipe path before it
 /// launches the helper, and keeps until teardown.
 ///
-/// Get one from [`RuntimeListener::bind`]. Its socket file has mode 0600, and
-/// its descriptor is nonblocking and close-on-exec. Closing or dropping it
+/// Get one from [`RuntimeListener::bind`]. Once that returns, its socket file
+/// has mode 0600, and its descriptor is nonblocking and close-on-exec. Closing
+/// or dropping it
 /// closes the listener, then removes the path only if a no-follow inspection
 /// still finds the socket it bound there.
 #[derive(Debug)]
@@ -39,7 +40,13 @@ pub enum EndpointRefusal {
     /// was.
     AddressInUse { path: RecipePath },
     /// Inspecting `path`, binding the socket or making it nonblocking failed
-    /// with `errno`. Nothing this call created remains at `path`.
+    /// with `errno`. A path too long for a socket address gives `EIO`, since
+    /// std refuses it without an errno. When the inspection or the `bind` call
+    /// failed, nothing was created. When std's `listen` failed after its
+    /// `bind`, or the spawn lock closed a socket that was not close-on-exec,
+    /// the socket file stays at `path`, since no identity was read for it.
+    /// When making it nonblocking failed, the socket file was removed as for
+    /// [`EndpointRefusal::Permissions`].
     Bind { path: RecipePath, errno: i32 },
     /// After the bind, reading what is at `path` without following a symlink
     /// failed with `errno`, or found something other than a socket, when
@@ -49,8 +56,10 @@ pub enum EndpointRefusal {
         path: RecipePath,
         errno: Option<i32>,
     },
-    /// Setting the socket file to mode 0600 failed with `errno`. The socket
-    /// was removed.
+    /// Setting the socket file to mode 0600 failed with `errno`. The listener
+    /// was closed, and the socket file removed only if a no-follow inspection
+    /// still found the socket this call bound; any other entry at `path` was
+    /// left in place.
     Permissions { path: RecipePath, errno: i32 },
 }
 
@@ -86,6 +95,11 @@ impl RuntimeListener {
     /// checked before the bind and the socket's identity is read after it.
     /// Those are separate calls, so pass a path under a directory only this
     /// supervisor can write; this call does not check the directory.
+    ///
+    /// The socket listens before it is set to 0600. Until then it has the mode
+    /// the umask leaves, so a process that can search the directory and that
+    /// mode admits can connect, and its connection stays queued after the
+    /// chmod. Pass a path under a directory no other principal can search.
     pub fn bind(path: &RecipePath) -> Result<RuntimeListener, EndpointRefusal> {
         let bind_failed = |error: std::io::Error| EndpointRefusal::Bind {
             path: path.clone(),
@@ -240,9 +254,10 @@ pub fn peer_pid(stream: &UnixStream) -> std::io::Result<libc::pid_t> {
 /// so a helper that writes a lot never blocks on descriptor 2.
 ///
 /// Start it with the read end `HelperExec::prepare` returns as
-/// `PreparedHelper::diagnostics`, right after `VmmChild::spawn`, and end it
-/// with [`DiagnosticTranscript::finish`]. Dropping it without `finish` stops
-/// the thread within one poll interval and discards what it read.
+/// `PreparedHelper::diagnostics`, before `VmmChild::spawn`, and end it with
+/// [`DiagnosticTranscript::finish`]. Dropping it without `finish` tells the
+/// thread to stop, which it sees within one poll interval, and discards what
+/// it read.
 #[derive(Debug)]
 pub struct DiagnosticTranscript {
     stop: Arc<AtomicBool>,
@@ -265,7 +280,14 @@ pub struct Transcript {
 
 impl DiagnosticTranscript {
     /// Starts reading `read_end` on a new thread, which owns it from now on.
-    /// Fails only when the thread cannot be started.
+    /// Fails only when the thread cannot be started, and then closes
+    /// `read_end`.
+    ///
+    /// Start it before `VmmChild::spawn`, so that failure refuses the launch
+    /// before anything forks. After the spawn, the same failure leaves the
+    /// helper's descriptor 2 a pipe with no reader. The helper's signals are
+    /// reset to their defaults before the exec, so its next diagnostic then
+    /// gets `SIGPIPE`, which kills it.
     pub fn start(read_end: OwnedFd) -> std::io::Result<DiagnosticTranscript> {
         let stop = Arc::new(AtomicBool::new(false));
         let (ended, done) = mpsc::channel();
@@ -280,9 +302,16 @@ impl DiagnosticTranscript {
         })
     }
 
-    /// Waits up to `wait` for end of file, then stops the thread and returns
-    /// what it read. It returns within `wait` plus one poll interval even when
-    /// a process still holds the write end; `eof` is then false.
+    /// Waits up to `wait` for end of file, then tells the thread to stop and
+    /// returns what it read. Once told, the thread reads what the pipe holds
+    /// without waiting, so bytes written before `finish` are kept even with no
+    /// wait. `eof` is false when a process still holds the write end.
+    ///
+    /// It never waits for that process. After `wait`, it waits for the thread
+    /// to see the stop, which it checks every 25 ms poll interval, and to read
+    /// what the pipe held then, plus one 64 KiB chunk at most. On a loaded
+    /// machine the scheduler adds its own delay to that, so `wait` plus 25 ms
+    /// is a typical time, not a deadline.
     pub fn finish(mut self, wait: Duration) -> Transcript {
         let _ = self.done.recv_timeout(wait);
         self.stop.store(true, Ordering::Release);
