@@ -782,7 +782,7 @@ impl fmt::Display for StartStep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance::{InstanceRoot, LockProbe};
+    use crate::instance::InstanceRoot;
     use std::cell::RefCell;
     use std::error::Error;
     use std::io::{Read, Write};
@@ -1014,7 +1014,10 @@ mod tests {
         match outcome {
             Err(StartError::ExecUnconfirmed { lock }) => {
                 assert!(
-                    matches!(cell.probe_supervisor_lock(), Ok(LockProbe::Held)),
+                    matches!(
+                        cell.probe_supervisor_lock(),
+                        Ok(crate::instance::LockProbe::Held)
+                    ),
                     "the returned lock is still held"
                 );
                 drop(lock);
