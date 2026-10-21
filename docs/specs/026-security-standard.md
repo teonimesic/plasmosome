@@ -307,32 +307,36 @@ check on each.
 - **An `unsafe(no_mangle)`, `unsafe(export_name = ...)` or `unsafe(link_section = ...)` attribute
   (N2b).** It needs the item's allow, but no lint asks for a reason. A `no_mangle` function named
   like a C library symbol replaces that symbol for the whole process. So the item's `///` says why
-  its name or section collides with nothing else the process loads. This adds no inline comment,
-  so the root `AGENTS.md` rule stays as it is.
+  its name or section collides with nothing else the process loads. Any other `unsafe(...)`
+  attribute, such as `unsafe(naked)`, is read the same way: the item's `///` says why it is sound.
+  This adds no inline comment, so the root `AGENTS.md` rule stays as it is.
 - **A lint attribute naming `unsafe_code` in any form but a plain outer `#[allow(unsafe_code)]`
   (N3a to N3c).** That covers an inner `#![...]`, one behind `cfg_attr`, `expect` in place of
   `allow`, `unsafe_code` listed with other lints, and the raw name `r#unsafe_code`. Each lifts the
   deny over its whole item. On the crate root, or on a module the crate's `AGENTS.md` does not
-  name, it is the wider allow this section refuses.
+  name, it is the wider allow this section refuses. On a single item or a named FFI module, the
+  reviewer asks for the plain outer spelling, which the command below does not print.
 - **An item nested inside an allowed item (N9).** It inherits the allow. The reviewer reads the
   body of each allowed item for nested items that hold `unsafe`, and asks for the allow on the
   nested item instead.
 
 One command prints every line of the first three kinds. Run it on the PR's fetched commit and on
-main. A line the first run prints and the second does not is one the PR adds, and the reviewer
-reads each.
+`origin/main` after a fetch. Each line it prints reads `<revision>:<path>:<line>:<text>`, so
+compare only the path and the text. A line the first run prints and the second does not is one
+the PR adds, and the reviewer reads each.
 
 ```shell
-git grep -n -P '(?<![A-Za-z0-9_])safe\s+(fn|static)\b|\bunsafe\s*\(|\b(no_mangle|export_name|link_section)\b|^(?!\s*#\[allow\(unsafe_code\)\]\s*$).*\b(allow|expect)\s*\([^)]*\bunsafe_code\b' <commit> -- '*.rs'
+git grep -n -P '(?<![A-Za-z0-9_])safe\s+(fn|static)\b|\bunsafe\s*\(|\b(no_mangle|export_name|link_section)\b|^(?!\s*#\[allow\(unsafe_code\)\]\s*$).*\b(allow|expect)\s*\([^)]*\bunsafe_code\b' <commit> -- ':(top)*.rs'
 ```
 
 Its control is main. On 2026-10-21 it printed exactly two lines there: the `safe fn` declarations
 of `_dyld_image_count` and `_dyld_get_image_name` in lanes' `krun.rs`. While those stay, a run at
 main that prints neither is broken. It needs `-P`. Apple Git's `-E` refuses the lookarounds, and
-reads `\b` and `\s` as matching nothing with no error, so an `-E` rewrite of the pattern prints
-nothing. It reads one line at a time, so an attribute that rustfmt wraps over two lines escapes it,
-and so does one a macro writes. It also prints prose that names a `safe fn`. It cannot see nesting,
-so N9 is the reviewer's reading alone.
+reads `\b` and `\s` as the letters `b` and `s` with no error, so an `-E` rewrite of the pattern
+prints nothing. It reads one line at a time, so an attribute that rustfmt wraps over two lines
+escapes it, and so does one a macro writes. It also prints prose that names a `safe fn`. It does
+not print a plain outer `#[allow(unsafe_code)]`, so one the PR adds on a `mod` shows only in the
+diff. It cannot see nesting, so N9 is the reviewer's reading alone.
 
 No check refuses these forms, for three reasons. No clippy lint reaches them: with clippy's
 restriction, pedantic, nursery and cargo groups all on, no lint fired on a `safe` declaration, an
@@ -342,8 +346,8 @@ too; a crate-wide `cfg_attr(all(), expect(unsafe_code, reason = "..."))` passed 
 guard fails spec 013's bar: each form is a line a reviewer sees in the diff, the next commit can
 revert it, and section 7 already gives a wider allow to the reviewer. A check for N9 needs a Rust
 parser, which means `syn` as a new direct dependency of `plasmosome-guards`, admitted under section
-1, for a form a reader sees in the diff. Added on 2026-10-21: everything from "What the reviewer
-reads" to here is new.
+1, for a form a reader sees in the diff. Amended on 2026-10-21: everything from "What the
+reviewer reads" to here is new.
 
 **What the lint levels do not reach.**
 
