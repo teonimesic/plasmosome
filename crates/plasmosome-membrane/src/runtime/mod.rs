@@ -1,3 +1,4 @@
+pub mod confinement;
 pub use plasmosome_backend::digest;
 pub mod hello;
 pub(crate) use plasmosome_core::runtime::strict_json;

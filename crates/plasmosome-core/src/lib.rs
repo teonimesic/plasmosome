@@ -37,7 +37,8 @@ pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;
 pub use instance::{
     CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
-    InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LockError, NotACell, WriterLock,
+    InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LaunchedMarker, LockError,
+    MarkerFault, MarkerRead, NotACell, RetireError, WriterLock,
 };
 pub use kill_budget::{
     GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, WorkloadStop,
