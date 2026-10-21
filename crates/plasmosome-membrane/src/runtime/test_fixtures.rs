@@ -1,6 +1,10 @@
 use super::recipe::{PlatformLimits, RuntimeRecipe};
 use serde_json::{Value, json};
 
+pub(crate) mod fake {
+    include!("../../tests/support/runtime_fake.rs");
+}
+
 pub(crate) fn artifact(path: &str, digit: char) -> Value {
     json!({"path": path, "sha256": digit.to_string().repeat(64)})
 }
@@ -34,6 +38,34 @@ pub(crate) fn recipe(value: &Value) -> RuntimeRecipe {
     let limits = PlatformLimits::host().expect("this host reports its limits");
     RuntimeRecipe::parse(format!("{value}\n").as_bytes(), &limits)
         .unwrap_or_else(|refusal| panic!("the test recipe is valid on this host: {refusal}"))
+}
+
+/// A new 0700 directory that core's `PrivateDir::open` accepts. Its base is the per-user temp
+/// directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` names on macOS, and on Linux
+/// `XDG_RUNTIME_DIR` when it is set, then the test binary's directory, whose ancestors are
+/// usually private where the shared temp directory is not.
+pub(crate) fn private_root() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let mut refusals = Vec::new();
+    for base in tree::root_bases() {
+        let root = match tempfile::Builder::new().prefix("ep").tempdir_in(&base) {
+            Ok(root) => root,
+            Err(error) => {
+                refusals.push(format!("{}: {error}", base.display()));
+                continue;
+            }
+        };
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("the test root is made private");
+        match plasmosome_core::private_socket::PrivateDir::open(root.path()) {
+            Ok(_) => return root,
+            Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
+        }
+    }
+    panic!(
+        "no base can hold a private test root:\n{}",
+        refusals.join("\n")
+    );
 }
 
 pub(crate) mod tree {
@@ -173,7 +205,7 @@ pub(crate) mod tree {
 
     #[cfg(target_os = "macos")]
     #[allow(unsafe_code)]
-    fn root_bases() -> Vec<PathBuf> {
+    pub(crate) fn root_bases() -> Vec<PathBuf> {
         use std::ffi::OsStr;
 
         let mut buffer = vec![0u8; libc::PATH_MAX as usize];
@@ -199,7 +231,7 @@ pub(crate) mod tree {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn root_bases() -> Vec<PathBuf> {
+    pub(crate) fn root_bases() -> Vec<PathBuf> {
         let mut bases: Vec<PathBuf> = std::env::var_os("XDG_RUNTIME_DIR")
             .filter(|base| !base.is_empty())
             .map(PathBuf::from)
