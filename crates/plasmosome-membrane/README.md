@@ -322,7 +322,7 @@ names the helper and those libraries load; see the next section.
 
 Spec 001 §4.2 asks that every library the helper loads be a listed, verified library or part of
 Darwin's sealed system, and that each be found without any search. `runtime::closure::audit_closure`
-checks that before exec, from the files alone. Pass it the verified helper and the verified
+checks what the files can show of that before exec. Pass it the verified helper and the verified
 libraries in recipe order. It reads each through its verified descriptor, at most 512 MiB, and
 reads the load commands of the 64-bit image for the host CPU: a thin file, or the one member of a
 fat file for that CPU. A fat file with two members for the host CPU is refused, because the audit
@@ -332,21 +332,49 @@ Every name in an `LC_LOAD_DYLIB`, `LC_LOAD_WEAK_DYLIB`, `LC_REEXPORT_DYLIB`, `LC
 or `LC_LOAD_UPWARD_DYLIB` command, in the helper and in each library, must resolve by rule:
 
 - `@executable_path/` joins the helper's directory, and `@loader_path/` the directory of the image
-  that holds the command. The join is lexical, and the result must equal a listed path exactly.
+  that holds the command. The join is lexical, and the result must equal a listed path exactly. A
+  run of `..` straight after the prefix is allowed, because it leaves directories the artifact
+  walk verified, as in `@executable_path/../lib/libkrun.1.19.4.dylib`. A `..` after a directory
+  the name itself writes is refused (`DotDotAfterNamedDirectory`): dyld resolves it on the file
+  system, through that directory even when it is a symlink, and nothing verified it. Measured on
+  macOS 26.6.2, `@executable_path/sub/../libt.dylib` with `sub` a symlink loaded a library from
+  outside the bundle. An absolute name with such a `..` is refused the same way.
 - An absolute name that equals a listed path is that library.
 - Any other absolute name must be clean ASCII under `/usr/lib/` or `/System/Library/`, and the
-  deepest part of it that exists must be on the read-only volume mounted at `/`; a symlink that
-  leads nowhere is refused. The second check is there because those prefixes are not all sealed.
+  deepest part of it that exists must be on the sealed system volume; a symlink that leads nowhere
+  is refused. That volume is the one `statfs` reports mounted at `/` and read-only, whose
+  capabilities, read with `getattrlist(ATTR_VOL_CAPABILITIES)` on its mount point, report
+  `VOL_CAP_FMT_SEALED` as valid and set. When that call fails, or does not report the capability,
+  the volume counts as not sealed. The check is needed because those prefixes are not all sealed.
   On macOS 26.6.2, `/usr/share/firmlinks` puts seven directories under `/System/Library` on the
   data volume, and sealed symlinks such as `/usr/lib/cron` lead to it too.
 - `@rpath/` names, names with no leading `/` or `@`, and any other `@` name are refused: dyld finds
   them by searching.
 
 Any `LC_RPATH` is refused, because dyld also searches it for a leaf name passed to `dlopen`. So is
-`LC_DYLD_ENVIRONMENT`, and a dynamic linker other than `/usr/lib/dyld`. A listed library that
-nothing names is allowed. The evidence records each resolution, each system name relied on, and
-`kern.osversion` and `kern.osproductversion`, which name the sealed system those names come from.
-Off macOS the audit refuses `Unsupported`.
+`LC_DYLD_ENVIRONMENT`, a dynamic linker other than `/usr/lib/dyld`, and a load command whose
+`LC_REQ_DYLD` bit says dyld must understand it but whose kind the audit does not know. A listed
+library that nothing names is allowed. The evidence records each resolution, each system name
+relied on, and `kern.osversion` and `kern.osproductversion`, which name the OS build. Off macOS
+the audit refuses `Unsupported`.
+
+The volume check judges where a name's symlinks lead at the time of the audit, not each step on
+the way. A name can pass whose path goes through a directory someone can write and comes back to
+the sealed volume, and whoever can write that directory can change where it leads afterwards. For
+example, `/usr/lib/cron` leads to `/private/var/at`, owned by `daemon` with mode 0755, so a process
+running as `daemon` could make `/private/var/at/x` a link to a sealed file, let `/usr/lib/cron/x`
+pass, and then replace it. Reasoned from a review's reading of this Mac, not measured for every
+chain: no step of such a chain is writable by the supervisor's user today. Refusing a symlink on
+the way is not an option, because it would refuse framework names such as
+`/System/Library/Frameworks/Foundation.framework/Foundation`, which go through `Versions/Current`.
+
+The audit does not look everywhere dyld does. For every absolute name, dyld also tries
+`/System/Volumes/Preboot/Cryptexes/OS` followed by the name, and the names in the shared cache,
+such as `/usr/lib/libSystem.B.dylib`, come from the shared cache in that cryptex. That tree is on
+the Preboot volume, which is read-write and not sealed; its `usr/lib` and `System/Library` are
+owned by root with the `restricted` flag, so SIP alone keeps them closed. Refusing that path would
+refuse every system library, so the audit relies on SIP there and does not check it. Whether
+`kern.osversion` changes when only the cryptex is updated is not measured.
 
 The audit sees load commands only. It does not see the images the running helper loads
 (`ImageInventory::NotIndependentlyObserved`, owner gate O-5 of `plasmosome-qep`), nor a name that

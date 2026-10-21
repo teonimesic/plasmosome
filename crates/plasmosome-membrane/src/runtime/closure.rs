@@ -545,11 +545,16 @@ pub struct ClosureEvidence {
     /// command, the name as written, and the library it resolved to. In audit order: the helper,
     /// then each library in recipe order.
     pub resolved: Vec<(ArtifactRole, String, ArtifactRole)>,
-    /// Each load name relied on as part of the sealed system volume or shared cache, once, in the
-    /// order first met.
+    /// Each load name relied on as a system name, once, in the order first met: the deepest part
+    /// of its path that exists was on the sealed system volume. dyld may still load it from
+    /// elsewhere. For every absolute name it also tries `/System/Volumes/Preboot/Cryptexes/OS`
+    /// followed by the name, and the names in the shared cache come from the shared cache in that
+    /// cryptex. That tree is on the read-write Preboot volume, closed by SIP alone, and the audit
+    /// does not look there, because refusing it would refuse every system library.
     pub system_names: Vec<String>,
-    /// `kern.osversion`, such as `25G83`: the build of the sealed system volume those names come
-    /// from.
+    /// `kern.osversion`, such as `25G83`: the OS build, which names the sealed system volume. The
+    /// audit reads nothing of the OS cryptex or its shared cache, and whether this value changes
+    /// when only the cryptex is updated is not measured.
     pub os_build: String,
     /// `kern.osproductversion`, such as `26.6.2`.
     pub os_product_version: String,
