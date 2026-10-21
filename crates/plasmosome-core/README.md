@@ -117,6 +117,11 @@ root table is level 1. Each array, each inline table and each dot in a key adds 
 part of a table header's name adds two. Nothing inside a string or a comment counts. TOML's own
 limit bounds each construct alone, not the depth they reach together, and a tree deep enough
 overflows the stack while toml builds or reads it, so the count runs before toml sees the text.
+The count is exact for arrays, inline tables and dotted keys, and never below the depth of the tree
+toml builds, so a declaration that passes has a tree at most 32 levels deep. A header part counts
+two whatever it names, so under a plain table header the count is above the tree's depth, up to
+about twice it: a 16-part table header with a key under it counts 33 and is refused, although its
+tree is 17 deep.
 `WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description.

@@ -407,8 +407,8 @@ impl WireError {
     /// write in place of that field, a bare entry for the list the field names
     /// (written in place of the entry when the field ends in an index), or
     /// exactly `remove this entry`. A file that could not be read, is not
-    /// TOML (a syntax error included) or is over `MAX_MANIFEST_BYTES` carries
-    /// none.
+    /// TOML (a syntax error included), is over `MAX_MANIFEST_BYTES` or nests
+    /// more than `MAX_MANIFEST_DEPTH` levels (`TooDeep`) carries none.
     pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
         let mut wire = WireError::manifest_invalid(error.to_string(), path);
         wire.fix = match error {

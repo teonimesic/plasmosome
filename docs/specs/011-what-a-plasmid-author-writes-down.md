@@ -357,12 +357,16 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   refusals concern the file as a whole and are the only exceptions: a TOML syntax error, which the
   parser reports by line and column; a declaration over 1 MiB, the maximum accepted size
   spec 020 §2 gives each declaration; and a declaration nested more than 32 levels deep, the depth
-  bound spec 026 §5 requires. Depth is counted from the text before any TOML is parsed. The root
-  table is level 1. Each array, each inline table and each dot in a key adds a level. Each part of
-  a table header's name adds two, enough for an array of tables and its element. Nothing inside a
-  string or a comment counts. They name no field and carry no `fix`. An unknown key is not one of
-  them. Apart from those three, a declaration with no `id` is the single case that cannot name
-  a plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid —
+  bound spec 026 §5 requires. The three name no field and carry no `fix`. An unknown key is not
+  one of them. Depth is counted from the text before any TOML is parsed. The root table is
+  level 1. Each array, each inline table and each dot in a key adds a level. Each part of a
+  table header's name adds two, enough for an array of tables and its element, so under a plain
+  table header the count is above the depth of the tree toml builds, up to about twice it.
+  Nothing inside a string or a comment counts. The bound is 32 because toml parses a
+  declaration that counts 32 with room to spare on a 2 MiB thread stack in a debug build, and
+  the deepest declaration the manifest grammar reads counts 13. Apart from those three
+  refusals, a declaration with no `id` is the single case that cannot name a plasmid; it names
+  the missing `id` instead. Where a refusal must name more than one plasmid —
   the requirers a detach would strand — it names them in the message, sorted, not in a new
   structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
   fourth amendment this spec does not make. That refusal is spec 001's 105 and carries no `fix`.
