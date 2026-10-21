@@ -96,20 +96,32 @@ fn run_every_case(arguments: &[OsString]) -> ExitCode {
                 .iter()
                 .any(|filter| name.contains(&*filter.to_string_lossy()))
     });
-    let mut ran = 0;
+    let mut passed = 0;
+    let mut failed = Vec::new();
     for (name, _) in chosen {
         let started = Instant::now();
         match run_case(name) {
-            Ok(()) => println!("case {name} ... ok ({:?})", started.elapsed()),
+            Ok(()) => {
+                println!("case {name} ... ok ({:?})", started.elapsed());
+                passed += 1;
+            }
             Err(failure) => {
                 println!("case {name} ... FAILED: {failure}");
-                return ExitCode::FAILURE;
+                failed.push(*name);
             }
         }
-        ran += 1;
     }
-    println!("supervisor_start: {ran} cases passed");
-    ExitCode::SUCCESS
+    if failed.is_empty() {
+        println!("supervisor_start: {passed} cases passed");
+        ExitCode::SUCCESS
+    } else {
+        println!(
+            "supervisor_start: {passed} cases passed, {} failed: {}",
+            failed.len(),
+            failed.join(", ")
+        );
+        ExitCode::FAILURE
+    }
 }
 
 fn run_case(name: &str) -> Result<(), String> {
