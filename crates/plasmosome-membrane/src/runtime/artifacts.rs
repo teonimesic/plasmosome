@@ -511,6 +511,15 @@ mod tests {
     }
 
     #[test]
+    fn the_hash_reads_at_most_one_byte_past_the_checked_size() {
+        let tree = ArtifactTree::new();
+        let path = tree.file("kernel", b"kernel and more", 0o444);
+        let file = File::open(&path).expect("the file opens");
+        assert_eq!(hash(&file, 6), Ok(Digest::of(b"kernel ")));
+        assert_eq!(hash(&file, 15), Ok(Digest::of(b"kernel and more")));
+    }
+
+    #[test]
     fn a_symlinked_directory_or_a_symlink_at_the_name_refuses_at_that_component() {
         let tree = ArtifactTree::new();
         let real = tree.dir("real", 0o700);
@@ -653,6 +662,7 @@ mod tests {
             (NotImmutable, "neither uchg nor schg"),
             (ImmutabilityUnverifiable, "cannot show it immutable"),
             (ChangedWhileHashing, "moved while it was hashed"),
+            (ChangedSinceVerification, "moved after it was verified"),
             (DigestMismatch { expected, actual }, &mismatch),
             (replaced, "inode 9, not the verified device 7 inode 8"),
             (io, "fstat failed with errno 5"),
@@ -666,7 +676,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     mod macos {
         use super::*;
-        use crate::runtime::test_fixtures::tree::{add_acl, set_flags};
+        use crate::runtime::test_fixtures::tree::{add_acl, set_flags, set_mode};
         use crate::runtime::test_fixtures::{recipe, recipe_value};
         use std::fs;
         use std::io::Seek;
@@ -862,6 +872,26 @@ mod tests {
                     verified: verified.identity(),
                     found: identity_of(&replacement),
                 }
+            );
+        }
+
+        #[test]
+        fn reconfirm_refuses_a_file_a_held_writer_rewrote_after_verification() {
+            let tree = ArtifactTree::new();
+            let path = tree.file("kernel", b"kernel", 0o644);
+            let writer = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("a writer opened before the lock");
+            set_mode(&path, 0o444);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
+            writer
+                .write_all_at(b"kernel", 0)
+                .expect("the held writer still writes");
+            assert_eq!(
+                verified.reconfirm().map_err(|refusal| refusal.fault),
+                Err(ArtifactFault::ChangedSinceVerification)
             );
         }
 
