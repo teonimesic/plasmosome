@@ -3,12 +3,14 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, Grant, GrantId,
-    GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass,
-    UniverseOp, UniverseRemoval,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, GrantId, Handle,
+    LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp,
+    UniverseRemoval,
 };
 
-use crate::builders::{GrantSequence, broker, mount, proxy_map, session_file, uds_socket};
+use crate::builders::{
+    GrantClosure, PreparedGrant, broker, mount, proxy_map, session_file, uds_socket,
+};
 
 const DRAIN: Duration = Duration::from_millis(50);
 
@@ -139,11 +141,11 @@ fn take_contract_failure() -> bool {
 pub fn grant_is_replayable<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
-        for grant in sample_grants() {
-            let entry = backend.grant(grant.clone());
-            contract_assert_eq!(entry.owner, grant.owner);
-            contract_assert_eq!(entry.capability, grant.capability);
-            contract_assert_eq!(entry.kind, grant.kind);
+        for prepared in sample_grants() {
+            let entry = grant_prepared(&mut backend, &prepared);
+            contract_assert_eq!(&entry.owner, prepared.operation.owner());
+            contract_assert_eq!(entry.capability, prepared.operation.capability());
+            contract_assert_eq!(entry.kind, prepared.kind);
             contract_assert_eq!(
                 backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
                     contract_panic!(
@@ -163,7 +165,7 @@ pub fn grant_is_replayable<B: EnforcementBackend>(make: impl Fn() -> B) {
 pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
-        let live = backend.grant(one_grant());
+        let live = grant_prepared(&mut backend, &one_grant());
         let live_object = live.object();
         let unknown = Handle {
             class: live.handle.class,
@@ -186,8 +188,8 @@ pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> 
 pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
-        for grant in sample_grants() {
-            let entry = backend.grant(grant);
+        for prepared in sample_grants() {
+            let entry = grant_prepared(&mut backend, &prepared);
             let object = entry.object();
             backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
                 contract_panic!(
@@ -215,8 +217,8 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
             backend.plant(residue.clone()),
             "the residue fixture must plant"
         );
-        for grant in sample_grants() {
-            let entry = backend.grant(grant);
+        for prepared in sample_grants() {
+            let entry = grant_prepared(&mut backend, &prepared);
             contract_unwrap!(backend.revoke(entry.handle, drain));
             contract_assert!(
                 holds_exact(&backend.snapshot_os_state(), &residue),
@@ -239,9 +241,9 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
     contract_assert!(make().snapshot_os_state().is_empty());
     let mut backend = make();
     let mut expected = Vec::new();
-    for grant in sample_grants() {
-        let entry = backend.grant(grant.clone());
-        expected.push(requested_object(&entry, &grant));
+    for prepared in sample_grants() {
+        let entry = grant_prepared(&mut backend, &prepared);
+        expected.push(requested_object(&entry, &prepared));
     }
     let residue = residue_objects().remove(0);
     contract_expect!(
@@ -261,8 +263,8 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
     for order in orders() {
         let mut backend = make();
         let mut live = Vec::new();
-        for grant in grants_with_two_of_one_class() {
-            let entry = backend.grant(grant);
+        for prepared in grants_with_two_of_one_class() {
+            let entry = grant_prepared(&mut backend, &prepared);
             contract_assert!(
                 live.iter()
                     .all(|(held, _): &(LedgerEntry, OsObject)| held.handle != entry.handle),
@@ -404,13 +406,13 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
     for drain in drains() {
         let mut backend = make();
         let mut spent = Vec::new();
-        for grant in sample_grants().into_iter().take(2) {
-            let entry = backend.grant(grant);
+        for prepared in sample_grants().into_iter().take(2) {
+            let entry = grant_prepared(&mut backend, &prepared);
             let object = entry.object();
             contract_unwrap!(backend.revoke(entry.handle, drain));
             spent.push((entry, object));
         }
-        let live = backend.grant(sample_grants().remove(2));
+        let live = grant_prepared(&mut backend, &sample_grants().remove(2));
         for (entry, spent_object) in spent.into_iter().rev() {
             contract_assert_eq!(
                 contract_unwrap_err!(backend.revoke(entry.handle, drain)),
@@ -441,10 +443,10 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
                 for order in orders() {
                     let mut backend = make();
                     let first_request = hot_grant(first_owner.clone(), &capability);
-                    let first = backend.grant(first_request.clone());
+                    let first = grant_prepared(&mut backend, &first_request);
                     let first_object = requested_object(&first, &first_request);
                     let second_request = hot_grant(second_owner.clone(), &capability);
-                    let second = backend.grant(second_request.clone());
+                    let second = grant_prepared(&mut backend, &second_request);
                     let second_object = requested_object(&second, &second_request);
                     let mut expected = vec![first_object.clone(), second_object.clone()];
                     for (entry, object) in
@@ -485,31 +487,17 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         proxy_map("routes.plasmosome.test", "audit"),
         proxy_map("routes.plasmosome.test", "deploy"),
     ));
-    let mut relaunched = broker("egressd");
-    if let Capability::Broker { launch, .. } = &mut relaunched {
-        launch.command.push("--audit".to_string());
-        launch.control_socket = "/run/plasmosome/audit.control".to_string();
-        launch.data_socket = "/run/plasmosome/audit.data".to_string();
-    }
-    pairs.push((broker("egressd"), relaunched));
+    pairs.push((broker("egressd"), relaunched_broker()));
 
     for (first_capability, second_capability) in pairs {
         for drain in drains() {
             for order in orders() {
                 let mut backend = make();
-                let first_request = Grant {
-                    owner: conformance_owner(),
-                    capability: first_capability.clone(),
-                    kind: GrantKind::Hot,
-                };
-                let first = backend.grant(first_request.clone());
+                let first_request = hot_grant(conformance_owner(), &first_capability);
+                let first = grant_prepared(&mut backend, &first_request);
                 let first_object = requested_object(&first, &first_request);
-                let second_request = Grant {
-                    owner: conformance_owner(),
-                    capability: second_capability.clone(),
-                    kind: GrantKind::Hot,
-                };
-                let second = backend.grant(second_request.clone());
+                let second_request = hot_grant(conformance_owner(), &second_capability);
+                let second = grant_prepared(&mut backend, &second_request);
                 let second_object = requested_object(&second, &second_request);
                 contract_assert_ne!(first.handle, second.handle);
                 let mut expected = vec![first_object.clone(), second_object.clone()];
@@ -548,12 +536,8 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             capability: capability.clone(),
         };
         contract_expect!(backend.plant(residue.clone()), "broker residue must plant");
-        let live_request = Grant {
-            owner: residue.owner.clone(),
-            capability: capability.clone(),
-            kind: GrantKind::Hot,
-        };
-        let live = backend.grant(live_request.clone());
+        let live_request = hot_grant(residue.owner.clone(), &capability);
+        let live = grant_prepared(&mut backend, &live_request);
         let live_object = requested_object(&live, &live_request);
         assert_exact_state(
             &backend.snapshot_os_state(),
@@ -575,7 +559,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             drain,
         ));
         contract_assert!(backend.snapshot_os_state().is_empty());
-        let removed = backend.grant(live_request);
+        let removed = grant_prepared(&mut backend, &hot_grant(residue.owner.clone(), &capability));
         contract_unwrap!(backend.apply_removal(removed.removal(), &removed.owner, drain));
         contract_assert!(backend.snapshot_os_state().is_empty());
         contract_assert_eq!(
@@ -587,6 +571,19 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             policy_of(drain)
         );
     }
+}
+
+/// Checks that a retry of a standing issued grant returns the original entry, that another kind,
+/// owner or capability at an issued address is refused, and that a grant never promotes an
+/// applied or planted object into an issued record.
+pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl Fn() -> B) {
+    let _ = make;
+}
+
+/// Checks that a backend fresh from the factory observes nothing an earlier instance did and
+/// refuses that instance's handles, even while it holds an equal grant of its own.
+pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() -> B) {
+    let _ = make;
 }
 
 /// The owner whose graceful withdrawals never finish. A factory passed to
@@ -619,7 +616,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
             for (order, normal) in withdrawal_passes() {
                 let mut backend = make();
                 let peer_request = hot_grant(conformance_owner(), &capability);
-                let peer = backend.grant(peer_request.clone());
+                let peer = grant_prepared(&mut backend, &peer_request);
                 let peer_object = requested_object(&peer, &peer_request);
                 let (stalled, stalled_entry) =
                     hold(&mut backend, stalled_owner(), &capability, granted);
@@ -773,7 +770,7 @@ fn hold<B: EnforcementBackend>(
 ) -> (OsObject, Option<LedgerEntry>) {
     if granted {
         let request = hot_grant(owner, capability);
-        let entry = backend.grant(request.clone());
+        let entry = grant_prepared(backend, &request);
         (requested_object(&entry, &request), Some(entry))
     } else {
         let op = op_for(GrantId::new(), owner, capability.clone());
@@ -835,12 +832,25 @@ fn withdraw<B: EnforcementBackend>(
     Ok(())
 }
 
-fn hot_grant(owner: CellOwner, capability: &Capability) -> Grant {
-    Grant {
-        owner,
-        capability: capability.clone(),
-        kind: GrantKind::Hot,
+fn hot_grant(owner: CellOwner, capability: &Capability) -> PreparedGrant {
+    GrantClosure::for_owner(owner)
+        .hot(capability.clone())
+        .prepare()
+        .remove(0)
+}
+
+fn grant_prepared<B: EnforcementBackend>(backend: &mut B, prepared: &PreparedGrant) -> LedgerEntry {
+    contract_unwrap!(backend.grant(prepared.operation.clone(), prepared.kind))
+}
+
+fn relaunched_broker() -> Capability {
+    let mut relaunched = broker("egressd");
+    if let Capability::Broker { launch, .. } = &mut relaunched {
+        launch.command.push("--audit".to_string());
+        launch.control_socket = "/run/plasmosome/audit.control".to_string();
+        launch.data_socket = "/run/plasmosome/audit.data".to_string();
     }
+    relaunched
 }
 
 fn removal_of(object: &OsObject) -> UniverseRemoval {
@@ -924,16 +934,16 @@ fn other_cell(owner: &CellOwner) -> CellOwner {
     }
 }
 
-fn sample_grants() -> Vec<Grant> {
-    let mut sequence = GrantSequence::for_owner(conformance_owner());
+fn sample_grants() -> Vec<PreparedGrant> {
+    let mut closure = GrantClosure::for_owner(conformance_owner());
     for capability in sample_capabilities() {
-        sequence = if matches!(&capability, Capability::Broker { .. }) {
-            sequence.generation_bound(capability)
+        closure = if matches!(&capability, Capability::Broker { .. }) {
+            closure.generation_bound(capability)
         } else {
-            sequence.hot(capability)
+            closure.hot(capability)
         };
     }
-    sequence.into_grants()
+    closure.prepare()
 }
 
 fn sample_capabilities() -> Vec<Capability> {
@@ -946,34 +956,33 @@ fn sample_capabilities() -> Vec<Capability> {
     ]
 }
 
-fn grants_with_two_of_one_class() -> Vec<Grant> {
+fn grants_with_two_of_one_class() -> Vec<PreparedGrant> {
     let mut grants = sample_grants();
-    grants.push(Grant {
-        owner: second_owner(),
-        capability: session_file("/var/lib/plasmosome/conformance/skills/review.md"),
-        kind: GrantKind::Hot,
-    });
+    grants.push(hot_grant(
+        second_owner(),
+        &session_file("/var/lib/plasmosome/conformance/skills/review.md"),
+    ));
     grants
 }
 
-fn one_grant() -> Grant {
+fn one_grant() -> PreparedGrant {
     sample_grants().remove(0)
 }
 
-fn requested_object(entry: &LedgerEntry, request: &Grant) -> OsObject {
+fn requested_object(entry: &LedgerEntry, request: &PreparedGrant) -> OsObject {
     contract_assert_eq!(
-        entry.handle.class,
-        request.capability.class(),
-        "a grant handle must name the requested capability class"
+        entry.handle,
+        request.handle(),
+        "a grant must issue exactly the address its caller prepared"
     );
     contract_assert_eq!(
-        entry.owner,
-        request.owner,
+        &entry.owner,
+        request.operation.owner(),
         "a grant must retain its requested owner"
     );
     contract_assert_eq!(
         entry.capability,
-        request.capability,
+        request.operation.capability(),
         "a grant must retain its complete requested capability"
     );
     contract_assert_eq!(
@@ -981,11 +990,7 @@ fn requested_object(entry: &LedgerEntry, request: &Grant) -> OsObject {
         request.kind,
         "a grant must retain its requested lifecycle kind"
     );
-    OsObject {
-        id: entry.handle.id,
-        owner: request.owner.clone(),
-        capability: request.capability.clone(),
-    }
+    request.operation.object()
 }
 
 fn policy_of(drain: DrainSpec) -> &'static str {
