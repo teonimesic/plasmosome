@@ -315,3 +315,26 @@ fn a_read_only_flag_that_is_neither_0_nor_1_fails_the_probe() {
         "{line}"
     );
 }
+
+#[test]
+fn map_identities_keep_file_backed_lines_with_their_device_and_inode() {
+    let maps = "\
+00400000-00452000 r-xp 00000000 00:17 2754  /mnt/sw/opt/p/bin/tool
+00600000-00601000 rw-p 00000000 00:00 0
+7f0000000000-7f0000001000 r--p 00000000 fe:01 131 /lib/data.txt (deleted)
+7ffd0000-7ffd1000 rw-p 00000000 00:00 0                          [stack]
+";
+
+    assert_eq!(
+        probe::map_identities(maps),
+        vec![("00:17".to_string(), 2754), ("fe:01".to_string(), 131)]
+    );
+}
+
+#[test]
+fn map_identities_skip_lines_that_do_not_parse() {
+    assert_eq!(
+        probe::map_identities("garbage\n00400000-00452000 r-xp 00000000 00:17\n"),
+        Vec::<(String, u64)>::new()
+    );
+}

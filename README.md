@@ -41,7 +41,7 @@ states what the tree serves now.
 | --- | --- |
 | `plasmosomed <config.json>` | Runs a foreground controller and serves only `plasmosome.status` on its configured Unix socket. |
 | `membraned <config.json>` | Runs a foreground empty/broker supervisor and serves only `membrane.status` on its configured Unix socket. |
-| `plasmid new <name>` | Writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. |
+| `plasmid <command>` | `plasmid new <name>` writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. `plasmid list`, `add`, `remove`, `reload` and `renew` are listed in `plasmid --help` and exit 2 with a `not_served` envelope. A wrong command line exits 64 with an `invalid` envelope, and `plasmid --version` prints `plasmid 0.0.0`. |
 | `plasmosome --help` | Lists spec 025's commands, each marked not served; every command exits 2 with `not_served`. |
 
 The `plasmosome` executable serves no command yet, so there is no `plasmosome start`. The accepted
@@ -77,17 +77,21 @@ The checkout is trusted host code: putting build output under the temporary dire
 isolate an untrusted build.
 
 The example makes a fresh 0700 directory inside a base directory and keeps its files, its
-sockets and its build there, about 240 MB, so you must be able to write the base. `plasmosomed`
-refuses a control socket unless every directory above the socket is owned by you or by root, is
-not a symlink, and is writable by neither group nor other (on macOS, nor through an ACL entry).
+sockets and its build there, about 240 MB. So you must be able to write the base, its mount must
+let the build run programs, and its path must be under 60 bytes, so that each socket path in it
+stays under 100 bytes. `plasmosomed` refuses a control socket unless every directory above the
+socket is owned by you or by root, is not a symlink, and is writable by neither group nor other
+(on macOS, nor through an ACL entry).
 On macOS it also refuses when `/` or any directory on the way down to the socket is on a volume
 mounted with ownership ignored, which `mount` lists as `noowners`, because there the owner and
 mode it reads do not keep other users out.
-Before it builds, the example checks the type, owner and mode of the base and of each directory
-above it, and that you can write the base, and stops with one line naming the first that fails.
+Before it builds, the example checks that the base's path is valid UTF-8, the type, owner and
+mode of the base and of each directory above it, that you can write the base, that its mount is
+not `noexec` (on Linux), and that its path is short enough, and stops with one line naming the
+first that fails.
 It does not check for ignored ownership, which Python's `os` module cannot read, so on such a
 volume the build runs and then `plasmosomed` refuses to start, naming the first directory on
-that volume.
+that volume. Python cannot read `noexec` on macOS either, so there such a base fails the build.
 `plasmosomed` makes the full check, ACL entries and ignored ownership included, when it starts.
 
 The base is `PLASMOSOME_QUICKSTART_DIR` when that is set, and otherwise Python's temporary
@@ -158,6 +162,11 @@ def refuse_base(reason):
 private_base = Path(
     os.path.realpath(os.environ.get("PLASMOSOME_QUICKSTART_DIR") or tempfile.gettempdir())
 )
+try:
+    os.fsencode(private_base).decode("utf-8")
+except UnicodeDecodeError:
+    shown = os.fsencode(private_base).decode("utf-8", "backslashreplace")
+    refuse_base(f"{shown} is not valid UTF-8, which the controller's JSON config cannot carry")
 for directory in [*reversed(private_base.parents), private_base]:
     try:
         info = os.lstat(directory)
@@ -172,8 +181,16 @@ for directory in [*reversed(private_base.parents), private_base]:
             f"{directory} has mode {stat.S_IMODE(info.st_mode):04o}: group or other can replace "
             "entries in it"
         )
-if not os.access(private_base, os.W_OK | os.X_OK):
+if not os.access(private_base, os.W_OK | os.X_OK, effective_ids=True):
     refuse_base(f"you cannot create entries in {private_base}")
+if os.statvfs(private_base).f_flag & getattr(os, "ST_NOEXEC", 0):
+    refuse_base(f"{private_base} is on a noexec mount, and the build runs programs from it")
+longest_socket = private_base / "plasmosome-status-XXXXXXXX" / "membrane.uds"
+if len(os.fsencode(longest_socket)) >= 100:
+    refuse_base(
+        f"{private_base} is too long: a socket path such as {longest_socket} must stay under "
+        "100 bytes"
+    )
 print(f"private base: {private_base}")
 
 failure = None
@@ -554,7 +571,7 @@ that its complete runtime role is delivered.
 | `plasmosome-ledger` | Typed reversibility: effects and their inverses; spec 020's registry IDs and release references |
 | `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
 | `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes, client codes and argument reading; never shipped |
-| `plasmid` | Plasmid-author command line; today `plasmid new` writes a declaration |
+| `plasmid` | Plasmid-author command line; today `plasmid new` writes a declaration, and the other plasmid commands answer `not_served` |
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
 | `plasmosome-guards` | Repository policy checks |
 | `plasmosome-testkit` | Test support; never shipped |
