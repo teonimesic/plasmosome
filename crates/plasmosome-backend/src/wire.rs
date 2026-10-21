@@ -12,12 +12,12 @@ use serde::{Deserialize, Deserializer, forward_to_deserialize_any};
 /// the value it wraps is affected: every field still decodes through its own type, so each
 /// nested record must refuse a sequence itself.
 ///
-/// Wrap only a derived struct, or an enum that serde tags externally (the default). Anything
-/// else is read as a map and refused even when valid: an untagged or internally tagged enum, an
-/// `Option`, a sequence. It reads a struct with `deserialize_map`, not `deserialize_struct`, so
-/// it needs a self-describing format such as JSON or TOML. The derived visitor is reached only
-/// through `visit_map`, so a format that answers `deserialize_map` with an array, as TOML does,
-/// is refused too.
+/// Wrap only a derived struct with named fields, or an enum that serde tags externally (the
+/// default). Anything else is read as a map and refused even when valid: an untagged or internally
+/// tagged enum, an `Option`, a sequence. It reads a struct with `deserialize_map`, not
+/// `deserialize_struct`, so it needs a self-describing format such as JSON or TOML. The derived
+/// visitor is reached only through `visit_map`, so a format that answers `deserialize_map` with an
+/// array, as TOML does, is refused too.
 pub struct ObjectOnly<D>(D);
 
 impl<D> ObjectOnly<D> {
@@ -181,6 +181,7 @@ mod tests {
 
     use super::ObjectOnly;
     use crate::backend::tests::{operation, owner};
+    use crate::fixtures;
     use crate::{
         BrokerLaunch, Capability, Diff, DrainSpec, FileAccess, Grant, GrantId, GrantKind, Handle,
         LedgerEntry, MountRecipe, OsObject, OsState, ProxyRecipe, ProxyTransport, ResidueReport,
@@ -188,10 +189,7 @@ mod tests {
     };
 
     fn mount() -> Capability {
-        Capability::Mount {
-            source: "/srv/repo".to_string(),
-            target: "/workspace".to_string(),
-        }
+        fixtures::mount("/srv/repo", "/workspace")
     }
 
     fn object() -> OsObject {
@@ -309,40 +307,35 @@ mod tests {
         ));
         for (capability, at, operation_at, fields) in [
             (
-                Capability::SessionFile {
-                    path: "/skills/pr.md".to_string(),
-                },
+                fixtures::session_file("/skills/pr.md"),
                 "/SessionFile",
                 "/WriteSessionFile",
-                &["path"][..],
+                &["path", "recipe"][..],
             ),
             (
-                Capability::UdsSocket {
-                    path: "/run/plasmosome/egressd.uds".to_string(),
-                },
+                fixtures::uds_socket("/run/plasmosome/egressd.uds"),
                 "/UdsSocket",
                 "/BindUds",
-                &["path"][..],
+                &["path", "recipe"][..],
             ),
             (
-                Capability::ProxyMap {
-                    host: "api.github.com".to_string(),
-                    route: "splice".to_string(),
-                },
+                fixtures::proxy_map("api.github.com", "splice"),
                 "/ProxyMap",
                 "/SetProxyMap",
-                &["host", "route"][..],
+                &["host", "route", "recipe"][..],
             ),
             (
-                Capability::Broker {
-                    pid: 4242,
-                    name: "egressd".to_string(),
-                },
+                fixtures::broker("egressd"),
                 "/Broker",
                 "/SpawnBroker",
-                &["pid", "name"][..],
+                &["name", "launch"][..],
             ),
-            (mount(), "/Mount", "/AddMount", &["source", "target"][..]),
+            (
+                mount(),
+                "/Mount",
+                "/AddMount",
+                &["source", "target", "recipe"][..],
+            ),
         ] {
             accepted.extend(sequence_accepted("Capability", &capability, at, fields));
             let operation_fields = [&["id"][..], fields, &["owner"]].concat();
@@ -428,11 +421,8 @@ mod tests {
         ));
         assert_eq!(
             accepted,
-            [
-                "Grant accepts an unknown field",
-                "DrainSpec accepts an unknown field"
-            ],
-            "only the two records whose unknown fields plasmosome-8pr4 decides may accept one"
+            Vec::<String>::new(),
+            "every record refuses a positional array and an unknown field"
         );
     }
 
@@ -532,7 +522,8 @@ mod tests {
         );
         assert_eq!(
             record::<Capability>(
-                "record = { Mount = { source = \"/srv/repo\", target = \"/workspace\" } }"
+                "record = { Mount = { source = \"/srv/repo\", target = \"/workspace\", \
+                 recipe = { access = \"read_only\" } } }"
             ),
             Ok(mount())
         );
