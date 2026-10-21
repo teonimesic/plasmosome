@@ -795,6 +795,95 @@ mod tests {
     }
 
     #[test]
+    fn every_author_refusal_spec_011_lists_carries_its_own_field_fix_and_plasmid_on_the_wire() {
+        let described = "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n";
+        let built = format!("{described}impl.wasm = \"pr.wasm\"\n");
+        let secret =
+            |entry: &str| format!("{built}[secrets]\nrefs = [{{ id = \"token\", {entry} }}]\n");
+        let rows = [
+            (
+                "id = \"github-pr\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                "description",
+            ),
+            (
+                format!("{built}[provides.\"github:tools\".tools]\n\"pr.read\" = \"\"\n"),
+                "provides.\"github:tools\".tools.\"pr.read\"",
+            ),
+            (
+                secret("consumer = \"git\", delivery = [\"handle\"]"),
+                "secrets.refs[0].delivery",
+            ),
+            (
+                secret("consumer = \"git\", delivery = []"),
+                "secrets.refs[0].delivery",
+            ),
+            (
+                secret("consumer = \"http\", delivery = [\"teleport\"]"),
+                "secrets.refs[0].delivery",
+            ),
+            (
+                secret("consumer = \"http\", delivery = [\"inject\"]"),
+                "secrets.refs[0].scope.path_scope",
+            ),
+            (
+                secret("consumer = \"http\", scope = { path_scope = [] }"),
+                "secrets.refs[0].scope.path_scope",
+            ),
+            (
+                secret("consumer = \"process\", scope = { path_scope = [\"relative\"] }"),
+                "secrets.refs[0].scope.path_scope",
+            ),
+            (
+                format!("{described}[network]\nports = [443]\n"),
+                "network.hosts",
+            ),
+            (described.to_string(), "impl"),
+            (
+                format!(
+                    "{described}[commands.commands.git]\nexec = [\"git\"]\n\
+                     [[commands.commands.git.secrets.refs]]\nid = \"token\"\nconsumer = \"git\"\n"
+                ),
+                "commands.commands.git.secrets.refs[0].subject",
+            ),
+            (
+                "description = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                "id",
+            ),
+        ];
+        for (declaration, named) in rows {
+            let error = PlasmidManifest::parse(&declaration).expect_err(&declaration);
+            let ManifestError::Field {
+                plasmid,
+                field,
+                fix,
+                ..
+            } = &error
+            else {
+                panic!("{declaration}\nis refused with no field: {error}");
+            };
+            assert_eq!(
+                (field.as_str(), plasmid.as_deref()),
+                (named, (named != "id").then_some("github-pr")),
+                "{declaration}"
+            );
+            let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
+            let line = serde_json::to_string(&wire).expect("a wire error serializes");
+            let read: Value = serde_json::from_str(&line).expect("a wire error line is JSON");
+            for (name, own) in [
+                ("field", Some(field.as_str())),
+                ("fix", Some(fix.as_str())),
+                ("plasmid", plasmid.as_deref()),
+            ] {
+                assert_eq!(
+                    read.get(name),
+                    own.map(Value::from).as_ref(),
+                    "{declaration}\nthe 108's {name} is the refusal's own: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_manifest_refusal_names_the_plasmid_and_field_in_its_detail() {
         let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &author_refusal());
         let value = serde_json::to_value(&wire).expect("a wire error serializes");
