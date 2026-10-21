@@ -86,6 +86,14 @@ pub(crate) fn hold_fork_side() -> std::sync::RwLockReadGuard<'static, ()> {
     SPAWN_LOCK.read().unwrap_or_else(PoisonError::into_inner)
 }
 
+#[cfg(test)]
+pub(crate) fn a_writer_waits() -> bool {
+    matches!(
+        SPAWN_LOCK.try_read(),
+        Err(std::sync::TryLockError::WouldBlock)
+    )
+}
+
 fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
     if is_close_on_exec(created.as_fd()) {
         Ok(created)
