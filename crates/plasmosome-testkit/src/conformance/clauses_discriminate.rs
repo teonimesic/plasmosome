@@ -3041,7 +3041,7 @@ fn a_revoke_that_leaves_an_unfinished_effect_reports_only_its_operation() {
     let effect = IncompleteEffect { operation: granted };
     assert_eq!(
         backend.snapshot_os_state(),
-        EnforcementSnapshot::new(OsState::new(), Vec::new(), vec![effect])
+        Ok(EnforcementSnapshot::new(OsState::new(), Vec::new(), vec![effect]).unwrap())
     );
 }
 
