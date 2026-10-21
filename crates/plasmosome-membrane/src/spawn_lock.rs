@@ -15,8 +15,8 @@ pub(crate) enum Forked {
 }
 
 /// Proof that the write side of the spawn lock is held. Only
-/// `with_descriptors_held` makes one, so a function that takes it can run only
-/// inside descriptor creation.
+/// `with_descriptors_held` and `with_each_descriptor_held` make one, so a
+/// function that takes it can run only inside descriptor creation.
 pub(crate) struct DescriptorsHeld(());
 
 /// Runs `create` while no `VmmChild::spawn` in this process can fork.
@@ -45,17 +45,52 @@ pub(crate) fn with_descriptors_held<T: AsFd + Into<OwnedFd>>(
     })
 }
 
+/// Runs `create` as `with_descriptors_held` does, for a creation that makes
+/// several descriptors, such as the two ends of a pipe.
+///
+/// `create` returns every descriptor it made, and each one is checked: if any
+/// is not close-on-exec when `create` returns, all of them are closed before
+/// the lock is released, and an error is returned instead. What
+/// `with_descriptors_held` says about blocking calls, spawns, nesting and
+/// descriptors kept elsewhere holds here too.
+pub(crate) fn with_each_descriptor_held<const N: usize>(
+    create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<[OwnedFd; N]>,
+) -> std::io::Result<[OwnedFd; N]> {
+    write_held(&SPAWN_LOCK, || {
+        create(&DescriptorsHeld(())).and_then(|created| {
+            if created.iter().all(|fd| is_close_on_exec(fd.as_fd())) {
+                Ok(created)
+            } else {
+                Err(not_close_on_exec())
+            }
+        })
+    })
+}
+
 #[allow(unsafe_code)]
-fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
-    // SAFETY: fcntl with F_GETFD takes no pointer, and `created` keeps its descriptor open for the
+fn is_close_on_exec(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+    // SAFETY: fcntl with F_GETFD takes no pointer, and the borrow keeps the descriptor open for the
     // call.
-    let flags = unsafe { libc::fcntl(created.as_fd().as_raw_fd(), libc::F_GETFD) };
-    if flags != -1 && flags & libc::FD_CLOEXEC != 0 {
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    flags != -1 && flags & libc::FD_CLOEXEC != 0
+}
+
+fn not_close_on_exec() -> std::io::Error {
+    std::io::Error::other(
+        "a descriptor created under the spawn lock was not close-on-exec, so it was closed",
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn hold_fork_side() -> std::sync::RwLockReadGuard<'static, ()> {
+    SPAWN_LOCK.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
+    if is_close_on_exec(created.as_fd()) {
         Ok(created)
     } else {
-        Err(std::io::Error::other(
-            "a descriptor created under the spawn lock was not close-on-exec, so it was closed",
-        ))
+        Err(not_close_on_exec())
     }
 }
 
@@ -69,10 +104,10 @@ pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // the panic hook has run. That `launch` does only async-signal-safe work rests on Launch's
     // documented contract, which safe code can break, as the test launcher PanicOnLaunch does.
     // fork_holding holds the read side of the spawn lock, so no descriptor made inside
-    // with_descriptors_held is mid-creation. The lock does not cover a descriptor made in two calls
-    // anywhere else, such as a socket or connection std makes on macOS, which has no SOCK_CLOEXEC
-    // or accept4. daemon::run's doc gives the order that keeps the daemon's own sockets out of a
-    // fork.
+    // with_descriptors_held or with_each_descriptor_held is mid-creation. The lock does not cover a
+    // descriptor made in two calls anywhere else, such as a socket or connection std makes on
+    // macOS, which has no SOCK_CLOEXEC or accept4. daemon::run's doc gives the order that keeps the
+    // daemon's own sockets out of a fork.
     fork_holding(&SPAWN_LOCK, || unsafe { libc::fork() })
 }
 
@@ -275,6 +310,43 @@ mod tests {
             Some(true),
             "the descriptor was closed before the write side was released"
         );
+    }
+
+    #[test]
+    fn creating_several_descriptors_runs_holding_the_write_side_and_returns_them_all() {
+        let mut write_side_held = false;
+        let created = with_each_descriptor_held(|_held| {
+            write_side_held = matches!(SPAWN_LOCK.try_read(), Err(TryLockError::WouldBlock));
+            Ok([close_on_exec_null()?, close_on_exec_null()?])
+        });
+        let created = created.expect("two close-on-exec descriptors are returned");
+        assert!(
+            created.iter().all(|fd| fd.as_raw_fd() >= 0),
+            "both descriptors came back"
+        );
+        assert!(
+            write_side_held,
+            "creation ran holding the write side of the spawn lock"
+        );
+    }
+
+    #[test]
+    fn several_descriptors_are_refused_when_any_one_is_still_inheritable() {
+        for inheritable_at in [0, 1] {
+            let created = with_each_descriptor_held(|_held| {
+                let mut pair = [close_on_exec_null()?, close_on_exec_null()?];
+                pair[inheritable_at] = inheritable_null();
+                Ok(pair)
+            });
+            let refusal = created.err().map(|error| error.to_string());
+            assert_eq!(
+                refusal.as_deref(),
+                Some(
+                    "a descriptor created under the spawn lock was not close-on-exec, so it was closed"
+                ),
+                "an inheritable descriptor at index {inheritable_at} refuses the creation"
+            );
+        }
     }
 
     struct ForkDuringCreation {

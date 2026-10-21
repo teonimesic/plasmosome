@@ -1,0 +1,51 @@
+name = "tempfile"
+range = "3"
+reason = """\
+  Creates a fresh, uniquely named temporary directory, removed with everything in it when it is \
+  dropped, and an unnamed temporary file, so that each test works in a place of its own.\
+  """
+write_it_instead.lines = 80
+write_it_instead.how = """\
+  On 2026-10-20, at main c3d850d, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 49 files, all \
+  of them tests, test modules or benchmarks, since eight of the eleven members declare tempfile, \
+  all eight as a dev-dependency, and the other three do not declare it. `git grep -h -o -E \
+  'tempfile::[A-Za-z_:]+' -- '*.rs' | sort | uniq -c` gives tempdir 228, TempDir 27, Builder::new \
+  5 and tempfile 3. Reading the code shows that it calls path() on a TempDir and relies on its \
+  drop to remove the tree, that each Builder::new() is followed by prefix("ps") or prefix("pd") \
+  and tempdir_in, and that tempfile() opens an unnamed file for a child's stderr, or for its \
+  stdout and stderr together. A replacement with the standard library alone needs: a TempDir that \
+  holds its path, gives path() and removes the tree when dropped (20 lines); a unique name, made \
+  of a prefix and six random letters and digits taken from std's RandomState, and tried again when \
+  the name exists (25); tempdir() under std::env::temp_dir(), and a Builder with prefix and \
+  tempdir_in (20); and tempfile(), a file opened with create_new and mode 0o600 and removed at \
+  once, which is what the crate does on macOS, while on Linux it first asks for O_TMPFILE through \
+  rustix (15): 80 lines. Replacing it removes nothing from Cargo.lock: proptest and rusty-fork \
+  bring tempfile too.\
+  """
+exception = ""
+brings = [
+  "bitflags@2",
+  "cfg-if@1",
+  "errno@0.3",
+  "fastrand@2",
+  "getrandom@0.4",
+  "libc@0.2",
+  "linux-raw-sys@0.12",
+  "once_cell@1",
+  "r-efi@6",
+  "rustix@1",
+  "windows-link@0.2",
+  "windows-sys@0.61",
+]
+build_time_code = ["getrandom@0.4 build script", "libc@0.2 build script", "rustix@1 build script"]
+expands_unsafe = "none"
+native_code = [
+  """\
+  libc@0.2 links the system libiconv on macOS, through the #[link(name = "iconv")] that libc.toml \
+  describes. libc builds here on both hosts: getrandom@0.4 depends on it on macOS and on Linux \
+  with glibc, and rustix@1 and errno@0.3 depend on it on macOS. rustix@1 calls the kernel through \
+  libc on macOS and through Rust's asm! on x86_64 Linux. None of the three build scripts compiles \
+  C or links a library.\
+  """,
+]
+verdict = "kept-pending-owner"
