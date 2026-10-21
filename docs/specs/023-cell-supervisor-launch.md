@@ -378,6 +378,9 @@ that do not retire the cell:
 - Step 5's rename fails: 105 `{from: "dead", to: "retired", cell}`. Amended on 2026-10-20: this
   outcome is new.
 - The helper is not reaped by the deadline: 105 `{from: "draining", to: "dead", cell}`.
+- Step 4 cannot test the lock: the reply lists `teardown` in `incomplete`, and the cell is set aside
+  as `lock_untestable` and leaves the ordinary registry, so a later `cell.kill` on it is 101.
+  Amended on 2026-10-21: this outcome is new.
 - The lock does not free within D: 105 `{from: "dead", to: "retired", cell}`.
 
 A cell that is retired, or never existed, is 101 `cell <id>`.
@@ -455,11 +458,11 @@ what startup adoption does: spec 008's pending cleanup, generation comparison, r
 publication, then the no-`created` rule below. `cell.kill` on a set-aside cell whose lock is held
 runs §7's steps. Every other verb naming a set-aside cell is 101, and so is `cell.kill` on one whose
 lock is free or cannot be tested. Clearing a cell whose lock is free is owner question 3; a cell
-whose lock cannot be tested leaves `set_aside` when its `supervisor.lock` is repaired and the next
-check decides it. Amended on 2026-10-20: this named no key for set-aside cells in
+whose lock cannot be tested is decided again by the next check once its `supervisor.lock` is
+repaired. Amended on 2026-10-20: this named no key for set-aside cells in
 `plasmosome.recovery`, whose keys spec 001 fixes, and did not list their settled holdings, which
 spec 028 §7 requires there. Amended on 2026-10-21: this did not say that `cell.kill` on a cell whose
-lock cannot be tested is 101, or how such a cell leaves `set_aside`.
+lock cannot be tested is 101, or when such a cell is decided again.
 
 **Order.** At startup the controller classifies every validated cell first, holding each free lock.
 It acts only after that, and only if startup is going to serve. A startup that refuses for another
@@ -817,8 +820,13 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     with no attachments whose lock is held: the kill runs instead of replying 101, and with the
     supervisor still silent replies 105 `{from: "draining", to: "dead", cell}`. An unremovable
     bridge socket: `state: "dead"` with residue items and `teardown` in `incomplete`, `membraned`
-    still runs and the cell is listed `dead`; once removable, a repeat retires it. Catches: an
-    unbounded kill, a cell that cannot be ended, and retiring after a failed teardown.
+    still runs and the cell is listed `dead`; once removable, a repeat retires it. A kill through a
+    membrane double that, before it answers `membrane.cell.kill`, renames the cell's
+    `supervisor.lock` away and puts a directory at that name: with `deadline_ms` 60,000 the reply
+    comes within 10 seconds and lists `teardown` in `incomplete`, `cell.list` omits the cell, and
+    `plasmosome.recovery` lists it as `lock_untestable`. Catches: an unbounded kill, a cell that
+    cannot be ended, retiring after a failed teardown, and a kill that waits out D for a lock it
+    cannot test. Amended on 2026-10-21: this did not test a lock the kill cannot test.
 15. A `membraned` under a group-writable parent, a group-writable `membraned`, and a wrong digest
     for `membraned` or a template Artifact: each `cell.new` is 108 with the path, and no cell
     directory exists. Without `cell_runtime`, `cell.new` is the stated 105 with no directory, and

@@ -521,11 +521,11 @@ kill's deadline. An unclean teardown replies `"state": "dead"` with its residue 
 retirement (spec 023 §7, step 5), or whose lock the kill cannot test (step 4), is decided at once by
 spec 023 §8's table: unless the table retires it, the reply lists `teardown` in `incomplete`, and
 the cell is set aside or quarantined and leaves `cell.list`; a later `cell.kill` of it is 101.
-Clearing it is spec 023's owner question 3, or outside spec 008 for a quarantined cell; a cell whose
-lock cannot be tested leaves `set_aside` when that lock is repaired and spec 023 §8's check runs
-again. A guest not stopped or a supervisor not gone within the deadline, or a rename that fails
-after the retire check passed, is 105 naming the cell. Amended on 2026-10-21: this did not cover a
-lock the kill cannot test.
+Clearing a set-aside cell whose lock is free is spec 023's owner question 3, and a quarantined cell
+is outside spec 008; a cell whose lock cannot be tested is decided again by spec 023 §8's next
+check once that lock is repaired. A guest not stopped or a supervisor not gone within the deadline,
+or a rename that fails after the retire check passed, is 105 naming the cell. Amended on
+2026-10-21: this did not cover a lock the kill cannot test.
 
 ### 3.8 `cell.exec`
 
