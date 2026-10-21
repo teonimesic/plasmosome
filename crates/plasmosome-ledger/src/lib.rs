@@ -1763,4 +1763,9 @@ mod tests {
             "every record refuses a positional array and an unknown field"
         );
     }
+
+    #[test]
+    fn throwaway_ofaf_fails() {
+        panic!("throwaway, reverted in this pull request");
+    }
 }
