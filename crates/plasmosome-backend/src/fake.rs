@@ -69,13 +69,29 @@ impl EnforcementBackend for FakeBackend {
         operation: UniverseOp,
         kind: GrantKind,
     ) -> Result<LedgerEntry, BackendError> {
+        let object = operation.object();
+        checked(&object)?;
+        self.refusal_before_effect(&object.owner)?;
         let entry = LedgerEntry {
             handle: operation.handle(),
-            owner: operation.owner().clone(),
-            capability: operation.capability(),
+            owner: object.owner.clone(),
+            capability: object.capability.clone(),
             kind,
         };
-        let _ = self.state.insert(operation.object());
+        let conflict = BackendError::IdentityConflict {
+            class: entry.handle.class.as_str(),
+            id: entry.handle.id,
+        };
+        if let Some(issued) = self.grants.get(&entry.handle) {
+            return if *issued == entry {
+                Ok(issued.clone())
+            } else {
+                Err(conflict)
+            };
+        }
+        if !self.state.insert(object)? {
+            return Err(conflict);
+        }
         self.grants.insert(entry.handle, entry.clone());
         Ok(entry)
     }
