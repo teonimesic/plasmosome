@@ -746,7 +746,7 @@ impl fmt::Display for StartStep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance::InstanceRoot;
+    use crate::instance::{InstanceRoot, LockProbe};
     use std::cell::RefCell;
     use std::error::Error;
     use std::io::{Read, Write};
@@ -762,6 +762,11 @@ mod tests {
                 work();
             }
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    fn after_every_pipe(work: Option<Box<dyn FnMut()>>) {
+        AFTER_A_PIPE.with(|slot| *slot.borrow_mut() = work);
     }
 
     const STEPS: [StartStep; 5] = [
@@ -911,6 +916,86 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_report_pipe_a_concurrent_spawn_inherited_leaves_the_exec_unconfirmed_at_the_deadline() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir
+            .path()
+            .canonicalize()
+            .expect("the temporary directory has a canonical path");
+        let root = InstanceRoot::open(&path).expect("the instance root opens");
+        let writer = root.lock().expect("the writer lock is free");
+        let id = CellId::from("cell-1");
+        let cell = root
+            .create_cell_dir(&writer, &id)
+            .expect("the cell directory is created");
+        let (ask, asked) = std::sync::mpsc::channel::<()>();
+        let (done, spawned) = std::sync::mpsc::channel::<()>();
+        let spawner = std::thread::spawn(move || {
+            let mut sleepers = Vec::new();
+            while asked.recv().is_ok() {
+                sleepers.push(
+                    std::process::Command::new("/bin/sleep")
+                        .arg("3")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .expect("a sleeper starts"),
+                );
+                let _ = done.send(());
+            }
+            sleepers
+        });
+        after_every_pipe(Some(Box::new(move || {
+            ask.send(()).expect("the spawner is asked");
+            spawned.recv().expect("the spawner has spawned");
+        })));
+        let membraned = RecipePath::parse("/usr/bin/true").expect("a canonical path");
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(1);
+        let outcome = start_supervisor(
+            SupervisorStart {
+                membraned: &membraned,
+                cell: &id,
+                lock: cell
+                    .create_supervisor_lock()
+                    .expect("the supervisor lock is created"),
+                log: cell.open_supervisor_log().expect("membraned.log opens"),
+                record: b"{}\n".to_vec(),
+            },
+            deadline,
+        );
+        let returned = Instant::now();
+        after_every_pipe(None);
+        let mut sleepers = spawner.join().expect("the spawner ends");
+        for sleeper in &mut sleepers {
+            let _ = sleeper.kill();
+            let _ = sleeper.wait();
+        }
+        assert_eq!(sleepers.len(), 2, "a sleeper was spawned after each pipe");
+        match outcome {
+            Err(StartError::ExecUnconfirmed { lock }) => {
+                assert!(
+                    matches!(cell.probe_supervisor_lock(), Ok(LockProbe::Held)),
+                    "the returned lock is still held"
+                );
+                drop(lock);
+            }
+            other => panic!(
+                "a report pipe a sleeper holds leaves the exec unconfirmed, not {other:?} after {:?}",
+                returned - started
+            ),
+        }
+        assert!(returned >= deadline, "the start waited until its deadline");
+        assert!(
+            returned - deadline < Duration::from_millis(500),
+            "the start returned {:?} after its deadline",
+            returned - deadline
+        );
+    }
+
     #[test]
     fn each_step_names_its_call() {
         let names: Vec<String> = STEPS.iter().map(ToString::to_string).collect();
@@ -930,6 +1015,7 @@ mod tests {
     fn each_start_error_says_what_failed_and_only_io_failures_have_a_source() {
         let (_first, first) = held_lock();
         let (_second, second) = held_lock();
+        let (_third, third) = held_lock();
         let laid_out = io::Error::from_raw_os_error(libc::EMFILE);
         let written = io::Error::from_raw_os_error(libc::EIO);
         let cases = [
@@ -951,6 +1037,11 @@ mod tests {
                     "starting the supervisor failed at execve: errno {}",
                     libc::ENOENT
                 ),
+                None,
+            ),
+            (
+                StartError::ExecUnconfirmed { lock: third },
+                "the supervisor's exec was not confirmed by the deadline".to_owned(),
                 None,
             ),
             (

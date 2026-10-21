@@ -923,7 +923,8 @@ impl Cell {
         let executed = matches!(
             result,
             Ok(())
-                | Err(StartError::SupervisorClosedPipe
+                | Err(StartError::ExecUnconfirmed { .. }
+                    | StartError::SupervisorClosedPipe
                     | StartError::RecordNotTaken
                     | StartError::Write(_))
         );
