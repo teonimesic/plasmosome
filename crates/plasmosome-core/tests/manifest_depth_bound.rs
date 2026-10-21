@@ -135,7 +135,12 @@ fn accepted_on_each_stack(text: &str, what: &str) {
 
 fn at_and_past_the_bound(at: Nesting, past: Nesting, what: &str) {
     accepted_on_each_stack(&at.counting(BOUND), &format!("{what} counting 32"));
-    refused_on_each_stack(&past.counting(BOUND + 1), &format!("{what} counting 33"));
+    let past = past.counting(BOUND + 1);
+    refused_on_each_stack(&past, &format!("{what} counting 33"));
+    refused_on_each_stack(
+        &format!("{past}{NOT_TOML}"),
+        &format!("{what} counting 33, then a line that is not TOML"),
+    );
 }
 
 #[test]
