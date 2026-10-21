@@ -69,7 +69,13 @@ pub(crate) fn resolve(
 }
 
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn is_system_boundary(name: &str) -> bool {
+pub(crate) fn is_system_name(name: &str) -> bool {
+    let _ = name;
+    todo!()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn on_sealed_volume(name: &str) -> Result<bool, ClosureFault> {
     let _ = name;
     todo!()
 }
@@ -221,3 +227,4 @@ pub fn audit_closure(
     let _ = (helper, libraries);
     todo!()
 }
+
