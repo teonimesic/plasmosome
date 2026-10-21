@@ -89,6 +89,7 @@ enum Defect {
     ChecksTheAddressBeforeValidating(Call),
     AnInvalidGrantKeepsARecord,
     AConflictingGrantKeepsARecord,
+    AConflictingGrantKeepsADisagreeingRecord,
     LeaksAnInvalidOperationOf(UniverseClass, Call),
     RefusalRollsBackTheAddressOf(UniverseClass, Call),
     ConflictWithdrawsTheLiveGrantOfItsKey,
@@ -99,6 +100,7 @@ enum Defect {
     RefusalDropsTheIssuedRecordAtOnce(Call),
     UnknownRevokeDropsAnIssuedRecord,
     RevokeLeavesAnUnfinishedEffect,
+    GrantedRemovalKeepsItsObject,
     SnapshotOmitsIssuedRecords,
     SnapshotReconstructsGrantsFromObjects,
 }
@@ -793,7 +795,10 @@ impl EnforcementBackend for DefectiveBackend {
                 self.drop_address(handle);
                 self.state.insert(entry.object())?;
             } else if !promotes {
-                if self.defect == Defect::AConflictingGrantKeepsARecord {
+                if self.defect == Defect::AConflictingGrantKeepsARecord
+                    || (self.defect == Defect::AConflictingGrantKeepsADisagreeingRecord
+                        && !identical)
+                {
                     self.ledger.insert(handle, entry);
                 } else if self.defect == Defect::ConflictWithdrawsTheLiveGrantOfItsKey {
                     let live: Vec<OsObject> = self
@@ -994,6 +999,11 @@ impl EnforcementBackend for DefectiveBackend {
         }
         if self.applied_order_refuses(&removal) || !self.selects(&removal, owner) {
             return Err(unknown_object(&removal, owner));
+        }
+        if self.defect == Defect::GrantedRemovalKeepsItsObject && self.ledger.contains_key(&address)
+        {
+            self.drop_record(address);
+            return Ok(());
         }
         if self.defect == Defect::ApplyRemovalDropsTheRecordOnTimeout {
             self.ledger.remove(&address);
@@ -1873,6 +1883,40 @@ fn graceful_granted_removal_step_rejects_a_stale_handle() {
     );
 }
 
+#[test]
+fn granted_removal_step_rejects_a_removal_that_keeps_its_object() {
+    assert_rejected("granted holding must take its holding and record", || {
+        conformance::repeated_grants_are_independently_removable(carrying(
+            Defect::GrantedRemovalKeepsItsObject,
+        ))
+    });
+}
+
+#[test]
+fn a_granted_removal_that_keeps_its_object_drops_only_the_record() {
+    let owner = conformance::conformance_owner;
+    let mut backend = DefectiveBackend::carrying(Defect::GrantedRemovalKeepsItsObject);
+    let granted = conformance::op_for(GrantId::new(), owner(), broker("egressd"));
+    let entry = backend.grant(granted.clone(), GrantKind::Hot).unwrap();
+    let applied = conformance::op_for(GrantId::new(), owner(), mount("/src", "/work"));
+    backend.apply(applied.clone()).unwrap();
+    for (removal, owner) in [
+        (entry.removal(), &entry.owner),
+        (applied.removal(), applied.owner()),
+    ] {
+        assert_eq!(
+            backend.apply_removal(removal, owner, DrainSpec::forcing()),
+            Ok(())
+        );
+    }
+    let mut state = OsState::new();
+    state.insert(granted.object()).unwrap();
+    assert_eq!(
+        backend.snapshot_os_state(),
+        Ok(EnforcementSnapshot::new(state, Vec::new(), Vec::new()).unwrap())
+    );
+}
+
 fn revoke_after_one_removal(
     defect: Defect,
     drain: DrainSpec,
@@ -2083,6 +2127,72 @@ fn the_retry_clause_rejects_a_conflicting_grant_that_keeps_a_record() {
             Defect::AConflictingGrantKeepsARecord,
         ))
     });
+}
+
+#[test]
+fn the_retry_clause_rejects_a_conflicting_grant_that_keeps_a_disagreeing_record() {
+    assert_rejected("must not issue a record for an", || {
+        conformance::grant_retry_returns_the_original_entry(carrying(
+            Defect::AConflictingGrantKeepsADisagreeingRecord,
+        ))
+    });
+}
+
+#[test]
+fn a_disagreeing_record_is_kept_only_for_another_owner_or_capability_and_stays_hidden() {
+    let owner = conformance::conformance_owner;
+    let standing = conformance::op_for(GrantId::new(), owner(), mount("/src", "/work"));
+    let mut state = OsState::new();
+    state.insert(standing.object()).unwrap();
+    for (request, kept) in [
+        (standing.clone(), false),
+        (
+            conformance::op_for(
+                standing.id(),
+                conformance::second_owner(),
+                mount("/src", "/work"),
+            ),
+            true,
+        ),
+        (
+            conformance::op_for(standing.id(), owner(), mount("/other", "/work")),
+            true,
+        ),
+    ] {
+        let mut backend =
+            DefectiveBackend::carrying(Defect::AConflictingGrantKeepsADisagreeingRecord);
+        backend.apply(standing.clone()).unwrap();
+        assert_eq!(
+            backend.grant(request.clone(), GrantKind::Hot),
+            Err(identity_conflict(standing.handle()))
+        );
+        assert_eq!(
+            backend.snapshot_os_state(),
+            Ok(EnforcementSnapshot::new(state.clone(), Vec::new(), Vec::new()).unwrap())
+        );
+        let unknown = Err(BackendError::UnknownHandle {
+            handle: standing.handle(),
+        });
+        assert_eq!(
+            backend.revoke(standing.handle(), DrainSpec::forcing()) == unknown,
+            !kept,
+            "{request:?}"
+        );
+    }
+}
+
+#[test]
+fn the_retry_clause_rejects_a_revoke_that_returns_a_stranger_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(
+            "revoking a retried grant must return the original entry",
+            || {
+                conformance::grant_retry_returns_the_original_entry(carrying(
+                    Defect::RevokeReturnsAStranger(class),
+                ))
+            },
+        );
+    }
 }
 
 #[test]
