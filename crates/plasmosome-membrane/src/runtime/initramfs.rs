@@ -170,21 +170,8 @@ const HEADER_BYTES: usize = 110;
 const PATH_MAX: usize = 4096;
 const TRAILER: &str = "TRAILER!!!";
 const POLICY_NAME: &str = "plasmosome/guest-policy";
-const FIELDS: [&str; 13] = [
-    "ino",
-    "mode",
-    "uid",
-    "gid",
-    "nlink",
-    "mtime",
-    "filesize",
-    "devmajor",
-    "devminor",
-    "rdevmajor",
-    "rdevminor",
-    "namesize",
-    "check",
-];
+const FIELDS: &str =
+    "ino mode uid gid nlink mtime filesize devmajor devminor rdevmajor rdevminor namesize check";
 const TYPE_BITS: u32 = 0o170000;
 const REGULAR: u32 = 0o100000;
 const DIRECTORY: u32 = 0o040000;
@@ -273,28 +260,14 @@ fn read_entry(bytes: &[u8], at: usize) -> Result<Entry<'_>, InitramfsRefusal> {
     }
     let header = take(bytes, at, HEADER_BYTES)?;
     let mut fields = [0; 13];
-    for (index, field) in fields.iter_mut().enumerate() {
+    for (index, (field, name)) in fields.iter_mut().zip(FIELDS.split(' ')).enumerate() {
         let start = MAGIC.len() + index * 8;
         *field = header
             .get(start..start + 8)
             .and_then(hex_field)
-            .ok_or_else(|| bad_field(at, FIELDS[index]))?;
+            .ok_or_else(|| bad_field(at, name))?;
     }
-    let [
-        _,
-        mode,
-        _,
-        _,
-        nlink,
-        _,
-        filesize,
-        _,
-        _,
-        _,
-        _,
-        namesize,
-        check,
-    ] = fields;
+    let [_, mode, _, _, nlink, _, filesize, .., namesize, check] = fields;
     if check != 0 {
         return Err(InitramfsRefusal::NonzeroCheck { offset });
     }
