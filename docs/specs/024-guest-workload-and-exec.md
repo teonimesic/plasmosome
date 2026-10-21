@@ -242,12 +242,12 @@ namespace, on purpose: a started process sees PID1 as pid 1 and sees other guest
 - The network namespace holds only loopback until a ProxyMap is installed. The resolver at
   127.0.0.53 and the synthetic-prefix device of spec 001 §4.2 live in it, so a running process can
   reach a newly attached host without restarting.
-  Until a ProxyMap is installed, loopback is its only device, and it is up, as on an ordinary
-  machine. PID1 writes 1 to `net.core.fb_tunnels_only_for_init_net` in the initial network
-  namespace, where it runs, before it creates this one, so a kernel with tunnel drivers built in
-  adds no fallback tunnel device to the new namespace. PID1 checks the devices before hello, and
-  any other device refuses the boot. Amended on 2026-10-21: this did not say loopback is up, and
-  "only loopback" failed on a kernel that adds fallback tunnels to every new namespace.
+  Its loopback device is up, as on an ordinary machine. PID1 writes 1 to
+  `net.core.fb_tunnels_only_for_init_net` in the initial network namespace, where it runs, before
+  it creates this one, so a kernel with tunnel drivers built in adds no fallback tunnel device to
+  the new namespace. PID1 checks the devices before hello, and any other device refuses the boot.
+  Amended on 2026-10-21: this did not say loopback is up, and "only loopback" failed on a kernel
+  that adds fallback tunnels to every new namespace.
 
 **The image contract.** The workload root image must provide a passwd entry `workload` with uid
 and gid 1000 and home `/home/workload`, that directory owned by 1000 with mode 0700, a group entry
