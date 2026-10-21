@@ -147,8 +147,7 @@ impl Walk {
         })
     }
 
-    /// The start path joined with every component.
-    pub fn path(&self) -> PathBuf {
+    pub(crate) fn path(&self) -> PathBuf {
         let mut path = self.start_path.clone();
         for component in &self.components {
             path.push(OsStr::from_bytes(component.as_bytes()));
@@ -327,23 +326,6 @@ pub enum WalkRefusal {
         path: PathBuf,
         errno: i32,
     },
-}
-
-impl WalkRefusal {
-    /// The path where the walk stopped.
-    pub fn path(&self) -> &Path {
-        match self {
-            WalkRefusal::NotNormal { path }
-            | WalkRefusal::Symlink { path }
-            | WalkRefusal::Missing { path }
-            | WalkRefusal::NotDirectory { path }
-            | WalkRefusal::ForeignOwner { path, .. }
-            | WalkRefusal::Replaceable { path, .. }
-            | WalkRefusal::ReplaceableByAcl { path }
-            | WalkRefusal::OwnershipIgnored { path }
-            | WalkRefusal::Io { path, .. } => path,
-        }
-    }
 }
 
 impl fmt::Display for WalkRefusal {
