@@ -1,7 +1,10 @@
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, Metadata};
+use std::io::{self, Read};
+use std::os::fd::AsFd;
+use std::os::unix::fs::{FileExt, MetadataExt};
 
-use plasmosome_core::nofollow::{Facts, Kind, Walk, WalkRefusal};
+use plasmosome_core::nofollow::{Facts, Kind, Walk, WalkRefusal, acl_grants_write, effective_uid};
 
 use super::digest::Digest;
 use super::path::RecipePath;
@@ -69,7 +72,20 @@ impl VerifiedArtifact {
     /// and requires the same device and inode. A path that now names another file, even one
     /// with the same bytes, is `Replaced`.
     pub fn reconfirm(&self) -> Result<(), ArtifactRefusal> {
-        todo!()
+        let refuse = |fault| ArtifactRefusal {
+            role: self.role,
+            path: self.path.clone(),
+            fault,
+        };
+        let found = open_checked(&self.walk).map_err(refuse)?.identity;
+        if found == self.identity {
+            Ok(())
+        } else {
+            Err(refuse(ArtifactFault::Replaced {
+                verified: self.identity,
+                found,
+            }))
+        }
     }
 }
 
@@ -137,16 +153,59 @@ impl From<WalkRefusal> for ArtifactFault {
 }
 
 impl fmt::Display for ArtifactRefusal {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}: {}", self.role, self.path.as_str(), self.fault)
     }
 }
 
 impl std::error::Error for ArtifactRefusal {}
 
 impl fmt::Display for ArtifactFault {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArtifactFault::Walk(refusal) => write!(f, "{refusal}"),
+            ArtifactFault::NotRegular { kind } => {
+                write!(f, "it is {}, not a regular file", kind_name(*kind))
+            }
+            ArtifactFault::ForeignOwner { uid } => write!(
+                f,
+                "it is owned by uid {uid}, neither root nor the effective uid"
+            ),
+            ArtifactFault::Writable { mode } => {
+                write!(f, "it has mode {mode:04o}, with a write bit")
+            }
+            ArtifactFault::SetIdBits { mode } => write!(
+                f,
+                "it has mode {mode:04o}, with a set-user-ID or set-group-ID bit"
+            ),
+            ArtifactFault::WriteAcl => f.write_str("it carries an ACL allow entry granting write"),
+            ArtifactFault::NotImmutable => f.write_str("it has neither uchg nor schg set"),
+            ArtifactFault::ImmutabilityUnverifiable => {
+                f.write_str("this platform cannot show it immutable")
+            }
+            ArtifactFault::ChangedWhileHashing => {
+                f.write_str("its size or times moved while it was hashed")
+            }
+            ArtifactFault::DigestMismatch { expected, actual } => {
+                write!(f, "it hashes to {actual}, not the pinned {expected}")
+            }
+            ArtifactFault::Replaced { verified, found } => write!(
+                f,
+                "the path names device {} inode {}, not the verified device {} inode {}",
+                found.dev, found.ino, verified.dev, verified.ino
+            ),
+            ArtifactFault::Io { op, errno } => write!(f, "{op} failed with errno {errno}"),
+        }
+    }
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Directory => "a directory",
+        Kind::Regular => "a regular file",
+        Kind::Socket => "a socket",
+        Kind::Symlink => "a symlink",
+        Kind::Other => "a FIFO, a device or another special file",
     }
 }
 
@@ -165,19 +224,132 @@ impl fmt::Display for ArtifactFault {
 /// anywhere on the path is refused. Root and the effective UID can still change an artifact
 /// after it passes; the checks keep out every other principal.
 pub fn verify_artifact(
-    _role: ArtifactRole,
-    _artifact: &Artifact,
+    role: ArtifactRole,
+    artifact: &Artifact,
 ) -> Result<VerifiedArtifact, ArtifactRefusal> {
-    todo!()
+    let refuse = |fault| ArtifactRefusal {
+        role,
+        path: artifact.path().clone(),
+        fault,
+    };
+    let walk =
+        Walk::from_root(artifact.path().as_path()).map_err(|refusal| refuse(refusal.into()))?;
+    let checked = open_checked(&walk).map_err(refuse)?;
+    let digest = hash(&checked.file).map_err(refuse)?;
+    let (after, _) = stat(&checked.file).map_err(refuse)?;
+    judge_unchanged(checked.stamp, after).map_err(refuse)?;
+    if digest != *artifact.sha256() {
+        return Err(refuse(ArtifactFault::DigestMismatch {
+            expected: *artifact.sha256(),
+            actual: digest,
+        }));
+    }
+    Ok(VerifiedArtifact {
+        role,
+        path: artifact.path().clone(),
+        walk,
+        file: checked.file,
+        identity: checked.identity,
+        size: checked.stamp.size,
+        digest,
+    })
 }
 
 /// Verifies every artifact of `recipe` with [`verify_artifact`] in field order: kernel,
 /// initramfs, root image, helper, each library, host policy, guest policy. Stops at the first
 /// refusal and closes every descriptor it opened.
 pub fn verify_recipe_artifacts(
-    _recipe: &RuntimeRecipe,
+    recipe: &RuntimeRecipe,
 ) -> Result<VerifiedArtifacts, ArtifactRefusal> {
-    todo!()
+    Ok(VerifiedArtifacts {
+        kernel: verify_artifact(ArtifactRole::Kernel, recipe.kernel())?,
+        initramfs: verify_artifact(ArtifactRole::Initramfs, recipe.initramfs())?,
+        root_image: verify_artifact(ArtifactRole::RootImage, recipe.root_image())?,
+        helper: verify_artifact(ArtifactRole::Helper, recipe.helper())?,
+        libraries: recipe
+            .libraries()
+            .iter()
+            .enumerate()
+            .map(|(index, library)| verify_artifact(ArtifactRole::Library(index), library))
+            .collect::<Result<_, _>>()?,
+        host_policy: verify_artifact(ArtifactRole::HostPolicy, recipe.host_policy())?,
+        guest_policy: verify_artifact(ArtifactRole::GuestPolicy, recipe.guest_policy())?,
+    })
+}
+
+struct Checked {
+    file: File,
+    identity: FileIdentity,
+    stamp: Stamp,
+}
+
+fn open_checked(walk: &Walk) -> Result<Checked, ArtifactFault> {
+    let euid = effective_uid();
+    let opened = walk.open_file(|reached| judge_artifact(&reached.facts, euid))?;
+    let identity = FileIdentity {
+        dev: opened.facts.dev,
+        ino: opened.facts.ino,
+    };
+    let file = File::from(opened.fd);
+    if acl_grants_write(file.as_fd()).map_err(|error| io_fault("acl", &error))? {
+        return Err(ArtifactFault::WriteAcl);
+    }
+    let (stamp, immutable) = stat(&file)?;
+    judge_immutability(immutable)?;
+    Ok(Checked {
+        file,
+        identity,
+        stamp,
+    })
+}
+
+fn stat(file: &File) -> Result<(Stamp, Immutability), ArtifactFault> {
+    let metadata = file.metadata().map_err(|error| io_fault("fstat", &error))?;
+    let stamp = Stamp {
+        size: metadata.size(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    };
+    Ok((stamp, immutability(&metadata)))
+}
+
+#[cfg(target_os = "macos")]
+fn immutability(metadata: &Metadata) -> Immutability {
+    use std::os::macos::fs::MetadataExt;
+    if metadata.st_flags() & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0 {
+        Immutability::Set
+    } else {
+        Immutability::Clear
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn immutability(_metadata: &Metadata) -> Immutability {
+    Immutability::Unverifiable
+}
+
+fn hash(file: &File) -> Result<Digest, ArtifactFault> {
+    Digest::of_reader(Positioned { file, offset: 0 }).map_err(|error| io_fault("pread", &error))
+}
+
+struct Positioned<'a> {
+    file: &'a File,
+    offset: u64,
+}
+
+impl Read for Positioned<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.file.read_at(buffer, self.offset)?;
+        self.offset += read as u64;
+        Ok(read)
+    }
+}
+
+fn io_fault(op: &'static str, error: &io::Error) -> ArtifactFault {
+    ArtifactFault::Io {
+        op,
+        errno: error.raw_os_error().unwrap_or(libc::EIO),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,16 +366,36 @@ pub(crate) struct Stamp {
     pub(crate) changed: (i64, i64),
 }
 
-pub(crate) fn judge_artifact(_facts: &Facts, _euid: u32) -> Result<(), ArtifactFault> {
-    todo!()
+pub(crate) fn judge_artifact(facts: &Facts, euid: u32) -> Result<(), ArtifactFault> {
+    if facts.kind != Kind::Regular {
+        return Err(ArtifactFault::NotRegular { kind: facts.kind });
+    }
+    if facts.uid != 0 && facts.uid != euid {
+        return Err(ArtifactFault::ForeignOwner { uid: facts.uid });
+    }
+    if facts.mode & 0o222 != 0 {
+        return Err(ArtifactFault::Writable { mode: facts.mode });
+    }
+    if facts.mode & 0o6000 != 0 {
+        return Err(ArtifactFault::SetIdBits { mode: facts.mode });
+    }
+    Ok(())
 }
 
-pub(crate) fn judge_immutability(_immutable: Immutability) -> Result<(), ArtifactFault> {
-    todo!()
+pub(crate) fn judge_immutability(immutable: Immutability) -> Result<(), ArtifactFault> {
+    match immutable {
+        Immutability::Set => Ok(()),
+        Immutability::Clear => Err(ArtifactFault::NotImmutable),
+        Immutability::Unverifiable => Err(ArtifactFault::ImmutabilityUnverifiable),
+    }
 }
 
-pub(crate) fn judge_unchanged(_before: Stamp, _after: Stamp) -> Result<(), ArtifactFault> {
-    todo!()
+pub(crate) fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
+    if before == after {
+        Ok(())
+    } else {
+        Err(ArtifactFault::ChangedWhileHashing)
+    }
 }
 
 #[cfg(test)]
