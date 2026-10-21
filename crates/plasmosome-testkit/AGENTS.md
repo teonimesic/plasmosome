@@ -40,7 +40,7 @@ Every place the kernel touches the world outside the process, and the seam that 
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 | Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`; writers that refuse every write, fail only on flush, or fail only their first write; one that records the largest piece; all in plasmosome-cli's tests |
 | Time (lifetime bounds, the fence, expiry scheduling) | `Clock` (`plasmosome-backend::clock`), `SystemClock` in `plasmosome-core::clock` | `ManualClock` |
-| A daemon's reply line (the command line's socket read) | the reader injected as an argument to `plasmosome_cli::reply::read_reply` | a `&[u8]`; readers that give a script of chunks and errors, serve a fixed chunk size, or never end and count what was taken; all in plasmosome-cli's tests |
+| A daemon's reply line (the command line's socket read) | the reader injected as an argument to `plasmosome_cli::reply::read_reply` | a `&[u8]`; readers that give a script of chunks and errors, serve a fixed chunk size, or send no newline, stop after a set length and count what was taken; all in plasmosome-cli's tests |
 | The pinned guest (`plasmosome-lanes`) | the bundle directory and the e2fsprogs tool directory injected as paths, and the VMM launcher path given to `run_lane` | a `TempDir` bundle, and launcher scripts that hang or write a console |
 
 **The seam rule.** Both forms in that table are seams. Which one a contact gets is decided by
@@ -53,8 +53,8 @@ indirection without letting a test observe anything a `TempDir` does not already
 
 For new code: the first time a change touches something not in that table — a network call, a
 clock read that affects behavior, a new daemon — it adds the seam in the crate that owns the
-contact, in whichever of the two forms fits, and a row here. It never calls the OS inline and
-mocks it in the test.
+contact, in whichever of the two forms fits, and the same row here and in spec 003's table. It
+never calls the OS inline and mocks it in the test.
 
 ## Hard rules
 
@@ -68,8 +68,9 @@ mocks it in the test.
 - **Conformance functions take a factory, not an instance** — `make: impl Fn() -> B` — so each
   one owns its backend and a clause cannot inherit another clause's state.
 - **Lifetime decisions read time through `Clock`.** Spec 028 requires one injected clock for
-  every lifetime decision, and tests pass `ManualClock`. Durations are passed in as arguments.
-  Spec 003 names the four earlier decisions that still read elapsed time outside it.
+  every lifetime decision, with three readings that tests set independently, and tests pass
+  `ManualClock`. Durations are passed in as arguments. Spec 003 names the four earlier decisions
+  that still read elapsed time outside it; they stay that way until a task moves them.
 - **Builders carry only what a test in this repository uses.** A helper written for a caller that
   does not exist is a guess about the next test.
 - **A clause that withdraws a set walks both orders, and each order needs its own witness.**
