@@ -754,11 +754,13 @@ fn a_flag_is_any_argument_before_dashes_that_starts_with_a_dash() {
     let reading = read(&args(&["--=x", "cell", "list"]), COMMANDS);
     let (command, code, _) = refused(&reading);
     assert_eq!((command, code), ("cell.list", ClientCode::NotServed));
-    let help = help_text(&["cell", "list", "-", "--help"], COMMANDS);
-    assert!(
-        help.starts_with("Usage: plasmosome cell list [FLAGS]"),
-        "{help}"
-    );
+    for flag in ["-", "-5"] {
+        let help = help_text(&["cell", "list", flag, "--help"], COMMANDS);
+        assert!(
+            help.starts_with("Usage: plasmosome cell list [FLAGS]"),
+            "{flag}: {help}"
+        );
+    }
 }
 
 #[test]
