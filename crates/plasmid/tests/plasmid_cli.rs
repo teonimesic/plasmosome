@@ -280,6 +280,24 @@ fn usage_errors_are_invalid_envelopes() {
     }
 }
 
+#[test]
+fn the_full_parse_names_the_first_fault_on_the_line() {
+    for (arguments, argument) in [
+        (&["frobnicate", "--", "x"][..], "--"),
+        (&["--kernel", "a", "--kernel", "b"], "--kernel"),
+        (&["--json", "--json"], "--json"),
+        (&["frobnicate", "--kernel"], "--kernel"),
+        (&["--socket"], "--socket"),
+        (&["--json", "--human"], "--human"),
+        (&["--human", "--json"], "--json"),
+        (&["frobnicate", "--json", "--human"], "--human"),
+        (&["list", "a", "--help"], "a"),
+    ] {
+        let error = usage_error(&run(arguments));
+        assert_eq!(error["argument"], argument, "{arguments:?}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn an_argument_that_is_not_utf8_is_a_usage_error_naming_its_lossy_form() {
