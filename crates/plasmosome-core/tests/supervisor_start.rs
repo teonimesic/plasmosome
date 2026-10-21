@@ -31,7 +31,7 @@ const STARTED: &str = "the child controller started its supervisor";
 const ONE_MIB: usize = 1 << 20;
 const LAST_SIGNAL: libc::c_int = 64;
 
-const CASES: [(&str, fn()); 11] = [
+const CASES: [(&str, fn()); 12] = [
     (
         "starts_detached_with_only_0_to_4",
         starts_detached_with_only_0_to_4,
@@ -63,6 +63,10 @@ const CASES: [(&str, fn()); 11] = [
     (
         "closes_from_5_to_the_per_process_top",
         closes_from_5_to_the_per_process_top,
+    ),
+    (
+        "the_callers_signal_mask_is_restored",
+        the_callers_signal_mask_is_restored,
     ),
 ];
 
@@ -278,6 +282,25 @@ fn closes_from_5_to_the_per_process_top() {
         report.numbers("open_above_four"),
         [0u64; 0],
         "descriptors 5, 6 and {targets:?} are closed, with the soft limit at 256; {report}"
+    );
+}
+
+fn the_callers_signal_mask_is_restored() {
+    let _blocked = SignalBlocked::on_this_thread(libc::SIGUSR2);
+    let before = blocked_signals();
+    assert_eq!(before, [libc::SIGUSR2], "the case blocks SIGUSR2 alone");
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-110");
+    let missing =
+        RecipePath::parse(&format!("{}/missing", root.path.display())).expect("a canonical path");
+    match cell.start(&missing, cell.lock(), cell.log(), cell.record()) {
+        Err(StartError::Exec { lock, .. }) => drop(lock),
+        other => panic!("a missing membraned is an Exec failure, not {other:?}"),
+    }
+    assert_eq!(
+        blocked_signals(),
+        before,
+        "the start gives the calling thread back the mask it had"
     );
 }
 
@@ -1487,6 +1510,22 @@ impl Drop for SigpipeDefault {
             // SAFETY: signal takes integers and the disposition saved above.
             unsafe { libc::signal(libc::SIGPIPE, previous) };
         }
+    }
+}
+
+#[allow(unsafe_code)]
+fn blocked_signals() -> Vec<libc::c_int> {
+    // SAFETY: All zeroes is a valid sigset_t. A null new set only reads this thread's mask into the
+    // local `mask`, which sigismember then only reads.
+    unsafe {
+        let mut mask: libc::sigset_t = std::mem::zeroed();
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask),
+            0
+        );
+        (1..=LAST_SIGNAL)
+            .filter(|signal| libc::sigismember(&mask, *signal) == 1)
+            .collect()
     }
 }
 
