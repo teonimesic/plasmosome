@@ -522,6 +522,17 @@ fn m3_fails_when_a_holding_directory_is_anywhere_in_the_share() {
         &judge_m3(&no_names, &check, &data(), &tool(), &detached()),
         "opt"
     ));
+    let mut share_no_names = detach(Some(5001));
+    replace(
+        &mut share_no_names,
+        "detach-list-share",
+        1000,
+        json!({"probe": "list", "ok": true}),
+    );
+    assert!(is_fail(
+        &judge_m3(&share_no_names, &check, &data(), &tool(), &detached()),
+        "the share lists"
+    ));
     let mut unlisted = detach(Some(5001));
     replace(
         &mut unlisted,
