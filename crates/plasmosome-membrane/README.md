@@ -17,6 +17,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `vmm` | The VM process lifecycle: fork, observe, kill, and reap on drop |
 | `readiness` | Is a broker actually serving? Readiness is an *answered query*, never a running pid or an existing file — a process can be alive and useless |
 | `brokers` | A cell's broker set, each one a `vmm::VmmChild`, asked again on every call |
+| `cell_args` | Spec 023 §4's argv, `--config-fd=3 --lock-fd=4 --cell=<id>`, matched exactly, so `membraned` can tell it from a usage error |
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
@@ -33,6 +34,24 @@ child.kill()?;
 ```
 
 Tests: `cargo test -p plasmosome-membrane`
+
+## Command line
+
+`membraned <config.json>` runs the daemon in the foreground. A sole `-h` or `--help` prints help
+on stdout and exits 0. A sole `--version` prints `membraned` and the package version, such as
+`membraned 0.1.0`, and exits 0. Neither reads a configuration. Any other single argument is the
+configuration path, so a file named `--version` is passed as `./--version`.
+
+Exactly `--config-fd=3 --lock-fd=4 --cell=<id>`, in that order with `<id>` a cell ID, is how
+spec 023 §4 starts a cell's supervisor. Spec 025 §6 says `membraned` then starts as spec 023 §5
+says, but cell mode is not built yet. Until native task `plasmosome-t8nq` builds it, that exact
+form prints one line saying so and exits 2, with no usage text, by Main's decision (3) on native
+task `plasmosome-rhn`. No argument, or any other list of more than one, prints usage on stderr
+and exits 64. That includes those three arguments in another order, with a fourth, or with a
+`--cell=` value that is not a cell ID. A configuration the daemon cannot read, or that
+`daemon::parse_config` refuses, exits 2. A later failure exits 1: to bind or inspect the control
+socket, to find or start a broker, or to accept connections while serving. The `-h`, `--help`,
+`--version` and exit 64 rules are spec 025 §6's. Exits 2 and 1 are unchanged.
 
 ## Readiness is an answered query
 
@@ -277,7 +296,7 @@ not in the root file.
 ## Not here yet
 
 The netstack shim and the vsock bridges belong to this crate by that rule, and none of it is
-built: the modules present are `brokers`, `control`, `daemon`, `exec`, `readiness`, `runtime`
-and `vmm`.
+built: the modules present are `brokers`, `cell_args`, `control`, `daemon`, `exec`, `readiness`,
+`runtime` and `vmm`.
 Native task `plasmosome-qep`, which boots one real cell from the qualified Darwin runtime bundle,
 carries the first part of that work: the vsock endpoints and their handshake.
