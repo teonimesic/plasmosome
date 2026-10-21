@@ -227,6 +227,16 @@ cell directory get the same treatment.
   an existing `retired/<cell>` is `AlreadyRetired`. Nothing is unlinked: the journal, the markers,
   a stale `membrane.uds` and `runtime/root.img` move with the directory.
 
+## Command line
+
+`plasmosomed <config.json>` runs the daemon in the foreground. A sole `-h` or `--help` prints
+help on stdout and exits 0. A sole `--version` prints `plasmosomed` and the package version, such
+as `plasmosomed 0.1.0`, and exits 0. Neither reads a configuration. Any other single argument is
+the configuration path, so a file named `--version` is passed as `./--version`. No argument, or
+more than one, prints usage on stderr and exits 64. A configuration the daemon cannot read, or
+refuses, exits 2. A failure to bind or serve exits 1. The `-h`, `--help`, `--version` and exit 64
+rules are spec 025 §6's. Exits 2 and 1 are unchanged.
+
 ## Configuration
 
 `plasmosomed` takes one JSON object, read by `parse_config`:

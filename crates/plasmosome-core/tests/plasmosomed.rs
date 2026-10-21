@@ -399,7 +399,7 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
     let no_arguments = output_within(plasmosomed(&[]), PATIENCE);
     assert_eq!(
         no_arguments.status.code(),
-        Some(2),
+        Some(64),
         "plasmosomed needs a config"
     );
     assert!(
