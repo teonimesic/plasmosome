@@ -5356,6 +5356,28 @@ mod tests {
     }
 
     #[test]
+    fn a_sync_that_fails_after_the_mkdir_names_the_cell_it_created() {
+        let (_dir, root) = temp_root();
+        fs::create_dir(root.join("cells")).expect("cells is made");
+        let (instance, lock) = recording_locked(&root);
+        fail_next_sync_of(&root.join("cells"));
+        let result = instance.allocate_cell(&lock);
+        let text = result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        expect_match!(result, Err(AllocateError::Create { cell: created, source: CellDirError::Io { path, source } }) => {
+            assert_eq!(created, cell("cell-1"));
+            assert_eq!(path, root.join("cells"));
+            assert_injected(&source);
+        });
+        assert!(text.contains("cell-1"), "{text:?} does not name the cell");
+        assert!(root.join("cells/cell-1").is_dir());
+        assert_eq!(allocated(&instance, &lock), cell("cell-2"));
+    }
+
+    #[test]
     fn a_symlinked_or_non_directory_cells_or_retired_refuses_and_follows_nothing() {
         for place in ["cells", "retired"] {
             for planted in ["a symlink", "a regular file"] {
@@ -5391,8 +5413,9 @@ mod tests {
                 .expect("cells is moved aside");
             symlink(hook_root.join("aside"), hook_root.join("cells")).expect("the link is made");
         });
-        expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Create(CellDirError::Symlink { path })) => {
-            assert_eq!(path, root.join("cells"))
+        expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Create { cell: chosen, source: CellDirError::Symlink { path } }) => {
+            assert_eq!(chosen, cell("cell-2"));
+            assert_eq!(path, root.join("cells"));
         });
         assert_eq!(names_under(&root.join("aside")), ["cell-1"]);
     }
@@ -5930,8 +5953,11 @@ mod tests {
             (failed_at!(AllocateError::Listing), "/inst/x", cause),
             (Box::new(AllocateError::Exhausted), "cell-9999999999", None),
             (
-                Box::new(AllocateError::Create(created())),
-                "/inst/cells",
+                Box::new(AllocateError::Create {
+                    cell: cell("cell-4"),
+                    source: created(),
+                }),
+                "cell-4",
                 Some(created().to_string()),
             ),
         ];
