@@ -171,7 +171,7 @@ fn a_ledger_rebuilt_from_its_log_replays_to_an_empty_universe() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
     let mut backend = FakeBackend::new();
-    let before = backend.snapshot_os_state();
+    let before = backend.snapshot_os_state().unwrap();
     let (plugin, effects) = populate(&mut backend);
 
     {
@@ -209,11 +209,12 @@ fn a_ledger_rebuilt_from_its_log_replays_to_an_empty_universe() {
         "the rebuilt ledger replays LIFO exactly as the in-memory one"
     );
     assert_eq!(report.delayed_discarded, 1);
-    let after = backend.snapshot_os_state();
+    let after = backend.snapshot_os_state().unwrap();
     assert!(
-        Diff::between(&before, &after).is_empty(),
+        Diff::between(before.state(), after.state()).is_empty(),
         "replay of the rebuilt ledger must restore the pre-attach universe"
     );
+    assert!(after.grants().is_empty() && after.incomplete().is_empty());
 }
 
 #[test]
@@ -253,7 +254,7 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
         "network",
         proxy_map("api.github.com", "splice"),
     );
-    let state = backend.snapshot_os_state();
+    let state = backend.snapshot_os_state().unwrap().state().clone();
     let encoded = serde_json::to_string(&state).unwrap();
     let round_trip: plasmosome_backend::OsState = serde_json::from_str(&encoded).unwrap();
     assert_eq!(round_trip, state);
@@ -540,14 +541,19 @@ fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
             .is_err()
     );
     assert_eq!(
-        backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+        backend
+            .snapshot_os_state()
+            .unwrap()
+            .state()
+            .objects()
+            .collect::<Vec<_>>(),
         vec![&first.object()]
     );
     let resumed = sealed
         .detach(&mut backend, &cell(), DrainSpec::forcing())
         .expect("force resumes at the exact timed-out holding");
     assert_eq!(resumed.replayed, vec!["first equal grant"]);
-    assert!(backend.snapshot_os_state().is_empty());
+    assert!(backend.snapshot_os_state().unwrap().is_empty());
 }
 
 #[test]
@@ -558,13 +564,19 @@ fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
     let mut source = FakeBackend::new();
     let first = grant(&mut source, "network", capability.clone());
     let second = grant(&mut source, "network", capability);
-    let encoded = serde_json::to_string(&source.snapshot_os_state()).unwrap();
-    let restored: plasmosome_backend::OsState = serde_json::from_str(&encoded).unwrap();
+    let encoded = serde_json::to_string(&source.snapshot_os_state().unwrap()).unwrap();
+    let restored: plasmosome_backend::EnforcementSnapshot = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(restored.grants().len(), 2);
     let mut fresh = FakeBackend::new();
-    for object in restored.objects() {
+    for object in restored.state().objects() {
         fresh.plant(object.clone()).unwrap();
     }
-    let before_refusal = fresh.snapshot_os_state();
+    let before_refusal = fresh.snapshot_os_state().unwrap();
+    assert_eq!(before_refusal.state(), restored.state());
+    assert!(
+        before_refusal.grants().is_empty(),
+        "planting serialized observations must not issue records"
+    );
     assert_eq!(
         fresh
             .revoke(first.handle, DrainSpec::forcing())
@@ -573,7 +585,7 @@ fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
             handle: first.handle
         }
     );
-    assert_eq!(fresh.snapshot_os_state(), before_refusal);
+    assert_eq!(fresh.snapshot_os_state().unwrap(), before_refusal);
 
     let mut ledger = Ledger::new("network");
     ledger.push(Effect::exact(
@@ -591,7 +603,7 @@ fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
     sealed
         .detach(&mut fresh, &cell(), DrainSpec::forcing())
         .expect("serialized exact inverses select both restored observations");
-    assert!(fresh.snapshot_os_state().is_empty());
+    assert!(fresh.snapshot_os_state().unwrap().is_empty());
 }
 
 #[test]

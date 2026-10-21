@@ -105,12 +105,23 @@ Application error codes (closed set; additions are a contract change):
 | 105 | `illegal_state` | `from`, `to`; `detail`, a record of a kind spec 001 defines, including spec 024's; `cell` whenever the refusal concerns a created cell (spec 023); private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
-| 108 | `manifest_invalid` | `detail`, `path`; `fix` when the refusal names a declaration field |
+| 108 | `manifest_invalid` | `detail`, `path`; `field` and `fix` when the refusal names a declaration field; `plasmid` when the refusal names the declaration's id |
 | 109 | `widening_forbidden` | `plasmid` |
 | 110 | `attestation_required` | `verb` — the E13b residual: subject spawn needs host-side attestation |
 
-The 108 `fix` is spec 011's amendment to this table. A 108 whose refusal names a declaration
-field carries a `fix` in one of three forms:
+The 108 `field`, `fix` and `plasmid` are spec 011's amendment to this table. `field` is the
+declaration field the refusal names, as its path: TOML keys joined by dots, each bare where TOML
+allows and otherwise a quoted string, with `[i]` after a list to name its entry `i`, such as
+`network.ports[1]`, `commands.commands."git ops".exec` or `secrets.refs[0].scope.path_scope`. A
+108 carries `field` and `fix` together or not at all. `plasmid` is the declaration's `id` itself,
+not quoted or escaped as `detail` writes it, and a 108 carries it exactly when the refusal names
+that id. Today no refusal of the `id` field names one, because no id parsed: the id is missing,
+not a string or empty. Such a refusal carries `field` `id` and its `fix`, and no `plasmid`. A
+client reads these members and never splits `detail`: a key or an id may hold `: `.
+Amended on 2026-10-21: the first sentence here read "The 108 `fix` is spec 011's amendment to
+this table.", and row 108's fields read "`detail`, `path`; `fix` when the refusal names a
+declaration field"; the field and the plasmid id travelled only inside `detail`. A 108 whose
+refusal names a declaration field carries a `fix` in one of three forms:
 
 - TOML to write in place of that field: a line such as `hosts = ["api.github.com"]`, or a
   section such as `[impl]` followed by `wasm = "component.wasm"`;
@@ -179,19 +190,28 @@ another effective UID (spec 025 §5 and §6). This does not change `membraned`'s
 - A **kernel instance** has a name (`plasmosome start --name work`); its state lives at
   `~/.plasmosome/instances/<name>/` (D1b). Verbs in the `plasmosome.*` group address the kernel
   organism; verbs in the `plasmid.*` group address plugin attachments. **No plasmid verb can
-  start the plasmosome** (D1a): if the addressed instance is not running, `plasmid.*` fails with
-  code `107`, it never boots one.
+  start the plasmosome** (D1a): if the addressed instance is not running, `plasmid.*` fails and
+  never boots one. Each instance has its own socket, so the command line notices a down instance
+  itself and exits 1 with client code `no_instance`, `not_running` or `unreachable` (spec 025
+  §4). Code `107` is for a service that answers for an instance it does not serve, which only a
+  host-level service could be; it also exits 1. Amended on 2026-10-21 (spec 025, amendment A):
+  this said "if the addressed instance is not running, `plasmid.*` fails with code `107`, it
+  never boots one."
 - A **cell** is a running session: one plasmosome + its attached plasmids + the workload (D1c).
   Its declarative definition is a **genome**, `~/.plasmosome`-relative to the project:
   `.plasmosome/genomes/<name>.toml`; the share/export form is `*.genome.toml`. That file is not yet
   a selection source: until a local genome grammar exists, `cell.new` selects a genome only by
   `artifact` (spec 022).
 - Addressing chains down `(kernel, cell, plasmid)`. `--kernel` / `--cell` are optional **only
-  when unambiguous**. One running instance → default; otherwise code `100` with the candidate
-  list. The server resolves; the client never guesses. The results of `plasmid.list`,
-  `plasmid.add`, `plasmid.remove`, `plasmid.reload` and `plasmid.renew` (spec 028 §8) each carry
-  `cell`, the cell the verb acted on, whether the request named it or the server resolved it.
-  Amended on 2026-10-20: this did not name `plasmid.renew`.
+  when unambiguous**. The server resolves a cell: one matching cell is the default, otherwise
+  code `100` with the candidate list. Each instance has its own socket, so no server can resolve
+  an instance; the command line does, under spec 025 §5. Exactly one instance is the default, and
+  more than one, reachable or not, is refused with the candidate list. Neither side guesses. The
+  results of `plasmid.list`, `plasmid.add`, `plasmid.remove`, `plasmid.reload` and
+  `plasmid.renew` (spec 028 §8) each carry `cell`, the cell the verb acted on, whether the request
+  named it or the server resolved it. Amended on 2026-10-20: this did not name `plasmid.renew`.
+  Amended on 2026-10-21 (spec 025, amendment A): this said "One running instance → default;
+  otherwise code `100` with the candidate list. The server resolves; the client never guesses."
 
 ## 3. Verb schemas (the v1 set)
 
@@ -436,14 +456,34 @@ replies.
 ```
 
 - `genome` is optional; without it the cell starts empty (plasmids attach later).
+- Optional `request_key` is 1 to 64 characters from `A-Z a-z 0-9 . _ -`, as in `cell.exec`; anything
+  else, `null` and numbers included, is `-32602`. A key belongs to the instance and is shared by
+  every client of it. While a cell holds the key, from its creation until it is retired, a
+  `cell.new` with that key and the same other parameters, `kernel` aside, creates nothing.
+  Parameters are compared as JSON values (spec 023 §3): key order, spacing and string escapes do not
+  matter, but a member left out differs from one sent at its default value. Such a repeat gets that
+  cell's `ready` result, `{cell, state: "ready", plasmids}`, once the cell's `created` file is
+  synced; or, at once, 105 `{from: <state>, to: "ready", cell, detail: {kind: "repeat"}}` while the
+  cell is `germinating`, `draining` or `dead`; or 101 `{target: "cell <id>"}` while it is
+  quarantined, or set aside and not adopted by the check the repeat runs. The same key with other
+  parameters is 102 `{target: "request <key>"}`. The 101 and the 102 carry no `cell` member, and
+  none of these replies ends a cell. Spec 023 §4 step 1's host refusals and this spec's §3.4 stop
+  gate come before the key is looked up, so a repeat can get them. The key is held with no time
+  limit until the cell is retired. Then it is forgotten, and the same request starts a new cell.
+  While a cell's key record cannot be read after a restart, every `cell.new` with a key is 105
+  `{from: "request_unreadable", to: "germinating", cell}`. Spec 023 §3, §4 and §8 say where the key
+  is kept and how it survives a restart. `repeat` is the 105 `detail` kind of this case. Amended on
+  2026-10-21: this bullet is new; `cell.new` had no request key, so a repeat after a lost reply made
+  a second cell.
 - With a genome, optional `lease_ms` and `idle_ms` only shorten the lifetime of each attachment
   the request creates (spec 028). `exec_id` is `-32602`.
 - The controller allocates the cell ID and starts its supervisor as spec 023 says. It replies only
   when the guest is up and the genome is attached; until then the cell is `germinating` and refuses
   `cell.exec`. Resolution refusals come before any cell directory exists; every later refusal
-  carries `cell`, and its cell is ended first. On a host other than Darwin arm64, or without
-  `cell_runtime`, cell.new is 105 `{from: "unsupported_host" | "no_cell_runtime", to:
-  "germinating"}`.
+  other than a repeat's reply (above) carries `cell`, and its cell is ended first. On a host other
+  than Darwin arm64, or without `cell_runtime`, cell.new is 105 `{from: "unsupported_host" |
+  "no_cell_runtime", to: "germinating"}`. Amended on 2026-10-21: this read "every later refusal
+  carries `cell`, and its cell is ended first", and a repeat's reply ends no cell.
 - Optional `artifact: {registry_id,release:ReleaseRef}` selects the exact already imported
   spec020 genome, with required digest and a matching required `genome` name. It does not fetch,
   authorize widening or bypass normal closure checks. Missing import is101; corrupt/mismatched

@@ -42,9 +42,9 @@ states what the tree serves now.
 | `plasmosomed <config.json>` | Runs a foreground controller and serves only `plasmosome.status` on its configured Unix socket. |
 | `membraned <config.json>` | Runs a foreground empty/broker supervisor and serves only `membrane.status` on its configured Unix socket. |
 | `plasmid <command>` | `plasmid new <name>` writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. `plasmid list`, `add`, `remove`, `reload` and `renew` are listed in `plasmid --help` and exit 2 with a `not_served` envelope. A wrong command line exits 64 with an `invalid` envelope, and `plasmid --version` prints `plasmid 0.0.0`. |
-| `plasmosome status --socket PATH` | Checks that the socket is a socket you own with mode `0600`, in a directory you own that no other user can open, and that no user but you or root can replace a directory above it. It then checks that the daemon runs as you, sends one `plasmosome.status` request, and prints the answer in spec 025's envelope: one JSON line on stdout, or the error on stderr with an exit code that says whether repeating is safe. `status` needs `--socket` in this build. `plasmosome --help` marks every other command not served, and each exits 2 with `not_served`. |
+| `plasmosome status` | Finds the controller's socket by `--socket PATH`, else by the instance name in `--kernel NAME` or `PLASMOSOME_KERNEL`, at `$HOME/.plasmosome/instances/NAME/control.uds`. With none of them, it takes the one instance under `$HOME/.plasmosome/instances/`, and refuses when there are several. It checks that the socket is a socket you own with mode `0600`, in a directory you own that no other user can open, and that no user but you or root can replace a directory above it. It then checks that the daemon runs as you, sends one `plasmosome.status` request, and prints the answer in spec 025's envelope: one JSON line on stdout, or the error on stderr with an exit code that says whether repeating is safe. `plasmosome --help` marks every other command not served, and each exits 2 with `not_served`. |
 
-The `plasmosome` executable serves only `status --socket`, so there is no `plasmosome start`. The
+The `plasmosome` executable serves only `status`, so there is no `plasmosome start`. The
 accepted future controller methods — `plasmosome.start/list/status/stop`,
 `cell.new/list/status/kill/exec`, `exec.status` and `plasmid.list/add/remove/reload` — are not
 implemented except for `plasmosome.status`. The membrane's desired-state, observe, kill and
@@ -628,7 +628,7 @@ that its complete runtime role is delivered.
 | `plasmosome-membrane` | Per-cell host supervisor for the VMM, network path and broker processes |
 | `plasmosome-ledger` | Typed reversibility: effects and their inverses; spec 020's registry IDs and release references |
 | `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
-| `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes, client codes, argument reading and `status --socket`; never shipped |
+| `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes, client codes, argument reading, instance selection and `status`; never shipped |
 | `plasmid` | Plasmid-author command line; today `plasmid new` writes a declaration, and the other plasmid commands answer `not_served` |
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
 | `plasmosome-guards` | Repository policy checks |
@@ -675,7 +675,7 @@ failure. After the build container runs, the tool reads only two things it left 
 the read-back in `check/`, which must still be a directory and is read through a bound.
 
 The images root above is the lab location, next to the runtime bundles. It is gated. Spec 001
-refuses an artifact with a replaceable parent (001:1126), and `/usr/local/var` is admin-writable,
+refuses an artifact with a replaceable parent (001:1148), and `/usr/local/var` is admin-writable,
 so product verification cannot accept an image from there. Owner gate O-1 (spec 027) is about the
 instance root, not the image, so answering O-1 alone does not admit an image there.
 

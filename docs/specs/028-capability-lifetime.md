@@ -496,13 +496,13 @@ Each has the default this spec uses until the owner answers.
    and both readings of its bound; it authorizes Force only for holdings whose drain timed out." In
    spec 017 (`017:292-293`), "Spec008 requires its durable operator assertion before forced cell
    cleanup" gains "or, for a holding whose drain timed out after its lifetime's bound, the recorded
-   expiry authority (spec 028)". In spec 001 §4.2 (`001:1344`), after "Force authority is
+   expiry authority (spec 028)". In spec 001 §4.2 (`001:1366`), after "Force authority is
    checked/durably recorded by the host under spec008.", add "It accepts an expiry authority only
    for a grant whose gate holds a lifetime fence and whose drain timed out (spec 028)." (b) As (a),
    and a bound also discharges external assertions: also add "or, at a lifetime's bound, the
    recorded expiry authority (spec 028)" after spec 001 §3.11's "force requires the operator/reason
-   pair exactly as `plasmosome.stop`" (`001:662`) and spec 011's "force requires the operator/reason
-   pair" (`011:469`), and "and its external assertions" to (a)'s 017 sentence. Amended on
+   pair exactly as `plasmosome.stop`" (`001:682`) and spec 011's "force requires the operator/reason
+   pair" (`011:483`), and "and its external assertions" to (a)'s 017 sentence. Amended on
    2026-10-21: this item's five line cites gave the lines from when this spec was accepted, and the
    quoted words had since moved.
 3. **Who renews.** Default: any control-socket caller with an operator and reason, each renewal
