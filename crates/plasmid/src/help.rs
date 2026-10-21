@@ -22,12 +22,13 @@ Global flags, before or after the command, never after --:
   --deadline-ms N    the time a command may take, from 1 to 3600000 milliseconds
   --json             the JSON form, the default
   --human            a form for a person, which nothing may parse
-  -h, --help         this help, or a command's help after its words
+  -h, --help         this help, or a command's help with its words
   --version          the version, as the sole argument
 
 --kernel, --socket and --deadline-ms are for commands that reach a socket, and none of those is
-served yet. plasmid new takes none of these flags but -h and --help. A flag given twice is a
-usage error.
+served yet. A command that is not served reads only --json and --human of these flags, and
+plasmid new takes none of them but -h and --help. A flag given twice is a usage error. When a
+line holds more than one fault, the usage error names the first, reading from the left.
 
 Environment:
   PLASMOSOME_KERNEL  works as --kernel, for commands that reach a socket
@@ -57,7 +58,7 @@ Exit codes:
   3   <name>.toml was created but could not be finished, or the sections could not be printed;
       look at <name>.toml before running it again
   64  the command line is wrong: no name, a second name, a name that is not a plasmid name, or a
-      global flag; nothing was written
+      flag other than -h and --help; nothing was written
 ";
 
 pub(crate) fn binary() -> String {
