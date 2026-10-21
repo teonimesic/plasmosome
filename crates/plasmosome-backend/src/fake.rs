@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::{
-    BackendError, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry, RevokePolicy,
+    BackendError, DrainSpec, EnforcementBackend, GrantKind, Handle, LedgerEntry, RevokePolicy,
 };
-use crate::universe::{CellOwner, GrantId, OsObject, OsState, UniverseOp, UniverseRemoval};
+use crate::universe::{CellOwner, OsObject, OsState, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Default)]
 pub struct FakeBackend {
@@ -11,9 +11,8 @@ pub struct FakeBackend {
     grants: BTreeMap<Handle, LedgerEntry>,
     stuck_handles: BTreeSet<Handle>,
     stalled_owners: BTreeSet<CellOwner>,
-    grants_issued: Vec<Grant>,
     revocations: Vec<Handle>,
-    apply_fault: Option<(CellOwner, String)>,
+    refused_owners: BTreeMap<CellOwner, String>,
 }
 
 impl FakeBackend {
@@ -28,10 +27,11 @@ impl FakeBackend {
             .ok_or(BackendError::UnknownHandle { handle })
     }
 
-    /// Makes every later `apply` of an operation owned by exactly `owner` fail with
-    /// `BackendError::Fault(cause)` before any change. The same plugin in another cell applies.
-    pub fn fail_apply_for_owner(&mut self, owner: CellOwner, cause: &str) {
-        self.apply_fault = Some((owner, cause.to_string()));
+    /// Makes every later `grant` and `apply` of a valid operation owned by exactly `owner` fail
+    /// with `BackendError::Fault(cause)` before any change. The same plugin in another cell, and
+    /// every withdrawal, are not affected. An invalid operation still returns `InvalidOperation`.
+    pub fn fail_before_effect_for_owner(&mut self, owner: CellOwner, cause: &str) {
+        self.refused_owners.insert(owner, cause.to_string());
     }
 
     /// Makes every graceful withdrawal of the holding at this exact address time out, through
@@ -51,45 +51,49 @@ impl FakeBackend {
         self.plant(object)
     }
 
-    pub fn grants_issued(&self) -> &[Grant] {
-        &self.grants_issued
-    }
-
     pub fn revocations(&self) -> &[Handle] {
         &self.revocations
     }
 
-    fn mint_with(&self, grant: &Grant, mut next_id: impl FnMut() -> GrantId) -> LedgerEntry {
-        loop {
-            let id = next_id();
-            if !self.state.contains_id(id) {
-                return LedgerEntry {
-                    handle: Handle {
-                        class: grant.capability.class(),
-                        id,
-                    },
-                    owner: grant.owner.clone(),
-                    capability: grant.capability.clone(),
-                    kind: grant.kind,
-                };
-            }
+    fn refusal_before_effect(&self, owner: &CellOwner) -> Result<(), BackendError> {
+        match self.refused_owners.get(owner) {
+            Some(cause) => Err(BackendError::Fault(cause.clone())),
+            None => Ok(()),
         }
-    }
-
-    fn grant_with(&mut self, grant: Grant, next_id: impl FnMut() -> GrantId) -> LedgerEntry {
-        let entry = self.mint_with(&grant, next_id);
-        self.state
-            .insert(entry.object())
-            .expect("a freshly checked grant identity cannot conflict");
-        self.grants.insert(entry.handle, entry.clone());
-        self.grants_issued.push(grant);
-        entry
     }
 }
 
 impl EnforcementBackend for FakeBackend {
-    fn grant(&mut self, grant: Grant) -> LedgerEntry {
-        self.grant_with(grant, GrantId::new)
+    fn grant(
+        &mut self,
+        operation: UniverseOp,
+        kind: GrantKind,
+    ) -> Result<LedgerEntry, BackendError> {
+        let object = operation.object();
+        checked(&object)?;
+        self.refusal_before_effect(&object.owner)?;
+        let entry = LedgerEntry {
+            handle: operation.handle(),
+            owner: object.owner.clone(),
+            capability: object.capability.clone(),
+            kind,
+        };
+        let conflict = BackendError::IdentityConflict {
+            class: entry.handle.class.as_str(),
+            id: entry.handle.id,
+        };
+        if let Some(issued) = self.grants.get(&entry.handle) {
+            return if *issued == entry {
+                Ok(issued.clone())
+            } else {
+                Err(conflict)
+            };
+        }
+        if !self.state.insert(object)? {
+            return Err(conflict);
+        }
+        self.grants.insert(entry.handle, entry.clone());
+        Ok(entry)
     }
 
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
@@ -110,11 +114,7 @@ impl EnforcementBackend for FakeBackend {
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
         let object = op.object();
         checked(&object)?;
-        if let Some((owner, cause)) = &self.apply_fault
-            && object.owner == *owner
-        {
-            return Err(BackendError::Fault(cause.clone()));
-        }
+        self.refusal_before_effect(&object.owner)?;
         self.state.insert(object).map(|_| ())
     }
 
@@ -169,19 +169,14 @@ fn checked(object: &OsObject) -> Result<(), BackendError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{Capability, GrantKind};
+    use crate::backend::Capability;
     use crate::fixtures::{self, broker, mount, proxy_map, session_file, uds_socket};
     use crate::recipe::{BrokerLaunch, ProxyRecipe, RecipeError};
-    use crate::universe::{CellId, CellOwner, PluginId, UniverseClass};
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use crate::universe::{CellId, CellOwner, GrantId, PluginId, UniverseClass};
     use std::time::Duration;
 
-    fn grant(plugin: &str, capability: Capability) -> Grant {
-        Grant {
-            owner: cell_owner("cell-1", plugin),
-            capability,
-            kind: GrantKind::Hot,
-        }
+    fn grant(backend: &mut FakeBackend, plugin: &str, capability: Capability) -> LedgerEntry {
+        grant_to(backend, &cell_owner("cell-1", plugin), capability)
     }
 
     fn capabilities() -> Vec<Capability> {
@@ -203,8 +198,8 @@ mod tests {
             for reverse in [false, true] {
                 for capability in capabilities() {
                     let mut backend = FakeBackend::new();
-                    let first = backend.grant(grant("owner", capability.clone()));
-                    let second = backend.grant(grant("owner", capability));
+                    let first = grant(&mut backend, "owner", capability.clone());
+                    let second = grant(&mut backend, "owner", capability);
                     assert_ne!(first.handle, second.handle);
                     assert_eq!(backend.snapshot_os_state().len(), 2);
                     let (taken, survivor) = if reverse {
@@ -227,10 +222,10 @@ mod tests {
     #[test]
     fn colliding_mount_targets_and_proxy_hosts_keep_complete_resources() {
         let mut backend = FakeBackend::new();
-        let first_mount = backend.grant(grant("owner", mount("/secrets", "/workspace")));
-        let second_mount = backend.grant(grant("owner", mount("/code", "/workspace")));
-        let first_route = backend.grant(grant("owner", proxy_map("api.github.com", "audit")));
-        let second_route = backend.grant(grant("owner", proxy_map("api.github.com", "deploy")));
+        let first_mount = grant(&mut backend, "owner", mount("/secrets", "/workspace"));
+        let second_mount = grant(&mut backend, "owner", mount("/code", "/workspace"));
+        let first_route = grant(&mut backend, "owner", proxy_map("api.github.com", "audit"));
+        let second_route = grant(&mut backend, "owner", proxy_map("api.github.com", "deploy"));
         assert_eq!(backend.snapshot_os_state().len(), 4);
         backend
             .revoke(second_mount.handle, DrainSpec::forcing())
@@ -255,7 +250,7 @@ mod tests {
         };
         let mut backend = FakeBackend::new();
         backend.plant_residue(residue.clone()).unwrap();
-        let live = backend.grant(grant("network", capability));
+        let live = grant(&mut backend, "network", capability);
         backend.revoke(live.handle, DrainSpec::forcing()).unwrap();
         assert_eq!(
             backend.snapshot_os_state().objects().collect::<Vec<_>>(),
@@ -278,8 +273,8 @@ mod tests {
     fn exact_removal_refusals_preserve_neighbouring_holdings() {
         let capability = proxy_map("api.github.com", "splice");
         let mut backend = FakeBackend::new();
-        let first = backend.grant(grant("deploy", capability.clone()));
-        let second = backend.grant(grant("deploy", capability.clone()));
+        let first = grant(&mut backend, "deploy", capability.clone());
+        let second = grant(&mut backend, "deploy", capability.clone());
         let before = backend.snapshot_os_state();
         let wrong_capability = UniverseRemoval {
             id: first.handle.id,
@@ -317,8 +312,8 @@ mod tests {
     fn graceful_timeout_preserves_peers_and_force_takes_only_requested_grant() {
         let capability = uds_socket("/run/ak/egressd.uds");
         let mut backend = FakeBackend::new();
-        let stuck = backend.grant(grant("network", capability.clone()));
-        let peer = backend.grant(grant("network", capability));
+        let stuck = grant(&mut backend, "network", capability.clone());
+        let peer = grant(&mut backend, "network", capability);
         backend.mark_stuck(stuck.handle);
         let before = backend.snapshot_os_state();
         assert!(matches!(
@@ -368,7 +363,7 @@ mod tests {
     #[test]
     fn direct_removal_retires_handle_and_reapply_does_not_revive_it() {
         let mut backend = FakeBackend::new();
-        let entry = backend.grant(grant("github-pr", session_file("/skills/pr.md")));
+        let entry = grant(&mut backend, "github-pr", session_file("/skills/pr.md"));
         backend
             .apply_removal(entry.removal(), &entry.owner, DrainSpec::forcing())
             .unwrap();
@@ -384,26 +379,9 @@ mod tests {
             Err(BackendError::UnknownHandle { .. })
         ));
         assert_eq!(backend.snapshot_os_state().len(), 1);
-        let fresh = backend.grant(grant("github-pr", entry.capability));
+        let fresh = grant(&mut backend, "github-pr", entry.capability);
         assert_ne!(fresh.handle, entry.handle);
         assert_eq!(backend.snapshot_os_state().len(), 2);
-    }
-
-    #[test]
-    fn identity_source_failure_happens_before_any_backend_mutation() {
-        let mut backend = FakeBackend::new();
-        let existing = backend.grant(grant("network", broker("standing")));
-        let before = backend.snapshot_os_state();
-        let grants_before = backend.grants_issued().to_vec();
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            backend.grant_with(grant("network", broker("new")), || {
-                panic!("deterministic random source failure")
-            })
-        }));
-        assert!(result.is_err());
-        assert_eq!(backend.snapshot_os_state(), before);
-        assert_eq!(backend.grants_issued(), grants_before);
-        assert_eq!(backend.peek_entry(existing.handle).unwrap(), existing);
     }
 
     fn cell_owner(cell: &str, plugin: &str) -> CellOwner {
@@ -417,19 +395,17 @@ mod tests {
         fixtures::op(GrantId::new(), owner.clone(), mount("/code", "/workspace"))
     }
 
-    fn address_of(op: &UniverseOp) -> Handle {
-        Handle {
-            class: op.class(),
-            id: op.id(),
-        }
-    }
-
-    fn grant_to(owner: &CellOwner, capability: Capability) -> Grant {
-        Grant {
-            owner: owner.clone(),
-            capability,
-            kind: GrantKind::Hot,
-        }
+    fn grant_to(
+        backend: &mut FakeBackend,
+        owner: &CellOwner,
+        capability: Capability,
+    ) -> LedgerEntry {
+        backend
+            .grant(
+                fixtures::op(GrantId::new(), owner.clone(), capability),
+                GrantKind::Hot,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -437,8 +413,8 @@ mod tests {
         let network = cell_owner("cell-1", "network");
         let capability = uds_socket("/run/ak/egressd.uds");
         let mut backend = FakeBackend::new();
-        let stuck = backend.grant(grant_to(&network, capability.clone()));
-        let peer = backend.grant(grant_to(&network, capability));
+        let stuck = grant_to(&mut backend, &network, capability.clone());
+        let peer = grant_to(&mut backend, &network, capability);
         backend.mark_stuck(stuck.handle);
         let before = backend.snapshot_os_state();
         assert_eq!(
@@ -476,7 +452,7 @@ mod tests {
     fn a_stuck_applied_address_times_out_graceful_removal_until_forced() {
         let workspace = cell_owner("cell-1", "workspace");
         let op = mount_by(&workspace);
-        let address = address_of(&op);
+        let address = op.handle();
         let mut backend = FakeBackend::new();
         backend.apply(op.clone()).unwrap();
         backend.mark_stuck(address);
@@ -507,7 +483,7 @@ mod tests {
         let op = mount_by(&workspace);
         let mut backend = FakeBackend::new();
         backend.apply(op.clone()).unwrap();
-        backend.mark_stuck(address_of(&op));
+        backend.mark_stuck(op.handle());
         backend
             .apply_removal(op.removal(), &workspace, DrainSpec::forcing())
             .unwrap();
@@ -530,15 +506,15 @@ mod tests {
         let capability = proxy_map("api.github.com", "splice");
         let mut backend = FakeBackend::new();
         backend.stall_graceful_drains_for_owner(stalled.clone());
-        let granted = backend.grant(grant_to(&stalled, capability.clone()));
+        let granted = grant_to(&mut backend, &stalled, capability.clone());
         let op = fixtures::op(
             GrantId::new(),
             stalled.clone(),
             proxy_map("api.github.com", "splice"),
         );
         backend.apply(op.clone()).unwrap();
-        let peer = backend.grant(grant_to(&peer_owner, capability.clone()));
-        let elsewhere = backend.grant(grant_to(&same_plugin_elsewhere, capability));
+        let peer = grant_to(&mut backend, &peer_owner, capability.clone());
+        let elsewhere = grant_to(&mut backend, &same_plugin_elsewhere, capability);
         let before = backend.snapshot_os_state();
         let graceful = DrainSpec::graceful(Duration::from_millis(9));
         assert_eq!(
@@ -553,7 +529,7 @@ mod tests {
                 .apply_removal(op.removal(), &stalled, graceful)
                 .unwrap_err(),
             BackendError::DrainTimedOut {
-                handle: address_of(&op),
+                handle: op.handle(),
                 deadline_ms: 9,
             }
         );
@@ -585,9 +561,9 @@ mod tests {
         let workspace = cell_owner("cell-1", "workspace");
         let op = mount_by(&workspace);
         let mut backend = FakeBackend::new();
-        let stuck = backend.grant(grant_to(&workspace, session_file("/skills/pr.md")));
+        let stuck = grant_to(&mut backend, &workspace, session_file("/skills/pr.md"));
         backend.apply(op.clone()).unwrap();
-        backend.mark_stuck(address_of(&op));
+        backend.mark_stuck(op.handle());
         backend.mark_stuck(stuck.handle);
         let before = backend.snapshot_os_state();
         let zero = DrainSpec::graceful(Duration::ZERO);
@@ -596,7 +572,7 @@ mod tests {
                 .apply_removal(op.removal(), &workspace, zero)
                 .unwrap_err(),
             BackendError::DrainTimedOut {
-                handle: address_of(&op),
+                handle: op.handle(),
                 deadline_ms: 0,
             }
         );
@@ -609,7 +585,7 @@ mod tests {
         );
         assert_eq!(backend.snapshot_os_state(), before);
         assert_eq!(backend.peek_entry(stuck.handle).unwrap(), stuck);
-        let drained = backend.grant(grant_to(&workspace, session_file("/skills/drained.md")));
+        let drained = grant_to(&mut backend, &workspace, session_file("/skills/drained.md"));
         assert_eq!(backend.revoke(drained.handle, zero).unwrap(), drained);
         assert_eq!(backend.snapshot_os_state(), before);
     }
@@ -620,7 +596,7 @@ mod tests {
         let op = mount_by(&workspace);
         let mut backend = FakeBackend::new();
         backend.apply(op.clone()).unwrap();
-        backend.mark_stuck(address_of(&op));
+        backend.mark_stuck(op.handle());
         for (deadline, deadline_ms) in [
             (Duration::ZERO, 0),
             (Duration::from_nanos(1), 1),
@@ -634,7 +610,7 @@ mod tests {
                     .apply_removal(op.removal(), &workspace, DrainSpec::graceful(deadline))
                     .unwrap_err(),
                 BackendError::DrainTimedOut {
-                    handle: address_of(&op),
+                    handle: op.handle(),
                     deadline_ms,
                 },
                 "{deadline:?}"
@@ -649,7 +625,7 @@ mod tests {
         let mut backend = FakeBackend::new();
         backend.stall_graceful_drains_for_owner(stalled.clone());
         backend.apply(op.clone()).unwrap();
-        backend.mark_stuck(address_of(&op));
+        backend.mark_stuck(op.handle());
         let before = backend.snapshot_os_state();
         let other_source = UniverseRemoval {
             id: op.id(),
@@ -684,7 +660,7 @@ mod tests {
     fn apply_faults_are_keyed_by_the_cell_qualified_owner() {
         let doomed = cell_owner("cell-1", "doomed");
         let mut backend = FakeBackend::new();
-        backend.fail_apply_for_owner(doomed.clone(), "injected refusal");
+        backend.fail_before_effect_for_owner(doomed.clone(), "injected refusal");
         let elsewhere = fixtures::op(
             GrantId::new(),
             cell_owner("cell-2", "doomed"),
@@ -724,19 +700,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn apply_and_plant_refuse_an_invalid_value_before_any_fault_or_change() {
-        let owner = cell_owner("cell-1", "github-pr");
-        let mut backend = FakeBackend::new();
-        backend.apply(mount_by(&owner)).unwrap();
-        backend.fail_apply_for_owner(owner.clone(), "injected refusal");
-        let before = backend.snapshot_os_state();
-        for (op, error) in [
+    fn invalid_operations(owner: &CellOwner) -> Vec<(UniverseOp, RecipeError)> {
+        vec![
             (
                 fixtures::op(GrantId::new(), owner.clone(), session_file("skills/pr.md")),
                 RecipeError::NotAbsolute {
                     field: "path",
                     value: "skills/pr.md".to_string(),
+                },
+            ),
+            (
+                fixtures::op(GrantId::new(), owner.clone(), uds_socket("run/egressd.uds")),
+                RecipeError::NotAbsolute {
+                    field: "path",
+                    value: "run/egressd.uds".to_string(),
                 },
             ),
             (
@@ -781,7 +758,17 @@ mod tests {
                     path: fixtures::launch().control_socket,
                 },
             ),
-        ] {
+        ]
+    }
+
+    #[test]
+    fn apply_and_plant_refuse_an_invalid_value_before_any_fault_or_change() {
+        let owner = cell_owner("cell-1", "github-pr");
+        let mut backend = FakeBackend::new();
+        backend.apply(mount_by(&owner)).unwrap();
+        backend.fail_before_effect_for_owner(owner.clone(), "injected refusal");
+        let before = backend.snapshot_os_state();
+        for (op, error) in invalid_operations(&owner) {
             let rule = error.to_string();
             let expected = BackendError::InvalidOperation {
                 class: op.class().as_str(),
@@ -806,5 +793,261 @@ mod tests {
             BackendError::Fault("injected refusal".to_string())
         );
         assert_eq!(backend.snapshot_os_state(), before);
+    }
+
+    fn issued(op: &UniverseOp, kind: GrantKind) -> LedgerEntry {
+        LedgerEntry {
+            handle: op.handle(),
+            owner: op.owner().clone(),
+            capability: op.capability(),
+            kind,
+        }
+    }
+
+    fn conflict(op: &UniverseOp) -> BackendError {
+        BackendError::IdentityConflict {
+            class: op.class().as_str(),
+            id: op.id(),
+        }
+    }
+
+    #[test]
+    fn a_grant_issues_exactly_the_supplied_address_owner_capability_and_kind() {
+        let owner = cell_owner("cell-1", "github-pr");
+        for kind in [GrantKind::Hot, GrantKind::GenerationBound] {
+            for capability in capabilities() {
+                let op = fixtures::op(GrantId::new(), owner.clone(), capability);
+                let mut backend = FakeBackend::new();
+                let entry = backend.grant(op.clone(), kind).unwrap();
+                assert_eq!(entry, issued(&op, kind));
+                assert_eq!(
+                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    vec![&op.object()]
+                );
+                assert_eq!(backend.peek_entry(op.handle()).unwrap(), entry);
+            }
+        }
+    }
+
+    #[test]
+    fn a_retry_of_a_standing_grant_returns_the_original_entry_and_changes_nothing() {
+        let owner = cell_owner("cell-1", "network");
+        for kind in [GrantKind::Hot, GrantKind::GenerationBound] {
+            for capability in capabilities() {
+                let op = fixtures::op(GrantId::new(), owner.clone(), capability);
+                let mut backend = FakeBackend::new();
+                let first = backend.grant(op.clone(), kind).unwrap();
+                let before = backend.snapshot_os_state();
+                assert_eq!(backend.grant(op.clone(), kind).unwrap(), first);
+                assert_eq!(backend.snapshot_os_state(), before);
+                assert_eq!(
+                    backend.revoke(op.handle(), DrainSpec::forcing()).unwrap(),
+                    first
+                );
+                assert!(backend.snapshot_os_state().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_changed_kind_owner_or_capability_at_an_issued_address_conflicts() {
+        let owner = cell_owner("cell-1", "network");
+        let op = fixtures::op(GrantId::new(), owner.clone(), mount("/code", "/workspace"));
+        let mut backend = FakeBackend::new();
+        let original = backend.grant(op.clone(), GrantKind::Hot).unwrap();
+        let before = backend.snapshot_os_state();
+        assert_eq!(
+            backend.grant(op.clone(), GrantKind::GenerationBound),
+            Err(conflict(&op))
+        );
+        for changed in [
+            fixtures::op(
+                op.id(),
+                cell_owner("cell-2", "network"),
+                mount("/code", "/workspace"),
+            ),
+            fixtures::op(
+                op.id(),
+                cell_owner("cell-1", "audit"),
+                mount("/code", "/workspace"),
+            ),
+            fixtures::op(op.id(), owner.clone(), mount("/secrets", "/workspace")),
+        ] {
+            assert_eq!(
+                backend.grant(changed.clone(), GrantKind::Hot),
+                Err(conflict(&changed))
+            );
+        }
+        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.peek_entry(op.handle()).unwrap(), original);
+        assert_eq!(
+            backend.revoke(op.handle(), DrainSpec::forcing()).unwrap(),
+            original
+        );
+    }
+
+    fn another_of_its_class(capability: &Capability) -> Capability {
+        match capability {
+            Capability::SessionFile { .. } => session_file("/skills/other.md"),
+            Capability::UdsSocket { .. } => uds_socket("/run/ak/other.uds"),
+            Capability::ProxyMap { .. } => proxy_map("other.github.com", "splice"),
+            Capability::Broker { .. } => broker("other"),
+            Capability::Mount { .. } => mount("/other", "/workspace"),
+        }
+    }
+
+    #[test]
+    fn a_grant_never_promotes_or_replaces_an_applied_or_planted_object() {
+        let owner = cell_owner("cell-1", "workspace");
+        for capability in capabilities() {
+            let applied = fixtures::op(GrantId::new(), owner.clone(), capability.clone());
+            let planted = OsObject {
+                id: GrantId::new(),
+                owner: owner.clone(),
+                capability: capability.clone(),
+            };
+            let mut backend = FakeBackend::new();
+            backend.apply(applied.clone()).unwrap();
+            backend.plant(planted.clone()).unwrap();
+            let before = backend.snapshot_os_state();
+            for standing in [applied.clone(), planted.operation()] {
+                let requests = [
+                    standing.clone(),
+                    fixtures::op(
+                        standing.id(),
+                        cell_owner("cell-1", "other"),
+                        capability.clone(),
+                    ),
+                    fixtures::op(
+                        standing.id(),
+                        owner.clone(),
+                        another_of_its_class(&capability),
+                    ),
+                ];
+                for op in requests {
+                    for kind in [GrantKind::Hot, GrantKind::GenerationBound] {
+                        assert_eq!(
+                            backend.grant(op.clone(), kind),
+                            Err(conflict(&op)),
+                            "{op:?}"
+                        );
+                        assert_eq!(backend.snapshot_os_state(), before);
+                    }
+                    assert_eq!(
+                        backend.revoke(op.handle(), DrainSpec::forcing()),
+                        Err(BackendError::UnknownHandle {
+                            handle: op.handle()
+                        }),
+                        "{op:?}"
+                    );
+                }
+                assert_eq!(backend.snapshot_os_state(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn applying_or_planting_a_live_grants_own_object_changes_nothing() {
+        let owner = cell_owner("cell-1", "network");
+        for capability in capabilities() {
+            let op = fixtures::op(GrantId::new(), owner.clone(), capability);
+            let mut backend = FakeBackend::new();
+            let entry = backend
+                .grant(op.clone(), GrantKind::GenerationBound)
+                .unwrap();
+            let before = backend.snapshot_os_state();
+            backend.apply(op.clone()).unwrap();
+            backend.plant(op.object()).unwrap();
+            assert_eq!(backend.snapshot_os_state(), before);
+            assert_eq!(
+                backend.revoke(op.handle(), DrainSpec::forcing()).unwrap(),
+                entry
+            );
+            assert!(backend.snapshot_os_state().is_empty());
+        }
+    }
+
+    #[test]
+    fn grant_refuses_an_invalid_operation_before_a_fault_or_any_change() {
+        let owner = cell_owner("cell-1", "github-pr");
+        let mut backend = FakeBackend::new();
+        let standing: Vec<LedgerEntry> = capabilities()
+            .into_iter()
+            .map(|capability| grant_to(&mut backend, &owner, capability))
+            .collect();
+        backend.fail_before_effect_for_owner(owner.clone(), "injected refusal");
+        let before = backend.snapshot_os_state();
+        for (fresh, error) in invalid_operations(&owner) {
+            let issued = standing
+                .iter()
+                .find(|entry| entry.handle.class == fresh.class())
+                .unwrap();
+            let at_the_issued_address = OsObject {
+                id: issued.handle.id,
+                ..fresh.object()
+            }
+            .operation();
+            for op in [fresh.clone(), at_the_issued_address] {
+                assert_eq!(
+                    backend.grant(op.clone(), GrantKind::Hot),
+                    Err(BackendError::InvalidOperation {
+                        class: op.class().as_str(),
+                        id: op.id(),
+                        error: error.clone(),
+                    }),
+                    "{op:?}"
+                );
+                assert_eq!(backend.snapshot_os_state(), before);
+            }
+            assert_eq!(
+                backend.revoke(fresh.handle(), DrainSpec::forcing()),
+                Err(BackendError::UnknownHandle {
+                    handle: fresh.handle()
+                })
+            );
+        }
+        for entry in standing {
+            assert_eq!(backend.peek_entry(entry.handle).unwrap(), entry);
+        }
+    }
+
+    #[test]
+    fn a_pre_effect_fault_refuses_grant_and_apply_for_exactly_that_owner() {
+        let doomed = cell_owner("cell-1", "doomed");
+        let elsewhere = cell_owner("cell-2", "doomed");
+        let mut backend = FakeBackend::new();
+        let standing = backend.grant(mount_by(&doomed), GrantKind::Hot).unwrap();
+        backend.fail_before_effect_for_owner(doomed.clone(), "injected refusal");
+        let before = backend.snapshot_os_state();
+        let refused = BackendError::Fault("injected refusal".to_string());
+        for capability in capabilities() {
+            let op = fixtures::op(GrantId::new(), doomed.clone(), capability.clone());
+            assert_eq!(
+                backend.grant(op.clone(), GrantKind::Hot),
+                Err(refused.clone())
+            );
+            assert_eq!(backend.apply(op.clone()), Err(refused.clone()));
+            assert_eq!(backend.snapshot_os_state(), before);
+            assert_eq!(
+                backend.revoke(op.handle(), DrainSpec::forcing()),
+                Err(BackendError::UnknownHandle {
+                    handle: op.handle()
+                })
+            );
+            let peer = fixtures::op(GrantId::new(), elsewhere.clone(), capability);
+            assert_eq!(
+                backend.grant(peer.clone(), GrantKind::Hot).unwrap(),
+                issued(&peer, GrantKind::Hot)
+            );
+            backend.revoke(peer.handle(), DrainSpec::forcing()).unwrap();
+        }
+        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.peek_entry(standing.handle).unwrap(), standing);
+        assert_eq!(
+            backend
+                .revoke(standing.handle, DrainSpec::forcing())
+                .unwrap(),
+            standing
+        );
     }
 }

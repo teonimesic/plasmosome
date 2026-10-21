@@ -183,7 +183,7 @@ mod tests {
     use crate::backend::tests::{operation, owner};
     use crate::fixtures;
     use crate::{
-        BrokerLaunch, Capability, Diff, DrainSpec, FileAccess, Grant, GrantId, GrantKind, Handle,
+        BrokerLaunch, Capability, Diff, DrainSpec, FileAccess, GrantId, GrantKind, Handle,
         LedgerEntry, MountRecipe, OsObject, OsState, ProxyRecipe, ProxyTransport, ResidueReport,
         SessionFileRecipe, UdsRecipe, UniverseClass, UniverseOp, UniverseRemoval,
     };
@@ -275,16 +275,6 @@ mod tests {
             &entry,
             "",
             &["handle", "owner", "capability", "kind"],
-        ));
-        accepted.extend(sequence_accepted(
-            "Grant",
-            &Grant {
-                owner: owner(),
-                capability: mount(),
-                kind: GrantKind::Hot,
-            },
-            "",
-            &["owner", "capability", "kind"],
         ));
         let drain = DrainSpec::graceful(Duration::from_millis(5));
         accepted.extend(sequence_accepted(
