@@ -242,7 +242,7 @@ component that escapes the sandbox runs as the component host process, under G3'
   in" (`011:402-403`), so it names the host and `network.hosts`, or the port and `network.ports`,
   and nothing that was granted. The relay knows which plasmid's code sent a request, so the report
   names that plasmid and is judged by that plasmid's grants alone (the proposed spec 011 change). A
-  that only another plasmid in the cell declared is reported to the requesting plasmid as
+  host that only another plasmid in the cell declared is reported to the requesting plasmid as
   `network.hosts`. Naming it shows the component nothing it did not send.
 
 ### 5. How a tool is found
@@ -412,9 +412,10 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   membrane is ready only when "every broker answers ready" (`001:723`), and it names the holder:
   "`broker` — the one that held the set back" (`001:727`). A trap inside a call is not a death:
   the instance is dropped and the host keeps serving.
-- **An orphan.** The component host holds a lifeline descriptor from `membraned`, and a native
-  thread outside WebAssembly exits the host when the lifeline reads end of file. So a host whose
-  supervisor died, even by SIGKILL, stops by itself with no signal. That exit holds only while the
+- **An orphan.** The component host holds the read end of a lifeline pipe whose only write end
+  `membraned` holds, and a native thread outside WebAssembly exits the host when the lifeline
+  reads end of file. So a host whose supervisor died, even by SIGKILL, stops by itself with no
+  signal. That exit holds only while the
   WebAssembly sandbox holds (G6), so the controller's signal is the backstop for a host that
   outlived its lifeline. When the controller's supervisor check (spec 023 §8) finds a cell whose
   supervisor is gone, it reads that cell's pid records and stops each process whose pid and start
@@ -650,7 +651,8 @@ quotes the text it changes with its lines at main dde7bf0a.
 - Contract, *Whom*: after "no `network.hosts` denial reaches a plasmid's `denials`."
   (`011:425`), add "Spec 031's component egress relay is such a boundary: it takes the plasmid
   from the egress channel a request came on. For a component's own request, *What* reads that
-  plasmid's grants, not the cell's, and the report names that plasmid."
+  plasmid's grants, not the cell's, and the report names that plasmid. A host that only another
+  plasmid holds is not granted to it, so its report may name that host."
 
 **Spec 020** (F2).
 
@@ -814,12 +816,15 @@ quotes the text it changes with its lines at main dde7bf0a.
   the WebAssembly sandbox, so for it the standard defends against code as well as bytes. Any other
   broker runs unconfined, and the standard defends against its bytes, not its code."
 - The parser rows land with each parser, as "A new parser lands in the same PR as its row below and
-  its bound." (`026:402`) requires. That is task F8, for the component host's line reader and
-  launch record, and task F11b, for three parsers of the relay, which runs in `membraned`, outside
-  both confinements. The relay's parser of a component's egress requests has the component host
-  as its writer, and so possibly a component that escaped the sandbox. The relay's TLS client and
-  HTTP response parser read bytes from a declared host, which the plasmid's author may run. So
-  each is hostile and gets a fuzz target too: "A parser whose writer is hostile also has a fuzz
+  its bound." (`026:402`) requires. That is tasks F8a, F8b and F8d, for the component host's
+  reading of the component file and of its launch record, its line reader, and its reader of the
+  relay's responses, and task F11b, for three parsers of the relay, which runs in `membraned`,
+  outside both confinements. The component file is a plasmid author's bytes and the line reader's
+  are the workload's, so those two rows also name a fuzz target. The relay's parser of a
+  component's egress requests has the component host as its writer, and so possibly a component
+  that escaped the sandbox. The relay's TLS client and HTTP response parser read bytes from a
+  declared host, which the plasmid's author may run. So each is hostile and gets a fuzz target
+  too: "A parser whose writer is hostile also has a fuzz
   target." (`026:400`).
 
 **Spec 027** (F5).
@@ -982,8 +987,9 @@ target.
 14. **Denials name what was missing (model; G11).** The denials of items 11 and 12 appear in the
     session log and in the requesting plasmid's `denials` with `network.hosts` or `network.ports`.
     The host only another plasmid in the cell declared is reported to the requesting plasmid as
-    `network.hosts`, and no granted host appears anywhere. Catches: a report that lists what was
-    granted; a report judged by the cell's grants, which drops that host or names no plasmid.
+    `network.hosts`, and no host the requesting plasmid holds appears anywhere. Catches: a report
+    that lists what was granted; a report judged by the cell's grants, which drops that host or
+    names no plasmid.
 15. **The deadline (host; G7).** An infinite loop returns `isError` with the deadline sentence
     within the deadline plus 1 s, and the next call succeeds. Catches: no interruption; a poisoned
     shared instance.
@@ -1023,17 +1029,19 @@ target.
     but a socket left.
 25. **Detach never waits on the component (membrane, then pinned runtime; G6).** A component in an
     infinite loop, under a call deadline longer than D, is detached by a graceful `plasmid.remove`
-    that answers success within D, never 106, and the call's connection is closed at D less the
-    release reserve. Catches: a drain that waits on the call and times out, which would let a
-    plasmid refuse a detach; a call cut before D less the reserve; a release run past D.
+    whose Broker withdrawal answers success within D of its own call, never 106, and the call's
+    connection is closed at D less the release reserve. Catches: a drain that waits on the call and
+    times out, which would let a plasmid refuse a detach; a call cut before D less the reserve; a
+    release run past D.
 26. **The lifetime bound (membrane, then pinned runtime; G6).** At B new connections close at once
     and `membraned` closes the open ones, with no request arriving after B. A call admitted before
     B ends within 1 s of B; the egress holdings are fenced; the Broker holding is the removal's
     first withdrawal; and the process is gone by H. With the controller stopped, the call still
     ends within 1 s of B. Catches: Broker work past H; a fence that waits for an admission; a fence
     that only removal provides; a Broker withdrawn after its egress holdings.
-27. **The lifeline (host; G6).** SIGKILL of the process holding the pipe makes the component host
-    exit within 1 s. Catches: an orphaned component host.
+27. **The lifeline (host; G6).** With a call running an infinite loop, SIGKILL of the process
+    holding the pipe's write end makes the component host exit within 1 s. Catches: an orphaned
+    component host; a lifeline read on the thread that runs the call.
 28. **An orphan is stopped (model; G6).** After `membraned` is SIGKILLed, a component host built to
     ignore its lifeline is stopped by the controller's supervisor check, through its pid record,
     and is confirmed gone by its start time. A record whose pid now belongs to another process,
@@ -1068,7 +1076,7 @@ target.
     that reads declarations again or launches a second process.
 35. **A host stops itself when its supervisor dies (model; G6).** With a call running an infinite
     loop, `membraned` is SIGKILLed. The component host exits within 1 s with no signal sent to it,
-    and the controller's next supervisor check of that cell finds no host to stop and sends no
+    and a supervisor check of that cell run after that second finds no host to stop and sends no
     signal. Catches: a host that ignores its lifeline; a lifeline read on the thread that runs the
     call.
 36. **The journal's formats (model).** A format4 ProxyMap record without `reached_by`, or a Broker
