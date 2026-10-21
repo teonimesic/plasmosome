@@ -5,8 +5,9 @@
 The client logic of the `plasmosome` command line, as a library the binary calls, so tests drive
 it without spawning a process. Decision 009 named the trigger for this crate and spec 025 §1
 pulled it. Today it holds spec 025's JSON scanner and writers, its reply reader and reply rules,
-its envelopes, its client codes, its command table, the order the command line is read in, and
-the one served command, `status --socket`. It is `publish = false` and never ships on its own.
+its envelopes, its client codes, its command table, the order the command line is read in, spec
+025 §5's instance selection, and the one served command, `status`. It is `publish = false` and
+never ships on its own.
 
 ## Hard rules
 
@@ -59,16 +60,28 @@ the one served command, `status --socket`. It is `publish = false` and never shi
   `handle`. A hook installed on every call nests one wrapper per call, and calls on two threads
   race and drop a hook. Tests make a command panic through a stdout that panics; nothing in the
   code exists only to panic.
-- **The trusted UID and the clock come in through `Context`.** `main_with` passes the effective
-  UID and `SystemClock`, and nothing else does. A flag, variable or file that reaches the trusted
-  UID lets a caller trust another user's daemon. Tests pass their own UID and a clock they
-  control.
+- **The trusted UID, the clock and the environment come in through `Context`.** `main_with`
+  passes the effective UID, `SystemClock` and `ProcessEnv`, and nothing else does. A flag,
+  variable or file that reaches the trusted UID lets a caller trust another user's daemon. Tests
+  pass their own UID, a clock they control and a `Vars` that holds the variables they set. Only
+  `ProcessEnv` reads the process's environment, so no test sets a process variable, which would
+  race every other test.
+- **`HOME` is the only way to a user's instances.** Selection never falls back to the password
+  database, and a bad `HOME` is `invalid_home`. A fallback would find another directory than the
+  one the user named, in a process whose `HOME` was set on purpose.
+- **Default selection guesses nothing.** Every entry of `instances/` is judged before any
+  connection. A symbolic link, a bad name or a candidate that fails its path check refuses the
+  whole selection, and several candidates are `ambiguous_instance` with no byte written to any
+  of them. One that is not running is never removed and no `rm` is suggested: on macOS a live
+  daemon with a full backlog refuses connections too.
 - **The peer check comes before the first byte.** `exchange` calls `check_peer_uid` before it
   writes, and every write and read waits only `Deadline::left`. A write before the check sends
   the request to a daemon of another user.
 - **What the client measures, it measures before connecting.** The path's length, the path
   boundary and the request line's size are refused with no connection made, so a refused command
-  never reaches a daemon.
+  never reaches a daemon. Default selection builds its request after it connects, since the name
+  comes from `instances/`. A directory name is at most `NAME_MAX`, 255 characters, so that line
+  stays far under the bound, and `status` treats a line over it as a bug.
 - **No `unsafe` and no direct third-party dependency.** The package keeps `lints.workspace = true`.
   Its one normal dependency is `plasmosome-core`, for `InstanceName` and the private-socket
   checks, and that brings third-party dependencies of its own into the library's build,
@@ -90,3 +103,10 @@ private socket, bound with `plasmosome-core`'s `PrivateListener`, that records e
 and every byte and answers each connection as the test says. `private_root` makes a `0700`
 directory that `check_private_path` accepts: under the canonical per-user temporary directory on
 macOS, and under `XDG_RUNTIME_DIR`, else the target's tmp, on Linux.
+
+The selection tests in `tests/selection.rs` build a short test `HOME` under that same directory,
+with `instances/` entries and `FakeDaemon`s at their sockets, and pass it in `Vars`. A `HOME`
+under `/tmp` fails the ancestor check, and a long one overflows `sun_path`. They never read the
+real `~/.plasmosome`. The tests in `tests/cli.rs`, for help, the version, `not_served` and usage
+errors, pass an `Env` that panics when it is read, so a rule that reads the environment there
+fails them.
