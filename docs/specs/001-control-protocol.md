@@ -252,10 +252,10 @@ Spec008 defines recovered `ledger_generation` as the maximum adopted cell genera
 It is not a cross-cell acknowledgement watermark. Recovered cells retain their actual observed
 supervisor state; replay does not prove readiness. After successful recovery startup, `ready` is
 false while the account contains drift, quarantine, a set-aside cell, unmatched effects or any
-incomplete effect, or while a spec 028 expiry is unfinished past its H. Quarantined and set-aside
-cells are absent from `cells` and remain named in `plasmosome.recovery`. Amended on 2026-10-21: this
-did not name set-aside cells, which spec 023 §8 keeps out of `cells` with readiness false. A
-recovered unknown genome is omitted, as §1 requires.
+incomplete effect, while a cell's publication is unsettled (spec 008), or while a spec 028 expiry is
+unfinished past its H. Quarantined and set-aside cells are absent from `cells` and remain named in
+`plasmosome.recovery`. Amended on 2026-10-21: this did not name set-aside cells, which spec 023 §8
+keeps out of `cells` with readiness false. A recovered unknown genome is omitted, as §1 requires.
 
 ### 3.3a `plasmosome.recovery`
 
