@@ -946,13 +946,19 @@ mod tests {
         }
 
         #[test]
-        fn an_acl_entry_granting_write_refuses() {
+        fn an_acl_entry_granting_write_refuses_with_or_without_uchg() {
             let tree = ArtifactTree::new();
             let path = tree.file("kernel", b"kernel", 0o444);
             add_acl(&path, "everyone allow write");
+            let unlocked = tree.file("unlocked", b"kernel", 0o444);
+            add_acl(&unlocked, "everyone allow write");
             set_flags(&path, libc::UF_IMMUTABLE);
             assert_eq!(
                 fault_of(verify_pinned(&path, &Digest::of(b"kernel"))),
+                ArtifactFault::WriteAcl
+            );
+            assert_eq!(
+                fault_of(verify_pinned(&unlocked, &Digest::of(b"kernel"))),
                 ArtifactFault::WriteAcl
             );
         }
