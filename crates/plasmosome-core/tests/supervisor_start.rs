@@ -1798,10 +1798,15 @@ struct Inherited {
 
 static INHERITED: OnceLock<Inherited> = OnceLock::new();
 
-// SAFETY: The loader calls each function in this section once, before `main` and before the
-// standard library's start-up ignores SIGPIPE or reopens a closed 0, 1 or 2 on /dev/null, so
-// `record_inherited` sees what `execve` handed over. It needs nothing that start-up sets: it
-// makes plain libc calls and sets a OnceLock.
+/// The loader calls each function in this section once, before `main` and before the standard
+/// library's start-up ignores SIGPIPE or reopens a closed 0, 1 or 2 on /dev/null, so
+/// `record_inherited` sees what `execve` handed over. It needs nothing that start-up sets: it
+/// makes plain libc calls and sets a OnceLock.
+///
+/// Neither entry collides with anything else the process loads. `__DATA,__mod_init_func` and
+/// `.init_array` each hold an image's list of initializer pointers. The linker adds this entry
+/// to the ones other objects put there, and the loader calls every entry, so it adds one call
+/// and replaces none. Each other image has its own list.
 #[used]
 #[allow(unsafe_code)]
 #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
