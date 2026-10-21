@@ -354,7 +354,7 @@ removal's deadline; the expected value is `ECONNABORTED`, measured and recorded 
 `close()` succeeds. The process keeps running.
 After the last holding at a target goes, a lookup by path there fails with `ENOENT`. All of this
 rests on spec 017's direct IO, zero cache timeouts and refusal of file-backed mappings
-(`017:434-442`), which need O-7 (§8); without them, cached pages and mappings outlive the grant.
+(`017:444-452`), which need O-7 (§8); without them, cached pages and mappings outlive the grant.
 
 **A revoked binding.** Observation reports the binding as `revoked` while references to it
 remain. It counts as absent, so `plasmid.remove` completes while a process sits in the target. It
