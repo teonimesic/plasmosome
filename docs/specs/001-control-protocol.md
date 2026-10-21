@@ -790,7 +790,7 @@ request IDs and errors. Responses with a wrong request ID or cell, unknown field
 malformed exact objects, incomplete frames or timeout are failed observations. The controller
 must not operate a quarantine's effects merely because its supervisor answered.
 
-The observation methods `membrane.cell.observe`, `membrane.residue.snapshot`, §4.2's4090
+The observation methods `membrane.cell.observe`, `membrane.residue.snapshot`, §4.2's 4090
 `observe` and public `plasmosome.recovery` return bounded pages of one complete logical result.
 Their request IDs are unsigned64-bit integers. Each params record includes required
 `snapshot:u64` and `offset:u64`: zero/zero starts a capture and returns its first page; later
@@ -1114,7 +1114,7 @@ Source for these API constraints is the pinned
 [header](https://github.com/libkrun/libkrun/blob/v1.19.4/include/libkrun.h) and
 [implementation](https://github.com/libkrun/libkrun/blob/v1.19.4/src/libkrun/src/lib.rs).
 
-Use `krun_add_vsock_port2(ctx,4090,control_path,false)` and corresponding4091data mapping
+Use `krun_add_vsock_port2(ctx,4090,control_path,false)` and corresponding 4091 data mapping
 before start. They are fixed guest-initiated mappings; logical grants change over continuing
 streams without altering the VM's boot mappings or rebooting it. Port4041 is not reused.
 Guest CID3 is not cross-cell identity. The host authenticates through the original per-VMM
@@ -1148,7 +1148,7 @@ bounded dispatcher and request IDs; several normal requests may be outstanding a
 says which wait for an outstanding mutation, and none blocks withdrawal dispatch. A wait in normal
 drain must not hold a lock or executor needed by withdrawal. Readiness requires both hellos, the
 data association, the workload namespaces and the workload control group; no workload process exists
-before readiness. On4091 the shim is sole caller and the host the responder,
+before readiness. On 4091 the shim is sole caller and the host the responder,
 within that same verified original VMM association. No stream uses notifications or accepts
 opposite-direction requests. Bounded data requests may overlap with distinct IDs. Actual loss
 of any of these streams closes host admission and moves every affected operation out of standing state
@@ -1211,7 +1211,7 @@ bindings in reverse prepare order; retained holdings remain intact. Spec008's pr
 of a reload that would widen access or disturb retained holdings still applies.
 
 Graceful removal uses a reversible **host-local** admission pause until the original host
-monotonic deadline. Every4091admission check treats that pause as expired at that deadline;
+monotonic deadline. Every 4091 admission check treats that pause as expired at that deadline;
 restoration needs neither a timer callback nor a guest RPC. The existing guest binding and
 selector remain active during this reversible phase. The host admits no new actual IO while
 paused and waits for already-admitted host work. `drain` only observes/waits for the guest
@@ -1323,7 +1323,7 @@ that flow alone, as after `no_active_grant`, and never falls through to another 
 serving every other flow and stream and never exits over it. The mismatch is a named observation
 fault on the selected grant: like a mismatched binding (below), it fails complete observation
 instead of being hidden. A stale locally active grant is not an authority to bypass this host
-selection. It binds the actual guest flow and4091stream/datagram handle to that original grant.
+selection. It binds the actual guest flow and 4091 stream/datagram handle to that original grant.
 Existing flows never follow a later selector change. An old holding and the activated replacement of
 a reload in progress (spec008) at one host, port and transport can both be eligible, and their
 routes and recipes can differ; nothing here assumes them equal. Selection does not read generations:
@@ -1435,7 +1435,7 @@ or foreign handles, closed grants, invalid lengths and overflow refuse before an
 Returned byte/write counts describe actual IO, including short operations. Datagram truncation
 is explicit; an empty timed-out read is not an invented EOF.
 
-The4091data verbs grant no capability-lifecycle or recovery authority. Handles cannot transfer across channels or
+The 4091 data verbs grant no capability-lifecycle or recovery authority. Handles cannot transfer across channels or
 rebind to a replacement grant. The host checks the effective grant on every request, bounds
 admitted work and propagates real errors. Channel loss closes its original data handles but
 does not manufacture grant withdrawal or clear remaining incomplete IO. Neither a service
@@ -1469,7 +1469,7 @@ just their listeners. `SocketStreamProjection` is `{id:String, grant:GrantId, en
 SocketStreamEnd is `{side:StreamSide, id:String}`, with StreamSide exactly `accepted | relay`.
 The ends array contains each still-present actual guest accepted endpoint and its original
 per-stream guest bridge binding, at most one of each and at least one. These are original
-resource identities, not a pathname, reused FD number or the shared4091channel mistaken for
+resource identities, not a pathname, reused FD number or the shared 4091 channel mistaken for
 one stream. A half-cleaned pair remains with its surviving end; it disappears only after both
 are freshly verified absent. A missing required socket_streams array is not an empty inventory.
 The supervisor independently joins that original bridge binding to its retained host relay
