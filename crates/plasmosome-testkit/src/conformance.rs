@@ -249,9 +249,11 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
 pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut backend = make();
     let mut expected = Vec::new();
+    let mut issued = Vec::new();
     for prepared in sample_grants() {
         let entry = grant_prepared(&mut backend, &prepared);
         expected.push(requested_object(&entry, &prepared));
+        issued.push(prepared.operation);
     }
     let residue = residue_objects().remove(0);
     contract_expect!(
@@ -264,51 +266,100 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         &expected,
         "the snapshot lost or invented an object",
     );
-    let invalid = invalid_operation();
-    let refusal = BackendError::InvalidOperation {
-        class: invalid.class().as_str(),
-        id: invalid.id(),
-        error: invalid
-            .validate()
-            .expect_err("the invalid operation fixture must fail validation"),
-    };
-    contract_assert_eq!(
-        backend.grant(invalid.clone(), GrantKind::Hot),
-        Err(refusal.clone()),
-        "a grant of an invalid operation must be refused before any change"
-    );
-    assert_exact_state(
-        &backend.snapshot_os_state(),
-        &expected,
-        "a refused invalid grant changed the state",
-    );
-    contract_assert_eq!(
-        backend.revoke(invalid.handle(), DrainSpec::forcing()),
-        Err(BackendError::UnknownHandle {
-            handle: invalid.handle()
-        }),
-        "a refused invalid grant must issue no record"
-    );
-    contract_assert_eq!(
-        backend.apply(invalid.clone()),
-        Err(refusal.clone()),
-        "an apply of an invalid operation must be refused before any change"
-    );
-    assert_exact_state(
-        &backend.snapshot_os_state(),
-        &expected,
-        "a refused invalid apply changed the state",
-    );
-    contract_assert_eq!(
-        backend.plant(invalid.object()),
-        Err(refusal),
-        "a plant of an invalid object must be refused before any change"
-    );
-    assert_exact_state(
-        &backend.snapshot_os_state(),
-        &expected,
-        "a refused invalid plant changed the state",
-    );
+    for invalid in invalid_operations() {
+        let before = backend.snapshot_os_state();
+        contract_assert_eq!(
+            backend.grant(invalid.clone(), GrantKind::Hot),
+            Err(invalid_refusal(&invalid)),
+            "a grant of an invalid {} operation must be refused before any change",
+            invalid.class().as_str()
+        );
+        contract_assert_eq!(
+            backend.snapshot_os_state(),
+            before,
+            "a refused invalid {} grant changed the state",
+            invalid.class().as_str()
+        );
+        contract_assert_eq!(
+            backend.revoke(invalid.handle(), DrainSpec::forcing()),
+            Err(BackendError::UnknownHandle {
+                handle: invalid.handle()
+            }),
+            "a refused invalid {} grant must issue no record",
+            invalid.class().as_str()
+        );
+    }
+    for invalid in invalid_operations() {
+        let before = backend.snapshot_os_state();
+        contract_assert_eq!(
+            backend.apply(invalid.clone()),
+            Err(invalid_refusal(&invalid)),
+            "an apply of an invalid {} operation must be refused before any change",
+            invalid.class().as_str()
+        );
+        contract_assert_eq!(
+            backend.snapshot_os_state(),
+            before,
+            "a refused invalid {} apply changed the state",
+            invalid.class().as_str()
+        );
+    }
+    for invalid in invalid_operations() {
+        let before = backend.snapshot_os_state();
+        contract_assert_eq!(
+            backend.plant(invalid.object()),
+            Err(invalid_refusal(&invalid)),
+            "a plant of an invalid {} object must be refused before any change",
+            invalid.class().as_str()
+        );
+        contract_assert_eq!(
+            backend.snapshot_os_state(),
+            before,
+            "a refused invalid {} plant changed the state",
+            invalid.class().as_str()
+        );
+    }
+    for standing in &issued {
+        let invalid = op_for(
+            standing.id(),
+            standing.owner().clone(),
+            invalid_capability(&standing.capability()),
+        );
+        let class = invalid.class().as_str();
+        let before = backend.snapshot_os_state();
+        contract_assert_eq!(
+            backend.grant(invalid.clone(), GrantKind::Hot),
+            Err(invalid_refusal(&invalid)),
+            "an invalid {class} grant at an issued address must be refused before any change"
+        );
+        contract_assert_eq!(
+            backend.snapshot_os_state(),
+            before,
+            "a refused invalid {class} grant at an issued address changed the state"
+        );
+        let before = backend.snapshot_os_state();
+        contract_assert_eq!(
+            backend.apply(invalid.clone()),
+            Err(invalid_refusal(&invalid)),
+            "an invalid {class} apply at an issued address must be refused before any change"
+        );
+        contract_assert_eq!(
+            backend.snapshot_os_state(),
+            before,
+            "a refused invalid {class} apply at an issued address changed the state"
+        );
+        let before = backend.snapshot_os_state();
+        contract_assert_eq!(
+            backend.plant(invalid.object()),
+            Err(invalid_refusal(&invalid)),
+            "an invalid {class} plant at an issued address must be refused before any change"
+        );
+        contract_assert_eq!(
+            backend.snapshot_os_state(),
+            before,
+            "a refused invalid {class} plant at an issued address changed the state"
+        );
+    }
     contract_assert!(
         make().snapshot_os_state().is_empty(),
         "a backend fresh from the factory must observe nothing an earlier instance did"
@@ -716,28 +767,43 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                     "the residue fixture must plant"
                 );
                 expected.push(residue.clone());
-                for (operation, origin) in [(applied, "applied"), (residue.operation(), "planted")]
-                {
-                    contract_assert_eq!(
-                        backend.grant(operation.clone(), kind),
-                        Err(BackendError::IdentityConflict {
-                            class: operation.class().as_str(),
-                            id: operation.id(),
-                        }),
-                        "a grant at the address of an {origin} object must conflict"
-                    );
-                    assert_exact_state(
-                        &backend.snapshot_os_state(),
-                        &expected,
-                        "a refused promotion changed the state",
-                    );
-                    contract_assert_eq!(
-                        backend.revoke(operation.handle(), DrainSpec::forcing()),
-                        Err(BackendError::UnknownHandle {
-                            handle: operation.handle()
-                        }),
-                        "a grant must never promote an {origin} object into an issued record"
-                    );
+                for (standing, origin) in [(applied, "applied"), (residue.operation(), "planted")] {
+                    let mut requests = vec![
+                        (standing.clone(), "the identical payload".to_string()),
+                        (
+                            op_for(standing.id(), second_owner(), capability.clone()),
+                            "another owner".to_string(),
+                        ),
+                    ];
+                    for other in changed_capabilities(&capability) {
+                        let label = format!("the capability {other:?}");
+                        requests.push((
+                            op_for(standing.id(), standing.owner().clone(), other),
+                            label,
+                        ));
+                    }
+                    for (operation, payload) in requests {
+                        contract_assert_eq!(
+                            backend.grant(operation.clone(), kind),
+                            Err(BackendError::IdentityConflict {
+                                class: operation.class().as_str(),
+                                id: operation.id(),
+                            }),
+                            "a grant of {payload} at an {origin} address must conflict"
+                        );
+                        assert_exact_state(
+                            &backend.snapshot_os_state(),
+                            &expected,
+                            "a refused grant at a standing address changed the state",
+                        );
+                        contract_assert_eq!(
+                            backend.revoke(operation.handle(), DrainSpec::forcing()),
+                            Err(BackendError::UnknownHandle {
+                                handle: operation.handle()
+                            }),
+                            "a grant of {payload} must not issue a record for an {origin} object"
+                        );
+                    }
                 }
                 contract_unwrap!(backend.apply(first.operation.clone()));
                 contract_unwrap!(backend.plant(issued_object.clone()));
@@ -771,7 +837,10 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
 /// refuses that instance's handles with `UnknownHandle`, even while it holds an equal grant of
 /// its own, and that the earlier instance keeps and can revoke what it granted.
 pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() -> B) {
-    for drain in drains() {
+    for (order, drain) in orders()
+        .into_iter()
+        .flat_map(|order| drains().map(|drain| (order, drain)))
+    {
         let mut first = make();
         let earlier: Vec<LedgerEntry> = sample_grants()
             .iter()
@@ -803,20 +872,26 @@ pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() 
             &earlier_objects,
             "a later instance changed what the earlier one holds",
         );
-        for entry in earlier {
+        for (entry, _) in order.arrange(earlier.into_iter().zip(earlier_objects).collect()) {
             contract_assert_eq!(
                 first.revoke(entry.handle, drain).unwrap_or_else(|error| {
                     contract_panic!(
-                        "the earlier instance could not {} revoke {}: {error}",
+                        "the earlier instance could not {} revoke {} on the {} pass: {error}",
                         policy_of(drain),
-                        entry.handle
+                        entry.handle,
+                        order.name()
                     )
                 }),
                 entry,
-                "the earlier instance must still revoke its own grant"
+                "the earlier instance must still revoke its own grant on the {} pass",
+                order.name()
             );
         }
-        contract_assert!(first.snapshot_os_state().is_empty());
+        contract_assert!(
+            first.snapshot_os_state().is_empty(),
+            "the earlier instance kept a holding after the {} pass",
+            order.name()
+        );
     }
 }
 
@@ -1136,12 +1211,40 @@ fn changed_capabilities(capability: &Capability) -> [Capability; 2] {
     [key_changed, recipe_changed]
 }
 
-fn invalid_operation() -> UniverseOp {
-    op_for(
-        GrantId::new(),
-        conformance_owner(),
-        session_file("relative/skills/pr.md"),
-    )
+fn invalid_operations() -> Vec<UniverseOp> {
+    sample_capabilities()
+        .iter()
+        .map(|capability| {
+            op_for(
+                GrantId::new(),
+                conformance_owner(),
+                invalid_capability(capability),
+            )
+        })
+        .collect()
+}
+
+fn invalid_capability(capability: &Capability) -> Capability {
+    let mut invalid = capability.clone();
+    match &mut invalid {
+        Capability::SessionFile { path, .. } | Capability::UdsSocket { path, .. } => {
+            *path = path.trim_start_matches('/').to_string();
+        }
+        Capability::ProxyMap { recipe, .. } => recipe.port = 0,
+        Capability::Broker { name, .. } => name.push('\0'),
+        Capability::Mount { target, .. } => target.push('/'),
+    }
+    invalid
+}
+
+fn invalid_refusal(operation: &UniverseOp) -> BackendError {
+    BackendError::InvalidOperation {
+        class: operation.class().as_str(),
+        id: operation.id(),
+        error: operation
+            .validate()
+            .expect_err("the invalid operation fixture must fail validation"),
+    }
 }
 
 fn removal_of(object: &OsObject) -> UniverseRemoval {
