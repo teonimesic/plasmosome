@@ -124,10 +124,12 @@ the field's parents are tables, not inline tables: a section such as
 `[commands.commands.git.network]` cannot be added to a command written as
 `git = { exec = ["git"], network = 443 }`, and TOML refuses the result.
 
-Exactly two refusals an author can cause name no declaration field and carry no `fix`:
+Exactly three refusals an author can cause name no declaration field and carry no `fix`:
 
 1. a TOML syntax error, which the parser reports by line and column;
-2. a declaration over 1 MiB, the maximum accepted size spec 020 §2 gives each declaration.
+2. a declaration over 1 MiB, the maximum accepted size spec 020 §2 gives each declaration;
+3. a declaration nested more than 32 levels deep, counted as spec 011 says. Amended on
+   2026-10-20: this list had two items before the manifest's depth bound.
 
 An unknown key is not one of them. Every other refusal an author can cause carries a field and a
 `fix`. A 108 the author did not cause carries no `fix` either: a file that cannot be read, or a
@@ -578,8 +580,12 @@ never punishes detachment). `--now` is the authority-class immediate removal.
 
 ```json
 {"id": 13, "result": {"cell": "cell-1", "plasmid": "github-pr", "state": "removed", "drained": true,
-  "replayed": 2, "delayed_discarded": 1, "residue": "empty"}}
+  "replayed": 2, "delayed_discarded": 1, "residue": "empty", "held": []}}
 ```
+
+`held` lists each reference into the plasmid's software, or a reload's replaced tree, that the
+guest's scan saw once its names were gone, as `{path, pid, comm, exec_id}` (spec 027). It is not
+residue, so `residue` stays `"empty"`.
 
 Outstanding external effects refuse the safe removal with code `105` carrying the assertion
 list; force requires the operator/reason pair exactly as `plasmosome.stop`. A removal that would
@@ -599,7 +605,8 @@ the plasmid's mock mode, and a `mock` that differs from it refuses with 104 (spe
 ```
 
 ```json
-{"id": 14, "result": {"cell": "cell-1", "plasmid": "github-pr", "mock": "capture", "generation": 5, "state": "active"}}
+{"id": 14, "result": {"cell": "cell-1", "plasmid": "github-pr", "mock": "capture", "generation": 5,
+  "state": "active", "held": []}}
 ```
 
 Reload preserves the attachment's spec008 AttachmentSource. A registry source reuses the exact
@@ -785,7 +792,7 @@ request IDs and errors. Responses with a wrong request ID or cell, unknown field
 malformed exact objects, incomplete frames or timeout are failed observations. The controller
 must not operate a quarantine's effects merely because its supervisor answered.
 
-The observation methods `membrane.cell.observe`, `membrane.residue.snapshot`, §4.2's4090
+The observation methods `membrane.cell.observe`, `membrane.residue.snapshot`, §4.2's 4090
 `observe` and public `plasmosome.recovery` return bounded pages of one complete logical result.
 Their request IDs are unsigned64-bit integers. Each params record includes required
 `snapshot:u64` and `offset:u64`: zero/zero starts a capture and returns its first page; later
@@ -1109,7 +1116,7 @@ Source for these API constraints is the pinned
 [header](https://github.com/libkrun/libkrun/blob/v1.19.4/include/libkrun.h) and
 [implementation](https://github.com/libkrun/libkrun/blob/v1.19.4/src/libkrun/src/lib.rs).
 
-Use `krun_add_vsock_port2(ctx,4090,control_path,false)` and corresponding4091data mapping
+Use `krun_add_vsock_port2(ctx,4090,control_path,false)` and corresponding 4091 data mapping
 before start. They are fixed guest-initiated mappings; logical grants change over continuing
 streams without altering the VM's boot mappings or rebooting it. Port4041 is not reused.
 Guest CID3 is not cross-cell identity. The host authenticates through the original per-VMM
@@ -1143,7 +1150,7 @@ bounded dispatcher and request IDs; several normal requests may be outstanding a
 says which wait for an outstanding mutation, and none blocks withdrawal dispatch. A wait in normal
 drain must not hold a lock or executor needed by withdrawal. Readiness requires both hellos, the
 data association, the workload namespaces and the workload control group; no workload process exists
-before readiness. On4091 the shim is sole caller and the host the responder,
+before readiness. On 4091 the shim is sole caller and the host the responder,
 within that same verified original VMM association. No stream uses notifications or accepts
 opposite-direction requests. Bounded data requests may overlap with distinct IDs. Actual loss
 of any of these streams closes host admission and moves every affected operation out of standing state
@@ -1206,7 +1213,7 @@ bindings in reverse prepare order; retained holdings remain intact. Spec008's pr
 of a reload that would widen access or disturb retained holdings still applies.
 
 Graceful removal uses a reversible **host-local** admission pause until the original host
-monotonic deadline. Every4091admission check treats that pause as expired at that deadline;
+monotonic deadline. Every 4091 admission check treats that pause as expired at that deadline;
 restoration needs neither a timer callback nor a guest RPC. The existing guest binding and
 selector remain active during this reversible phase. The host admits no new actual IO while
 paused and waits for already-admitted host work. `drain` only observes/waits for the guest
@@ -1318,7 +1325,7 @@ that flow alone, as after `no_active_grant`, and never falls through to another 
 serving every other flow and stream and never exits over it. The mismatch is a named observation
 fault on the selected grant: like a mismatched binding (below), it fails complete observation
 instead of being hidden. A stale locally active grant is not an authority to bypass this host
-selection. It binds the actual guest flow and4091stream/datagram handle to that original grant.
+selection. It binds the actual guest flow and 4091 stream/datagram handle to that original grant.
 Existing flows never follow a later selector change. An old holding and the activated replacement of
 a reload in progress (spec008) at one host, port and transport can both be eligible, and their
 routes and recipes can differ; nothing here assumes them equal. Selection does not read generations:
@@ -1430,7 +1437,7 @@ or foreign handles, closed grants, invalid lengths and overflow refuse before an
 Returned byte/write counts describe actual IO, including short operations. Datagram truncation
 is explicit; an empty timed-out read is not an invented EOF.
 
-The4091data verbs grant no capability-lifecycle or recovery authority. Handles cannot transfer across channels or
+The 4091 data verbs grant no capability-lifecycle or recovery authority. Handles cannot transfer across channels or
 rebind to a replacement grant. The host checks the effective grant on every request, bounds
 admitted work and propagates real errors. Channel loss closes its original data handles but
 does not manufacture grant withdrawal or clear remaining incomplete IO. Neither a service
@@ -1439,7 +1446,7 @@ acknowledgement nor a guest claim replaces independent resource cleanup observat
 `GuestObservation` is the strict record
 `{boot:String, policy:String, fs_mounts:[GuestProjection], fs_handles:[GuestProjection],
 socket_listeners:[GuestProjection], socket_streams:[SocketStreamProjection],
-network:GuestNetworkObservation}`. Every field and nested
+network:GuestNetworkObservation, software:SoftwareObservation}`. Every field and nested
 array is required even when independently observed empty; omission of an otherwise-empty kind refuses
 the entire observation. The nonempty boot token identifies this original supervisor/guest
 association and is never reused or reconstructed from journal contents. Policy is the SHA256 of
@@ -1448,7 +1455,14 @@ GuestProjection is `{id:String, bindings:[GuestBinding]}`; its containing array 
 GuestNetworkObservation is the strict record `{dns_listeners:[GuestProjection],
 tuns:[GuestProjection], routes:[GuestProjection], proxy_rules:[GuestProjection],
 tcp_flows:[GuestProjection], udp_flows:[GuestProjection]}`. All six arrays are required, including
-empty arrays; coverage of one network kind cannot stand in for another. DNS listeners appear
+empty arrays; coverage of one network kind cannot stand in for another. SoftwareObservation is
+the strict record `{trees:[SoftwareTree], held:[TreeReference]}` (spec 027). SoftwareTree names
+one tree visible in the workload namespace, with its digest and every name placed for it; its
+field names follow spec 027's journal record. TreeReference is `{path:String, pid:u64,
+comm:String, exec_id:String|null}`, one per reference into a detached tree that the guest's scan
+sees. Both arrays are required even when empty. A tree or name with no committed or pending
+journal effect, or a committed effect with no tree or name, fails observation. A `held` row is
+not a binding or residue, and never makes a removal incomplete. DNS listeners appear
 only in network, not again in socket_listeners; the latter contains UdsSocket/Broker data
 listeners. Network infrastructure first created by install and shared by several grants carries
 each actual binding; it cannot persist with an empty binding list after last removal.
@@ -1457,7 +1471,7 @@ just their listeners. `SocketStreamProjection` is `{id:String, grant:GrantId, en
 SocketStreamEnd is `{side:StreamSide, id:String}`, with StreamSide exactly `accepted | relay`.
 The ends array contains each still-present actual guest accepted endpoint and its original
 per-stream guest bridge binding, at most one of each and at least one. These are original
-resource identities, not a pathname, reused FD number or the shared4091channel mistaken for
+resource identities, not a pathname, reused FD number or the shared 4091 channel mistaken for
 one stream. A half-cleaned pair remains with its surviving end; it disappears only after both
 are freshly verified absent. A missing required socket_streams array is not an empty inventory.
 The supervisor independently joins that original bridge binding to its retained host relay
