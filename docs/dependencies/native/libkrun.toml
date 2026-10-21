@@ -1,0 +1,115 @@
+name = "libkrun"
+purpose = """\
+  The virtual machine monitor library. The VMM helper of spec 001 §4.2 links it, and \
+  plasmosome-lanes' lane-vmm loads it, to boot the Linux guest of guest-kernel.toml on \
+  Hypervisor.framework.\
+  """
+version = "1.19.4"
+bundle_manifest_sha256 = "eed141b574337d9911885a839b9afe6835ee5aa27472bbd41ee768f108266b3f"
+file = "lib/libkrun.1.19.4.dylib"
+sha256 = "e4a4aafe3a6842a5f3a863bda7b7359a045e3cfab2b20324494e5f6bd1b8e3a4"
+sources = [
+  """\
+  https://github.com/libkrun/libkrun at tag v1.19.4, commit \
+  728df8125077d0db44265f6e997c72b81b65c015, which the tag points at.\
+  """,
+  """\
+  Built from that commit by plasmosome-itt on 2026-09-18, on macOS 26.6.2 arm64, with \
+  `make BLK=1`: no NET, EFI, GPU, SND, INPUT, SEV, TDX or AWS_NITRO. It keeps the default \
+  init-blob feature, and spec 001 §4.2 turns that init off with krun_disable_implicit_init. \
+  Tools: Apple clang 21.0.0, rustc 1.97.1 and Homebrew LLD 23.1.1. The build's output, \
+  target/release/libkrun.1.19.4.dylib, has SHA-256 \
+  491a310db4b9aefa7b857a7ee1421b6cbdb3e86aa6efe18e12a30b4c5b687627 and is 5,360,672 bytes. \
+  No rebuild has been compared with it: plasmosome-itt's notes record one `make BLK=1` build.\
+  """,
+  """\
+  Two changes were made to that output before it went into the bundle. Its install name, \
+  `libkrun.1.dylib`, became `@executable_path/../lib/libkrun.1.19.4.dylib`, and it was signed \
+  again ad hoc. codesign -dv prints `Identifier=libkrun.dylib` and \
+  `flags=0x20002(adhoc,linker-signed)` for the output, and `Identifier=libkrun.1` and \
+  `flags=0x2(adhoc)` for the bundled file, which is 5,347,600 bytes. No script, manifest field \
+  or plasmosome-itt note names either step, and manifest.json's install_name_audit shows only \
+  the result. This was measured on 2026-10-21 by running shasum -a 256, stat -f %z, otool -D \
+  and codesign -dv on both files. nm -a and otool -l print the same 10,628 symbols and the \
+  same 18 load commands for both.\
+  """,
+  """\
+  The init blob in the dylib is a static aarch64 Linux executable of 771,880 bytes, SHA-256 \
+  2fcb20a5d9749c04102603fbd99d906b3b0d0a53428a4c7a3b7ba9689e4de270, at byte 2,723,340 of the \
+  file. build.rs compiled it from src/init_blob/init/init.c and dhcp.c with CC_LINUX, -O2 \
+  -static. On macOS the Makefile sets CC_LINUX to clang with a Debian bookworm sysroot that it \
+  makes itself. It downloads bookworm's Packages.xz, then libc6, libc6-dev, libgcc-12-dev and \
+  linux-libc-dev, from https://deb.debian.org with curl. It checks no digest, and it deletes the \
+  .debs after unpacking them (Makefile lines 67, 113 and 160-185, and src/init_blob/build.rs \
+  lines 28-44, at 728df812). The sysroot holds libc6 2.36-9+deb12u14, libc6-dev \
+  2.36-9+deb12u14, linux-libc-dev 6.1.176-1 and libgcc-12-dev 12.2.0-14+deb12u1. Each version \
+  is the first line of the package's changelog.Debian.gz, except libgcc-12-dev's: its doc folder \
+  links to gcc-12-base, which the sysroot lacks, so its version is the GCC identification in its \
+  crtbeginT.o.\
+  """,
+]
+licence = "Apache-2.0 AND BSD-3-Clause AND ISC AND MIT"
+limits = [
+  """\
+  The dylib carries LC_RPATH /opt/homebrew/opt/llvm/lib, and krun_create_ctx loads \
+  libkrunfw.5.dylib by its leaf name (src/libkrun/src/lib.rs lines 83, 114-115 and 553 at \
+  728df812). So dyld searches that path among others, and a library planted there runs its \
+  initializers before any check of the loaded images (crates/plasmosome-lanes/README.md, \
+  "Limits"). This is owner gate O-6. lane-vmm refuses the run when such a file exists, before \
+  it loads libkrun. plasmosome-vev, an open planned task, plans an audit that refuses any \
+  LC_RPATH, so plasmosome-qep's cell boot waits on O-6. Nothing on main refuses an LC_RPATH \
+  today. plasmosome-jab, an open task, plans a successor bundle that edits this dylib: it \
+  deletes the rpath with install_name_tool and signs the file again ad hoc. It plans no new \
+  build of libkrun.\
+  """,
+  """\
+  libkrun's Cargo.lock at 728df812 locks 184 crates.io packages, and the dylib's Rust code is \
+  built from those its features and target need. Spec 026's cargo-deny reads only this \
+  repository's lockfiles, so no advisory against them reaches here (spec 026, threat model, \
+  "Native artifacts and the host"). Who tracks them is spec 026 Q6.\
+  """,
+  """\
+  The init blob was built against four Debian packages that the build downloaded without a \
+  digest check and then deleted. No digest of those packages was kept, and manifest.json's \
+  pinned does not name them. Their bytes sit inside the dylib even though spec 001 §4.2 has the \
+  helper call krun_disable_implicit_init, which keeps libkrun from injecting the init into the \
+  guest's root (include/libkrun.h lines 1110-1122 at 728df812). Who tracks these packages' \
+  advisories is spec 026 Q6.\
+  """,
+  """\
+  Whoever distributes this dylib must carry the notices, and meet the terms, of what it holds. \
+  libkrun's own code is Apache-2.0, BSD-3-Clause, ISC and MIT, as licence says. MIT is jsmn.h, \
+  which init.c includes. ISC is the code init.c takes from libyajl, by the notice at init.c \
+  lines 582-598. 48 files at 728df812 outside src/rutabaga_gfx carry a Chromium OS notice \
+  that a BSD-style licence governs them, found in the THIRD-PARTY file (38 files) or the LICENSE \
+  file (10 files). No THIRD-PARTY file exists at that commit, and the LICENSE files outside \
+  src/rutabaga_gfx are Apache-2.0, so the text those notices name is not in the pinned tree. 28 \
+  of the 48 are among the files the build compiled, by cargo's target/release/libkrun.d. The \
+  init blob links glibc statically, and most of glibc is LGPL-2.1-or-later, by libc6's \
+  copyright file. It also links the libgcc startup files and libraries that CC_LINUX passes \
+  with -B and -L. They are GPL-3.0-or-later WITH GCC-exception-3.1, by the headers \
+  libgcc-12-dev ships, such as stddef.h, since its own copyright file is a link the sysroot \
+  cannot resolve. The Rust code also comes from the 184 locked crates, each under its own \
+  licence and notices. No workflow in this repository publishes a bundle today, so the duty \
+  falls on the first release that ships one.\
+  """,
+]
+
+[checks]
+cadence = "weekly"
+updates = """\
+  Compare v1.19.4 with the newest release of https://github.com/libkrun/libkrun, and read the \
+  release notes in between for security fixes.\
+  """
+advisories = """\
+  Read the GitHub security advisories of https://github.com/libkrun/libkrun. Read the Debian \
+  security tracker, https://security-tracker.debian.org/tracker/, for fixes after the versions \
+  the init blob was built against: libc6 2.36-9+deb12u14 and libc6-dev 2.36-9+deb12u14 (source \
+  package glibc), libgcc-12-dev 12.2.0-14+deb12u1 (gcc-12) and linux-libc-dev 6.1.176-1 \
+  (linux). Then take a clone at the pinned commit, outside this repository, and read its .cargo/ \
+  and rust-toolchain* first, as spec 026 section 1's "Read before running" asks of a \
+  contributor's code. From a directory with no deny.toml, run `cargo-deny --manifest-path \
+  <clone>/Cargo.toml --workspace --all-features --locked check advisories`.\
+  """
+by = "Nobody, until the owner answers spec 026 Q6."
+last = "never"
