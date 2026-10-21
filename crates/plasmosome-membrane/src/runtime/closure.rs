@@ -753,7 +753,11 @@ mod tests {
     fn a_cut_or_inconsistent_header_load_command_or_name_refuses_malformed_where_it_breaks() {
         let one = executable(&[]);
         let named = library(&[load("/usr/lib/libSystem.B.dyl")]);
-        let no_nul = put(&named, 76, u32::from_le_bytes(*b"ylib"));
+        let mut no_nul = named.clone();
+        no_nul[56..88]
+            .iter_mut()
+            .filter(|byte| **byte == 0)
+            .for_each(|byte| *byte = b'x');
         let mut not_utf8 = named.clone();
         not_utf8[57] = 0xff;
         let rows: [(&str, Vec<u8>, u64); 12] = [
@@ -869,15 +873,15 @@ mod tests {
                     path: "/l".to_owned()
                 }
             ),
-            "Library(0): LC_RPATH /l is a search path"
+            "libraries[0]: LC_RPATH /l is a search path"
         );
         assert_eq!(
             show(Helper, unlisted("@loader_path/x", Some("/b/bin/x"))),
-            "Helper: @loader_path/x resolves to /b/bin/x, which is not a listed library"
+            "helper: @loader_path/x resolves to /b/bin/x, which is not a listed library"
         );
         assert_eq!(
             show(Helper, unlisted("/o/x", None)),
-            "Helper: /o/x is neither a listed library nor on the sealed system volume"
+            "helper: /o/x is neither a listed library nor on the sealed system volume"
         );
         let name = || "/n".to_owned();
         for fault in [
@@ -902,7 +906,7 @@ mod tests {
             },
         ] {
             assert!(
-                show(Helper, fault.clone()).len() > "Helper: ".len(),
+                show(Helper, fault.clone()).len() > "helper: ".len(),
                 "{fault:?}"
             );
         }
