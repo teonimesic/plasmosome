@@ -47,9 +47,12 @@ pub struct NetworkSpec {
     pub pin_cidrs: Vec<String>,
 }
 
+/// The `[workspace].mount` a declaration writes. `dst` is the guest path, `/workspace` when the
+/// declaration leaves it out (spec 022 §6). A written `backend` is not kept: it selects nothing
+/// (spec 011), so nothing here can choose how the Mount is realized.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceMount {
-    pub backend: String,
+    /// The guest path the Mount appears at.
     pub dst: String,
 }
 
@@ -319,11 +322,6 @@ impl PlasmidManifest {
             .get("workspace")
             .and_then(|w| w.get("mount"))
             .map(|m| WorkspaceMount {
-                backend: m
-                    .get("backend")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or("virtiofs")
-                    .to_string(),
                 dst: m
                     .get("dst")
                     .and_then(toml::Value::as_str)
