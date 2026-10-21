@@ -37,7 +37,7 @@ pub(crate) struct DescriptorsHeld(());
 /// already held. Only descriptors created inside `create` are held back from
 /// a fork, and forks that bypass this lock, such as `std::process::Command`,
 /// are not held back.
-pub(crate) fn with_descriptors_held<T: AsFd + Into<OwnedFd>>(
+pub(crate) fn with_descriptors_held<T: AsFd>(
     create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<T>,
 ) -> std::io::Result<T> {
     write_held(&SPAWN_LOCK, || {
