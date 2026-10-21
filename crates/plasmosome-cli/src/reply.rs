@@ -23,9 +23,12 @@ pub enum ReadFailure {
 /// Reads one reply line from `reader` and returns it without its newline.
 ///
 /// It consumes the line and its newline and nothing more, so whatever follows stays in `reader`
-/// unread. It holds at most [`MAX_REPLY_BYTES`] before the newline and looks at one byte more:
-/// when that byte is not the newline, it returns [`ReadFailure::TooLarge`] without reading
-/// further. An interrupted read is retried.
+/// unread. It reads and keeps at most [`MAX_REPLY_BYTES`] plus one byte. When that last byte is
+/// not the newline, it returns [`ReadFailure::TooLarge`] without reading further. An interrupted
+/// read is retried.
+///
+/// It has no clock. Each read waits as long as `reader` lets it, so a caller with a deadline gives
+/// each read only the time left, not one timeout for the whole line.
 pub fn read_reply(reader: &mut dyn BufRead) -> Result<Vec<u8>, ReadFailure> {
     let mut line = Vec::new();
     let mut limited = reader.take(MAX_REPLY_BYTES as u64 + 1);
@@ -162,11 +165,11 @@ pub fn kernel_exit(error: &KernelError) -> Exit {
 
 /// Returns the client error for a request whose reply line never arrived.
 ///
-/// With `changes_state` false, the request cannot have changed anything: a closed connection, a
-/// timeout or a failed read is `no_reply` with `cause` `closed`, `deadline` or `transport`, exit
-/// 1, and a line past the bound is `reply_too_large` with `max_bytes`, exit 2. With
-/// `changes_state` true, the request may still take effect, so each is `outcome_unknown` with
-/// that `cause`, or `reply_too_large`, exit 3.
+/// With `changes_state` false, the request cannot have changed anything. A closed connection, a
+/// timeout or a failed read is `no_reply`, exit 1, with `cause` `closed`, `deadline` or
+/// `transport`. A line past the bound is `reply_too_large`, exit 2, with `max_bytes`. With
+/// `changes_state` true, the request may still take effect, so each is `outcome_unknown`, exit 3,
+/// with `cause` `closed`, `deadline`, `transport` or `reply_too_large`.
 pub fn unanswered(failure: ReadFailure, changes_state: bool) -> ClientError {
     let (cause, what) = match failure {
         ReadFailure::Closed => (

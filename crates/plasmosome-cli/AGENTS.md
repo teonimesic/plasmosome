@@ -32,9 +32,9 @@ its envelopes and its client codes. It is `publish = false` and never ships on i
 - **Spec 026 §5 lists `scan` and `read_reply`.** A change to either's bound, or to the scan's
   depth handling, updates that row.
 - **`read_reply` takes only its line.** It consumes the line and its newline from a `BufRead`
-  and nothing more, and it never holds more than `MAX_REPLY_BYTES` before the newline. A reader
-  that reads until the newline and then checks the length is the unbounded read spec 026
-  refuses.
+  and nothing more. Through `take`, it reads and keeps at most `MAX_REPLY_BYTES` plus one byte. A
+  reader that reads until the newline and then checks the length is the unbounded read spec 026
+  refuses. It has no clock, so its caller bounds each read by the time left.
 - **No `unsafe` and no third-party dependency.** The package keeps `lints.workspace = true`.
   `serde_json` is a dev-dependency only: the independent parser the escaping test checks against.
 

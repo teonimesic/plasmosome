@@ -31,12 +31,13 @@ resident to scan and drop, and 779 MB to scan and write either form.
 
 `reply::read_reply` takes one line from any `BufRead` and returns it without its newline. It
 consumes the line and its newline and nothing more, so whatever the daemon sent after them stays
-unread in the reader. It holds at most `MAX_REPLY_BYTES` before the newline and looks at one byte
-more. When that byte is not the newline, the line is `TooLarge` and nothing more is read, so an
-endless line costs the bound and not the deadline. The end of input before a newline is `Closed`,
-whatever came before it. A read that reports `WouldBlock` or `TimedOut`, as a socket's read
-timeout does, is `TimedOut`. Any other failed read is `Transport`, with its errno when it has one.
-An interrupted read is retried.
+unread in the reader. It reads through `take` and `read_until`, so it reads and keeps at most
+`MAX_REPLY_BYTES` plus one byte. When that last byte is not the newline, the line is `TooLarge` and
+nothing more is read. The end of input before a newline is `Closed`, whatever came before it. A
+read that reports `WouldBlock` or `TimedOut`, as a socket's read timeout does, is `TimedOut`. Any
+other failed read is `Transport`, with its errno when it has one. An interrupted read is retried.
+`read_reply` has no clock: each read waits as long as the reader lets it. So a caller with a
+deadline gives each read only the time left, not one timeout for the whole line.
 
 `reply::judge_reply` applies spec 025 §4's reply rules to that line, for a request sent with
 `id` 1. A valid reply is an object with `id` 1 and exactly one of `result` and `error`. `result`
@@ -56,7 +57,8 @@ and one outside `i64` included.
 command that changes no state, a closed connection, a timeout and a failed read are `no_reply`
 with `cause` `closed`, `deadline` or `transport`, exit 1. A line past the bound is
 `reply_too_large` with `max_bytes`, exit 2. For a command that changes state, the request may
-still take effect, so each is `outcome_unknown` with that cause, or `reply_too_large`, exit 3.
+still take effect, so each is `outcome_unknown`, exit 3, with `cause` `closed`, `deadline`,
+`transport` or `reply_too_large`.
 
 `reply::request_line` writes `{"id":1,"method":...,"params":{...}}` and a newline through the
 compact writer. It hands the params back when a key repeats among them or inside a value.
