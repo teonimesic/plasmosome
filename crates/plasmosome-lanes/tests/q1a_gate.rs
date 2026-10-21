@@ -7,12 +7,12 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use common::gate::{
-    GateLane, Shown, assert_caught, assert_decided, confine, gate_lane, own_as_root, place_tree,
-    read_records, record_lane, records_dir, results, run_gate, set_override, spelled, test_commit,
-    walk, write_file, write_record,
+    GateLane, Shown, assert_caught, assert_decided, commit_at, confine, gate_lane, own_as_root,
+    place_tree, read_records, record_lane, records_dir, results, run_gate, set_override, spelled,
+    test_commit, walk, write_file, write_record,
 };
 use common::guest::{TIMEOUT, guest_binary, probe};
 use plasmosome_lanes::config::{MountOption, Semantics, WORKLOAD_UID};
@@ -947,6 +947,60 @@ gate O-8).
   The writer runs last: `cargo test -p plasmosome-lanes --test q1a_gate write_the_results_file -- --ignored`.
 ",
     )
+}
+
+#[test]
+fn the_test_commit_is_marked_uncommitted_for_an_untracked_or_a_changed_file() {
+    let repo = tempfile::tempdir().expect("a directory for a repository");
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=lanes",
+                "-c",
+                "user.email=lanes@example.invalid",
+            ])
+            .args(args)
+            .current_dir(repo.path())
+            .stdin(Stdio::null())
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    write_file(&repo.path().join("tracked"), b"tracked\n", 0o644);
+    git(&["add", "tracked"]);
+    git(&["commit", "-q", "-m", "one"]);
+
+    let head = commit_at(repo.path());
+    assert!(
+        head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit()),
+        "{head}"
+    );
+
+    let untracked = repo.path().join(".cargo");
+    fs::create_dir(&untracked).expect("an untracked directory is made");
+    write_file(
+        &untracked.join("config.toml"),
+        b"[build]\nrustflags = [\"--cfg\", \"untracked\"]\n",
+        0o644,
+    );
+    assert_eq!(
+        commit_at(repo.path()),
+        format!("{head} with uncommitted changes")
+    );
+
+    fs::remove_dir_all(&untracked).expect("the untracked directory is removed");
+    assert_eq!(commit_at(repo.path()), head);
+    write_file(&repo.path().join("tracked"), b"changed\n", 0o644);
+    assert_eq!(
+        commit_at(repo.path()),
+        format!("{head} with uncommitted changes")
+    );
 }
 
 #[test]

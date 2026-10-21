@@ -312,6 +312,33 @@ fn an_observation_row_reads_recorded_only_with_its_observation_and_a_missing_ver
     );
     assert!(text.contains("- M2: not run: no console"), "{text}");
 
+    let mut empty = records.clone();
+    empty[0].observations.insert("Names".to_string(), vec![]);
+    assert!(
+        matches!(row_verdict(&names, &empty), Verdict::NotRun(reason) if reason.contains("real") && reason.contains("Names"))
+    );
+    let text = render("", &[m1(), names.clone()], &empty);
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| Names | the claim of Names |")
+                && line.contains("| **not recorded**: ")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("**recorded**"),
+        "a row with an empty observation reads recorded: {text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| Names | real |") && line.ends_with("| not recorded |")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "| Names | real | not recorded |"),
+        "{text}"
+    );
+
     let mut observed = records.clone();
     observed[0]
         .observations
@@ -353,6 +380,67 @@ fn a_measured_count_is_written_beside_its_rows_verdict() {
         "{text}"
     );
     assert!(text.contains("- R1: pass (80 of 80 trials held)"), "{text}");
+}
+
+fn section_of<'a>(text: &'a str, run: &str) -> &'a str {
+    let start = text
+        .find(&format!("### {run}\n"))
+        .unwrap_or_else(|| panic!("a section for {run}: {text}"));
+    let end = text[start + 1..]
+        .find("\n### ")
+        .map_or(text.len(), |end| start + 1 + end);
+    &text[start..end]
+}
+
+#[test]
+fn a_verdict_no_row_reads_is_marked_in_its_runs_section_with_the_runs_its_row_reads() {
+    let m2 = row(
+        "M2",
+        vec![
+            run("real", Expect::Observe),
+            run("plain", Expect::Pass),
+            run("ro", Expect::Fail),
+        ],
+    );
+    let mut real = record(
+        "real",
+        &[
+            ("M1", Verdict::Pass),
+            ("M2", Verdict::Fail("EROFS, not EACCES".to_string())),
+            ("M9", Verdict::Pass),
+        ],
+    );
+    real.counts.insert("M9".to_string(), "3 of 3".to_string());
+    let records = [
+        real,
+        record("simplified", &[("M1", Verdict::Fail("c".to_string()))]),
+        record("ro", &[("M2", Verdict::Fail("d".to_string()))]),
+    ];
+
+    let text = render("", &[m1(), m2], &records);
+
+    let verdicts = |run: &str| -> Vec<String> {
+        section_of(&text, run)
+            .lines()
+            .filter(|line| line.starts_with("- M"))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(
+        verdicts("real"),
+        [
+            "- M1: pass",
+            "- M2: fail: EROFS, not EACCES (no row reads this verdict; M2 reads `plain` and `ro`)",
+            "- M9: pass (3 of 3) (no row reads this verdict)",
+        ],
+        "{text}"
+    );
+    assert_eq!(verdicts("simplified"), ["- M1: fail: c"], "{text}");
+    assert_eq!(verdicts("ro"), ["- M2: fail: d"], "{text}");
+    assert!(
+        !text[..text.find("## Runs").expect("a runs heading")].contains("no row reads"),
+        "only a run's section marks a verdict: {text}"
+    );
 }
 
 #[test]
