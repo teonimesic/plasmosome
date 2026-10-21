@@ -3797,6 +3797,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             "255.255.255.255/32",
             "::1/128",
             "2001:db8::1/128",
+            "2001:db8::8000/113",
             "10.0.0.0/8",
         ] {
             let cidr = Cidr::parse(text).unwrap_or_else(|error| panic!("{text}: {error:?}"));
@@ -3808,7 +3809,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             ("10.1.2.3/8", "10.0.0.0/8"),
             ("1.2.3.4/0", "0.0.0.0/0"),
             ("2001:db8::1/32", "2001:db8::/32"),
-            ("2001:db8::8000/113", "2001:db8::/113"),
+            ("2001:db8::4000/113", "2001:db8::/113"),
         ] {
             assert_eq!(
                 Cidr::parse(text),
