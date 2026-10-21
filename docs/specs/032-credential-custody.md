@@ -675,8 +675,9 @@ Each has a default. The first consumer's PR settles it, by editing this spec.
 
 These are proposed text. The PR that adds this spec edits no other document. Each change is
 applied by a later reviewed change to the document it amends, before any task that relies on it,
-and none starts while this spec is a draft. Each item quotes the words it replaces with their lines
-at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names that commit.
+and none starts while this spec is a draft. Each item quotes the words it replaces or follows,
+with their lines at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names
+that commit.
 
 **Spec 022** (words read at main `423f01a4`).
 
@@ -693,10 +694,10 @@ at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names 
   1 has no entries for Broker, UdsSocket or SessionFile, no guest IP routes and no credentials.
   Version 2 (spec 032) is version 1 plus an optional `credentials` array in each plasmid entry; an
   entry names where a value is kept, never the value. Adding any other kind is a new version."
-- §5, registry members: after "The operator file supplies only its ProxyMap and Mount entries,
-  keyed by its plasmid ID alone." (`022:239`), add "Spec 032's credential entries are the
-  exception: one serves a registry member only when its `publishers` lists the member's
-  publisher."
+- §5, registry members: replace "The operator file supplies only its ProxyMap and Mount entries,
+  keyed by its plasmid ID alone." (`022:239`) with "The operator file supplies its ProxyMap and
+  Mount entries, keyed by its plasmid ID alone, and spec 032's credential entries, which serve it
+  only when their `publishers` name its registry and publisher."
 - §6, other sections: replace "`[secrets]` with any reference, or `[model]` (whose `credential`
   defaults to `model-provider/key`): 103, `capability` `unsupported:credential:<ref>`. Credential
   custody is reserved in spec 001, and spec 017 keeps credential material out of recipes. Spec
@@ -707,6 +708,10 @@ at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names 
   `unsupported:credential:<ref>`. `[model]` (whose `credential` defaults to `model-provider/key`)
   is 103 `unsupported:credential:<ref>` (spec 032, question Q1). Spec 001's credential validation
   runs first and keeps its 108."
+- §6, the Mount source guard: after "once spec 023 is accepted, the directory of every
+  `cell_runtime` Artifact." (`022:338`), add "- the directory of every secret file the operator
+  file names or a held credential binding records, and of the instance authority's key (spec
+  032)." So a Mount whose source is, lies inside, or is an ancestor of one is 108.
 - §7: after "no reference back to the operator file." (`022:360`), add "A member's credential
   bindings (spec 032) are recorded on its attachment, beside its capabilities, and also carry no
   value."
@@ -723,8 +728,8 @@ at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names 
   a `[secrets]` reference attaches when an entry covers it and its mode is realized. `[model]`
   still refuses with 103, and spec 032's question Q1 carries the rest."
 - Question 5: after "including a `read_write` Mount (§5)." (`022:562-563`), add "Spec 032 does not
-  key credentials this way: a credential entry serves a registry member only when it lists the
-  member's publisher."
+  key credentials this way: a credential entry serves a registry member only when it names the
+  member's registry and publisher."
 - Acceptance item 15: in "`[commands]` is 103 `unsupported:commands:<id>`, `[secrets]`
   `unsupported:credential:<ref>`," (`022:711`), replace "`[secrets]`
   `unsupported:credential:<ref>`," with "an uncovered `[secrets]` reference
@@ -784,13 +789,22 @@ at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names 
   port carries a credential or a request for one (spec 032), and port 4041 stays unused. Custody
   state stays kernel-core: the journal records each credential binding, and only the cell's
   `membraned` reads a value, at apply."
+- §4.1, the configuration: after "in which `stop_deadline_ms` is optional. Recovery never reads
+  it." (`001:868-869`), add "The same configuration admits optional `credential_authority:
+  {certificate: Artifact, key, roots}`, spec 032's instance authority, in which `key` is a
+  canonical absolute path and `roots` an Artifact or null. Recovery never reads the key."
+- §4.1, `membrane.cell.observe`: in "Its assembled logical result is" (`001:918`), add
+  `credentials` after `gates`. After "its idle deadline and whether its gate has fenced (spec
+  028)." (`001:923`), add "`credentials` lists each spec 032 binding the supervisor holds, by
+  reference, `GrantId`, mode and surrogate, never a value or a source path. Like `gates`, it is
+  read fresh at each call."
 - §4.1: in "`membrane.effect.apply` params are" (`001:953`), add `credentials` after `lifetime`
   in the params object. After "work at the bound plus D (spec 028 section 4)." (`001:957`), add
   "`credentials` lists the spec 032 bindings the operation's holding serves, each with its
   reference, mode, header, scheme, path scope, source and surrogate, and never a value. It is `[]`
   for a holding that serves none."
 - §4.2: after "Workload edits of resolver configuration grant no bypass." (`001:1428-1429`), add
-  "At a target where an attachment binds a spec 032 `inject` credential, the host relay
+  "On a flow whose selected grant is the holding of a spec 032 `inject` binding, the host relay
   terminates the flow's TLS and attaches the value as spec 032 §5 says; every other flow stays a
   relayed stream."
 
@@ -809,6 +823,11 @@ at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names 
   (`008:442`), add `credentials: Vec<RecordedCredential>` after `provides: Vec<String>`. After
   "requirements with their providers, provided keys," (`008:455`), add "credential bindings with
   their surrogates,".
+- Recovery: after "Stray verified holdings still appear in exact drift;" (`008:497`), add "an
+  observed spec 032 credential binding matches the journaled binding of a standing holding by
+  reference, `GrantId` and surrogate, and one listed for a holding the journal does not record is
+  stray drift. A holding's withdrawal is complete only once the observation lists none of its
+  bindings."
 
 **Spec 017** (words read at main `423f01a4`).
 
@@ -817,9 +836,17 @@ at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names 
   separate." (`017:131`) with "Credential bindings belong to the attachment (spec 032, spec 008),
   never to a recipe."
 - ProxyMap adapter: after "Inspect effective relay rules, actual flow sockets and guest route/TUN
-  state." (`017:403`), add "At a target where an attachment binds a spec 032 `inject` credential,
-  the relay terminates the flow's TLS and attaches the value only to requests it sends to the
-  recorded destination; every other flow stays a stream it never reads."
+  state." (`017:403`), add "On a flow whose selected grant is the holding of a spec 032 `inject`
+  binding, the relay terminates the flow's TLS and attaches the value only to requests it writes
+  and sends to the recorded destination; every other flow stays a stream it never reads."
+
+**Spec 023** (words read at main `423f01a4`).
+
+- §4, the config record: in "has exactly these keys:" (`023:183`), replace "and
+  `boot_deadline_ms` (the remaining start budget at spawn)." (`023:184`) with
+  "`boot_deadline_ms` (the remaining start budget at spawn) and `credential_authority`: the paths
+  of spec 032's instance authority certificate and key, never the key, or null when the
+  controller's configuration has none."
 
 ## Open questions
 
