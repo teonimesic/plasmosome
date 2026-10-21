@@ -335,3 +335,47 @@ fn ambiguous(instances: &str, candidates: &[String], trusted_uid: u32) -> Client
 fn names(names: &[String]) -> Json {
     Json::Array(names.iter().cloned().map(Json::String).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    struct Home(Option<OsString>);
+
+    impl Env for Home {
+        fn home(&self) -> Option<OsString> {
+            self.0.clone()
+        }
+
+        fn kernel(&self) -> Option<OsString> {
+            None
+        }
+    }
+
+    fn judged(home: &str) -> Result<String, ClientCode> {
+        super::home(&Home(Some(home.into()))).map_err(|error| error.code())
+    }
+
+    #[test]
+    fn one_trailing_slash_is_dropped_and_root_is_a_home() {
+        assert_eq!(judged("/Users/me"), Ok("/Users/me".to_string()));
+        assert_eq!(judged("/Users/me/"), Ok("/Users/me".to_string()));
+        assert_eq!(judged("/"), Ok(String::new()));
+        for refused in [
+            "",
+            "//",
+            "/Users/me//",
+            "/Users//me",
+            "Users/me",
+            "./me",
+            "/Users/./me",
+            "/Users/me/.",
+            "/Users/../me",
+            "/Users/me/..",
+        ] {
+            assert_eq!(judged(refused), Err(ClientCode::InvalidHome), "{refused:?}");
+        }
+    }
+}
