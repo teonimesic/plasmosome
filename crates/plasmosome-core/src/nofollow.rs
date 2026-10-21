@@ -182,6 +182,32 @@ impl Walk {
         self.reach(Last::File, judge)
     }
 
+    /// Opens every component, the last as a directory, without following a symlink and without
+    /// judging any directory: spec 022 §3 rule 1's walk alone. It returns the identity of the start
+    /// and of every directory below it, ending with the last. A symlink anywhere is `Symlink`, a
+    /// missing name `Missing`, a component that is not a directory `NotDirectory`, and a
+    /// directory the effective UID cannot search `Io`. It shows which directories a path passes;
+    /// never trust what it reaches.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "plasmosome-0xy2's resolution is the first caller")
+    )]
+    pub(crate) fn identities(&self) -> Result<Vec<DirIdentity>, WalkRefusal> {
+        let mut at = self.start_path.clone();
+        let mut chain = vec![stat_fd(&self.start, &at)?.identity()];
+        let mut held: Option<OwnedFd> = None;
+        for component in &self.components {
+            let parent = held.as_ref().unwrap_or(&self.start);
+            at.push(OsStr::from_bytes(component.as_bytes()));
+            let next = open_child(parent, component, &at, SEARCH_ONLY, |_| {
+                Ok::<(), WalkRefusal>(())
+            })?;
+            chain.push(stat_fd(&next, &at)?.identity());
+            held = Some(next);
+        }
+        Ok(chain)
+    }
+
     fn reach<E>(
         &self,
         last: Last,

@@ -1,3 +1,166 @@
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use plasmosome_backend::CellId;
+
+use crate::nofollow::{DirIdentity, Walk, WalkRefusal};
+use crate::operator::trusted::{TrustCheck, TrustRefusal, TrustedFile};
+
+/// Who has a Mount source: a cell of this instance that holds it or has a pending operation for
+/// it, or the operator file, which declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Holder {
+    Cell(CellId),
+    Declared,
+}
+
+impl fmt::Display for Holder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Holder::Cell(cell) => write!(f, "{cell} holds"),
+            Holder::Declared => f.write_str("the operator file declares"),
+        }
+    }
+}
+
+/// A Mount source spec 022 §3 rule 5 keeps trusted files out of: the path recorded at attach or
+/// declared, and who has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Source {
+    pub(crate) holder: Holder,
+    pub(crate) path: PathBuf,
+}
+
+/// The macOS data volume and its identity. A firmlink such as `/Users` opens one of its
+/// directories, so that directory has a second parent, the data volume, that no walk from "/"
+/// through the firmlink passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DataVolume {
+    pub(crate) path: PathBuf,
+    pub(crate) identity: DirIdentity,
+}
+
+#[cfg(target_os = "macos")]
+const DATA_VOLUME: Option<&str> = Some("/System/Volumes/Data");
+
+#[cfg(target_os = "linux")]
+const DATA_VOLUME: Option<&str> = None;
+
+const FIRMLINK: &str =
+    "where a firmlink gives a directory a second parent that no walk from / sees";
+
+/// Opens `/System/Volumes/Data` with the walk of spec 022 §3 rule 1. It is `Ok(None)` on Linux,
+/// which has no firmlinks, and when that path is missing. Any other refusal is `Err`, which the
+/// caller must refuse on, never read as no data volume.
+pub(crate) fn data_volume() -> Result<Option<DataVolume>, WalkRefusal> {
+    match DATA_VOLUME {
+        Some(path) => volume_at(Path::new(path), Walk::from_root),
+        None => Ok(None),
+    }
+}
+
+fn volume_at(
+    path: &Path,
+    walk: impl Fn(&Path) -> Result<Walk, WalkRefusal>,
+) -> Result<Option<DataVolume>, WalkRefusal> {
+    match walk(path).and_then(|walk| walk.identities()) {
+        Ok(chain) => Ok(chain.last().map(|&identity| DataVolume {
+            path: path.to_path_buf(),
+            identity,
+        })),
+        Err(WalkRefusal::Missing { .. }) => Ok(None),
+        Err(refusal) => Err(refusal),
+    }
+}
+
+fn unopened_volume(refusal: &WalkRefusal) -> String {
+    format!("the data volume does not open, so a firmlink cannot be ruled out: {refusal}")
+}
+
+/// Every held, pending and declared Mount source, each opened once with the walk of spec 022 §3
+/// rule 1 alone, and the data volume. Build it once per resolving request, after the operator file
+/// is read, and check every trusted file the request reads against it.
+#[derive(Debug)]
+pub(crate) struct Probes {
+    probed: Vec<(Source, Result<Vec<DirIdentity>, WalkRefusal>)>,
+    data_volume: Result<Option<DataVolume>, WalkRefusal>,
+}
+
+impl Probes {
+    /// Opens each of `sources` from "/" without following a symlink or judging any directory, and
+    /// keeps its identity or why it did not open. It reads the data volume once. It never fails:
+    /// [`Probes::check`] decides what a source that did not open means.
+    pub(crate) fn probe(sources: &[Source]) -> Probes {
+        Self::probe_with(sources, Walk::from_root, data_volume())
+    }
+
+    fn probe_with(
+        sources: &[Source],
+        walk: impl Fn(&Path) -> Result<Walk, WalkRefusal>,
+        data_volume: Result<Option<DataVolume>, WalkRefusal>,
+    ) -> Probes {
+        let probed = sources
+            .iter()
+            .map(|source| {
+                let found = walk(&source.path).and_then(|walk| walk.identities());
+                (source.clone(), found)
+            })
+            .collect();
+        Probes {
+            probed,
+            data_volume,
+        }
+    }
+
+    /// Refuses `file` with `inside_mount_source` when its directory is, or lies below, a source
+    /// that opened, whoever has it; when a source the cell `resolving_for` holds did not open; and
+    /// when the file is reached through the data volume or the data volume did not open. Pass the
+    /// request's cell, or `None` for a new cell. A declared source that did not open never
+    /// refuses.
+    pub(crate) fn check(
+        &self,
+        file: &TrustedFile,
+        resolving_for: Option<&CellId>,
+    ) -> Result<(), TrustRefusal> {
+        let shown = file.path().display();
+        let refuse = |reason: String| {
+            Err(TrustRefusal {
+                path: file.path().to_path_buf(),
+                check: TrustCheck::InsideMountSource,
+                reason,
+            })
+        };
+        match &self.data_volume {
+            Err(refusal) => return refuse(unopened_volume(refusal)),
+            Ok(Some(volume)) if file.chain().contains(&volume.identity) => {
+                let volume = volume.path.display();
+                return refuse(format!(
+                    "{shown} is reached through the data volume {volume}, {FIRMLINK}"
+                ));
+            }
+            Ok(_) => {}
+        }
+        for (source, found) in &self.probed {
+            let (path, holder) = (source.path.display(), &source.holder);
+            match found {
+                Ok(chain) if chain.last().is_some_and(|dir| file.chain().contains(dir)) => {
+                    return refuse(format!(
+                        "{shown} lies inside mount source {path}, which {holder}"
+                    ));
+                }
+                Err(refusal) if matches!(holder, Holder::Cell(cell) if Some(cell) == resolving_for) =>
+                {
+                    return refuse(format!(
+                        "mount source {path}, which {holder}, does not open: {refusal}"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

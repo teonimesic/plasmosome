@@ -24,11 +24,12 @@ pub enum TrustCheck {
     Links,
     Mode,
     Size,
+    InsideMountSource,
 }
 
 impl TrustCheck {
     /// The check's name in spec 022: `path`, `ancestor`, `parent`, `not_regular`, `owner`,
-    /// `links`, `mode` or `size`.
+    /// `links`, `mode`, `size` or `inside_mount_source`.
     pub fn as_str(self) -> &'static str {
         match self {
             TrustCheck::Path => "path",
@@ -39,6 +40,7 @@ impl TrustCheck {
             TrustCheck::Links => "links",
             TrustCheck::Mode => "mode",
             TrustCheck::Size => "size",
+            TrustCheck::InsideMountSource => "inside_mount_source",
         }
     }
 }
@@ -96,7 +98,7 @@ impl TrustedFile {
         Self::from_walk(walk)
     }
 
-    fn from_walk(walk: Walk) -> Result<TrustedFile, TrustRefusal> {
+    pub(crate) fn from_walk(walk: Walk) -> Result<TrustedFile, TrustRefusal> {
         let path = walk.path();
         let euid = effective_uid();
         let opened = walk
