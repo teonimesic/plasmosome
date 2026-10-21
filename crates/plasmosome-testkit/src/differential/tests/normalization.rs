@@ -222,6 +222,14 @@ fn time_placeholders_keep_the_order_of_the_times() {
                 &Verdict::Pass,
             ),
             ([json!([u64::MAX, i64::MIN]), json!([0, -1])], &fail),
+            (
+                [
+                    json!([i64::MIN + 1, i64::MIN]),
+                    json!([i64::MIN + 3, i64::MIN + 2]),
+                ],
+                &fail,
+            ),
+            ([json!([-0.5, 0.25]), json!([-0.25, 0.5])], &Verdict::Pass),
         ] {
             let mut runs = runs();
             for (run, times) in cell.iter().enumerate() {
@@ -350,6 +358,7 @@ fn a_time_or_duration_list_that_mixes_whole_numbers_and_fractions_is_refused() {
             (json!([5, 5.0]), Lane::Open, 1),
             (mixed_times(9, 24), Lane::Absent, 0),
             (mixed_times(0, 1_000), Lane::Cell, 1),
+            (json!([u64::MAX, 0.5]), Lane::Absent, 1),
         ] {
             let mut runs = runs();
             let fields = &mut observation(&mut runs, lane, run, "op-times").fields;
@@ -425,6 +434,7 @@ fn a_boot_id_rule_holds_only_a_uuid() {
             json!(TOKEN_A),
             json!("6e1f3a0c9b2d4c5e8f7a1b2c3d4e5f60"),
             json!("6e1f3a0c-9b2d-4c5e-8f7a-1b2c3d4e5f6g"),
+            json!("6e1f3a0g-9b2d-4c5e-8f7a-1b2c3d4e5f60"),
             json!("6e1f3a0c-9b2d-4c5e-8f7a1-b2c3d4e5f60"),
             json!("6e1f3a0c-9b2d-4c5e-8f7a-1b2c3d4e5f60-0"),
             json!(4_242),
