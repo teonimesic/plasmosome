@@ -33,11 +33,12 @@ resident to scan and drop, and 779 MB to scan and write either form.
 consumes the line and its newline and nothing more, so whatever the daemon sent after them stays
 unread in the reader. It reads through `take` and `read_until`, so it reads and keeps at most
 `MAX_REPLY_BYTES` plus one byte. When that last byte is not the newline, the line is `TooLarge` and
-nothing more is read. The end of input before a newline is `Closed`, whatever came before it. A
-read that reports `WouldBlock` or `TimedOut`, as a socket's read timeout does, is `TimedOut`. Any
-other failed read is `Transport`, with its errno when it has one. An interrupted read is retried.
-`read_reply` has no clock: each read waits as long as the reader lets it. So a caller with a
-deadline gives each read only the time left, not one timeout for the whole line.
+nothing more is read. The end of input before a newline is `Closed` when it comes within the bound,
+and `TooLarge` when more than `MAX_REPLY_BYTES` came before it. A read that reports `WouldBlock` or
+`TimedOut`, as a socket's read timeout does, is `TimedOut`. Any other failed read is `Transport`,
+with its errno when it has one. An interrupted read is retried. `read_reply` has no clock: each read
+waits as long as the reader lets it. So a caller with a deadline gives each read only the time left,
+not one timeout for the whole line.
 
 `reply::judge_reply` applies spec 025 §4's reply rules to that line, for a request sent with
 `id` 1. A valid reply is an object with `id` 1 and exactly one of `result` and `error`. `result`

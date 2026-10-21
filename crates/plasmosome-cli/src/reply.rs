@@ -9,7 +9,8 @@ const ID_IS_NOT_ONE: &str = "the reply's id is not 1";
 /// Why [`read_reply`] returned no line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadFailure {
-    /// The input ended before a newline, whatever came before it.
+    /// The input ended, within the bound, before a newline. When more than [`MAX_REPLY_BYTES`]
+    /// came before the end, the failure is [`ReadFailure::TooLarge`] instead.
     Closed,
     /// The line passed [`MAX_REPLY_BYTES`] before its newline.
     TooLarge,
