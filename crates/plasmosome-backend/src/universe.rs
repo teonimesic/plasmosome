@@ -1559,6 +1559,60 @@ mod tests {
     }
 
     #[test]
+    fn canonical_equivalence_tells_two_holdings_apart_when_any_one_field_differs() {
+        for class in GENERATED_CLASSES {
+            let names = generated_names(class);
+            for mask in 0..(1u32 << names.len()) {
+                let x = holding(class, mask);
+                let x2 = OsObject {
+                    id: GrantId::new(),
+                    ..x.clone()
+                };
+                let pair = state_of(&[x.clone(), x2.clone()]);
+                let reissued = state_of(&[
+                    OsObject {
+                        id: GrantId::new(),
+                        ..x.clone()
+                    },
+                    OsObject {
+                        id: GrantId::new(),
+                        ..x.clone()
+                    },
+                ]);
+                assert!(
+                    pair.canonically_equivalent(&reissued),
+                    "new grant ids alone changed the canonical account of {x:?}"
+                );
+                for (bit, field) in names.iter().enumerate() {
+                    let y = holding(class, mask ^ (1 << bit));
+                    for mixed in [
+                        state_of(&[
+                            OsObject {
+                                id: x.id,
+                                ..y.clone()
+                            },
+                            x2.clone(),
+                        ]),
+                        state_of(&[
+                            x.clone(),
+                            OsObject {
+                                id: x2.id,
+                                ..y.clone()
+                            },
+                        ]),
+                    ] {
+                        assert!(
+                            !pair.canonically_equivalent(&mixed)
+                                && !mixed.canonically_equivalent(&pair),
+                            "two holdings at one key hid a changed {field} of {class:?} at {x:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn residue_report_names_exact_identified_objects() {
         let leaked = object("github", session_file("/cache/github-tokens"));
         let mut after = OsState::new();
