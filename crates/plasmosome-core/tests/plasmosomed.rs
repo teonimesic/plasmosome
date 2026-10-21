@@ -178,7 +178,15 @@ fn write_config(path: &Path, body: &Value) {
 }
 
 fn addressable(daemon: &mut Daemon, socket: &Path) -> BufReader<UnixStream> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    addressable_within(daemon, socket, Duration::from_secs(5))
+}
+
+fn addressable_within(
+    daemon: &mut Daemon,
+    socket: &Path,
+    budget: Duration,
+) -> BufReader<UnixStream> {
+    let deadline = Instant::now() + budget;
     loop {
         if let Ok(stream) = UnixStream::connect(socket) {
             stream
@@ -201,8 +209,8 @@ fn addressable(daemon: &mut Daemon, socket: &Path) -> BufReader<UnixStream> {
                 let _ = pipe.read_to_string(&mut stderr);
             }
             panic!(
-                "plasmosomed is addressable on {} within five seconds; it ended with {status}, \
-                 and its stderr was:\n{stderr}",
+                "plasmosomed is addressable on {} within {budget:?}; it ended with {status}, and \
+                 its stderr was:\n{stderr}",
                 socket.display()
             );
         }
