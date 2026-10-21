@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -13,8 +13,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use plasmosome_core::private_socket::{
-    Accepted, EntryKind, ListedEntry, PrivateDir, PrivateListener, PrivateSocketError, SocketEntry,
-    check_peer_uid, check_private_path, effective_uid, list_trusted_dir, peer_uid,
+    Accepted, EntryKind, LISTEN_BACKLOG, ListedEntry, PrivateDir, PrivateListener,
+    PrivateSocketError, RemoveOutcome, SocketEntry, check_peer_uid, check_private_path,
+    effective_uid, list_trusted_dir, peer_uid,
 };
 use tempfile::TempDir;
 
@@ -911,6 +912,192 @@ fn drop_removes_only_the_bound_socket() {
     let other = entry_of(&path);
     drop(listener);
     assert_eq!(entry_of(&path), other);
+}
+
+#[test]
+fn close_reports_what_it_found_at_the_name() {
+    let root = private_root();
+    let path = root.path().join("sock");
+    let saved = root.path().join("saved");
+    let is_socket =
+        |at: &Path| fs::symlink_metadata(at).is_ok_and(|found| found.file_type().is_socket());
+
+    let listener = bind(&root, "sock");
+    assert_eq!(listener.close(), RemoveOutcome::Removed);
+    assert!(
+        fs::symlink_metadata(&path).is_err(),
+        "the bound socket is gone"
+    );
+
+    let listener = bind(&root, "sock");
+    fs::rename(&path, &saved).expect("rename");
+    fs::write(&path, b"replacement").expect("write");
+    assert_eq!(listener.close(), RemoveOutcome::LeftReplacement);
+    assert_eq!(fs::read(&path).expect("read"), b"replacement");
+    assert!(is_socket(&saved), "the renamed socket stays");
+    fs::remove_file(&path).expect("unlink");
+    fs::remove_file(&saved).expect("unlink");
+
+    let listener = bind(&root, "sock");
+    fs::rename(&path, &saved).expect("rename");
+    drop(UnixListener::bind(&path).expect("bind another socket"));
+    let other = entry_of(&path);
+    assert_eq!(listener.close(), RemoveOutcome::LeftReplacement);
+    assert_eq!(entry_of(&path), other, "another socket at the name stays");
+    fs::remove_file(&path).expect("unlink");
+    fs::remove_file(&saved).expect("unlink");
+
+    let listener = bind(&root, "sock");
+    fs::rename(&path, &saved).expect("rename");
+    assert_eq!(listener.close(), RemoveOutcome::AlreadyGone);
+    assert!(is_socket(&saved), "the renamed socket stays");
+}
+
+#[test]
+fn close_reports_an_unlink_the_directory_refuses() {
+    let root = private_root();
+    let path = root.path().join("sock");
+    let listener = bind(&root, "sock");
+    set_mode(root.path(), 0o500);
+    let outcome = listener.close();
+    set_mode(root.path(), 0o700);
+    if effective_uid() == 0 {
+        assert_eq!(outcome, RemoveOutcome::Removed, "root ignores the mode");
+    } else {
+        assert_eq!(
+            outcome,
+            RemoveOutcome::Failed {
+                errno: libc::EACCES
+            }
+        );
+        assert!(
+            fs::symlink_metadata(&path).is_ok_and(|found| found.file_type().is_socket()),
+            "the socket stays"
+        );
+    }
+}
+
+#[test]
+fn close_reports_a_name_the_directory_will_not_let_it_inspect() {
+    let root = private_root();
+    let path = root.path().join("sock");
+    let listener = bind(&root, "sock");
+    set_mode(root.path(), 0o600);
+    let outcome = listener.close();
+    set_mode(root.path(), 0o700);
+    if effective_uid() == 0 {
+        assert_eq!(outcome, RemoveOutcome::Removed, "root ignores the mode");
+    } else {
+        assert_eq!(
+            outcome,
+            RemoveOutcome::Failed {
+                errno: libc::EACCES
+            },
+            "the name could not be looked up, so close cannot say it is gone"
+        );
+        assert!(
+            fs::symlink_metadata(&path).is_ok_and(|found| found.file_type().is_socket()),
+            "the socket stays"
+        );
+    }
+}
+
+#[allow(unsafe_code)]
+fn connected(at: &Path) -> Result<(), std::io::ErrorKind> {
+    // SAFETY: sockaddr_un is a plain C struct, for which all zeroes is a valid value.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let name = at.as_os_str().as_bytes();
+    assert!(name.len() < address.sun_path.len(), "{} fits", at.display());
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(name) {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: socket takes no pointer.
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(raw >= 0, "socket: {}", std::io::Error::last_os_error());
+    // SAFETY: socket returned this descriptor just above, and nothing else owns it.
+    let client = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: fcntl with F_SETFL takes an integer flag set, not a pointer, and `client` keeps
+    // its descriptor open for the call.
+    let set = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+    assert_eq!(set, 0, "fcntl: {}", std::io::Error::last_os_error());
+    let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    // SAFETY: connect reads `length` bytes of `address`, a live local, and `client` keeps its
+    // descriptor open for the call.
+    let outcome = unsafe { libc::connect(client.as_raw_fd(), (&raw const address).cast(), length) };
+    if outcome == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().kind())
+    }
+}
+
+const RECONNECT_WAITS_MS: [u64; 12] = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+
+const CONNECTS_PER_LISTENER: usize = 2 + RECONNECT_WAITS_MS.len();
+
+const _: () = assert!(
+    CONNECTS_PER_LISTENER < LISTEN_BACKLOG as usize,
+    "the close test must stay under the backlog: on macOS a full queue refuses a connect as a \
+     closed listener does"
+);
+
+fn refused_once_spawns_in_flight_exec(at: &Path) -> Result<(), std::io::ErrorKind> {
+    let mut found = connected(at);
+    for wait_ms in RECONNECT_WAITS_MS {
+        if found.is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(wait_ms));
+        found = connected(at);
+    }
+    found
+}
+
+#[test]
+fn close_and_drop_stop_the_socket_listening_under_a_name_they_no_longer_hold() {
+    let root = private_root();
+    let path = root.path().join("sock");
+    let still_listening = "the renamed socket still takes connections 4 s later, longer than a \
+                           child spawned before the close takes to exec and drop its copy";
+
+    let closed = root.path().join("closed");
+    let listener = bind(&root, "sock");
+    fs::rename(&path, &closed).expect("rename");
+    assert_eq!(connected(&closed), Ok(()), "the renamed socket listens");
+    assert_eq!(listener.close(), RemoveOutcome::AlreadyGone);
+    assert_eq!(
+        refused_once_spawns_in_flight_exec(&closed),
+        Err(std::io::ErrorKind::ConnectionRefused),
+        "after close, {still_listening}"
+    );
+
+    let dropped = root.path().join("dropped");
+    let listener = bind(&root, "sock");
+    fs::rename(&path, &dropped).expect("rename");
+    assert_eq!(connected(&dropped), Ok(()), "the renamed socket listens");
+    drop(listener);
+    assert_eq!(
+        refused_once_spawns_in_flight_exec(&dropped),
+        Err(std::io::ErrorKind::ConnectionRefused),
+        "after drop, {still_listening}"
+    );
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn the_listening_descriptor_is_close_on_exec() {
+    let root = private_root();
+    let listener = bind(&root, "sock");
+    // SAFETY: fcntl with F_GETFD takes no pointer, and `listener` keeps its descriptor open for
+    // the call.
+    let flags = unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0, "fcntl: {}", std::io::Error::last_os_error());
+    assert_ne!(
+        flags & libc::FD_CLOEXEC,
+        0,
+        "a child that execs does not inherit the listener"
+    );
 }
 
 #[test]
