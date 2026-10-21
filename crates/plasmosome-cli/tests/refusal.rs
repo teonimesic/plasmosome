@@ -488,13 +488,18 @@ fn the_trusted_uid_is_the_one_passed_in() {
             found: 65,
         },
     ] {
-        let refusal = map_refusal(&error, Path::new(SOCKET), PathOrigin::SocketFlag, passed);
-        assert_eq!(
-            field(&refusal, "uid"),
-            Some(&number(passed)),
-            "{}'s uid",
-            variant_name(&error)
-        );
+        for (origin, from) in [
+            (PathOrigin::SocketFlag, "--socket"),
+            (PathOrigin::Home, "Home"),
+        ] {
+            let refusal = map_refusal(&error, Path::new(SOCKET), origin, passed);
+            assert_eq!(
+                field(&refusal, "uid"),
+                Some(&number(passed)),
+                "{}'s uid from {from}",
+                variant_name(&error)
+            );
+        }
     }
 }
 
