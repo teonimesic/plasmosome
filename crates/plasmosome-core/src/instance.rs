@@ -878,8 +878,8 @@ impl CellDir {
     /// close-on-exec. `flock(LOCK_EX | LOCK_NB)` is taken on it, it is renamed to
     /// `supervisor.lock` without replacing anything, and this directory is synced. With one call
     /// at a time, a probe sees no entry and then a held lock, never a free one. The returned
-    /// [`SupervisorLock`] holds the lock. On Linux the rename needs a filesystem with `RENAME_NOREPLACE`; on one without it the
-    /// call is an `Io` error.
+    /// [`SupervisorLock`] holds the lock. On Linux the rename needs a filesystem with
+    /// `RENAME_NOREPLACE`; on one without it the call is an `Io` error.
     ///
     /// Any `supervisor.lock.tmp` left by an earlier call is removed first; a symlink there is
     /// removed, not followed. Every failure before the rename removes the temporary. An existing
@@ -893,10 +893,10 @@ impl CellDir {
     /// the second call's file into place. So after the rename the call reads the entry named
     /// `supervisor.lock`, without following a symlink, and returns the lock only when that entry
     /// is the file it holds. Otherwise it is `LockNotNamed`, naming `supervisor.lock` in this
-    /// cell, no lock is returned, and the entry is left as it is. `Ok` therefore always means
-    /// that `supervisor.lock` names the held file. When calls race, any of them can fail, and a
-    /// file no call returned can be left at `supervisor.lock`; a probe reads it `Free` once
-    /// nothing holds it.
+    /// cell, no lock is returned, and the entry is left as it is. If the name is gone by then, the
+    /// error is `Io` naming `supervisor.lock`. `Ok` therefore always means that `supervisor.lock`
+    /// names the held file. When calls race, any of them can fail, and a file no call returned can
+    /// be left at `supervisor.lock`; a probe reads it `Free` once nothing holds it.
     ///
     /// A directory at `supervisor.lock.tmp` cannot be unlinked, so every call is then an `Io`
     /// error naming it, while a probe reads `Missing`. Only a writer under the root can plant
@@ -911,6 +911,8 @@ impl CellDir {
                 return Err(error);
             }
         };
+        #[cfg(test)]
+        tests::after_naming_the_lock();
         self.check_lock_named(&file, &path)?;
         self.sync_dir()?;
         Ok(SupervisorLock { file, path })
@@ -5056,6 +5058,7 @@ mod tests {
     thread_local! {
         static BETWEEN_LISTINGS: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static BEFORE_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
+        static AFTER_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static ON_SYNC: RefCell<Option<SyncHook>> = const { RefCell::new(None) };
     }
 
@@ -5069,6 +5072,18 @@ mod tests {
 
     fn on_naming_the_lock(work: impl FnMut() + 'static) {
         BEFORE_NAMING_THE_LOCK.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
+    }
+
+    pub(super) fn after_naming_the_lock() {
+        AFTER_NAMING_THE_LOCK.with(|slot| {
+            if let Some(work) = slot.borrow_mut().as_mut() {
+                work();
+            }
+        });
+    }
+
+    fn once_the_lock_is_named(work: impl FnMut() + 'static) {
+        AFTER_NAMING_THE_LOCK.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
     }
 
     pub(super) fn between_listings() {
@@ -5864,6 +5879,23 @@ mod tests {
         );
         assert!(!exists(&lock_temporary_path(&root)));
         drop(free_once_released(&dir));
+    }
+
+    #[test]
+    fn a_lock_whose_name_is_removed_before_the_check_returns_no_lock() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let named = lock_path(&root);
+        once_the_lock_is_named(move || {
+            fs::remove_file(&named).expect("the lock's name is removed");
+        });
+        expect_match!(dir.create_supervisor_lock(), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, lock_path(&root));
+            assert_eq!(source.kind(), io::ErrorKind::NotFound);
+        });
+        assert!(!exists(&lock_path(&root)));
+        assert!(!exists(&lock_temporary_path(&root)));
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Missing) => ());
     }
 
     #[test]
