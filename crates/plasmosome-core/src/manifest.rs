@@ -1211,6 +1211,9 @@ fn string_list(value: Option<&toml::Value>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    const PROVIDER: &str =
+        "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
+
     fn field_fix(source: &str, expected_field: &str) -> String {
         let ManifestError::Field {
             plasmid,
@@ -1245,8 +1248,6 @@ mod tests {
 
     #[test]
     fn malformed_tool_declarations_are_refused_instead_of_dropped() {
-        let base =
-            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
         for (declaration, field) in [
             ("provides = false", "provides"),
             (
@@ -1266,12 +1267,12 @@ mod tests {
                 "provides.\"github:tools\".tools",
             ),
         ] {
-            let fix = field_fix(&format!("{base}{declaration}"), field);
+            let fix = field_fix(&format!("{PROVIDER}{declaration}"), field);
             let repair: toml::Value = fix.parse().unwrap();
             assert!(repair["provides"].is_table());
         }
         let fix = field_fix(
-            &format!("{base}[provides.\"github:tools\"]\ntools = [\"pr.read\"]"),
+            &format!("{PROVIDER}[provides.\"github:tools\"]\ntools = [\"pr.read\"]"),
             "provides.\"github:tools\".tools",
         );
         let repair: toml::Value = fix.parse().unwrap();
@@ -1280,11 +1281,9 @@ mod tests {
 
     #[test]
     fn tool_description_refusals_quote_the_exact_key_and_repair_entry() {
-        let base =
-            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
         for description in ["42", "\"\"", "\" \\t \""] {
             let source = format!(
-                "{base}[provides.\"git\\\"hub:tools\".tools]\n\"pr.\\\"read\" = {description}"
+                "{PROVIDER}[provides.\"git\\\"hub:tools\".tools]\n\"pr.\\\"read\" = {description}"
             );
             let fix = field_fix(
                 &source,
@@ -1298,8 +1297,6 @@ mod tests {
 
     #[test]
     fn diagnostic_paths_and_repairs_preserve_special_binding_and_tool_keys() {
-        let base =
-            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
         for (name, quoted) in [
             ("line\nname", "\"line\\nname\""),
             ("both'\"quotes", "\"both'\\\"quotes\""),
@@ -1323,7 +1320,7 @@ mod tests {
                     "\"Read the title.\"",
                 ),
             ] {
-                let source = format!("{base}{declaration}");
+                let source = format!("{PROVIDER}{declaration}");
                 let ManifestError::Field {
                     plasmid,
                     field,
@@ -1338,7 +1335,7 @@ mod tests {
                 let expected_path: toml::Value = format!("{expected_path} = true").parse().unwrap();
                 assert_eq!(actual_path, expected_path);
                 let repaired_path =
-                    PlasmidManifest::parse(&format!("{base}{field} = {replacement}")).unwrap();
+                    PlasmidManifest::parse(&format!("{PROVIDER}{field} = {replacement}")).unwrap();
                 let repair: toml::Value = fix.parse().unwrap();
                 if declaration.ends_with("false") {
                     let bindings = repair["provides"].as_table().unwrap();
@@ -1356,7 +1353,7 @@ mod tests {
                                 description: "Read the title.".into(),
                             }]
                         );
-                        format!("{base}[provides.{quoted}.tools]\n{fix}")
+                        format!("{PROVIDER}[provides.{quoted}.tools]\n{fix}")
                     } else {
                         assert_eq!(repair["provides"].as_table().unwrap().len(), 1);
                         assert_eq!(
@@ -1371,7 +1368,7 @@ mod tests {
                                 .is_empty()
                         );
                         assert!(repaired_path.provides_tools.is_empty());
-                        format!("{base}{fix}")
+                        format!("{PROVIDER}{fix}")
                     };
                     let repaired = PlasmidManifest::parse(&repaired_source).unwrap();
                     assert_eq!(repaired.provides_tools.len(), 1);
@@ -1384,20 +1381,18 @@ mod tests {
 
     #[test]
     fn an_empty_tool_key_is_quoted_in_its_path() {
-        let source = "id = \"github-pr\"\ndescription = \"Read pull requests.\"\n\
-                      impl.wasm = \"pr.wasm\"\n[provides.\"a:tools\".tools]\n\"\" = 42";
-        field_fix(source, "provides.\"a:tools\".tools.\"\"");
+        let source = format!("{PROVIDER}[provides.\"a:tools\".tools]\n\"\" = 42");
+        field_fix(&source, "provides.\"a:tools\".tools.\"\"");
     }
 
     #[test]
     fn blank_binding_keys_are_refused_one_at_a_time() {
-        let mut declaration = "id = \"github-pr\"\ndescription = \"Read pull requests.\"\n\
-                               impl.wasm = \"pr.wasm\"\n\
-                               [provides.\"a:tools\".tools]\n\"a.read\" = \"Read a.\"\n\
-                               [provides.\"\".tools]\n\"b.read\" = \"Read b.\"\n\
-                               [provides.\" \".tools]\n\"c.read\" = \"Read c.\"\n\
-                               [provides.\"\\t\".tools]\n\"d.read\" = \"Read d.\"\n"
-            .to_string();
+        let mut declaration = format!(
+            "{PROVIDER}[provides.\"a:tools\".tools]\n\"a.read\" = \"Read a.\"\n\
+             [provides.\"\".tools]\n\"b.read\" = \"Read b.\"\n\
+             [provides.\" \".tools]\n\"c.read\" = \"Read c.\"\n\
+             [provides.\"\\t\".tools]\n\"d.read\" = \"Read d.\"\n"
+        );
         let blank = [String::new(), " ".to_string(), raw(0x09).to_string()];
         let fixture: toml::Table = toml::from_str(&declaration).unwrap();
         let bindings: std::collections::BTreeSet<String> = fixture["provides"]
@@ -1441,8 +1436,6 @@ mod tests {
 
     #[test]
     fn a_blank_binding_key_is_refused_before_anything_inside_it() {
-        let base =
-            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
         let ideographic = format!("\"{}\"", concat!("\\", "u3000"));
         for (key, decoded) in [
             ("\"\"".to_string(), String::new()),
@@ -1458,7 +1451,7 @@ mod tests {
                 format!("[provides]\n{key} = {{ tools = {{}} }}"),
                 format!("[provides]\n{key} = {{ tools = {{ \"x.read\" = 42 }} }}"),
             ] {
-                let source = format!("{base}{tail}");
+                let source = format!("{PROVIDER}{tail}");
                 let fixture: toml::Table = toml::from_str(&source).unwrap();
                 let bindings: Vec<&String> =
                     fixture["provides"].as_table().unwrap().keys().collect();
