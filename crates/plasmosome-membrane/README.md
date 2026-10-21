@@ -22,7 +22,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
 
 ## Use
 
@@ -315,8 +315,47 @@ relative path can add to where the helper's loader looks for libraries. They do 
 path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
 names in the qualified libkrun. The launch checks no artifact either: the cell, plasmosome-7em,
 which is not built yet, must verify the helper and its libraries with `runtime::artifacts` before it
-prepares the launch. That checks only the files the recipe lists. plasmosome-vev, also not built,
-audits the helper's Mach-O load names against those verified libraries.
+prepares the launch. That checks only the files the recipe lists. `runtime::closure` audits the
+names the helper and those libraries load; see the next section.
+
+## Auditing the helper's load names
+
+Spec 001 §4.2 asks that every library the helper loads be a listed, verified library or part of
+Darwin's sealed system, and that each be found without any search. `runtime::closure::audit_closure`
+checks that before exec, from the files alone. Pass it the verified helper and the verified
+libraries in recipe order. It reads each through its verified descriptor, at most 512 MiB, and
+reads the load commands of the 64-bit image for the host CPU: a thin file, or the one member of a
+fat file for that CPU. A fat file with two members for the host CPU is refused, because the audit
+cannot know which one dyld would pick.
+
+Every name in an `LC_LOAD_DYLIB`, `LC_LOAD_WEAK_DYLIB`, `LC_REEXPORT_DYLIB`, `LC_LAZY_LOAD_DYLIB`
+or `LC_LOAD_UPWARD_DYLIB` command, in the helper and in each library, must resolve by rule:
+
+- `@executable_path/` joins the helper's directory, and `@loader_path/` the directory of the image
+  that holds the command. The join is lexical, and the result must equal a listed path exactly.
+- An absolute name that equals a listed path is that library.
+- Any other absolute name must be clean ASCII under `/usr/lib/` or `/System/Library/`, and the
+  deepest part of it that exists must be on the read-only volume mounted at `/`; a symlink that
+  leads nowhere is refused. The second check is there because those prefixes are not all sealed.
+  On macOS 26.6.2, `/usr/share/firmlinks` puts seven directories under `/System/Library` on the
+  data volume, and sealed symlinks such as `/usr/lib/cron` lead to it too.
+- `@rpath/` names, names with no leading `/` or `@`, and any other `@` name are refused: dyld finds
+  them by searching.
+
+Any `LC_RPATH` is refused, because dyld also searches it for a leaf name passed to `dlopen`. So is
+`LC_DYLD_ENVIRONMENT`, and a dynamic linker other than `/usr/lib/dyld`. A listed library that
+nothing names is allowed. The evidence records each resolution, each system name relied on, and
+`kern.osversion` and `kern.osproductversion`, which name the sealed system those names come from.
+Off macOS the audit refuses `Unsupported`.
+
+The audit sees load commands only. It does not see the images the running helper loads
+(`ImageInventory::NotIndependentlyObserved`, owner gate O-5 of `plasmosome-qep`), nor a name that
+code passes to `dlopen` (`RuntimeLoads::NotAudited`). The pinned libkrun's `krun_create_ctx` loads
+`libkrunfw.5.dylib` that way on every context. Measured on macOS 26.6.2 on 2026-10-21, with the
+working directory `/` and an empty environment, dyld looked for that leaf name relative to the
+working directory, then at `/System/Volumes/Preboot/Cryptexes/OS` followed by the name, then in
+each `LC_RPATH` entry with and without that prefix, then in `/usr/lib`. The qualified libkrun's
+`LC_RPATH` makes the audit refuse it today; `plasmosome-jab` plans the bundle that deletes it.
 
 ## The runtime's listeners and diagnostics
 
