@@ -181,6 +181,25 @@ released, an undrained one times out, and zero never forces. `revoke` follows th
 address or one owner time out. `fail_before_effect_for_owner` makes every later `grant` and
 `apply` of a valid operation owned by one owner return `Fault` before any change.
 
+An operation that had its first effect and then failed is an incomplete effect. `grant` and
+`apply` return `IncompleteEffect { class, id, detail }` at the operation's address. The detail is
+diagnostic, never a selector. The snapshot lists exactly that operation in `incomplete`, with no
+standing object and no issued record. While it is there, a `grant` or `apply` of the same
+operation returns the same error and creates nothing, and another operation or a `plant` at that
+address returns `IdentityConflict`. A `revoke` of its handle returns `UnknownHandle`, because no
+record was issued. `apply_removal` with the operation's owner and full removal clears it and
+nothing else; another owner or capability returns `UnknownObject`, and a graceful timeout returns
+`DrainTimedOut` and keeps it. A withdrawal that fails after it released something returns
+`IncompleteEffect` too: a standing holding moves to `incomplete` and keeps its issued record, and
+an unfinished effect stays. A later exact `apply_removal`, or a `revoke` of the original handle,
+clears both. `CompositeBackend` routes each of these calls to the leaf that owns the class, and its
+snapshot joins every leaf's unfinished effects. `FakeBackend::fail_after_effect_for_owner` makes
+every later `grant` and `apply` of a valid operation owned by one owner, at an address that holds
+nothing, fail after its first effect. An invalid operation still returns `InvalidOperation`, and
+`fail_before_effect_for_owner` refuses first. `FakeBackend::fail_next_withdrawal` makes the next
+withdrawal at one address fail after release, through `revoke` or `apply_removal` and under either
+policy. A graceful timeout comes first and leaves it armed.
+
 `DrainSpec::shutdown_deadline` is the deadline `membraned` sends with the 4090 `shutdown` when it
 stops a guest under that drain (spec 023 §7). It is a tenth of the drain deadline, and at least
 1 ms, below that deadline, in whole milliseconds. It is none with `Force`, or when under 1 ms
