@@ -11,6 +11,7 @@ use plasmosome_core::state::InstanceName;
 use crate::clock::{Clock, SystemClock};
 use crate::codes::{ClientCode, Exit};
 use crate::commands::{COMMANDS, Command};
+use crate::env::{Env, ProcessEnv};
 use crate::envelope::{ClientError, Envelope, ErrorBody, Form, emit};
 use crate::help;
 use crate::json::{self, Json, Number};
@@ -92,11 +93,15 @@ pub struct Context<'a> {
     pub trusted_uid: u32,
     /// The monotonic clock a command's deadline is counted on, from the start of the call.
     pub clock: &'a dyn Clock,
+    /// Where socket selection reads `HOME` and `PLASMOSOME_KERNEL`. The binary passes
+    /// [`ProcessEnv`].
+    pub env: &'a dyn Env,
 }
 
 /// The whole `main` of the `plasmosome` binary. Takes the arguments after the program name and
 /// the package version the binary was built with, and returns the process exit code. It runs the
-/// command with the process's own effective UID as the trusted UID, on [`SystemClock`].
+/// command with the process's own effective UID as the trusted UID, on [`SystemClock`], with the
+/// process's own environment.
 pub fn main_with(args: impl IntoIterator<Item = OsString>, version: &str) -> u8 {
     let args: Vec<OsString> = args.into_iter().collect();
     let context = Context {
@@ -104,6 +109,7 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>, version: &str) -> u8 
         commands: COMMANDS,
         trusted_uid: effective_uid(),
         clock: &SystemClock,
+        env: &ProcessEnv,
     };
     let stdout = io::stdout();
     let stderr = io::stderr();
