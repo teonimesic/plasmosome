@@ -18,14 +18,3 @@ pub mod readiness;
 pub mod runtime;
 mod spawn_lock;
 pub mod vmm;
-
-/// Links [`NoSuchBoth36oc`].
-pub fn throwaway_both() {}
-
-/// Links [`NoSuchLinux36oc`].
-#[cfg(target_os = "linux")]
-pub fn throwaway_linux() {}
-
-/// Links [`NoSuchMacos36oc`].
-#[cfg(target_os = "macos")]
-pub fn throwaway_macos() {}
