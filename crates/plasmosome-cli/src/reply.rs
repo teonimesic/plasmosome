@@ -1,4 +1,4 @@
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 
 use crate::codes::{ClientCode, Exit};
 use crate::envelope::{ClientError, KernelError};
@@ -28,28 +28,16 @@ pub enum ReadFailure {
 /// further. An interrupted read is retried.
 pub fn read_reply(reader: &mut dyn BufRead) -> Result<Vec<u8>, ReadFailure> {
     let mut line = Vec::new();
-    loop {
-        let available = match reader.fill_buf() {
-            Ok(available) => available,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(failure_of(&error)),
-        };
-        if available.is_empty() {
-            return Err(ReadFailure::Closed);
-        }
-        let room = MAX_REPLY_BYTES + 1 - line.len();
-        let window = &available[..available.len().min(room)];
-        if let Some(end) = window.iter().position(|&byte| byte == b'\n') {
-            line.extend_from_slice(&window[..end]);
-            reader.consume(end + 1);
-            return Ok(line);
-        }
-        if window.len() == room {
-            return Err(ReadFailure::TooLarge);
-        }
-        let taken = window.len();
-        line.extend_from_slice(window);
-        reader.consume(taken);
+    let mut limited = reader.take(MAX_REPLY_BYTES as u64 + 1);
+    if let Err(error) = limited.read_until(b'\n', &mut line) {
+        return Err(failure_of(&error));
+    }
+    if line.pop_if(|byte| *byte == b'\n').is_some() {
+        Ok(line)
+    } else if line.len() > MAX_REPLY_BYTES {
+        Err(ReadFailure::TooLarge)
+    } else {
+        Err(ReadFailure::Closed)
     }
 }
 
