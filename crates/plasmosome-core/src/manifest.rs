@@ -1382,7 +1382,10 @@ mod tests {
     #[test]
     fn an_empty_tool_key_is_quoted_in_its_path() {
         let source = format!("{PROVIDER}[provides.\"a:tools\".tools]\n\"\" = 42");
-        field_fix(&source, "provides.\"a:tools\".tools.\"\"");
+        assert_eq!(
+            field_fix(&source, "provides.\"a:tools\".tools.\"\""),
+            REMOVAL
+        );
     }
 
     #[test]
@@ -1513,6 +1516,153 @@ mod tests {
             })
             .collect();
         assert_eq!(tools, expected);
+    }
+
+    fn blank_tool_keys() -> [(String, String); 5] {
+        [
+            ("\"\"".to_string(), String::new()),
+            ("\" \"".to_string(), " ".to_string()),
+            ("\"\\t\"".to_string(), raw(0x09).to_string()),
+            (
+                format!("\"{}\"", concat!("\\", "u3000")),
+                raw(0x3000).to_string(),
+            ),
+            (
+                format!(
+                    "\"{}{}{LINE_SEPARATOR}\"",
+                    concat!("\\", "u00A0"),
+                    concat!("\\", "u0085")
+                ),
+                [0xA0, 0x85, 0x2028].map(raw).iter().collect(),
+            ),
+        ]
+    }
+
+    fn tool_names(source: &str) -> Vec<String> {
+        let fixture: toml::Table = toml::from_str(source).unwrap();
+        let tools = fixture["provides"]["a:tools"]["tools"].as_table().unwrap();
+        let mut names: Vec<String> = tools.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn blank_tool_names_are_refused_one_at_a_time() {
+        let keys = blank_tool_keys();
+        let mut declaration =
+            format!("{PROVIDER}[provides.\"a:tools\".tools]\n\"a.read\" = \"Read a.\"\n");
+        for (index, (quoted, _)) in keys.iter().enumerate() {
+            declaration.push_str(&format!("{quoted} = \"Read {index}.\"\n"));
+        }
+        let blank: Vec<String> = keys.into_iter().map(|(_, decoded)| decoded).collect();
+        let mut expected = blank.clone();
+        expected.push("a.read".into());
+        expected.sort();
+        assert_eq!(tool_names(&declaration), expected);
+        let mut refused: Vec<String> = Vec::new();
+        while PlasmidManifest::parse(&declaration).is_err() {
+            let (plasmid, field, fix) = field_refusal(&declaration);
+            assert_eq!(plasmid.as_deref(), Some("github-pr"), "{field}");
+            assert_eq!(fix, REMOVAL, "{field}");
+            let (keys, index) = field_keys(&field);
+            assert_eq!(index, None, "{field}");
+            let [provides, binding, tools, name] = keys.as_slice() else {
+                panic!("{field} does not name a tool");
+            };
+            assert_eq!(
+                [provides, binding, tools],
+                ["provides", "a:tools", "tools"],
+                "{field}"
+            );
+            assert!(
+                blank.contains(name) && !refused.contains(name),
+                "{field} is not a blank tool refused for the first time"
+            );
+            refused.push(name.clone());
+            declaration = with_fix(&declaration, &field, &fix);
+        }
+        assert_eq!(refused.len(), blank.len(), "{refused:?}");
+        assert_eq!(
+            PlasmidManifest::parse(&declaration).unwrap().provides_tools,
+            vec![ToolDeclaration {
+                name: "a.read".into(),
+                description: "Read a.".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_blank_tool_name_is_refused_before_its_description() {
+        for (quoted, decoded) in blank_tool_keys() {
+            for value in ["42", "false", "{}", "\"\"", "\" \""] {
+                let source = format!("{PROVIDER}[provides.\"a:tools\".tools]\n{quoted} = {value}");
+                assert_eq!(tool_names(&source), [decoded.clone()], "{source}");
+                let path = format!("provides.\"a:tools\".tools.{quoted}");
+                assert_eq!(field_fix(&source, &path), REMOVAL, "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_blank_binding_is_refused_before_its_blank_tool() {
+        for (binding, _) in blank_tool_keys() {
+            for (tool, _) in blank_tool_keys() {
+                let source = format!("{PROVIDER}[provides.{binding}.tools]\n{tool} = \"Read.\"");
+                let path = format!("provides.{binding}");
+                assert_eq!(field_fix(&source, &path), REMOVAL, "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_blank_name_in_a_tools_list_is_refused_at_its_entry() {
+        for (quoted, _) in blank_tool_keys() {
+            for (list, expected) in [
+                (format!("[{quoted}]"), vec![]),
+                (
+                    format!("[{quoted}, \"a.read\"]"),
+                    vec![ToolDeclaration {
+                        name: "a.read".into(),
+                        description: "Describe what this tool does.".into(),
+                    }],
+                ),
+            ] {
+                let declaration = format!("{PROVIDER}[provides.\"a:tools\"]\ntools = {list}\n");
+                let (plasmid, field, fix) = field_refusal(&declaration);
+                assert_eq!(plasmid.as_deref(), Some("github-pr"), "{list}");
+                assert_eq!(fix, REMOVAL, "{list}");
+                let (keys, index) = field_keys(&field);
+                assert_eq!(keys, ["provides", "a:tools", "tools"], "{list}");
+                assert_eq!(index, Some(0), "{list}");
+                let declaration = with_fix(&declaration, &field, &fix);
+                let (_, field, fix) = field_refusal(&declaration);
+                let repaired = PlasmidManifest::parse(&with_fix(&declaration, &field, &fix));
+                assert_eq!(repaired.unwrap().provides_tools, expected, "{list}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_tool_name_that_is_not_only_whitespace_parses() {
+        let names = [
+            " a".to_string(),
+            "a ".to_string(),
+            format!("{}a", raw(0x3000)),
+            raw(0xFEFF).to_string(),
+            raw(0x200B).to_string(),
+            raw(0x180E).to_string(),
+        ];
+        let mut declaration = format!("{PROVIDER}[provides.\"a:tools\".tools]\n");
+        for name in &names {
+            declaration.push_str(&format!("\"{name}\" = \"Read.\"\n"));
+        }
+        let mut expected = names.to_vec();
+        expected.sort();
+        assert_eq!(tool_names(&declaration), expected);
+        let tools = PlasmidManifest::parse(&declaration).unwrap().provides_tools;
+        let mut parsed: Vec<String> = tools.into_iter().map(|tool| tool.name).collect();
+        parsed.sort();
+        assert_eq!(parsed, expected);
     }
 
     #[test]
@@ -3197,6 +3347,20 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             github,
             "network.hosts".to_string(),
             format!("hosts = [\"x{ESCAPE}y\"]"),
+        ));
+        rows.push((
+            declared(&format!(
+                "impl.wasm = \"pr.wasm\"\n[provides.\"{}{}{LINE_SEPARATOR}\".tools]\n\"b.read\" = \"Read b.\"",
+                concat!("\\", "u00A0"),
+                concat!("\\", "u0085")
+            )),
+            github,
+            format!(
+                "provides.\"{}{}{LINE_SEPARATOR}\"",
+                raw(0xA0),
+                concat!("\\", "u0085")
+            ),
+            REMOVAL.to_string(),
         ));
         for (_, quoted, program) in COMMAND_KEYS {
             let command = format!("[commands.commands.{quoted}]\nexec = [\"git\"]\n");
