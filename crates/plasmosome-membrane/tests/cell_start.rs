@@ -1,6 +1,8 @@
 use std::fs::{self, File};
-use std::io::{self, PipeWriter, Write};
+use std::io::{self, PipeWriter, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -265,6 +267,26 @@ fn reads_one_record() {
     let config = sample_config(1);
     let read = read_piped(encoded(&config), &argv(1));
     assert_eq!(read.expect("the record is read"), config);
+}
+
+#[test]
+fn descriptor_3_is_closed_after_a_good_record() {
+    let config = sample_config(1);
+    let (mut ours, theirs) = UnixStream::pair().expect("a socket pair");
+    ours.write_all(&encoded(&config))
+        .expect("the record is written");
+    ours.shutdown(Shutdown::Write)
+        .expect("the write side shuts down");
+    let read = read_config(OwnedFd::from(theirs), &argv(1), &limits());
+    assert_eq!(read.expect("the record is read"), config);
+    ours.set_nonblocking(true)
+        .expect("the socket is nonblocking");
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        ours.read(&mut byte).map_err(|error| error.kind()),
+        Ok(0),
+        "the reader's end is closed"
+    );
 }
 
 #[test]
