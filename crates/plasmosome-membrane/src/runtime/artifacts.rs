@@ -738,7 +738,6 @@ mod tests {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::{FileExt, MetadataExt};
         use std::path::PathBuf;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         fn identity_of(path: &Path) -> FileIdentity {
             let metadata = fs::symlink_metadata(path).expect("stat");
@@ -926,8 +925,30 @@ mod tests {
             }
         }
 
+        fn checked_at(path: &Path) -> (Walk, Checked) {
+            let walk = Walk::from_root(path).expect("the walk starts at /");
+            let checked = open_checked(&walk).expect("the locked file passes the checks");
+            (walk, checked)
+        }
+
+        fn after_the_clock_passes(tree: &ArtifactTree, stamp: Stamp) {
+            let probe = fs::OpenOptions::new()
+                .write(true)
+                .open(tree.file("clock", b"", 0o644))
+                .expect("the clock probe opens");
+            loop {
+                probe
+                    .write_all_at(b"tick", 0)
+                    .expect("the probe is written");
+                let probed = probe.metadata().expect("fstat");
+                if (probed.ctime(), probed.ctime_nsec()) > stamp.changed {
+                    return;
+                }
+            }
+        }
+
         #[test]
-        fn a_held_writer_rewriting_the_same_bytes_while_the_file_is_hashed_refuses() {
+        fn a_held_writer_rewriting_the_same_bytes_after_the_check_is_refused_as_changed() {
             let tree = ArtifactTree::new();
             let bytes = vec![7; 4 << 20];
             let path = tree.file("rootfs.raw", &bytes, 0o644);
@@ -937,26 +958,24 @@ mod tests {
                 .expect("a writer opened before the lock");
             set_mode(&path, 0o444);
             set_flags(&path, libc::UF_IMMUTABLE);
-            let writing = AtomicBool::new(true);
-            let writes = AtomicUsize::new(0);
-            let outcome = std::thread::scope(|scope| {
-                scope.spawn(|| {
-                    while writing.load(Ordering::Relaxed) {
-                        let rewrote = writer.write_all_at(&bytes[..16], 0);
-                        writes.fetch_add(1, Ordering::Relaxed);
-                        if rewrote.is_err() {
-                            break;
-                        }
-                    }
-                });
-                while writes.load(Ordering::Relaxed) == 0 {
-                    std::thread::yield_now();
-                }
-                let outcome = verify_pinned(&path, &Digest::of(&bytes)).map(|_| ());
-                writing.store(false, Ordering::Relaxed);
-                outcome.map_err(|refusal| refusal.fault)
-            });
-            assert_eq!(outcome, Err(ArtifactFault::ChangedWhileHashing));
+            let artifact = artifact_at(&path, &Digest::of(&bytes));
+            let verify = |(walk, checked): (Walk, Checked)| {
+                verify_checked(ArtifactRole::RootImage, &artifact, walk, checked).map(|_| ())
+            };
+            assert_eq!(
+                verify(checked_at(&path)),
+                Ok(()),
+                "with no write it verifies"
+            );
+            let (walk, checked) = checked_at(&path);
+            after_the_clock_passes(&tree, checked.stamp);
+            writer
+                .write_all_at(&bytes[..16], 0)
+                .expect("the held writer still writes under uchg");
+            assert_eq!(
+                verify((walk, checked)),
+                Err(ArtifactFault::ChangedWhileHashing)
+            );
         }
 
         #[test]
