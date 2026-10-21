@@ -105,12 +105,23 @@ Application error codes (closed set; additions are a contract change):
 | 105 | `illegal_state` | `from`, `to`; `detail`, a record of a kind spec 001 defines, including spec 024's; `cell` whenever the refusal concerns a created cell (spec 023); private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
-| 108 | `manifest_invalid` | `detail`, `path`; `fix` when the refusal names a declaration field |
+| 108 | `manifest_invalid` | `detail`, `path`; `field` and `fix` when the refusal names a declaration field; `plasmid` when the refusal names the declaration's id |
 | 109 | `widening_forbidden` | `plasmid` |
 | 110 | `attestation_required` | `verb` — the E13b residual: subject spawn needs host-side attestation |
 
-The 108 `fix` is spec 011's amendment to this table. A 108 whose refusal names a declaration
-field carries a `fix` in one of three forms:
+The 108 `field`, `fix` and `plasmid` are spec 011's amendment to this table. `field` is the
+declaration field the refusal names, as its path: TOML keys joined by dots, each bare where TOML
+allows and otherwise a quoted string, with `[i]` after a list to name its entry `i`, such as
+`network.ports[1]`, `commands.commands."git ops".exec` or `secrets.refs[0].scope.path_scope`. A
+108 carries `field` and `fix` together or not at all. `plasmid` is the declaration's `id` itself,
+not quoted or escaped as `detail` writes it, and a 108 carries it exactly when the refusal names
+that id. Today no refusal of the `id` field names one, because no id parsed: the id is missing,
+not a string or empty. Such a refusal carries `field` `id` and its `fix`, and no `plasmid`. A
+client reads these members and never splits `detail`: a key or an id may hold `: `.
+Amended on 2026-10-21: the first sentence here read "The 108 `fix` is spec 011's amendment to
+this table.", and row 108's fields read "`detail`, `path`; `fix` when the refusal names a
+declaration field"; the field and the plasmid id travelled only inside `detail`. A 108 whose
+refusal names a declaration field carries a `fix` in one of three forms:
 
 - TOML to write in place of that field: a line such as `hosts = ["api.github.com"]`, or a
   section such as `[impl]` followed by `wasm = "component.wasm"`;

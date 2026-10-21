@@ -258,6 +258,8 @@ pub struct WireError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     fix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verb: Option<String>,
@@ -282,6 +284,7 @@ impl WireError {
             deadline_ms: None,
             detail: None,
             path: None,
+            field: None,
             fix: None,
             verb: None,
         }
@@ -388,9 +391,10 @@ impl WireError {
         error
     }
 
-    /// Code 108 with no `fix`, for a fault the author cannot repair from the
-    /// refusal, such as spec 022's operator faults. A `ManifestError` goes
-    /// through `manifest_refusal` instead, which keeps its fix.
+    /// Code 108 with no `field`, `fix` or `plasmid`, for a fault the author
+    /// cannot repair from the refusal, such as spec 022's operator faults. A
+    /// `ManifestError` goes through `manifest_refusal` instead, which keeps
+    /// its field, fix and plasmid.
     pub fn manifest_invalid(detail: String, path: String) -> WireError {
         let mut error = WireError::bare(
             ErrorCode::ManifestInvalid,
@@ -414,22 +418,38 @@ impl WireError {
     }
 
     /// Code 108 for a declaration `PlasmidManifest` refused: `path` is the
-    /// declaration file and `detail` the refusal's text. `fix` is present only
-    /// when the refusal names a field, in one of three forms: the TOML to
-    /// write in place of that field, a bare entry for the list the field names
-    /// (written in place of the entry when the field ends in an index), or
-    /// exactly `remove this entry`. A file that could not be read, is not
-    /// TOML (a syntax error included), is over `MAX_MANIFEST_BYTES` or nests
-    /// more than `MAX_MANIFEST_DEPTH` levels (`TooDeep`) carries none.
+    /// declaration file and `detail` the refusal's text. A `Field` refusal
+    /// also carries `field`, `fix` and `plasmid`, so a client never splits
+    /// `detail`. `field` is the declaration field it names, as a TOML path
+    /// with `[i]` for an entry in a list. `fix` is in one of three forms: the
+    /// TOML to write in place of that field, a bare entry for the list the
+    /// field names (written in place of the entry when the field ends in an
+    /// index), or exactly `remove this entry`. `plasmid` is the declaration's
+    /// id itself, not the quoted form `detail` writes, and is present exactly
+    /// when the refusal names an id. A refusal of an `id` that is missing, not
+    /// a string or empty names none, so it carries `field` and `fix` and no
+    /// `plasmid`. A file that could not be read (`Io`), is not TOML
+    /// (`Parse`, a syntax error included), is over `MAX_MANIFEST_BYTES`
+    /// (`TooLarge`) or nests more than `MAX_MANIFEST_DEPTH` levels (`TooDeep`)
+    /// carries no `field`, `fix` or `plasmid`.
     pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
         let mut wire = WireError::manifest_invalid(error.to_string(), path);
-        wire.fix = match error {
-            ManifestError::Field { fix, .. } => Some(fix.clone()),
+        match error {
+            ManifestError::Field {
+                plasmid,
+                field,
+                fix,
+                ..
+            } => {
+                wire.plasmid = plasmid.clone();
+                wire.field = Some(field.clone());
+                wire.fix = Some(fix.clone());
+            }
             ManifestError::Io(_)
             | ManifestError::Parse(_)
             | ManifestError::TooLarge { .. }
-            | ManifestError::TooDeep { .. } => None,
-        };
+            | ManifestError::TooDeep { .. } => {}
+        }
         wire
     }
 
@@ -618,16 +638,32 @@ mod tests {
         .expect_err("a network section with no hosts is refused")
     }
 
-    fn declaration_refusals() -> [(ManifestError, Option<&'static str>); 5] {
+    type Named = Option<(&'static str, &'static str)>;
+
+    fn declaration_refusals() -> [(ManifestError, Named, Option<&'static str>); 6] {
         [
-            (author_refusal(), Some("hosts = [\"api.example.com\"]")),
+            (
+                author_refusal(),
+                Some(("network.hosts", "hosts = [\"api.example.com\"]")),
+                Some("github-pr"),
+            ),
+            (
+                PlasmidManifest::parse(
+                    "id = \"\"\ndescription = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"",
+                )
+                .expect_err("an empty id is refused"),
+                Some(("id", "id = \"choose-a-stable-id\"")),
+                None,
+            ),
             (
                 PlasmidManifest::parse("id = ").expect_err("a value is missing"),
+                None,
                 None,
             ),
             (
                 PlasmidManifest::parse(&"#".repeat(MAX_MANIFEST_BYTES + 1))
                     .expect_err("a declaration over 1 MiB is refused"),
+                None,
                 None,
             ),
             (
@@ -637,37 +673,215 @@ mod tests {
                 ))
                 .expect_err("a declaration nested 33 levels is refused"),
                 None,
+                None,
             ),
             (
                 ManifestError::Io(std::io::Error::other("the declaration could not be read")),
+                None,
                 None,
             ),
         ]
     }
 
     #[test]
-    fn a_manifest_refusal_carries_the_fix_only_when_the_declaration_names_one() {
-        for (error, fix) in declaration_refusals() {
+    fn a_manifest_refusal_carries_field_fix_and_plasmid_only_when_the_declaration_names_a_field() {
+        for (error, named, plasmid) in declaration_refusals() {
             let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
             let value = serde_json::to_value(&wire).expect("a wire error serializes");
             assert_eq!(value["code"], Value::from(108), "{value}");
             assert_eq!(value["path"], Value::from(DECLARATION_PATH), "{value}");
             assert_eq!(value["detail"], Value::from(error.to_string()), "{value}");
-            assert_eq!(value.get("fix").and_then(Value::as_str), fix, "{value}");
-            assert_eq!(
-                value.as_object().unwrap().contains_key("fix"),
-                fix.is_some(),
-                "a refusal with no fix has no fix key at all: {value}"
-            );
-            let mut carried = vec!["code", "detail", "message", "path"];
-            if fix.is_some() {
-                carried.push("fix");
-                carried.sort();
+            for (name, expected) in [
+                ("field", named.map(|(field, _)| field)),
+                ("fix", named.map(|(_, fix)| fix)),
+                ("plasmid", plasmid),
+            ] {
+                assert_eq!(
+                    value.get(name),
+                    expected.map(Value::from).as_ref(),
+                    "the 108's {name}, with no key at all when it has none: {value}"
+                );
             }
+            let mut carried = vec!["code", "detail", "message", "path"];
+            if named.is_some() {
+                carried.extend(["field", "fix"]);
+            }
+            if plasmid.is_some() {
+                carried.push("plasmid");
+            }
+            carried.sort();
             assert_eq!(wire_fields(&wire), carried, "{value}");
             let line = serde_json::to_string(&wire).expect("a wire error serializes");
             let back: WireError = serde_json::from_str(&line).expect("a wire error reads back");
             assert_eq!(back, wire, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_client_reads_a_108s_field_and_plasmid_without_parsing_its_detail() {
+        let field = "commands.commands.\"a: b\".network.hosts[1]";
+        let id = "x: network.hosts";
+        let error = PlasmidManifest::parse(
+            "id = \"x: network.hosts\"\ndescription = \"Run git.\"\n\
+             [commands.commands.\"a: b\"]\nexec = [\"git\"]\n\
+             [commands.commands.\"a: b\".network]\nhosts = [\"api.github.com\", 5]\n",
+        )
+        .expect_err("a host that is not a string is refused");
+        let ManifestError::Field {
+            plasmid,
+            field: refused,
+            fix,
+            ..
+        } = &error
+        else {
+            panic!("the host is refused at its field: {error}");
+        };
+        assert_eq!(
+            (plasmid.as_deref(), refused.as_str(), fix.as_str()),
+            (Some(id), field, "remove this entry")
+        );
+        let failure = Response::Failure {
+            id: raw_id("7"),
+            error: WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error),
+        };
+        let line = serde_json::to_string(&failure).expect("a failure response serializes");
+        let read: Value = serde_json::from_str(&line).expect("a failure line is JSON");
+        let member = |pointer: &str| read.pointer(pointer).and_then(Value::as_str);
+        let detail = member("/error/detail").expect("a 108 carries its detail");
+        assert_eq!(
+            detail.split(": ").nth(1),
+            Some("network.hosts\""),
+            "splitting the detail on \": \" gives a piece of the id, not the field: {detail}"
+        );
+        assert_eq!(member("/error/field"), Some(field), "{line}");
+        assert_eq!(member("/error/fix"), Some("remove this entry"), "{line}");
+        assert_eq!(member("/error/plasmid"), Some(id), "{line}");
+        let path = member("/error/field")
+            .and_then(|field| field.strip_suffix("[1]"))
+            .expect("the field names the entry at index 1");
+        let keys: Vec<String> = toml_edit::Key::parse(path)
+            .expect("the field is a TOML path")
+            .iter()
+            .map(|key| key.get().to_string())
+            .collect();
+        assert_eq!(keys, ["commands", "commands", "a: b", "network", "hosts"]);
+    }
+
+    #[test]
+    fn a_108s_plasmid_is_the_id_itself_and_its_detail_the_escaped_form() {
+        let escape = concat!("\\", "u001B");
+        let control = char::from_u32(0x1B).unwrap();
+        for (written, id) in [
+            ("two words".to_string(), "two words".to_string()),
+            (format!("a\\nb{escape}c"), format!("a{}b{control}c", '\n')),
+        ] {
+            let error = PlasmidManifest::parse(&format!(
+                "id = \"{written}\"\ndescription = \"Reach the declared API.\"\n\
+                 [network]\nports = [443]"
+            ))
+            .expect_err("a network section with no hosts is refused");
+            let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
+            let line = serde_json::to_string(&wire).expect("a wire error serializes");
+            let read: Value = serde_json::from_str(&line).expect("a wire error line is JSON");
+            let detail = read["detail"].as_str().expect("a 108 carries its detail");
+            assert!(
+                detail.starts_with(&format!("plasmid \"{written}\": ")),
+                "the detail writes the id quoted and escaped: {detail:?}"
+            );
+            assert_eq!(
+                read.get("plasmid").and_then(Value::as_str),
+                Some(id.as_str()),
+                "the plasmid member is the id itself: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_author_refusal_spec_011_lists_carries_its_own_field_fix_and_plasmid_on_the_wire() {
+        let described = "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n";
+        let built = format!("{described}impl.wasm = \"pr.wasm\"\n");
+        let reference_row =
+            |entry: &str| format!("{built}[secrets]\nrefs = [{{ id = \"token\", {entry} }}]\n");
+        let rows = [
+            (
+                "id = \"github-pr\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                "description",
+            ),
+            (
+                format!("{built}[provides.\"github:tools\".tools]\n\"pr.read\" = \"\"\n"),
+                "provides.\"github:tools\".tools.\"pr.read\"",
+            ),
+            (
+                reference_row("consumer = \"git\", delivery = [\"handle\"]"),
+                "secrets.refs[0].delivery",
+            ),
+            (
+                reference_row("consumer = \"git\", delivery = []"),
+                "secrets.refs[0].delivery",
+            ),
+            (
+                reference_row("consumer = \"http\", delivery = [\"teleport\"]"),
+                "secrets.refs[0].delivery",
+            ),
+            (
+                reference_row("consumer = \"http\", delivery = [\"inject\"]"),
+                "secrets.refs[0].scope.path_scope",
+            ),
+            (
+                reference_row("consumer = \"http\", scope = { path_scope = [] }"),
+                "secrets.refs[0].scope.path_scope",
+            ),
+            (
+                reference_row("consumer = \"process\", scope = { path_scope = [\"relative\"] }"),
+                "secrets.refs[0].scope.path_scope",
+            ),
+            (
+                format!("{described}[network]\nports = [443]\n"),
+                "network.hosts",
+            ),
+            (described.to_string(), "impl"),
+            (
+                format!(
+                    "{described}[commands.commands.git]\nexec = [\"git\"]\n\
+                     [[commands.commands.git.secrets.refs]]\nid = \"token\"\nconsumer = \"git\"\n"
+                ),
+                "commands.commands.git.secrets.refs[0].subject",
+            ),
+            (
+                "description = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                "id",
+            ),
+        ];
+        for (declaration, named) in rows {
+            let error = PlasmidManifest::parse(&declaration).expect_err(&declaration);
+            let ManifestError::Field {
+                plasmid,
+                field,
+                fix,
+                ..
+            } = &error
+            else {
+                panic!("{declaration}\nis refused with no field: {error}");
+            };
+            assert_eq!(
+                (field.as_str(), plasmid.as_deref()),
+                (named, (named != "id").then_some("github-pr")),
+                "{declaration}"
+            );
+            let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
+            let line = serde_json::to_string(&wire).expect("a wire error serializes");
+            let read: Value = serde_json::from_str(&line).expect("a wire error line is JSON");
+            for (name, own) in [
+                ("field", Some(field.as_str())),
+                ("fix", Some(fix.as_str())),
+                ("plasmid", plasmid.as_deref()),
+            ] {
+                assert_eq!(
+                    read.get(name),
+                    own.map(Value::from).as_ref(),
+                    "{declaration}\nthe 108's {name} is the refusal's own: {line}"
+                );
+            }
         }
     }
 
@@ -785,7 +999,7 @@ mod tests {
         expect_code_and_fields(
             WireError::manifest_refusal(DECLARATION_PATH.to_string(), &author_refusal()),
             108,
-            &["detail", "fix", "path"],
+            &["detail", "field", "fix", "path", "plasmid"],
         );
         expect_code_and_fields(
             WireError::widening_forbidden("github-pr".to_string()),
