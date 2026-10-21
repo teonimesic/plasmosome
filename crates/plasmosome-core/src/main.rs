@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 const USAGE: &str = "usage: plasmosomed <config.json>
-       plasmosomed -h | --help";
+       plasmosomed -h | --help | --version";
 
 const HELP: &str = "plasmosomed — controller status daemon
 
 usage: plasmosomed <config.json>
-       plasmosomed -h | --help
+       plasmosomed -h | --help | --version
 
 Runs in the foreground with required JSON configuration:
   {\"control_socket\":\"/private/path/control.uds\",\"name\":\"quickstart\",\"instance_root\":\"/private/path/instance\",\"recovery_deadline_ms\":5000}
@@ -50,10 +50,14 @@ fn main() {
     let mut arguments = std::env::args_os().skip(1);
     let (Some(path), None) = (arguments.next(), arguments.next()) else {
         eprintln!("{USAGE}");
-        std::process::exit(2);
+        std::process::exit(64);
     };
     if path == "-h" || path == "--help" {
         print!("{HELP}");
+        return;
+    }
+    if path == "--version" {
+        println!("plasmosomed {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     let path = Path::new(&path);
