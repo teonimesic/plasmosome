@@ -1177,6 +1177,23 @@ mod tests {
                 "the exact diff missed a changed {field}"
             );
 
+            let peer = OsObject {
+                id: GrantId::new(),
+                ..held.clone()
+            };
+            let pair = state_of(&[held.clone(), peer.clone()]);
+            for (first, second) in [(&held, &peer), (&peer, &held)] {
+                let one_changed = OsObject {
+                    capability: changed.capability.clone(),
+                    ..first.clone()
+                };
+                let mixed = state_of(&[one_changed, second.clone()]);
+                assert!(
+                    !pair.canonically_equivalent(&mixed) && !mixed.canonically_equivalent(&pair),
+                    "two holdings at one key hid a changed {field}"
+                );
+            }
+
             for kept in [held, changed] {
                 let reissued = OsObject {
                     id: GrantId::new(),
