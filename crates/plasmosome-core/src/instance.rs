@@ -314,17 +314,27 @@ impl InstanceRoot {
     /// [`InstanceRoot::create_cell_dir`] does: exclusive, mode 0700 and synced. The ID is
     /// `cell-<n>`, where `n` is one more than the largest number named in `cells` or `retired`,
     /// or 1 when there is none. Only names count, so an entry of any kind named `cell-<n>` keeps
-    /// that ID from being allocated again, and a name that `parse_cell_id` refuses is ignored.
-    /// Listing creates neither directory. Each one found is set to mode 0700, as `create_cell_dir`
-    /// does for `cells`. A symlink or anything but a directory at either name is
-    /// `NotADirectory`: it is not followed, and nothing is created.
+    /// that ID from being allocated again, and a name that `parse_cell_id` refuses is ignored. A
+    /// name whose `cell-` prefix differs only in ASCII case, such as `CELL-3`, counts as that ID,
+    /// because a case-insensitive filesystem treats the two as one name. Listing creates neither
+    /// directory. Each one found is set to mode 0700, as `create_cell_dir` does for `cells`. A
+    /// symlink at either name is `Symlink` and anything else but a directory is `NotADirectory`:
+    /// neither is followed, and nothing is created.
     ///
     /// It needs this root's writer lock; a lock taken on another root is `ForeignLock` and
     /// nothing is listed. Allocations under one writer lock run one at a time, from the listing
-    /// until the directory exists, through every open of the root that uses that lock. If another
-    /// process creates the chosen name first, the call lists again and tries the next number, at
-    /// most 64 times, then is `Contended`. When `cell-9999999999` is taken it is `Exhausted`. The
-    /// new directory has no `supervisor.lock` yet.
+    /// until the directory exists, through every open of the root that uses that lock.
+    /// [`InstanceRoot::retire`] does not take that mutex, so it can move a cell while an
+    /// allocation lists. `cells` is listed before `retired` so that a cell it moves then is seen in
+    /// one of the two listings, and its ID is not allocated again.
+    ///
+    /// If the chosen name already exists when the directory is made, the call lists again and
+    /// tries the next number: the larger of the new listing's and one above the number that was
+    /// taken. After 64 attempts it is `Contended`. When no number up to `cell-9999999999` is left
+    /// it is `Exhausted`, naming the directory that holds the largest one. A failure from
+    /// `create_cell_dir` is `Create`, which carries the ID it was creating: when its source is an
+    /// `Io` error naming `cells`, an entry with that name exists, the new directory unsynced or
+    /// one another process made first. The new directory has no `supervisor.lock` yet.
     pub fn allocate_cell(&self, lock: &WriterLock) -> Result<CellDir, AllocateError> {
         if lock.root != self.identity {
             return Err(AllocateError::ForeignLock {
@@ -860,14 +870,24 @@ impl CellDir {
         self.sync_dir()
     }
 
-    /// Creates spec 023 §3's `supervisor.lock` and locks it (spec 023 §4, step 4). The file is
-    /// created exclusively, without following a symlink, with mode 0600 whatever the umask, and
-    /// close-on-exec; then `flock(LOCK_EX | LOCK_NB)` is taken on it and this directory is
-    /// synced. The returned [`SupervisorLock`] holds the lock. Any existing entry named
-    /// `supervisor.lock`, a symlink included, is `AlreadyExists`. If the lock is not taken, as
-    /// when another open of the new file took it first, or the sync fails, the error is `Io`
-    /// and the file stays in place: a retry is `AlreadyExists`, and once nothing else holds it
-    /// [`CellDir::probe_supervisor_lock`] reports it `Free`.
+    /// Creates spec 023 §3's `supervisor.lock` already locked (spec 023 §4, step 4), so it is
+    /// held from the moment it has its name. The file is created as `supervisor.lock.tmp`,
+    /// exclusively, without following a symlink, with mode 0600 whatever the umask, and
+    /// close-on-exec. `flock(LOCK_EX | LOCK_NB)` is taken on it, it is renamed to
+    /// `supervisor.lock` without replacing anything, and this directory is synced. A probe sees
+    /// no entry and then a held lock, never a free one. The returned [`SupervisorLock`] holds the
+    /// lock. On Linux the rename needs a filesystem with `RENAME_NOREPLACE`; on one without it the
+    /// call is an `Io` error.
+    ///
+    /// Any `supervisor.lock.tmp` left by an earlier call is removed first; a symlink there is
+    /// removed, not followed. Every failure before the rename removes the temporary. An existing
+    /// entry named `supervisor.lock` is left as it was: a symlink is `Symlink`, a directory or
+    /// other non-regular file is `NotARegularFile`, and a file is `AlreadyExists`. If the sync
+    /// fails, the error is `Io` and the lock file stays in place: a retry is `AlreadyExists`, and
+    /// once nothing else holds it [`CellDir::probe_supervisor_lock`] reports it `Free`.
+    ///
+    /// The caller must be the only creator of this cell's `supervisor.lock`, as the controller
+    /// is; this call does not check it. A second creator can remove the first one's temporary.
     pub fn create_supervisor_lock(&self) -> Result<SupervisorLock, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOCK_FILE);
         self.remove_if_present(SUPERVISOR_LOCK_TEMPORARY)?;
@@ -1062,9 +1082,11 @@ pub struct FileIdentity {
     pub ino: u64,
 }
 
-/// Why no cell was allocated. `NotADirectory` names a `cells` or `retired` that is a symlink or
-/// not a directory. `Exhausted` means `cell-9999999999` is taken. `Contended` means another
-/// process created the chosen name before each of 64 attempts could.
+/// Why no cell was allocated. `Symlink` names a `cells` or `retired` that is a symlink, and
+/// `NotADirectory` one that is anything else but a directory. `Exhausted` means no ID up to
+/// `cell-9999999999` is left, and names the directory that holds the largest one. `Contended`
+/// means each of 64 attempts found the name it chose already taken. `Create` carries the cell
+/// ID that [`InstanceRoot::create_cell_dir`] failed to create.
 #[derive(Debug)]
 pub enum AllocateError {
     ForeignLock { path: PathBuf },

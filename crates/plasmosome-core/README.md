@@ -239,19 +239,30 @@ calls them yet.
   and creates `cell-<n>`, where `n` is one more than the largest number it found, or 1 when
   there is none. Any entry named `cell-<n>` counts, whatever it is, so an ID in either directory
   is never allocated again. A name `parse_cell_id` refuses, such as `cell-07`, does not count.
-  The listing creates neither directory, and sets each one it finds to mode 0700. A `cells` or
-  `retired` that is a symlink or not a directory is `NotADirectory`, and nothing is created.
-- The directory itself is made by `create_cell_dir`: exclusive, mode 0700 and synced. If another
-  process made the chosen name first, the call lists again and tries the next number, up to 64
-  times, and is then `Contended`. When `cell-9999999999` is taken it is `Exhausted`.
+  A name whose `cell-` prefix differs only in case, such as `CELL-3`, counts as that ID: APFS
+  folds case by default, so there `CELL-3` and `cell-3` are one name. The listing creates
+  neither directory, and sets each one it finds to mode 0700. A `cells` or `retired` that is a
+  symlink is `Symlink`, one that is not a directory is `NotADirectory`, and nothing is created.
+- The directory itself is made by `create_cell_dir`: exclusive, mode 0700 and synced. If the
+  chosen name is already taken, the call lists again and tries the next number, the larger of
+  the new listing's and one above the taken one, up to 64 times, and is then `Contended`. When no
+  number up to `cell-9999999999` is left it is `Exhausted`, naming the directory that holds the
+  largest. A failure from `create_cell_dir` is `Create`, which carries the cell ID: if the sync of
+  `cells` failed after the `mkdir`, that cell's directory exists.
 - Allocations run one at a time, under a mutex held from the listing until the directory exists.
   The mutex lives in the `WriterLock`, not in the `InstanceRoot`, because two opens of one root
   can share one writer lock, and only one writer lock exists per root. A panic during an
-  allocation does not block the next one.
-- `CellDir::create_supervisor_lock` creates `supervisor.lock` exclusively with mode 0600,
-  close-on-exec, takes `flock(LOCK_EX | LOCK_NB)` on it and syncs the cell directory. The
-  returned `SupervisorLock` holds the lock. `into_owned_fd` gives up its descriptor, still
-  locked, to become `membraned`'s descriptor 4.
+  allocation does not block the next one. `retire` does not take this mutex, so it can move a
+  cell during an allocation. `cells/` is listed before `retired/` so that a cell moved between
+  the two listings is seen in the second one.
+- `CellDir::create_supervisor_lock` creates the lock as `supervisor.lock.tmp`, exclusively with
+  mode 0600 and close-on-exec, takes `flock(LOCK_EX | LOCK_NB)` on it, renames it to
+  `supervisor.lock` without replacing anything and syncs the cell directory. The lock is held
+  from the moment the name exists, so a probe sees no lock file and then a held one. A leftover
+  temporary is removed first, and every failure before the rename removes it. An entry already at
+  `supervisor.lock` is left as it is and reported as what it is: `Symlink`, `NotARegularFile` or,
+  for a file, `AlreadyExists`. The returned `SupervisorLock` holds the lock. `into_owned_fd`
+  gives up its descriptor, still locked, to become `membraned`'s descriptor 4.
 - `CellDir::probe_supervisor_lock` tries the lock on a fresh read-only descriptor. `Held` means
   another open of the file holds it, even one in this process. `Free` keeps the lock it took
   until the returned `SupervisorLock` is dropped. `Missing` means no entry is there, and nothing
