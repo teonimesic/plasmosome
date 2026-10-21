@@ -98,9 +98,10 @@ which today is the owner. #114 is the failure this prevents.
 ### 2. What the project refuses
 
 1. **A trailer crediting a model.** A `Co-authored-by` or `Signed-off-by` trailer whose value is
-   a model's identity (section 4). GitHub shows a co-author for the first. The second certifies
-   where a change came from, which a tool cannot do. The attribution guard refuses it today, by a
-   rule this spec corrects.
+   a model's identity (section 4). GitHub shows a co-author for the first when it can resolve the
+   address to an account. The second certifies where a change came from, which a tool cannot do.
+   The attribution guard refuses it today, by a rule this spec corrects. Corrected on 2026-10-21:
+   this said GitHub shows a co-author for every such trailer.
 2. **A model as a commit's author or committer**, on any commit in a pull request. GitHub copies
    a commit's author into the squash as a co-author. Under any merge method other than squash,
    the identity itself would land. This spec adds that refusal to the attribution guard.
@@ -114,9 +115,12 @@ which today is the owner. #114 is the failure this prevents.
    supplies replaces the one section 1 says GitHub takes from the pull request's author. A merge
    takes GitHub's composed commit: `gh pr merge` with none of the four options that supply its
    subject, body or author, which in gh 2.102.0 are `-t`/`--subject`, `-b`/`--body`,
-   `-F`/`--body-file` and `-A`/`--author-email`, and no edit in the web form. Nothing refuses a
-   breach before it lands; the read after the merge finds it (section 4). Amended on 2026-10-21:
-   this named only `--subject` and `--body`.
+   `-F`/`--body-file` and `-A`/`--author-email`, and no edit at gh's interactive prompt or in the
+   web form. Nothing refuses a breach before it lands. The read after the merge finds a model or an
+   untraceable identity the breach adds (section 4); nothing finds a person's address the merger
+   supplies, or a person's line the merger removes. Amended on 2026-10-21: this named only
+   `--subject` and `--body`, left out gh's prompt, and said the read after the merge finds every
+   breach.
 
 A bot is not refused for being a bot. A model or AI tool working through a bot account is still a
 model, and its identity is refused like any other. CodeRabbit is one: it reviews this repository
@@ -177,16 +181,24 @@ Each identity it reads, in all four positions alike (author, committer, `Co-auth
    value's last `<…>`, and the name is what comes before it.
 2. **No address.** An empty address (`<>`, which git accepts), a value with no `<…>`, and an
    address with no `@` are no address. So is a malformed address. Its local part is the text
-   before its last `@`, and its domain is the text after it. It is malformed when it starts with
-   ASCII whitespace, when its local part is empty, or when its domain holds ASCII whitespace or,
-   once one trailing dot is removed, is empty, starts or ends with a dot, or holds two dots in a
-   row. `<probe@>`, `<@>`, `<@corp.locale.io>`, `<probe@laptop.local >` and
-   `<me@laptop.local..>` are each malformed; RFC 5321 (section 4.1.2) gives no mailbox any of
-   these shapes. An identity with no address is refused: no account can be found for it. Its
-   name decides only what the refusal says. A name holding a word from today's vendor list, such
-   as `Claude (Fable 5)`, is reported as crediting a model. Amended on 2026-10-21: until then a
+   before its last `@`, and its domain is the text after it. It is malformed when it holds
+   whitespace anywhere, when its local part is empty, or when its domain, once one trailing dot is
+   removed, is empty, starts or ends with a dot, or holds two dots in a row. Whitespace is every
+   character the guard's `blank_to_another_reader` counts as blank: ASCII space, tab, carriage
+   return, vertical tab and form feed, and U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028,
+   U+2029, U+202F, U+205F, U+3000 and U+FEFF. `<probe@>`, `<@>`, `<@corp.locale.io>`,
+   `<probe @corp.locale.io>`, `<probe@corp.locale.io >` and `<probe@corp.locale.io..>` are each
+   malformed; RFC 5321 (section 4.1.2) gives no mailbox any of these shapes. This rule has two
+   limits on purpose. It refuses the rare mailbox that RFC 5321 or RFC 6531 allows with whitespace
+   in a quoted or internationalized local part; a person with one can commit under another
+   address, such as a GitHub noreply address. And it tests only the shapes above, so another
+   address no mailbox has, such as `<probe@@corp.locale.io>`, goes on to the rules below. An
+   identity with no address is refused: no account can be found for it. Its name decides only
+   what the refusal says. A name holding a word from today's vendor list, such as
+   `Claude (Fable 5)`, is reported as crediting a model. Amended on 2026-10-21: until then a
    malformed address was cleared, and once rule 3 replaced the vendor search, `Claude <@>` and
-   `Claude <noreply@anthropic.com >` would have been cleared too.
+   `Claude <noreply@anthropic.com>` with a space or a U+00A0 before the `>` would have been
+   cleared too.
 3. **Tool identities.** An address is a model's when, compared whole and ignoring ASCII case, it
    equals a listed tool address. It is also a model's when it is a GitHub noreply address,
    `<login>@users.noreply.github.com` with or without an `<id>+` prefix, whose login equals a
@@ -228,9 +240,12 @@ evidence. An entry found to be a person's leaves the list in its own change.
 The harm depends on the position:
 
 - **Author.** GitHub copies a pull request commit's author into the squash as a `Co-authored-by`
-  line. On a commit already on `main`, it is the author.
+  line. When that author is the pull request's own account, as when a model tool's account opens
+  the pull request, GitHub writes no line and the identity becomes the squash's author
+  (section 1). On a commit already on `main`, it is the author.
 - **Committer.** The squash drops a pull request commit's committer, because GitHub commits the
-  squash. Any other merge method would put it on `main` as it stands (section 2, item 2).
+  squash. Any other merge method would put it on `main` as it stands (section 2, item 2). On a
+  commit already on `main`, it is the committer.
 - **`Co-authored-by`.** The squash keeps the line. GitHub shows a co-author for it when it can
   resolve the address to an account.
 - **`Signed-off-by`.** The squash keeps the line. GitHub shows no co-author for it, but a model's
@@ -241,7 +256,8 @@ untraceable author or committer, the refusal also says how to fix the commits: s
 `user.email`, then run `git rebase --exec 'git commit --amend --no-edit --reset-author' <base>`.
 For an untraceable trailer, it says to reword the commit and correct or remove the line.
 Corrected on 2026-10-21: this said the harm is what GitHub will show on `main`, which holds for
-neither a sign-off nor a pull request commit's committer.
+neither a sign-off nor a pull request commit's committer, and missed a pull request's own account
+as author.
 
 **Fails closed.** A range, message or identity it cannot read, a parse failure, and a matcher
 that exits above 1 are each a refusal. Identity matching goes through the same exit-checked
@@ -269,7 +285,8 @@ the message `Merge <sha> into <sha>`; it sits inside the range CI reads.
   and it counts only for a pull request that leaves the workflows and hooks unchanged (section 6).
 - **`gates` on a push to `main`.** Range `<before>..<sha>`: the squash commit as GitHub composed
   it. A refusal stops nothing, because the commit is already public. This is the detector for
-  what GitHub composed, for an edited message and for the title.
+  what GitHub composed, for an edited message or a supplied author, and for the title. Amended on
+  2026-10-21: this did not name the author.
 
 **The read after a merge.** It is CI's read on a push to `main`. Nothing in the tree asks anyone
 to repeat it by hand. A read is the attribution step concluding, pass or fail, for that commit; a
@@ -281,11 +298,15 @@ reported to the owner. Its remedy is a rerun of that run, with `gh run rerun <ru
 run's page. GitHub's documentation says a rerun uses "the same `GITHUB_SHA` (commit SHA) and
 `GITHUB_REF` (git ref) of the original event", and allows one "up to 30 days after its initial
 run". The step's range is built from the push event's `before` and `sha`, and its log prints it
-as `RANGE: <before>..<sha>`. No push run on `main` has been rerun yet, so the rerun counts as the
-commit's read only when that line matches the original run's range. Rerunning is the owner's
-decision; no agent reruns a run. If no rerun reads it, the commit stays unread, and the report
-says so. Amended on 2026-10-21: until then a cancelled push run left its commit unread with no
-remedy.
+as `RANGE: <before>..<sha>`. Each merge is its own push of one squash commit, so `<before>` is the
+tip `main` held before that push: the commit's first parent, `<sha>^1`. No push run on `main` has
+been rerun yet, so the rerun counts as the commit's read only when its log reads
+`RANGE: <sha>^1..<sha>`, both written out in full as `git rev-parse` prints them. Rerunning is
+the owner's decision; no agent reruns a run. If no rerun reads it, the commit stays unread, and
+the report says so. Amended on 2026-10-21: until then a cancelled push run left its commit unread
+with no remedy. The rerun's line is compared with `<sha>^1`, not with the original run's line,
+because a run cancelled before the step prints none: run 37906198397 skipped its attribution step,
+and its log holds no `RANGE:` line.
 
 Spec 004 already settles cancellation: "On a push each commit has its own concurrency group, so
 no run on main is cancelled; only a pull request cancels its superseded run." 0613d04 (#147,
@@ -315,8 +336,11 @@ setting.
 
 - GitHub's composition. The guard reads its inputs before the merge and its output after it,
   never the message in between.
-- A merger who edits the squash message, and a changed merge setting. Both are found only after
-  they land.
+- A merger who edits the squash message or supplies its author, and a changed merge setting. An
+  edit at gh's interactive prompt, its "Edit commit subject" or "Edit commit message", is such an
+  edit. A model or an untraceable identity they add is found only after it lands, and a person's
+  address the merger supplies is never found. Amended on 2026-10-21: this named neither the
+  author nor gh's prompt, and said every such change is found.
 - The pull request's title. With more than one commit it becomes the squash's subject, and
   nothing reads it before the merge.
 - Commits under other identities before they are in a pull request, as in a fork.
@@ -388,11 +412,14 @@ checks, beyond the review:
   `GitHub <noreply@github.com>` as committer passes: commits made in GitHub's web interface, the
   suggestion button's included, carry it. Every author other than the pull request's becomes a
   co-author on `main`.
-- Every `Co-authored-by` and `Signed-off-by` names a person or a bot (section 5), never a model.
-  A model tool's bot account, such as `coderabbitai[bot]`, is a model here, as section 2 says.
-  A Dependabot pull request passes this check. Amended on 2026-10-21: these two checks did not
-  say that `GitHub <noreply@github.com>` passes or that a model tool's bot account fails.
-- The merge takes GitHub's composed message.
+- Every `Co-authored-by` and `Signed-off-by` names a person or a bot (section 5), never a model
+  or an identity section 4 refuses. A model tool's bot account, such as `coderabbitai[bot]`, is a
+  model here, as section 2 says. A Dependabot pull request passes this check. Amended on
+  2026-10-21: these two checks did not say that `GitHub <noreply@github.com>` passes, that a model
+  tool's bot account fails, or that the trailer check fails what section 4 refuses.
+- The merge takes GitHub's composed message and author (section 2, item 4). At gh's interactive
+  prompt, "Edit commit subject" and "Edit commit message" are each an edit. Amended on
+  2026-10-21: this named the message only, and not gh's prompt.
 
 #114 passed review with an agent's session name as its only commit author. These checks are
 what would have stopped it.
@@ -489,15 +516,21 @@ domain such as `corp.locale.io`, because `example.com` is on section 4's list.
    - No address: `Claude (Fable 5) <>` is refused as a model. `Jane Doe <>`, `Jane Doe <jane>`
      and, as a trailer, `Jane Doe` with no `<…>` are refused as untraceable. Catches a no-address
      rule written for trailers only, and one that knows only `<>`.
-   - Malformed addresses, added on 2026-10-21 and not among the 49 measured above:
-     `Claude <@>` and `Claude <noreply@anthropic.com >` are refused as a model. `Probe <probe@>`,
-     `Probe <probe@.>`, `Probe <@>`, `Probe <@corp.locale.io>`, `Probe < probe@corp.locale.io>`,
-     `Probe <probe@laptop.local >`, `Probe <me@laptop.local..>`, `Probe <probe@corp..locale.io>`
-     and `Probe <probe@.corp.locale.io>` are refused as untraceable.
-     `Probe <probe@corp.locale.io.>` and `Jane Doe <jane.doe@corp.locale.io>` are cleared.
-     Catches a no-address rule that clears an empty local part or domain, whitespace or an empty
-     label, one that refuses the single trailing dot rule 4 ignores, and one that refuses every
-     dot.
+   - Malformed addresses, added on 2026-10-21 and not among the 49 measured above. No row but
+     `Claude <@laptop.local>` has a domain on section 4's list, so only rule 2 can refuse it.
+     `Claude <@>`, `Claude <noreply@anthropic.com >` and `Claude <noreply@anthropic.com>` with a
+     U+00A0 before the `>` are refused as a model. `Claude <@laptop.local>` is refused as a model
+     too, not as untraceable: rule 2 decides before rule 4, and its name holds a vendor word.
+     Refused as untraceable: `Probe <probe@>`, `Probe <probe@.>`, `Probe <@>`,
+     `Probe <@corp.locale.io>`, `Probe < probe@corp.locale.io>`, `Probe <probe @corp.locale.io>`,
+     `Probe <probe@corp .locale.io>`, `Probe <probe@corp.locale.io >`,
+     `Probe <probe@corp.locale.io>` with a U+3000 before the `>`, `Probe <probe@corp.locale.io..>`,
+     `Probe <probe@.corp.locale.io>` and `Probe <probe@corp..locale.io>`. Cleared:
+     `Probe <probe@corp.locale.io.>` and `Jane Doe <jane.doe@corp.locale.io>`. Catches a rule 2
+     that tests no malformed shape or drops any one of its clauses, one that trims the address,
+     one that looks for whitespace only at the domain's end or only in ASCII, one that strips
+     every trailing dot, one that refuses the one trailing dot rule 4 ignores or every dot, and
+     one that decides after rule 4.
 2. **Raw identities.** A commit authored by `Claude <noreply@anthropic.com>`, whose tree holds a
    `.mailmap` mapping that identity to a person, is refused, and the refusal names the raw author.
    Catches a guard that reads `%aN`, `%aE` or `git log`'s default output.
@@ -528,8 +561,10 @@ domain such as `corp.locale.io`, because `example.com` is on section 4's list.
    - dropping the author read, and dropping the committer read;
    - reading the mailmapped form;
    - dropping the domain check, and anchoring it to a dot;
-   - clearing a value with no address, and clearing each malformed shape rule 2 names (amended on
-     2026-10-21).
+   - clearing a value with no address, and clearing a value for each clause of rule 2's malformed
+     test: whitespace anywhere, Unicode whitespace included, an empty local part, and a domain
+     that, once one trailing dot is removed, is empty, starts or ends with a dot, or holds two
+     dots in a row; and deciding rule 2 after rule 4 (amended on 2026-10-21).
 
    Today, dropping `Signed-off-by` passes all 13 tests in `attribution_guard.rs` (measured).
    Catches a test that cannot fail.
@@ -553,10 +588,11 @@ domain such as `corp.locale.io`, because `example.com` is on section 4's list.
     with its failing test, which the pr-review skill's first step would otherwise block; the pull
     request reverts it before merge and says so in its body. #174 did this with 90f276f. The
     step's condition does not depend on the event, so that pull request run shows what a push run
-    does. When the task closes, run history shows a concluded attribution step for every push run
-    on `main` since the change. Catches today's `gates`, where a failed `tests` step skipped the
-    read of 707972e and c5aa18d. Amended on 2026-10-21: this did not say that the red push is
-    authorized.
+    does. When the task closes, run history shows, for every push run on `main` since the change,
+    an attribution step that concluded on the run's first attempt or on a rerun section 4 counts.
+    Catches today's `gates`, where a failed `tests` step skipped the read of 707972e and c5aa18d.
+    Amended on 2026-10-21: this did not say that the red push is authorized, and its history check
+    counted any rerun.
 11. **The pr-review skill.** It carries the checks of section 6: the workflow-approval rule, the
     pre-merge checks with their `gh api` command, the clearing of Dependabot, and how a model
     tool's suggestion is taken. It also carries the merge rule of section 2, item 4. #114 is the
