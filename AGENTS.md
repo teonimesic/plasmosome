@@ -85,6 +85,7 @@ means a real seam, one means a hypothetical one — do not abstract until someth
 ```shell
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 cargo fmt --all -- --check
 ./.githooks/provenance-guard
 ./.githooks/attribution-guard
