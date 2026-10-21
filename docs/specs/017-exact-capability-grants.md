@@ -417,7 +417,8 @@ fault, never a made-up GrantId or an empty class. Requested configuration is not
 
 Every class closes only the selected grant's new admission and drains its actual admitted work
 under the supplied single deadline. Before destructive release, timeout restores that holding's
-admission and preserves its full authority and peers. After destructive progress, timeout or
+admission and preserves its full authority and peers. Restoring admission never lifts a spec 028
+lifetime fence. After destructive progress, timeout or
 failure is incomplete, not `DrainTimedOut` with a fictitious rollback. Force first closes the
 selected access gate, then releases only original resources; outstanding uninterruptible host
 IO remains owned/incomplete until actually terminal. Dropping a future is not cancellation.
