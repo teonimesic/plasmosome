@@ -236,14 +236,22 @@ fn read_checked(file: &File, path: &Path) -> Result<Vec<u8>, Fault> {
             format!("{shown} carries an ACL allow entry that grants write"),
         ));
     }
+    read_bounded(file, path)
+}
+
+fn read_bounded(reader: impl Read, path: &Path) -> Result<Vec<u8>, Fault> {
     let mut bytes = Vec::new();
-    file.take(MAX_TRUSTED_BYTES as u64 + 1)
+    reader
+        .take(MAX_TRUSTED_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| io_fault("read", path, &error))?;
     if bytes.len() > MAX_TRUSTED_BYTES {
         return Err(Fault::Check(
             TrustCheck::Size,
-            format!("{shown} holds more than {MAX_TRUSTED_BYTES} bytes"),
+            format!(
+                "{} holds more than {MAX_TRUSTED_BYTES} bytes",
+                path.display()
+            ),
         ));
     }
     Ok(bytes)
