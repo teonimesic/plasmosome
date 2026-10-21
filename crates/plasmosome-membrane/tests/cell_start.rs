@@ -178,11 +178,12 @@ fn read_piped(bytes: Vec<u8>, args: &CellArgs) -> Result<SupervisorConfig, CellS
     read
 }
 
-fn refused_record(bytes: Vec<u8>, args: &CellArgs) -> CellStartRefusal {
+fn refused_record(record: impl FnOnce(&Instance) -> Vec<u8>, args: &CellArgs) -> CellStartRefusal {
     let instance = Instance::new();
-    let _held = instance.cell(1);
+    let _first = instance.cell(1);
+    let _second = instance.cell(2);
     let before = instance.tree();
-    let refusal = read_piped(bytes, args).expect_err("the record is refused");
+    let refusal = read_piped(record(&instance), args).expect_err("the record is refused");
     assert_eq!(instance.tree(), before, "the instance root is unchanged");
     refusal
 }
@@ -252,8 +253,10 @@ fn a_record_of_exactly_the_bound_before_its_newline_is_accepted() {
 
 #[test]
 fn a_record_one_byte_over_the_bound_is_too_large() {
-    let config = sample_config(1);
-    let refusal = refused_record(padded(&config, MAX_RECORD_BYTES + 1), &argv(1));
+    let refusal = refused_record(
+        |instance| padded(&instance.config(1), MAX_RECORD_BYTES + 1),
+        &argv(1),
+    );
     assert!(
         matches!(
             refusal,
@@ -265,9 +268,12 @@ fn a_record_one_byte_over_the_bound_is_too_large() {
 
 #[test]
 fn a_record_with_no_newline_before_eof_is_refused() {
-    let mut record = encoded(&sample_config(1));
-    record.pop();
-    let refusal = refused_record(record, &argv(1));
+    let without_newline = |instance: &Instance| {
+        let mut record = encoded(&instance.config(1));
+        record.pop();
+        record
+    };
+    let refusal = refused_record(without_newline, &argv(1));
     assert!(
         matches!(
             refusal,
@@ -279,7 +285,7 @@ fn a_record_with_no_newline_before_eof_is_refused() {
 
 #[test]
 fn nothing_before_eof_is_refused() {
-    let refusal = refused_record(Vec::new(), &argv(1));
+    let refusal = refused_record(|_| Vec::new(), &argv(1));
     assert!(
         matches!(
             refusal,
@@ -291,8 +297,7 @@ fn nothing_before_eof_is_refused() {
 
 #[test]
 fn a_second_line_after_the_record_is_refused() {
-    let record = encoded(&sample_config(1));
-    let refusal = refused_record(record.repeat(2), &argv(1));
+    let refusal = refused_record(|instance| encoded(&instance.config(1)).repeat(2), &argv(1));
     assert!(
         matches!(
             refusal,
@@ -304,8 +309,7 @@ fn a_second_line_after_the_record_is_refused() {
 
 #[test]
 fn a_record_for_another_cell_is_refused() {
-    let record = encoded(&sample_config(2));
-    let refusal = refused_record(record, &argv(1));
+    let refusal = refused_record(|instance| encoded(&instance.config(2)), &argv(1));
     let CellStartRefusal::CellMismatch { argv, record } = refusal else {
         panic!("{refusal:?}");
     };
