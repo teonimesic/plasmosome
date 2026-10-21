@@ -133,11 +133,8 @@ impl Walk {
         })
     }
 
-    /// A walk of `relative` from `start`, an open directory the caller names `start_path`.
-    /// `relative` must be one or more normal components. The start is judged like every directory
-    /// the walk passes, and nothing above it is. Production paths walk from "/"; this serves tests
-    /// and callers that already hold a directory they verified.
-    pub fn from_dir(
+    #[cfg(test)]
+    pub(crate) fn from_dir(
         start: OwnedFd,
         start_path: &Path,
         relative: &Path,
