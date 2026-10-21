@@ -4,13 +4,26 @@ version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "A composable, OS-enforced capability kernel for AI agents. This version is an empty placeholder holding the name."
+description = "A composable, OS-enforced capability kernel for AI agents. Version 0.0.0 on crates.io is an empty placeholder holding the name."
 repository = "https://github.com/teonimesic/plasmosome"
 readme = "README.md"
 publish = ["crates-io"]
 exclude = ["AGENTS.md", "CLAUDE.md"]
 
+[dependencies]
+plasmosome-cli = { workspace = true }
+
+[dev-dependencies]
+plasmosome-core = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
 [lib]
+bench = false
+
+[[bin]]
+name = "plasmosome"
+path = "src/main.rs"
 bench = false
 
 [lints]

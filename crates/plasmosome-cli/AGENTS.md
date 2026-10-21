@@ -5,7 +5,8 @@
 The client logic of the `plasmosome` command line, as a library the binary calls, so tests drive
 it without spawning a process. Decision 009 named the trigger for this crate and spec 025 §1
 pulled it. Today it holds spec 025's JSON scanner and writers, its reply reader and reply rules,
-its envelopes and its client codes. It is `publish = false` and never ships on its own.
+its envelopes, its client codes, its command table, the order the command line is read in, and
+the one served command, `status --socket`. It is `publish = false` and never ships on its own.
 
 ## Hard rules
 
@@ -40,15 +41,52 @@ its envelopes and its client codes. It is `publish = false` and never ships on i
   and nothing more. Through `take`, it reads and keeps at most `MAX_REPLY_BYTES` plus one byte. A
   reader that reads until the newline and then checks the length is the unbounded read spec 026
   refuses. It has no clock, so its caller bounds each read by the time left.
+- **The command table is spec 025's.** `COMMANDS` holds every command of spec 025 §2, and the
+  table test reads spec 025's table. A command is marked served in the task that serves its verb,
+  and never earlier, so `--help` stays true.
+- **Help, the version and `not_served` read nothing more.** They read no environment variable,
+  select no socket and connect nowhere. Help comes before every other rule.
+- **The full parse names the leftmost fault.** It judges each argument where it stands, in one
+  scan from left to right. A check that runs over the whole line for one kind of fault, before or
+  after that scan, names a fault further right first. Help, `not_served` and the full parse read
+  the command words through one function, so the three rules agree on what the command is. Help
+  judges only those words and names the first bad one, since spec 025 prints help whatever flags
+  are on the line. So one line can name a word with `--help` and a flag without it.
+- **Names are checked with `plasmosome-core`'s `InstanceName`.** A copy of its rules here would
+  drift from the rules the daemons use.
+- **A panic ends as `internal`.** `handle` runs the command under `catch_unwind`. Its hook is
+  installed once per process, through a `Once`, and is silent only on the thread running
+  `handle`. A hook installed on every call nests one wrapper per call, and calls on two threads
+  race and drop a hook. Tests make a command panic through a stdout that panics; nothing in the
+  code exists only to panic.
+- **The trusted UID and the clock come in through `Context`.** `main_with` passes the effective
+  UID and `SystemClock`, and nothing else does. A flag, variable or file that reaches the trusted
+  UID lets a caller trust another user's daemon. Tests pass their own UID and a clock they
+  control.
+- **The peer check comes before the first byte.** `exchange` calls `check_peer_uid` before it
+  writes, and every write and read waits only `Deadline::left`. A write before the check sends
+  the request to a daemon of another user.
+- **What the client measures, it measures before connecting.** The path's length, the path
+  boundary and the request line's size are refused with no connection made, so a refused command
+  never reaches a daemon.
 - **No `unsafe` and no direct third-party dependency.** The package keeps `lints.workspace = true`.
-  Its one normal dependency is `plasmosome-core`, for `PrivateSocketError`, and that brings
-  third-party dependencies of its own into the library's build, `serde_json` among them;
-  `cargo tree -p plasmosome-cli -e normal` lists them. This package uses `serde_json` directly only
-  as a dev-dependency: the independent parser the escaping test checks against.
+  Its one normal dependency is `plasmosome-core`, for `InstanceName` and the private-socket
+  checks, and that brings third-party dependencies of its own into the library's build,
+  `serde_json` among them; `cargo tree -p plasmosome-cli -e normal` lists them. This package
+  uses `serde_json` directly only as a dev-dependency: the independent parser the escaping test
+  checks against. `tempfile` is the other dev-dependency, for the private directories the status
+  tests bind their sockets in.
 
 ## Testing
 
-`cargo test -p plasmosome-cli`. A test that needs a terminal control builds it with
-`char::from_u32` or a byte value, and builds an escape from a backslash character and the hex
-digits. Never type the escape itself into an editor or a tool: a tool can decode it, and the test
-then checks nothing. Read a new test file with `xxd` before trusting it.
+`cargo test -p plasmosome-cli`. The panic tests are in `tests/panic.rs`, a process of their own, so
+their recording hook is set before the first call to `handle`. A test that needs a terminal control
+builds it with `char::from_u32` or a byte value, and builds an escape from a backslash character and
+the hex digits. Never type the escape itself into an editor or a tool: a tool can decode it, and the
+test then checks nothing. Read a new test file with `xxd` before trusting it.
+
+The status tests in `tests/status.rs` run `handle` against `tests/support`'s `FakeDaemon`: a real
+private socket, bound with `plasmosome-core`'s `PrivateListener`, that records every connection
+and every byte and answers each connection as the test says. `private_root` makes a `0700`
+directory that `check_private_path` accepts: under the canonical per-user temporary directory on
+macOS, and under `XDG_RUNTIME_DIR`, else the target's tmp, on Linux.
