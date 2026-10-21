@@ -29,14 +29,22 @@ its envelopes and its client codes. It is `publish = false` and never ships on i
   human form is about 66 times the reply's size.
 - **The client codes are a closed list.** A new code lands in spec 025 first, then in
   `ClientCode::ALL`. The table test reads spec 025's table.
+- **Each private-socket refusal has its own arm.** `map_refusal` names every `PrivateSocketError`
+  variant, and `clippy::wildcard_enum_match_arm` is denied on that match, so a new variant stops
+  the build and a `_` arm fails the gate. A new variant gets a row in spec 025 §5's table first,
+  then its arm, then its case in `tests/refusal.rs`. That test's `position` also names every
+  variant, and the test reads spec 025's table.
 - **Spec 026 §5 lists `scan` and `read_reply`.** A change to either's bound, or to the scan's
   depth handling, updates that row.
 - **`read_reply` takes only its line.** It consumes the line and its newline from a `BufRead`
   and nothing more. Through `take`, it reads and keeps at most `MAX_REPLY_BYTES` plus one byte. A
   reader that reads until the newline and then checks the length is the unbounded read spec 026
   refuses. It has no clock, so its caller bounds each read by the time left.
-- **No `unsafe` and no third-party dependency.** The package keeps `lints.workspace = true`.
-  `serde_json` is a dev-dependency only: the independent parser the escaping test checks against.
+- **No `unsafe` and no direct third-party dependency.** The package keeps `lints.workspace = true`.
+  Its one normal dependency is `plasmosome-core`, for `PrivateSocketError`, and that brings
+  third-party dependencies of its own into the library's build, `serde_json` among them;
+  `cargo tree -p plasmosome-cli -e normal` lists them. This package uses `serde_json` directly only
+  as a dev-dependency: the independent parser the escaping test checks against.
 
 ## Testing
 

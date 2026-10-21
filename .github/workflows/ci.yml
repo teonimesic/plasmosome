@@ -126,7 +126,7 @@ jobs:
       - name: ignored tests regression
         run: python3 tools/ignored-tests-regression.py
 
-      # `macos` runs these four steps too, from clippy to the ignored-test report. Change both jobs.
+      # `macos` runs these five steps too, from clippy to rustdoc. Change both jobs.
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
 
@@ -146,6 +146,11 @@ jobs:
           TESTS: ${{ steps.tests.outcome }}
           GUARDS: ${{ steps.guards.outcome }}
         run: python3 tools/ignored_tests.py "$RUNNER_TEMP/cargo-test.log" "tests=$TESTS=--workspace --exclude plasmosome-guards" "workspace guards=$GUARDS=-p plasmosome-guards"
+
+      - name: rustdoc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --workspace --no-deps
 
       - name: provenance guard
         run: ./.githooks/provenance-guard
@@ -242,7 +247,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      # These four steps match the four in `gates`, from clippy to the ignored-test report. Change both jobs.
+      # These five steps match the five in `gates`, from clippy to rustdoc. Change both jobs.
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
 
@@ -262,6 +267,11 @@ jobs:
           TESTS: ${{ steps.tests.outcome }}
           GUARDS: ${{ steps.guards.outcome }}
         run: python3 tools/ignored_tests.py "$RUNNER_TEMP/cargo-test.log" "tests=$TESTS=--workspace --exclude plasmosome-guards" "workspace guards=$GUARDS=-p plasmosome-guards"
+
+      - name: rustdoc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --workspace --no-deps
 
   coverage:
     runs-on: ubuntu-latest
