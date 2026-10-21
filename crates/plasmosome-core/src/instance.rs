@@ -5041,7 +5041,7 @@ mod tests {
         entries(
             &root,
             "cells",
-            &["cell-2", "cell-07", "cell-x", "cell-0", "Cell-9", "cell-"],
+            &["cell-2", "cell-07", "cell-x", "cell-0", "CELL-08", "cell-"],
         );
         entries(
             &root,
@@ -5051,6 +5051,63 @@ mod tests {
         fs::write(root.join("cells/cell-30.tmp"), b"").expect("the file is made");
         let (instance, lock) = locked(&root);
         assert_eq!(allocated(&instance, &lock), cell("cell-3"));
+    }
+
+    #[test]
+    fn a_name_that_differs_from_a_cell_id_only_in_the_case_of_its_prefix_counts_as_that_id() {
+        let rows = [
+            ("cells", &["cell-2", "CELL-3"][..], "cell-4"),
+            ("retired", &["Cell-3"][..], "cell-4"),
+            ("cells", &["cElL-12", "cell-3"][..], "cell-13"),
+        ];
+        let found: Vec<_> = rows
+            .iter()
+            .map(|&(place, names, _)| {
+                let (_dir, root) = temp_root();
+                entries(&root, place, names);
+                let (mut instance, lock) = locked(&root);
+                instance.sync = no_sync;
+                let outcome = instance
+                    .allocate_cell(&lock)
+                    .map(|dir| dir.cell().as_str().to_owned())
+                    .map_err(|error| error.to_string());
+                (place, names, outcome)
+            })
+            .collect();
+        let wanted: Vec<_> = rows
+            .iter()
+            .map(|&(place, names, next)| (place, names, Ok(next.to_owned())))
+            .collect();
+        assert_eq!(found, wanted);
+    }
+
+    #[test]
+    fn a_taken_name_the_listing_cannot_see_makes_the_allocation_try_the_next_number() {
+        let (_dir, root) = temp_root();
+        entries(&root, "cells", &["cell-2"]);
+        let (mut instance, lock) = locked(&root);
+        instance.sync = hooked_sync;
+        let cells = root.join("cells");
+        let cells_identity = identity_at(&cells);
+        let hidden = cells.join("cell-3");
+        let scans = Rc::new(Cell::new(0));
+        let (counted, planted) = (Rc::clone(&scans), hidden.clone());
+        on_every_scan(move || {
+            counted.set(counted.get() + 1);
+            fs::create_dir(&planted).expect("the hidden name is made after cells/ is listed");
+        });
+        on_every_sync(move |fd| {
+            let synced = fs::File::from(fd.try_clone_to_owned().expect("the descriptor is copied"))
+                .metadata()
+                .expect("the synced directory has metadata");
+            if identity(&synced) == cells_identity {
+                fs::remove_dir(&hidden)
+                    .expect("the hidden name is removed before the next listing");
+            }
+        });
+        assert_eq!(allocated(&instance, &lock), cell("cell-4"));
+        assert_eq!(scans.get(), 2);
+        assert_eq!(names_under(&root.join("cells")), ["cell-2", "cell-4"]);
     }
 
     #[cfg(target_os = "linux")]
@@ -5713,5 +5770,9 @@ mod tests {
             path: PathBuf::from("/inst/cells"),
         };
         assert!(contended.to_string().contains("64"), "{contended}");
+        assert!(
+            !contended.to_string().contains("another process"),
+            "{contended} blames a process that may not exist"
+        );
     }
 }
