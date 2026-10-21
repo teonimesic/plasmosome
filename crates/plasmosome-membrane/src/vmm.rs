@@ -1031,7 +1031,8 @@ mod tests {
         loop {
             // SAFETY: siginfo_t is a plain C struct, for which all zeroes is a valid value.
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            // SAFETY: `info` is a local siginfo_t that waitid may write. WNOWAIT leaves the child
+            // SAFETY: `info` is a local siginfo_t that waitid may write. Every caller passes a child
+            // it spawned before any consuming wait, so `pid` still names it, and WNOWAIT leaves it
             // unreaped.
             let waited = unsafe {
                 libc::waitid(
@@ -1056,18 +1057,6 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    #[allow(unsafe_code)]
-    fn assert_no_waitable_child(pid: i32) {
-        let mut status = 0;
-        assert_eq!(
-            // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
-            // this process.
-            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
-            -1
-        );
-        assert_eq!(last_errno(), libc::ECHILD);
     }
 
     #[allow(unsafe_code)]
@@ -1238,17 +1227,19 @@ mod tests {
     fn kill_then_immediate_drop_leaves_no_orphan() {
         let mut child = VmmChild::spawn(SleepForever).expect("fork succeeds");
         let pid = child.pid();
+        reset_reap_record();
         child.kill().expect("signalling a live child succeeds");
         drop(child);
-        assert_no_waitable_child(pid);
+        assert_reaped_by_handle(pid);
     }
 
     #[test]
     fn drop_reaps_a_running_child_without_orphans() {
         let child = VmmChild::spawn(SleepForever).expect("fork succeeds");
         let pid = child.pid();
+        reset_reap_record();
         drop(child);
-        assert_no_waitable_child(pid);
+        assert_reaped_by_handle(pid);
     }
 
     #[test]
@@ -1259,7 +1250,6 @@ mod tests {
         reset_reap_record();
         drop(fixture.take_child());
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
         assert_reaped_by_handle(pid);
         fixture.discard_release();
     }
@@ -1272,7 +1262,6 @@ mod tests {
         reset_reap_record();
         assert_eq!(fixture.child().state(), Ok(VmmState::Exited { code: 7 }));
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
         assert_reaped_by_handle(pid);
         assert_eq!(fixture.child().state(), Ok(VmmState::Exited { code: 7 }));
         drop(fixture.take_child());
@@ -1290,7 +1279,6 @@ mod tests {
             Ok(VmmState::Exited { code: 7 })
         );
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
         assert_reaped_by_handle(pid);
         drop(fixture.take_child());
         fixture.discard_release();
@@ -1304,7 +1292,6 @@ mod tests {
         reset_reap_record();
         fixture.child().kill().expect("cleanup succeeds");
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
         assert_reaped_by_handle(pid);
         assert_eq!(fixture.child().state(), Ok(VmmState::Exited { code: 7 }));
         fixture.discard_release();
@@ -1517,12 +1504,13 @@ mod tests {
             }
         }
         gate_read.close();
+        reset_reap_record();
         let mut child = VmmChild {
             pid,
             lifecycle: Lifecycle::Owned,
         };
         child.kill().expect("pre-setsid teardown completes");
-        assert_no_waitable_child(pid);
+        assert_reaped_by_handle(pid);
         gate_write.close();
     }
 
@@ -1530,9 +1518,10 @@ mod tests {
     fn immediate_drop_kills_execed_leader_and_worker() {
         let mut fixture = spawn_with_worker(false);
         let pid = fixture.child().pid();
+        reset_reap_record();
         drop(fixture.take_child());
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
+        assert_reaped_by_handle(pid);
         fixture.discard_release();
     }
 
@@ -1847,19 +1836,9 @@ mod signal_pressure {
         unhandled
     }
 
-    #[allow(unsafe_code)]
     fn assert_reaped_by_drop(pid: libc::pid_t, interruptions: usize) {
-        let mut status: libc::c_int = 0;
-        // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
-        // this process.
-        let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        let errno = last_errno();
-        if observed == 0 {
-            // SAFETY: as above. The leader was released, so it exits and this wait returns.
-            unsafe { libc::waitpid(pid, &mut status, 0) };
-        }
         assert!(
-            observed == -1 && errno == libc::ECHILD,
+            reaped_by_a_handle(pid),
             "pid {pid} survived a drop whose blocking wait was interrupted {interruptions} times"
         );
     }
@@ -1887,7 +1866,6 @@ mod signal_pressure {
             let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
             let interruptions = interrupted_reaps() - interruptions_before;
             assert_reaped_by_drop(pid, interruptions);
-            assert_reaped_by_handle(pid);
             assert_eq!(
                 reports, 0,
                 "child {child_number}: the drop reported a cleanup error"

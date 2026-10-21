@@ -513,16 +513,10 @@ mod tests {
         |_spec: &BrokerSpec| VmmChild::spawn(SleepForever)
     }
 
-    #[allow(unsafe_code)]
     fn assert_reaped(pid: i32, broker: &str) {
-        let mut status: libc::c_int = 0;
-        // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of this
-        // process.
-        let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        let errno = std::io::Error::last_os_error().raw_os_error();
         assert!(
-            observed == -1 && errno == Some(libc::ECHILD),
-            "broker `{broker}` at pid {pid} was still a child of this process, so it outlived the set"
+            crate::vmm::reaped_by_a_handle(pid),
+            "no handle consumed broker `{broker}`'s exit at pid {pid}, so the set's drop did not reap it"
         );
     }
 
@@ -624,6 +618,7 @@ mod tests {
         let specs = names.iter().map(|name| spec(dir.path(), name)).collect();
         let set =
             BrokerSet::spawn(specs, forking(), ScriptedProbe::new()).expect("every broker forks");
+        crate::vmm::reset_reap_record();
 
         let pids = set.pids();
         assert_eq!(
