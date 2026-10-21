@@ -39,6 +39,10 @@ pub mod runtime;
 pub mod session_log;
 pub mod state;
 pub mod supervisor_check;
+/// Spec 023 §4's start: the controller runs one cell's `membraned` detached, with only
+/// descriptors 0 to 4, and writes it the config record.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod supervisor_start;
 mod toml_depth;
 pub mod version;
 
