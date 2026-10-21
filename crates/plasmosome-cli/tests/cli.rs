@@ -356,6 +356,7 @@ fn the_command_words_are_read_the_same_way_by_every_rule() {
     }
     assert_usage(args(&["--frob", "cell", "list"]), COMMANDS, Some("--frob"));
     assert_usage(args(&["cell", "--frob", "list"]), COMMANDS, Some("cell"));
+    assert_usage(args(&["-x=y", "cell", "list"]), COMMANDS, Some("-x=y"));
 }
 
 #[test]
@@ -693,6 +694,39 @@ fn the_lines_that_read_two_ways_name_the_settled_argument() {
         rows.len(),
         wrong.join("\n")
     );
+}
+
+#[test]
+fn help_names_the_first_bad_word_and_any_other_line_its_leftmost_fault() {
+    let status = status_served();
+    let rows: Vec<(&[Command], &str, Option<&str>)> = vec![
+        (
+            &status,
+            "--kernel ../x frobnicate --help",
+            Some("frobnicate"),
+        ),
+        (&status, "--kernel ../x frobnicate", Some("../x")),
+        (&status, "--frob=x frobnicate --help", Some("frobnicate")),
+        (&status, "--frob=x frobnicate", Some("--frob=x")),
+        (&status, "status --frob=x extra --help", Some("extra")),
+        (&status, "status --frob=x extra", Some("--frob=x")),
+        (&status, "status --help --help extra", Some("extra")),
+    ];
+    let wrong = misnamed(&rows);
+    assert!(
+        wrong.is_empty(),
+        "{} of {} lines name the wrong argument:\n{}",
+        wrong.len(),
+        rows.len(),
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn the_full_parse_refuses_an_unknown_flag_that_holds_a_value() {
+    for flag in ["--frob=x", "--deadline=5"] {
+        assert_usage(args(&["status", flag]), &status_served(), Some(flag));
+    }
 }
 
 #[test]
