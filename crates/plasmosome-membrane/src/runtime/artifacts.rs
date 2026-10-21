@@ -3,6 +3,7 @@ use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::os::fd::AsFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
+use std::path::PathBuf;
 
 use plasmosome_core::nofollow::{Facts, Kind, Walk, WalkRefusal, acl_grants_write, effective_uid};
 
@@ -74,7 +75,7 @@ impl VerifiedArtifact {
     pub fn reconfirm(&self) -> Result<(), ArtifactRefusal> {
         let refuse = |fault| ArtifactRefusal {
             role: self.role,
-            path: self.path.clone(),
+            path: self.path.as_path().to_path_buf(),
             fault,
         };
         let found = open_checked(&self.walk).map_err(refuse)?.identity;
@@ -102,11 +103,12 @@ pub struct VerifiedArtifacts {
     pub guest_policy: VerifiedArtifact,
 }
 
-/// Why an artifact was refused: its role, its path and the first rule it broke.
+/// Why an artifact was refused: its role, its path as the recipe gave it and the first rule it
+/// broke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactRefusal {
     pub role: ArtifactRole,
-    pub path: RecipePath,
+    pub path: PathBuf,
     pub fault: ArtifactFault,
 }
 
@@ -154,7 +156,7 @@ impl From<WalkRefusal> for ArtifactFault {
 
 impl fmt::Display for ArtifactRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}: {}", self.role, self.path.as_str(), self.fault)
+        write!(f, "{} {}: {}", self.role, self.path.display(), self.fault)
     }
 }
 
@@ -229,14 +231,14 @@ pub fn verify_artifact(
 ) -> Result<VerifiedArtifact, ArtifactRefusal> {
     let refuse = |fault| ArtifactRefusal {
         role,
-        path: artifact.path().clone(),
+        path: artifact.path().as_path().to_path_buf(),
         fault,
     };
     let walk =
         Walk::from_root(artifact.path().as_path()).map_err(|refusal| refuse(refusal.into()))?;
     let checked = open_checked(&walk).map_err(refuse)?;
     let digest = hash(&checked.file).map_err(refuse)?;
-    let (after, _) = stat(&checked.file).map_err(refuse)?;
+    let after = stamp(&stat(&checked.file).map_err(refuse)?);
     judge_unchanged(checked.stamp, after).map_err(refuse)?;
     if digest != *artifact.sha256() {
         return Err(refuse(ArtifactFault::DigestMismatch {
@@ -294,38 +296,40 @@ fn open_checked(walk: &Walk) -> Result<Checked, ArtifactFault> {
     if acl_grants_write(file.as_fd()).map_err(|error| io_fault("acl", &error))? {
         return Err(ArtifactFault::WriteAcl);
     }
-    let (stamp, immutable) = stat(&file)?;
-    judge_immutability(immutable)?;
+    let metadata = stat(&file)?;
+    judge_immutability(&metadata)?;
     Ok(Checked {
         file,
         identity,
-        stamp,
+        stamp: stamp(&metadata),
     })
 }
 
-fn stat(file: &File) -> Result<(Stamp, Immutability), ArtifactFault> {
-    let metadata = file.metadata().map_err(|error| io_fault("fstat", &error))?;
-    let stamp = Stamp {
+fn stat(file: &File) -> Result<Metadata, ArtifactFault> {
+    file.metadata().map_err(|error| io_fault("fstat", &error))
+}
+
+fn stamp(metadata: &Metadata) -> Stamp {
+    Stamp {
         size: metadata.size(),
         modified: (metadata.mtime(), metadata.mtime_nsec()),
         changed: (metadata.ctime(), metadata.ctime_nsec()),
-    };
-    Ok((stamp, immutability(&metadata)))
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn immutability(metadata: &Metadata) -> Immutability {
+fn judge_immutability(metadata: &Metadata) -> Result<(), ArtifactFault> {
     use std::os::macos::fs::MetadataExt;
     if metadata.st_flags() & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0 {
-        Immutability::Set
+        Ok(())
     } else {
-        Immutability::Clear
+        Err(ArtifactFault::NotImmutable)
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn immutability(_metadata: &Metadata) -> Immutability {
-    Immutability::Unverifiable
+fn judge_immutability(_metadata: &Metadata) -> Result<(), ArtifactFault> {
+    Err(ArtifactFault::ImmutabilityUnverifiable)
 }
 
 fn hash(file: &File) -> Result<Digest, ArtifactFault> {
@@ -353,13 +357,6 @@ fn io_fault(op: &'static str, error: &io::Error) -> ArtifactFault {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Immutability {
-    Set,
-    Clear,
-    Unverifiable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stamp {
     pub(crate) size: u64,
     pub(crate) modified: (i64, i64),
@@ -380,14 +377,6 @@ pub(crate) fn judge_artifact(facts: &Facts, euid: u32) -> Result<(), ArtifactFau
         return Err(ArtifactFault::SetIdBits { mode: facts.mode });
     }
     Ok(())
-}
-
-pub(crate) fn judge_immutability(immutable: Immutability) -> Result<(), ArtifactFault> {
-    match immutable {
-        Immutability::Set => Ok(()),
-        Immutability::Clear => Err(ArtifactFault::NotImmutable),
-        Immutability::Unverifiable => Err(ArtifactFault::ImmutabilityUnverifiable),
-    }
 }
 
 pub(crate) fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
