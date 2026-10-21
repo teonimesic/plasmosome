@@ -3,9 +3,9 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, GrantId, Handle,
-    LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp,
-    UniverseRemoval,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FileAccess,
+    GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy,
+    UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 use crate::builders::{
@@ -137,12 +137,18 @@ fn take_contract_failure() -> bool {
     CONTRACT_FAILURE_RECORDED.with(|recorded| recorded.replace(false))
 }
 
-/// Checks that a grant's exact ledger entry is returned by either revoke policy.
+/// Checks that a grant issues exactly the address, owner, capability and kind its caller
+/// prepared, and that either revoke policy returns that entry.
 pub fn grant_is_replayable<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
         for prepared in sample_grants() {
             let entry = grant_prepared(&mut backend, &prepared);
+            contract_assert_eq!(
+                entry.handle,
+                prepared.handle(),
+                "a grant must issue exactly the address its caller prepared"
+            );
             contract_assert_eq!(&entry.owner, prepared.operation.owner());
             contract_assert_eq!(entry.capability, prepared.operation.capability());
             contract_assert_eq!(entry.kind, prepared.kind);
@@ -236,9 +242,11 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
     }
 }
 
-/// Checks that snapshots contain every and only requested grant or planted object.
+/// Checks that snapshots contain every and only requested grant or planted object; that a
+/// grant, apply or plant of an invalid operation returns `InvalidOperation` and changes nothing;
+/// and that a backend fresh from the factory, made after another instance was used, observes
+/// nothing.
 pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> B) {
-    contract_assert!(make().snapshot_os_state().is_empty());
     let mut backend = make();
     let mut expected = Vec::new();
     for prepared in sample_grants() {
@@ -255,6 +263,55 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         &backend.snapshot_os_state(),
         &expected,
         "the snapshot lost or invented an object",
+    );
+    let invalid = invalid_operation();
+    let refusal = BackendError::InvalidOperation {
+        class: invalid.class().as_str(),
+        id: invalid.id(),
+        error: invalid
+            .validate()
+            .expect_err("the invalid operation fixture must fail validation"),
+    };
+    contract_assert_eq!(
+        backend.grant(invalid.clone(), GrantKind::Hot),
+        Err(refusal.clone()),
+        "a grant of an invalid operation must be refused before any change"
+    );
+    assert_exact_state(
+        &backend.snapshot_os_state(),
+        &expected,
+        "a refused invalid grant changed the state",
+    );
+    contract_assert_eq!(
+        backend.revoke(invalid.handle(), DrainSpec::forcing()),
+        Err(BackendError::UnknownHandle {
+            handle: invalid.handle()
+        }),
+        "a refused invalid grant must issue no record"
+    );
+    contract_assert_eq!(
+        backend.apply(invalid.clone()),
+        Err(refusal.clone()),
+        "an apply of an invalid operation must be refused before any change"
+    );
+    assert_exact_state(
+        &backend.snapshot_os_state(),
+        &expected,
+        "a refused invalid apply changed the state",
+    );
+    contract_assert_eq!(
+        backend.plant(invalid.object()),
+        Err(refusal),
+        "a plant of an invalid object must be refused before any change"
+    );
+    assert_exact_state(
+        &backend.snapshot_os_state(),
+        &expected,
+        "a refused invalid plant changed the state",
+    );
+    contract_assert!(
+        make().snapshot_os_state().is_empty(),
+        "a backend fresh from the factory must observe nothing an earlier instance did"
     );
 }
 
@@ -573,17 +630,206 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
     }
 }
 
-/// Checks that a retry of a standing issued grant returns the original entry, that another kind,
-/// owner or capability at an issued address is refused, and that a grant never promotes an
-/// applied or planted object into an issued record.
+/// Checks, for every sample capability, both kinds and both revoke policies, that a retry of a
+/// standing issued grant returns the original entry and changes nothing; that another kind,
+/// owner or capability at an issued address returns `IdentityConflict` and changes nothing; that
+/// a grant at the address of an applied or planted object returns `IdentityConflict` and issues
+/// no record; and that applying or planting the identical object of a live grant changes
+/// nothing, so its revoke still returns the original entry. The clause withdraws one holding and
+/// leaves the rest standing, so it has no withdrawal order to walk.
 pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl Fn() -> B) {
-    let _ = make;
+    for capability in sample_capabilities() {
+        for kind in [GrantKind::Hot, GrantKind::GenerationBound] {
+            for drain in drains() {
+                let mut backend = make();
+                let first = PreparedGrant {
+                    operation: op_for(GrantId::new(), conformance_owner(), capability.clone()),
+                    kind,
+                };
+                let entry = grant_prepared(&mut backend, &first);
+                let issued_object = requested_object(&entry, &first);
+                let mut expected = vec![issued_object.clone()];
+                contract_assert_eq!(
+                    backend.grant(first.operation.clone(), kind),
+                    Ok(entry.clone()),
+                    "a retry of the standing {} grant must return the original entry",
+                    capability.class_str()
+                );
+                assert_exact_state(
+                    &backend.snapshot_os_state(),
+                    &expected,
+                    "a retry changed the state",
+                );
+                let conflict = BackendError::IdentityConflict {
+                    class: first.operation.class().as_str(),
+                    id: first.operation.id(),
+                };
+                let mut changed = vec![(
+                    first.operation.clone(),
+                    other_kind(kind),
+                    "another kind".to_string(),
+                )];
+                changed.push((
+                    op_for(first.operation.id(), second_owner(), capability.clone()),
+                    kind,
+                    "another plugin".to_string(),
+                ));
+                changed.push((
+                    op_for(
+                        first.operation.id(),
+                        other_cell(&conformance_owner()),
+                        capability.clone(),
+                    ),
+                    kind,
+                    "the same plugin in another cell".to_string(),
+                ));
+                for other in changed_capabilities(&capability) {
+                    let label = format!("the capability {other:?}");
+                    changed.push((
+                        op_for(first.operation.id(), conformance_owner(), other),
+                        kind,
+                        label,
+                    ));
+                }
+                for (operation, changed_kind, change) in changed {
+                    contract_assert_eq!(
+                        backend.grant(operation, changed_kind),
+                        Err(conflict.clone()),
+                        "a grant with {change} at an issued address must conflict"
+                    );
+                    assert_exact_state(
+                        &backend.snapshot_os_state(),
+                        &expected,
+                        "a conflicting grant changed the state",
+                    );
+                }
+                let applied = op_for(GrantId::new(), conformance_owner(), capability.clone());
+                contract_unwrap!(backend.apply(applied.clone()));
+                expected.push(applied.object());
+                let residue = OsObject {
+                    id: GrantId::new(),
+                    owner: abandoned_owner(),
+                    capability: capability.clone(),
+                };
+                contract_expect!(
+                    backend.plant(residue.clone()),
+                    "the residue fixture must plant"
+                );
+                expected.push(residue.clone());
+                for (operation, origin) in [(applied, "applied"), (residue.operation(), "planted")]
+                {
+                    contract_assert_eq!(
+                        backend.grant(operation.clone(), kind),
+                        Err(BackendError::IdentityConflict {
+                            class: operation.class().as_str(),
+                            id: operation.id(),
+                        }),
+                        "a grant at the address of an {origin} object must conflict"
+                    );
+                    assert_exact_state(
+                        &backend.snapshot_os_state(),
+                        &expected,
+                        "a refused promotion changed the state",
+                    );
+                    contract_assert_eq!(
+                        backend.revoke(operation.handle(), DrainSpec::forcing()),
+                        Err(BackendError::UnknownHandle {
+                            handle: operation.handle()
+                        }),
+                        "a grant must never promote an {origin} object into an issued record"
+                    );
+                }
+                contract_unwrap!(backend.apply(first.operation.clone()));
+                contract_unwrap!(backend.plant(issued_object.clone()));
+                assert_exact_state(
+                    &backend.snapshot_os_state(),
+                    &expected,
+                    "applying or planting a live grant's own object must change nothing",
+                );
+                contract_assert_eq!(
+                    backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
+                        contract_panic!(
+                            "a {} revoke of the retried grant failed: {error}",
+                            policy_of(drain)
+                        )
+                    }),
+                    entry,
+                    "revoking a retried grant must return the original entry and its kind"
+                );
+                remove_expected(&mut expected, &issued_object);
+                assert_exact_state(
+                    &backend.snapshot_os_state(),
+                    &expected,
+                    "revoking the retried grant must take only its own holding",
+                );
+            }
+        }
+    }
 }
 
 /// Checks that a backend fresh from the factory observes nothing an earlier instance did and
-/// refuses that instance's handles, even while it holds an equal grant of its own.
+/// refuses that instance's handles with `UnknownHandle`, even while it holds an equal grant of
+/// its own, and that the earlier instance keeps and can revoke what it granted.
 pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() -> B) {
-    let _ = make;
+    for drain in drains() {
+        let mut first = make();
+        let earlier: Vec<LedgerEntry> = sample_grants()
+            .iter()
+            .map(|prepared| grant_prepared(&mut first, prepared))
+            .collect();
+        let earlier_objects: Vec<OsObject> = earlier.iter().map(LedgerEntry::object).collect();
+        let mut second = make();
+        contract_assert!(
+            second.snapshot_os_state().is_empty(),
+            "a backend fresh from the factory must observe nothing an earlier instance did"
+        );
+        assert_unknown_everywhere(&mut second, &earlier);
+        let mut own = Vec::new();
+        for entry in &earlier {
+            let equal = hot_grant(entry.owner.clone(), &entry.capability);
+            own.push(requested_object(
+                &grant_prepared(&mut second, &equal),
+                &equal,
+            ));
+        }
+        assert_unknown_everywhere(&mut second, &earlier);
+        assert_exact_state(
+            &second.snapshot_os_state(),
+            &own,
+            "a fresh backend must hold exactly its own grants",
+        );
+        assert_exact_state(
+            &first.snapshot_os_state(),
+            &earlier_objects,
+            "a later instance changed what the earlier one holds",
+        );
+        for entry in earlier {
+            contract_assert_eq!(
+                first.revoke(entry.handle, drain).unwrap_or_else(|error| {
+                    contract_panic!(
+                        "the earlier instance could not {} revoke {}: {error}",
+                        policy_of(drain),
+                        entry.handle
+                    )
+                }),
+                entry,
+                "the earlier instance must still revoke its own grant"
+            );
+        }
+        contract_assert!(first.snapshot_os_state().is_empty());
+    }
+}
+
+fn assert_unknown_everywhere<B: EnforcementBackend>(backend: &mut B, entries: &[LedgerEntry]) {
+    for entry in entries {
+        contract_assert_eq!(
+            backend.revoke(entry.handle, DrainSpec::forcing()),
+            Err(BackendError::UnknownHandle {
+                handle: entry.handle
+            }),
+            "a backend must refuse a handle another instance issued"
+        );
+    }
 }
 
 /// The owner whose graceful withdrawals never finish. A factory passed to
@@ -851,6 +1097,51 @@ fn relaunched_broker() -> Capability {
         launch.data_socket = "/run/plasmosome/audit.data".to_string();
     }
     relaunched
+}
+
+fn other_kind(kind: GrantKind) -> GrantKind {
+    match kind {
+        GrantKind::Hot => GrantKind::GenerationBound,
+        GrantKind::GenerationBound => GrantKind::Hot,
+    }
+}
+
+fn changed_capabilities(capability: &Capability) -> [Capability; 2] {
+    let mut recipe_changed = capability.clone();
+    let key_changed = match &mut recipe_changed {
+        Capability::SessionFile { recipe, .. } => {
+            recipe.guest_path = format!("{}.changed", recipe.guest_path);
+            session_file("/var/lib/plasmosome/conformance/skills/changed.md")
+        }
+        Capability::UdsSocket { recipe, .. } => {
+            recipe.guest_path = format!("{}.changed", recipe.guest_path);
+            uds_socket("/run/conformance/changed.uds")
+        }
+        Capability::ProxyMap { recipe, .. } => {
+            recipe.port = recipe.port % u16::MAX + 1;
+            proxy_map("changed.plasmosome.test", "splice")
+        }
+        Capability::Broker { launch, .. } => {
+            launch.data_socket = format!("{}.changed", launch.data_socket);
+            broker("changed")
+        }
+        Capability::Mount { recipe, .. } => {
+            recipe.access = match recipe.access {
+                FileAccess::ReadOnly => FileAccess::ReadWrite,
+                FileAccess::ReadWrite => FileAccess::ReadOnly,
+            };
+            mount("/src/changed", "/workspace")
+        }
+    };
+    [key_changed, recipe_changed]
+}
+
+fn invalid_operation() -> UniverseOp {
+    op_for(
+        GrantId::new(),
+        conformance_owner(),
+        session_file("relative/skills/pr.md"),
+    )
 }
 
 fn removal_of(object: &OsObject) -> UniverseRemoval {
