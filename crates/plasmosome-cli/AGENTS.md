@@ -4,8 +4,9 @@
 
 The client logic of the `plasmosome` command line, as a library the binary calls, so tests drive
 it without spawning a process. Decision 009 named the trigger for this crate and spec 025 §1
-pulled it. Today it holds spec 025's JSON scanner and writers, its envelopes and its client codes.
-It is `publish = false` and never ships on its own.
+pulled it. Today it holds spec 025's JSON scanner and writers, its envelopes, its client codes,
+its command table and the order the command line is read in. It is `publish = false` and never
+ships on its own.
 
 ## Hard rules
 
@@ -30,8 +31,18 @@ It is `publish = false` and never ships on its own.
 - **The client codes are a closed list.** A new code lands in spec 025 first, then in
   `ClientCode::ALL`. The table test reads spec 025's table.
 - **Spec 026 §5 lists `scan`.** A change to its bound or its depth handling updates that row.
+- **The command table is spec 025's.** `COMMANDS` holds every command of spec 025 §2, and the
+  table test reads spec 025's table. A command is marked served in the task that serves its verb,
+  and never earlier, so `--help` stays true.
+- **Help, the version and `not_served` read nothing more.** They read no environment variable,
+  select no socket and connect nowhere. Help comes before every other rule.
+- **Names are checked with `plasmosome-core`'s `InstanceName`.** A copy of its rules here would
+  drift from the rules the daemons use.
+- **A panic ends as `internal`.** `handle` runs the command under `catch_unwind`, and its hook
+  stays silent on that thread. The trigger a test uses to panic exists only under `cfg(test)`.
 - **No `unsafe` and no third-party dependency.** The package keeps `lints.workspace = true`.
-  `serde_json` is a dev-dependency only: the independent parser the escaping test checks against.
+  `plasmosome-core` is a dependency for `InstanceName`; `serde_json` is a dev-dependency only, the
+  independent parser the escaping test checks against.
 
 ## Testing
 

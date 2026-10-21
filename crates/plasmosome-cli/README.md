@@ -5,10 +5,50 @@ published.
 
 Spec 025 makes the command line's output a contract: one compact JSON line, an envelope around
 the daemon's answer, and an exit code that says which of six things happened. This crate holds
-the parts of that contract that need no socket. It reads a reply line without decoding it, writes
-JSON that never carries a raw terminal control, builds the envelopes, and lists the client's own
-error codes with their exits. The `plasmosome` binary, its argument rules and the socket client
-arrive in later tasks.
+the parts of that contract that need no socket. It reads the command line, reads a reply line
+without decoding it, writes JSON that never carries a raw terminal control, builds the envelopes,
+and lists the client's own error codes with their exits. The `plasmosome` binary in
+`crates/plasmosome` is a thin `main` over `main_with`. No command is served yet, so every command
+refuses with `not_served`; the socket client arrives in later tasks.
+
+## Reading the command line
+
+`read` reads the arguments after the program name against a command table, `COMMANDS` in the
+binary, and the first rule that applies decides, as spec 025 §2 orders them:
+
+1. `-h` or `--help` anywhere before `--` prints help and exits 0, whatever else is on the line.
+   With no command words it is the binary's help: every command with the verb it sends and
+   whether this build serves it, the global flags, `PLASMOSOME_KERNEL` and the exit codes. Words
+   that name a group, such as `cell` or `registry source`, list the group. Words that name a
+   command, followed by at most its operands, give that command's help, so `germinate --help` and
+   `germinate g --help` both work. Any other words are a usage error.
+2. `--version` as the sole argument prints `plasmosome VERSION`. Anywhere else before `--` it is a
+   usage error.
+3. Leading words that name a command this build does not serve exit 2 with `not_served`. Its
+   `command` is the wire method, or spec 020's name for a registry command, and `method` is there
+   when the command has one. Nothing else on the line is read except `--json` and `--human`:
+   either given twice, or both given, is a usage error.
+4. Everything else is the full parse. Its first fault, in this order, is the usage error: an
+   argument that is not UTF-8, anywhere; an unknown flag, a flag given twice, a value flag with
+   no value, or `--json` with `--human`, whichever comes first; no command words; words that name
+   no command, or only a group; `--`, since no served command takes one; a word past the
+   command's operands; then a bad value. `--kernel` takes a name that `plasmosome-core`'s
+   `InstanceName` accepts and that holds no terminal control. `--socket` takes an absolute path
+   with no empty, `.` or `..` component. `--deadline-ms` takes an integer from 1 to 3,600,000,
+   and a longer digit string is refused, never parsed. A clean line gives an `Invocation`.
+
+A word is an argument before `--` that does not begin with `-` and is not a value. `--kernel`,
+`--socket` and `--deadline-ms` take the next argument as their value, whatever it is. A usage
+error is `invalid_argument` under `command: "invalid"`, exit 64, with `argument` holding the
+argument at fault, made UTF-8 with replacement characters when it was not. Its message names the
+argument too, so the human form shows it, each terminal control as `<U+XXXX>`. The human form is
+used when `--human` is given once and `--json` is not, usage errors included.
+
+`handle` reads a line and writes the outcome. A failure to write help or the version to stdout is
+`local_io`, exit 1, with `errno` when the system gave one, under `command` `--help` or
+`--version`. A panic prints nothing of its own: it ends in one `internal` envelope on stderr and
+exit 70. `handle` installs a panic hook that stays silent on the thread running a command and
+passes any other panic to the hook before it.
 
 ## Reading a reply
 
@@ -73,5 +113,8 @@ stream it failed on; the caller picks the exit.
 | `ErrorBody`, `ClientError`, `KernelError` | The `error` object: the client's own, or the daemon's relayed with `domain` added |
 | `emit` | Writes an envelope to stdout or stderr, never both |
 | `ClientCode`, `Exit` | The 18 client codes of spec 025 §4 and the six exit statuses they map to |
+| `Command`, `COMMANDS` | Spec 025 §2's command table: words, operands, wire method or registry name, whether it changes state, whether this build serves it |
+| `read`, `Reading`, `Invocation` | One command line read in spec 025's order, and a served command's checked flags |
+| `handle`, `main_with` | Read a line, write its outcome and return the exit, with a panic ending as `internal`; `main_with` does it on the process's own streams |
 
 Tests: `cargo test -p plasmosome-cli`

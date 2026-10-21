@@ -8,17 +8,23 @@ filesystem beyond its workspace, no credentials, no model access. Capabilities a
 by the operating system rather than by asking the agent nicely — the socket closes, the mount goes
 away, the credential handle dies.
 
-This crate is the name, and nothing else yet. The kernel is being built in the open at
+The kernel is being built in the open at
 [teonimesic/plasmosome](https://github.com/teonimesic/plasmosome), where the controller, the
 per-cell supervisor, the reversibility ledger and the enforcement-backend seam live as separate
-crates. When there is a single command a person runs to drive all of that, it will ship here.
+crates. The `plasmosome` command, which a person or an agent runs to drive a kernel instance one
+step at a time, is being built in this crate.
 
 ## Status
 
-Version `0.0.0`: an empty library with no API, so nothing about the interface is promised and
-nothing later is constrained by it. There is no binary either, which is why
-`cargo install plasmosome` refuses rather than putting a command on your PATH that does nothing.
-The first release with something in it picks its own version number.
+The version on crates.io, `0.0.0`, is an empty placeholder that holds the name: a library with no
+API and no binary. Nothing about the interface is promised, and `cargo install plasmosome` refuses
+rather than putting a command on your PATH that does nothing. The first release with something in
+it picks its own version number.
+
+A checkout of the repository builds a `plasmosome` binary from this crate. It drives no instance
+yet. `plasmosome --help` lists every command, each marked not served, and running any of them
+exits 2 with one JSON line on stderr whose error code is `not_served`. `plasmosome --version`
+prints `plasmosome 0.0.0`. A wrong command line exits 64, also with one JSON line on stderr.
 
 To follow the work, read the repository. Nothing for building a capability module is ready yet:
 [`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk), the

@@ -42,8 +42,9 @@ states what the tree serves now.
 | `plasmosomed <config.json>` | Runs a foreground controller and serves only `plasmosome.status` on its configured Unix socket. |
 | `membraned <config.json>` | Runs a foreground empty/broker supervisor and serves only `membrane.status` on its configured Unix socket. |
 | `plasmid --help` | Describes the reserved author command; `plasmid new` refuses without writing a scaffold. |
+| `plasmosome --help` | Lists spec 025's commands, each marked not served; every command exits 2 with `not_served`. |
 
-There is no `plasmosome` executable or `plasmosome start` command today. The accepted future
+The `plasmosome` executable serves no command yet, so there is no `plasmosome start`. The accepted future
 controller methods — `plasmosome.start/list/status/stop`, `cell.new/list/status/kill/exec`,
 `exec.status` and `plasmid.list/add/remove/reload` — are not implemented except for
 `plasmosome.status`. The membrane's desired-state, observe, kill and residue methods are also
@@ -552,7 +553,7 @@ that its complete runtime role is delivered.
 | `plasmosome-membrane` | Per-cell host supervisor for the VMM, network path and broker processes |
 | `plasmosome-ledger` | Typed reversibility: effects and their inverses; spec 020's registry IDs and release references |
 | `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
-| `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes and client codes; never shipped |
+| `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes, client codes and argument reading; never shipped |
 | `plasmid` | Reserved plasmid-author command line |
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
 | `plasmosome-guards` | Repository policy checks |
