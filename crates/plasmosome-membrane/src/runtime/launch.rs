@@ -1262,6 +1262,11 @@ mod tests {
             return;
         }
         let fitting = record_recipe();
+        for stray in [FIRST_KEPT, FIRST_KEPT + 1] {
+            // SAFETY: close takes an integer. In this probe process only a descriptor inherited
+            // from the spawning test process can be at 10 or 11.
+            unsafe { libc::close(stray) };
+        }
         let mut limit = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
