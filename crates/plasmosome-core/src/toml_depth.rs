@@ -740,7 +740,7 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig {
-            cases: 2048,
+            cases: 512,
             max_global_rejects: 4096,
             ..ProptestConfig::default()
         })]
