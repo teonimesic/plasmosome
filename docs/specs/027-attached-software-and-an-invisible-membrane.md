@@ -204,24 +204,57 @@ any `not run` makes the verdict `not run`. A reach probe equal in the open and a
 the run.
 
 **The verdict** passes when every probe ran in every lane, every reach probe discriminated, and the
-cell lane equals the absent lane after normalization, on every probe and on the harness's tool
-calls, results, exit statuses and files left behind. The only exceptions are §7's remaining
+cell lane equals the absent lane: after normalization on every probe, and exactly on the harness's
+tool calls, results, exit statuses and files left behind. The only exceptions are §7's remaining
 differences, each allowed mechanically: the manifest names the probes and fields where it shows
 and the exact value the cell lane may have there, such as mode 0600 for a file the workload
-created. Any other difference, in those probes or the harness transcript, fails the verdict.
+created. Any other difference, in those probes or the harness transcript, fails the verdict. No
+rule reaches the transcript, because its values sit inside text that a rule could reach only by
+how it looks. So the recorded session asks only for tool calls whose results hold no value the
+system chose, such as a process ID or a time: such a value differs between boots, and fails the
+verdict. Amended on 2026-10-21: this said the transcript is compared after normalization, which no
+rule can reach.
 
 **The workload** is the probe suite plus one unmodified harness pinned by version and digest (Q3),
 attached in the cell lane and installed by hand elsewhere, driven by a recorded model session from
 a fixture endpoint.
 
 **Normalization** is a fixed table of `(probe, field, rule)` in the manifest; any other field is
-compared exactly. A rule replaces each value with a placeholder numbered by first appearance within
-that probe and field in that lane's run, so equal values stay equal, distinct ones stay distinct,
-time placeholders keep their order, and an extra value in one probe shifts no other. The rules cover
-process IDs, boot IDs, mount and parent mount IDs, device and inode numbers, times and durations the
-system chose, ephemeral ports, resolved addresses, and memory and load counters. A value the
-workload set, such as a time set with `utimensat`, is never normalized, and nothing is normalized
-for how it looks. A new rule is an edit to this spec, with the reason.
+compared exactly. A rule replaces each value with a placeholder, numbered within that probe in that
+lane's run, so an extra value in one probe shifts no other probe. How a kind is numbered decides
+which relations between its values the placeholders keep:
+
+- **A value that names something**, a process, boot, mount, device, inode, ephemeral port or
+  resolved address, is numbered by first appearance across every field of the probe that its kind
+  covers, taking the fields in the byte order of their names. So equal values stay equal and
+  distinct ones stay distinct, even in two fields: a leader and the process list it belongs to, or
+  two files' inodes. A parent mount ID is numbered with the mount IDs, since it names a mount.
+- **A system time** is numbered by rank within its field, earliest first, and equal times share a
+  number, so time placeholders keep their order. Times that cannot be ranked exactly, such as whole
+  numbers beside fractions, refuse the runs.
+- **A memory or load counter** is numbered by first appearance within its field. Two counters that
+  happen to be equal name nothing, so counters in two fields are not related.
+- **A duration** keeps no relation: every one becomes the same placeholder, because timing is not
+  closed here (§5). A probe that must tell a hang from a prompt failure reports which one happened,
+  not how long it took.
+
+Times or counters whose relation matters go in one list field. A relation between two probes is
+never compared, so a probe that needs one reports both values. The rules cover process IDs, boot
+IDs, mount and parent mount IDs, device and inode numbers, times and durations the system chose,
+ephemeral ports, resolved addresses, and memory and load counters. A value the workload set, such
+as a time set with `utimensat`, is never normalized, and nothing is normalized for how it looks. A
+new rule is an edit to this spec, with the reason. Amended on 2026-10-21: this numbered every value
+by first appearance within one field, which cannot keep the order of times and lost the relation
+between two fields, and it did not say whether durations keep an order.
+
+**Reading guest output.** The probe output and the transcript a guest writes are read so that two
+different numbers never read as one. The reader refuses the runs, naming the lane, the probe or the
+transcript, and the field, when it finds an integer below `i64::MIN` or above `u64::MAX`, or a
+number with a fraction or an exponent whose value differs from the shortest decimal that reads back
+as the same `f64`. So `1760954400.123456789` is refused, since it and `1760954400.123456788` read
+as one `f64`, and `0.1` is not. Amended on 2026-10-21: §6 did not say how numbers are read, and a
+reader that holds every number as an `f64` reads `18446744073709551616` and `18446744073709551617`
+as one.
 
 **Results** go in a dated file under `docs/benchmarks/`: each lane's configuration; the digests of
 the image, kernel, libkrun, fixtures, harness, session, probe suite and manifest; the normalization
