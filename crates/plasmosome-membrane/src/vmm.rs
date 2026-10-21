@@ -1815,6 +1815,7 @@ mod signal_pressure {
             let pid = child.pid();
             let signals_before = DELIVERED.load(Ordering::Relaxed);
             let interruptions_before = interrupted_reaps();
+            reset_reap_record();
             {
                 let _withheld = WithheldLeaderSignal::for_leader(pid);
                 interrupter.drop_interrupted(child, &release);
@@ -1822,6 +1823,7 @@ mod signal_pressure {
             let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
             let interruptions = interrupted_reaps() - interruptions_before;
             assert_reaped_by_drop(pid, interruptions);
+            assert_reaped_by_handle(pid);
             assert!(
                 interruptions >= INTERRUPTIONS_PER_REAP,
                 "child {child_number}: the reaping thread took {signals} SIGUSR1 and {interruptions} of them interrupted its blocking wait, fewer than {INTERRUPTIONS_PER_REAP}, so the retry after EINTR was not exercised"
