@@ -141,11 +141,13 @@ other probe. How a kind is numbered decides which relations its placeholders kee
 - Every duration becomes `<duration>`, so durations keep no relation. A reach probe whose lanes
   differ only in the order of its durations does not discriminate, since timing is spec 006's.
 
-A relation that changes can show as a difference in a later field of the same probe rather than
-in the field that changed. In `two_distinct_files_that_report_one_inode_fail`, the cell's two
-files in `distinct` share an inode, and `linked` differs too, though its inodes did not change,
-because its numbers moved. Times or counters whose relation matters go in one list field. A
-relation between two probes is never compared, so a probe that needs one reports both values.
+A relation that changes can show as a difference in a later field of the same probe, instead of
+or as well as the field that changed. In `a_leader_that_names_another_process_of_its_list_fails`,
+only `leader` changes, and `pids` is the field that differs. In
+`two_distinct_files_that_report_one_inode_fail`, the cell's two files in `distinct` share an
+inode, and both `distinct` and `linked` differ: `linked`'s inodes did not change, but its numbers
+moved. Times or counters whose relation matters go in one list field. A relation between two
+probes is never compared, so a probe that needs one reports both values.
 
 Every field no rule names is compared exactly, so nothing is normalized for how it looks, and a
 field the workload set can have no rule. A ruled field must hold one value of the rule's kind or
@@ -162,8 +164,9 @@ a list of them, or the runs are refused, naming the lane, probe, field and kind:
   gets two placeholders;
 - a boot ID is a UUID, and a resolved address an IPv4 or IPv6 address.
 
-Integer system times rank exactly across the whole `i64` and `u64` range, and the others by
-their total order. No kind holds an object, so no field the workload set lists can sit under a
+Integer system times rank exactly across the whole `i64` and `u64` range, and the others as
+`f64` values. Times that are equal JSON numbers share a number, so `-0.0` and `0.0` are one time.
+No kind holds an object, so no field the workload set lists can sit under a
 ruled field. A number the workload set, such as a time set with `utimensat`, can still sit in a
 ruled list, and keeping it out is the manifest author's job. A rule checks a value's shape, not
 its meaning: a `pid` rule on a numeric `errno` field makes 13 and 2 equal.

@@ -78,13 +78,14 @@ pub struct ProbeSpec {
 }
 
 /// One row of the normalization table. In each run, [`judge`] replaces each value of `field` in
-/// `probe` with a placeholder of `kind`, numbered within that probe and run. A value that names
+/// `probe` with a placeholder, numbered within that probe and run. A placeholder names `kind`,
+/// such as `<pid:2>`, except that a parent mount ID prints `<mount_id:N>`. A value that names
 /// something, such as a process ID or an inode, is numbered by first appearance across every
 /// field of the probe ruled with its kind, taking the fields in the byte order of their names,
 /// so equal values stay equal and distinct ones distinct, even in two fields. A parent mount ID
-/// is numbered with the mount IDs, as `<mount_id:N>`. A system time is numbered by rank within
-/// its field, earliest first, and equal times share a number. A memory or load counter is
-/// numbered by first appearance within its field. Every duration becomes `<duration>`, so
+/// is numbered with the mount IDs. A system time is numbered by rank within its field, earliest
+/// first, and equal times share a number. A memory or load counter is numbered by first
+/// appearance within its field. Every duration becomes `<duration>`, with no number, so
 /// durations keep no relation. The field must hold one value of `kind` or a list of them, or
 /// `judge` refuses the runs. No kind holds an object, so no workload-set field can sit under a
 /// ruled field.
