@@ -696,6 +696,8 @@ fn judge_peer(trusted: u32, found: u32) -> Result<(), PrivateSocketError> {
 
 const TEMPORARY_LENGTH: usize = 16;
 
+const TEMPORARY_DRAWS: usize = 8;
+
 const TEMPORARY_CHARACTERS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 #[cfg(target_os = "macos")]
@@ -802,14 +804,35 @@ fn publish(
 
 fn choose_temporary(
     dir: &Path,
-    _name: &str,
+    name: &str,
     room: usize,
     draw: &mut dyn FnMut(usize) -> String,
     mut bind_at: impl FnMut(&Path) -> Result<(), PrivateSocketError>,
 ) -> Result<String, PrivateSocketError> {
-    let candidate = draw(room);
-    bind_at(&dir.join(&candidate))?;
-    Ok(candidate)
+    let mut drawn = 0;
+    loop {
+        drawn += 1;
+        let candidate = draw(room);
+        let at = dir.join(&candidate);
+        if !candidate.eq_ignore_ascii_case(name) {
+            match bind_at(&at) {
+                Ok(()) => return Ok(candidate),
+                Err(PrivateSocketError::Io {
+                    op: "bind",
+                    errno: libc::EADDRINUSE,
+                    ..
+                }) => {}
+                Err(refusal) => return Err(refusal),
+            }
+        }
+        if drawn == TEMPORARY_DRAWS {
+            return Err(PrivateSocketError::Io {
+                op: "bind",
+                path: at,
+                errno: libc::EADDRINUSE,
+            });
+        }
+    }
 }
 
 #[allow(unsafe_code)]
