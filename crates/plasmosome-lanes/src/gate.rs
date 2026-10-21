@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::config::{Probe, WORKLOAD_UID};
 use crate::console::ProbeResult;
 use crate::overlap::overlaps;
+use crate::steps::StepRecord;
 
 /// The tag of the software share every gate lane exports.
 pub const SHARE_TAG: &str = "sw";
@@ -73,6 +74,11 @@ pub struct Tally {
 }
 
 impl Tally {
+    /// The measured count, as `<held> of <claimed> trials held`.
+    pub fn count(&self) -> String {
+        format!("{} of {} trials held", self.held(), self.claimed)
+    }
+
     /// How many trials showed the claim.
     pub fn held(&self) -> usize {
         self.trials
@@ -84,7 +90,7 @@ impl Tally {
     /// `Pass` only when every claimed trial ran and showed the claim; `Fail` when any trial
     /// contradicted it; otherwise `NotRun`. The count is never rounded up.
     pub fn verdict(&self) -> Verdict {
-        let count = format!("{} of {}", self.held(), self.claimed);
+        let count = self.count();
         let reasons = |wanted: fn(&Verdict) -> Option<&String>| {
             self.trials
                 .iter()
@@ -361,7 +367,7 @@ pub const SELF_CHECKS: [&str; 4] = [
 ];
 
 /// M3 passes when the helper's unconfined control and confined self-check each held, the host's
-/// flag arrived, and the descriptor, the mapping and the executable each read back `data` and
+/// detach step after `DETACH_AFTER` succeeded and its flag arrived, and the descriptor, the mapping and the executable each read back `data` and
 /// `tool` after the detach, while the share lists only `opt` and `opt` lists nothing: neither the
 /// tree nor a holding directory, under any name, is left anywhere in the share.
 pub fn judge_m3(
@@ -369,9 +375,21 @@ pub fn judge_m3(
     stderr: &str,
     data: &Expected,
     tool: &Expected,
+    steps: &[StepRecord],
 ) -> Verdict {
     let judged = || {
         confined(stderr)?;
+        match steps.iter().find(|step| step.after == DETACH_AFTER) {
+            None => {
+                return not_run(format!(
+                    "the host took no detach step after `{DETACH_AFTER}`"
+                ));
+            }
+            Some(StepRecord {
+                outcome: Err(why), ..
+            }) => return not_run(format!("the host's detach failed: {why}")),
+            Some(_) => {}
+        }
         started(results, "detach-await", WORKLOAD_UID)?;
         for id in ["m3-hold-fd", "m3-hold-map", "m3-hold-exec"] {
             started(results, id, WORKLOAD_UID)?;

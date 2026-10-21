@@ -33,7 +33,8 @@ pub struct RowSpec {
 }
 
 /// What one lane run left for the results file. `verdicts` maps a row ID to that row's verdict
-/// on this run; `observations` maps a row ID to what an observation saw.
+/// on this run; `observations` maps a row ID to what an observation saw; `counts` maps a tallied
+/// row's ID to its measured count. `digests` names the test commit under `test commit`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -42,8 +43,43 @@ pub struct Record {
     pub digests: BTreeMap<String, String>,
     pub verdicts: BTreeMap<String, Verdict>,
     pub observations: BTreeMap<String, Vec<String>>,
+    pub counts: BTreeMap<String, String>,
     pub notes: Vec<String>,
     pub lines: Vec<String>,
+}
+
+const TEST_COMMIT: &str = "test commit";
+const UNCOMMITTED: &str = "with uncommitted changes";
+
+/// The one test commit every record names. An error when there is no record, when a record
+/// names no commit, when two records name different commits, or when one ran from a tree with
+/// uncommitted changes, so the results file never mixes verdicts from different code.
+pub fn one_commit(records: &[Record]) -> Result<String, String> {
+    let mut commits: Vec<(&str, &str)> = Vec::new();
+    for record in records {
+        let Some(commit) = record.digests.get(TEST_COMMIT) else {
+            return Err(format!("run `{}` names no test commit", record.run));
+        };
+        if commit.contains(UNCOMMITTED) {
+            return Err(format!("run `{}` ran at {commit}", record.run));
+        }
+        if !commits.iter().any(|(_, seen)| seen == commit) {
+            commits.push((&record.run, commit));
+        }
+    }
+    match commits.as_slice() {
+        [] => Err("there are no records".to_string()),
+        [(_, commit)] => Ok(commit.to_string()),
+        several => Err(format!(
+            "the records name {} commits: {}",
+            several.len(),
+            several
+                .iter()
+                .map(|(run, commit)| format!("{commit} (run `{run}`)"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 fn judged(row: &RowSpec) -> bool {
@@ -105,6 +141,22 @@ fn cell(text: &str) -> String {
     text.replace('|', "\\|").replace('\n', " ")
 }
 
+fn counted(text: String, counts: &[&String]) -> String {
+    if counts.is_empty() {
+        return text;
+    }
+    let counts: Vec<&str> = counts.iter().map(|count| count.as_str()).collect();
+    format!("{text} ({})", counts.join("; "))
+}
+
+fn row_counts<'a>(row: &RowSpec, records: &'a [Record]) -> Vec<&'a String> {
+    row.runs
+        .iter()
+        .filter_map(|spec| records.iter().find(|record| record.run == spec.run))
+        .filter_map(|record| record.counts.get(&row.id))
+        .collect()
+}
+
 fn verdict_text(verdict: &Verdict) -> String {
     match verdict {
         Verdict::Pass => "pass".to_string(),
@@ -137,7 +189,10 @@ fn observed_text(row: &RowSpec, spec: &RunSpec, records: &[Record]) -> String {
         return "not run: no record".to_string();
     };
     match record.verdicts.get(&row.id) {
-        Some(verdict) => verdict_text(verdict),
+        Some(verdict) => counted(
+            verdict_text(verdict),
+            &record.counts.get(&row.id).into_iter().collect::<Vec<_>>(),
+        ),
         None if spec.expect == Expect::Observe && observed(record, &row.id) => {
             "recorded".to_string()
         }
@@ -178,7 +233,11 @@ fn section(name: &str, records: &[Record]) -> String {
     if !record.verdicts.is_empty() {
         text.push_str("**Verdicts**\n\n");
         for (row, verdict) in &record.verdicts {
-            text.push_str(&format!("- {row}: {}\n", verdict_text(verdict)));
+            let count: Vec<&String> = record.counts.get(row).into_iter().collect();
+            text.push_str(&format!(
+                "- {row}: {}\n",
+                counted(verdict_text(verdict), &count)
+            ));
         }
         text.push('\n');
     }
@@ -247,7 +306,7 @@ pub fn render(preamble: &str, rows: &[RowSpec], records: &[Record]) -> String {
             "| {} | {} | {} |\n",
             cell(&row.id),
             cell(&row.claim),
-            cell(&row_text(row, &verdict))
+            cell(&counted(row_text(row, &verdict), &row_counts(row, records)))
         ));
     }
     text.push_str(&observation_table(rows, records));
