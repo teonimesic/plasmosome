@@ -636,7 +636,7 @@ def a_refused_run_writes_its_refusal_to_the_step_summary():
 
 
 def a_cancelled_step_is_named_as_cancelled():
-    """Case 28. A superseded run cancels a step, and the report still runs under if: always()."""
+    """Case 28. A step that concluded cancelled is named as cancelled, and the list covers only what ran."""
     log = tests_log() + running("unittests src/lib.rs", "target/debug/deps/plasmosome_guards-6a71") + ["running 1 test"]
     result = report(log, outcomes=("success", "cancelled"))
     assert result.code == 0, result

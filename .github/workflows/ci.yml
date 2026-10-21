@@ -41,6 +41,8 @@ jobs:
         run: rustup show active-toolchain --verbose
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' }}
 
       - name: run quick benchmarks
         run: cargo bench --locked --workspace -- --quick
@@ -84,8 +86,8 @@ jobs:
 
       # Spec 026's git-only step. Nothing from the commit may run before it: a program run by an
       # earlier step can rewrite PATH for every later one through $GITHUB_PATH. Only gates runs it,
-      # as spec 026 section 1 asks; macos, bench and coverage do not. What a pull request's run
-      # leaves in a cache is plasmosome-ofaf's.
+      # as spec 026 section 1 asks; macos, bench and coverage do not. A pull request's run saves no
+      # cache (spec 026 section 1), so what those jobs build stays in that run.
       - name: git-only step
         run: ./.githooks/build-input-guard HEAD
 
@@ -98,6 +100,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: cargo-deny-0.20.2
+          save-if: ${{ github.event_name == 'push' }}
 
       - name: format
         run: cargo fmt --all -- --check
@@ -141,7 +144,7 @@ jobs:
         run: cargo test --locked -p plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
 
       - name: ignored tests
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           TESTS: ${{ steps.tests.outcome }}
           GUARDS: ${{ steps.guards.outcome }}
@@ -246,6 +249,8 @@ jobs:
         run: rustup show active-toolchain --verbose
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.event_name == 'push' }}
 
       # These five steps match the five in `gates`, from clippy to rustdoc. Change both jobs.
       - name: clippy
@@ -262,7 +267,7 @@ jobs:
         run: cargo test --locked -p plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
 
       - name: ignored tests
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           TESTS: ${{ steps.tests.outcome }}
           GUARDS: ${{ steps.guards.outcome }}
