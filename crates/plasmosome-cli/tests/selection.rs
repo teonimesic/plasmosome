@@ -690,3 +690,36 @@ fn instance_says_whether_a_socket_was_chosen() {
         );
     }
 }
+
+#[test]
+fn an_oversized_name_from_the_variable_names_the_variable() {
+    let home = Home::new();
+    let a = home.listening("a");
+    let name = "a".repeat(1_048_576);
+    let envelope = failure(&run(&["status"], home.with_kernel(&name)), Exit::Usage);
+    assert_eq!(envelope["command"], "invalid");
+    assert_eq!(envelope["error"]["code"], "invalid_argument");
+    assert_eq!(envelope["error"]["argument"], VARIABLE);
+    assert_eq!(envelope["instance"]["name"], name.as_str());
+    assert_never_reached(&a, "an oversized request");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_candidate_that_cannot_be_connected_to_refuses_the_selection() {
+    let eprototype = 41;
+    for with_a in [false, true] {
+        let home = Home::new();
+        let _a = with_a.then(|| home.listening("a"));
+        home.dir("b");
+        let socket = home.socket("b");
+        let _datagram = std::os::unix::net::UnixDatagram::bind(&socket).expect("a datagram socket");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("0600");
+        let envelope = failure(&run(&["status"], home.vars()), Exit::Unavailable);
+        let error = &envelope["error"];
+        assert_eq!(error["code"], "transport", "{with_a}: {error}");
+        assert_eq!(error["path"], text(&socket));
+        assert_eq!(error["errno"], eprototype);
+        assert_eq!(envelope.get("instance").is_some(), !with_a, "{envelope}");
+    }
+}
