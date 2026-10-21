@@ -1,6 +1,6 @@
 use plasmosome_core::{MAX_LINE_BYTES, PrivateSocketError};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
@@ -177,7 +177,7 @@ fn write_config(path: &Path, body: &Value) {
     .expect("the config is written");
 }
 
-fn addressable(socket: &Path) -> BufReader<UnixStream> {
+fn addressable(daemon: &mut Daemon, socket: &Path) -> BufReader<UnixStream> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Ok(stream) = UnixStream::connect(socket) {
@@ -189,11 +189,23 @@ fn addressable(socket: &Path) -> BufReader<UnixStream> {
                 .expect("the test client bounds its own writes");
             return BufReader::new(stream);
         }
-        assert!(
-            Instant::now() < deadline,
-            "plasmosomed is addressable on {} within five seconds",
-            socket.display()
-        );
+        let exited = daemon
+            .child
+            .try_wait()
+            .expect("the daemon's state is readable");
+        if exited.is_some() || Instant::now() >= deadline {
+            let _ = daemon.child.kill();
+            let status = daemon.child.wait().expect("the daemon is reaped");
+            let mut stderr = String::new();
+            if let Some(mut pipe) = daemon.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            panic!(
+                "plasmosomed is addressable on {} within five seconds; it ended with {status}, \
+                 and its stderr was:\n{stderr}",
+                socket.display()
+            );
+        }
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -265,8 +277,8 @@ fn the_envelope_edges_hold_on_the_wire() {
     let config = directory.path().join("config.json");
     write_config(&config, &one_instance(directory.path(), &control, "work"));
 
-    let _daemon = start(&config);
-    let mut client = addressable(&control);
+    let mut daemon = start(&config);
+    let mut client = addressable(&mut daemon, &control);
 
     let unparseable = ask(&mut client, "not json at all");
     assert_eq!(
@@ -327,7 +339,7 @@ fn the_envelope_edges_hold_on_the_wire() {
     );
     drop(client);
 
-    let mut over_cap = addressable(&control);
+    let mut over_cap = addressable(&mut daemon, &control);
     let (too_long, _) = padded_status(MAX_LINE_BYTES + 1);
     send_unterminated(&over_cap, too_long.as_bytes());
     let refusal = read_reply(&mut over_cap);
@@ -353,7 +365,7 @@ fn plasmosomed_serves_status_and_dies_cleanly_on_sigterm() {
     write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let mut daemon = start(&config);
-    let mut client = addressable(&control);
+    let mut client = addressable(&mut daemon, &control);
     let reply = ask(&mut client, STATUS_REQUEST);
     assert_eq!(
         reply.pointer("/result/name"),
@@ -523,7 +535,7 @@ fn plasmosomed_leaves_a_replacement_settled_at_its_socket_path_alone() {
     write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let mut daemon = start(&config);
-    let mut client = addressable(&control);
+    let mut client = addressable(&mut daemon, &control);
     assert_eq!(
         ask(&mut client, STATUS_REQUEST).pointer("/result/name"),
         Some(&json!("work")),
@@ -576,7 +588,7 @@ fn plasmosomed_leaves_a_symlink_settled_at_its_socket_path_alone() {
     write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let mut daemon = start(&config);
-    let mut client = addressable(&control);
+    let mut client = addressable(&mut daemon, &control);
     assert_eq!(
         ask(&mut client, STATUS_REQUEST).pointer("/result/name"),
         Some(&json!("work")),
@@ -623,7 +635,7 @@ fn plasmosomed_leaves_a_dangling_symlink_settled_at_its_socket_path_alone() {
     write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let mut daemon = start(&config);
-    let mut client = addressable(&control);
+    let mut client = addressable(&mut daemon, &control);
     assert_eq!(
         ask(&mut client, STATUS_REQUEST).pointer("/result/name"),
         Some(&json!("work")),
@@ -671,12 +683,12 @@ fn the_socket_is_0600_in_a_0700_directory() {
     let config = root.path().join("config.json");
     write_config(&config, &one_instance(root.path(), &control, "work"));
 
-    let _daemon = Daemon {
+    let mut daemon = Daemon {
         child: with_open_umask(plasmosomed(&[&config]))
             .spawn()
             .expect("plasmosomed starts as a process"),
     };
-    let mut client = addressable(&control);
+    let mut client = addressable(&mut daemon, &control);
     let socket = std::fs::symlink_metadata(&control).expect("the socket is on disk");
     assert!(socket.file_type().is_socket(), "{socket:?}");
     assert_eq!(
@@ -793,6 +805,29 @@ fn a_missing_socket_directory_is_refused_and_not_created() {
 }
 
 #[test]
+fn a_daemon_that_never_becomes_addressable_fails_the_test_with_its_stderr() {
+    let root = private_root();
+    let missing = root.path().join("missing");
+    let control = missing.join("control.uds");
+    let config = root.path().join("config.json");
+    write_config(&config, &one_instance(root.path(), &control, "work"));
+
+    let mut daemon = start(&config);
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        addressable(&mut daemon, &control)
+    }))
+    .expect_err("a daemon that refused its start never becomes addressable");
+    let message = failure
+        .downcast_ref::<String>()
+        .expect("the failure is a formatted message");
+    let refusal = PrivateSocketError::NoDirectory { path: missing };
+    assert!(
+        message.contains(&format!("plasmosomed: {refusal}\n")),
+        "the failure carries the daemon's stderr, which names why it never bound: {message}"
+    );
+}
+
+#[test]
 fn a_socket_directory_that_is_a_file_is_refused_and_left_alone() {
     let root = private_root();
     let file = root.path().join("file");
@@ -816,8 +851,8 @@ fn plasmosomed_refuses_a_status_params_key_it_does_not_define_with_invalid_param
     let config = directory.path().join("config.json");
     write_config(&config, &one_instance(directory.path(), &control, "work"));
 
-    let _daemon = start(&config);
-    let mut client = addressable(&control);
+    let mut daemon = start(&config);
+    let mut client = addressable(&mut daemon, &control);
 
     let named = ask(
         &mut client,
@@ -841,7 +876,7 @@ fn plasmosomed_refuses_a_status_params_key_it_does_not_define_with_invalid_param
     assert_eq!(extra.get("result"), None, "{extra}");
     drop(client);
 
-    let mut unnamed = addressable(&control);
+    let mut unnamed = addressable(&mut daemon, &control);
     let misspelt = ask(
         &mut unnamed,
         r#"{"id":3,"method":"plasmosome.status","params":{"nmae":"work"}}"#,
