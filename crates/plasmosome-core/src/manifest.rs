@@ -2147,13 +2147,11 @@ subject = "git"
     }
 
     fn ports_of(manifest: PlasmidManifest) -> Vec<u16> {
-        let network = match manifest.commands {
-            Some(commands) => commands.commands[0].network.clone(),
-            None => manifest.network,
-        };
-        network
-            .expect("the declaration has a network section")
-            .ports
+        match manifest.commands {
+            Some(commands) => commands.commands[0].network.clone().map(|n| n.ports),
+            None => manifest.network.map(|n| n.ports),
+        }
+        .expect("the declaration has a network section")
     }
 
     fn parsed_ports(section: &str, ports: &str) -> Result<Vec<u16>, ManifestError> {
