@@ -137,9 +137,12 @@ pub const LISTEN_BACKLOG: i32 = 16;
 /// [`PrivateListener::close`]:
 ///
 /// ```compile_fail,E0277
-/// fn lends_a_borrowed_descriptor<T: std::os::fd::AsFd>() {}
-/// lends_a_borrowed_descriptor::<plasmosome_core::private_socket::PrivateListener>();
+/// fn lends<T: std::os::fd::AsFd>() {}
+/// lends::<plasmosome_core::private_socket::PrivateListener>();
 /// ```
+///
+/// Stable rustdoc does not check the `E0277`, so that block passes on any compile error and is
+/// kept this small.
 #[derive(Debug)]
 pub struct PrivateListener {
     listener: UnixListener,
