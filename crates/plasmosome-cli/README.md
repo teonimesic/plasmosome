@@ -5,10 +5,10 @@ published.
 
 Spec 025 makes the command line's output a contract: one compact JSON line, an envelope around
 the daemon's answer, and an exit code that says which of six things happened. This crate holds
-the parts of that contract that need no socket. It reads a reply line without decoding it, writes
-JSON that never carries a raw terminal control, builds the envelopes, and lists the client's own
-error codes with their exits. The `plasmosome` binary, its argument rules and the socket client
-arrive in later tasks.
+the parts of that contract that need no socket. It reads one reply line through spec 025's
+bound, judges it without decoding it, gives each answer its exit, writes JSON that never carries
+a raw terminal control, builds the envelopes, and lists the client's own error codes with their
+exits. The `plasmosome` binary, its argument rules and the socket client arrive in later tasks.
 
 ## Reading a reply
 
@@ -21,11 +21,48 @@ a `Reason`; for a repeated key the reason carries the RFC 6901 pointer to the re
 will say, and it shows each terminal control in a key as `<U+XXXX>`.
 
 `scan` refuses input longer than `json::MAX_REPLY_BYTES`, spec 025's bound of 16,777,216 bytes,
-before reading any of it. The reader that reads a reply through that limit is a later task and
-uses the same constant. Nesting depth has no limit, by design. The scan keeps its own stack, so
-nesting costs memory and never the call stack. The tests scan, write and drop a million nested
-arrays, and compare values 200,000 levels deep. At the bound, in a release build, 8,388,608
-nested arrays peak at 508 MB resident to scan and drop, and 779 MB to scan and write either form.
+before reading any of it. `reply::read_reply`, below, reads a reply line through that limit.
+Nesting depth has no limit, by design. The scan keeps its own stack, so nesting costs memory and
+never the call stack. The tests scan, write and drop a million nested arrays, and compare values
+200,000 levels deep. At the bound, in a release build, 8,388,608 nested arrays peak at 508 MB
+resident to scan and drop, and 779 MB to scan and write either form.
+
+## Judging a reply
+
+`reply::read_reply` takes one line from any `BufRead` and returns it without its newline. It
+consumes the line and its newline and nothing more, so whatever the daemon sent after them stays
+unread in the reader. It reads through `take` and `read_until`, so it reads and keeps at most
+`MAX_REPLY_BYTES` plus one byte. When that last byte is not the newline, the line is `TooLarge` and
+nothing more is read. The end of input before a newline is `Closed` when it comes within the bound,
+and `TooLarge` when more than `MAX_REPLY_BYTES` came before it. A read that reports `WouldBlock` or
+`TimedOut`, as a socket's read timeout does, is `TimedOut`. Any other failed read is `Transport`,
+with its errno when it has one. An interrupted read is retried. `read_reply` has no clock: each read
+waits as long as the reader lets it. So a caller with a deadline gives each read only the time left,
+not one timeout for the whole line.
+
+`reply::judge_reply` applies spec 025 §4's reply rules to that line, for a request sent with
+`id` 1. A valid reply is an object with `id` 1 and exactly one of `result` and `error`. `result`
+is an object. `error` is an object with an integer `code`, a string `message` and no `domain`. A
+`null` id is valid only on an error whose code is -32700 or -32600, which spec 001's connection
+loop sends under a `null` id. Other members are ignored. Anything else is the client error
+`bad_reply`, exit 70, whose `detail` names the first rule broken or gives the scanner's refusal,
+such as `the key /result repeats at byte 20`. A valid `result` comes back as `Reply::Result`,
+exactly as it arrived. A valid `error` comes back as `Reply::Kernel` with every member kept, and
+the envelope writes it with `domain` `kernel` first.
+
+`reply::kernel_exit` gives a kernel error its exit by code. 107 exits 1, and 105 whose `to` is
+`"unknown"` exits 3. -32700, -32600 and -32603 exit 70. Every other code exits 2, an unknown code
+and one outside `i64` included.
+
+`reply::unanswered` builds the client error for a request whose reply line never arrived. For a
+command that changes no state, a closed connection, a timeout and a failed read are `no_reply`
+with `cause` `closed`, `deadline` or `transport`, exit 1. A line past the bound is
+`reply_too_large` with `max_bytes`, exit 2. For a command that changes state, the request may
+still take effect, so each is `outcome_unknown`, exit 3, with `cause` `closed`, `deadline`,
+`transport` or `reply_too_large`.
+
+`reply::request_line` writes `{"id":1,"method":...,"params":{...}}` and a newline through the
+compact writer. It hands the params back when a key repeats among them or inside a value.
 
 ## Writing output
 
@@ -67,6 +104,11 @@ stream it failed on; the caller picks the exit.
 | `json::Number` | A number's text, checked against RFC 8259's number grammar |
 | `json::scan` | One reply line to a `Json`, or a `ScanError` with its offset |
 | `json::MAX_REPLY_BYTES` | Spec 025's bound on one reply line, 16,777,216 bytes |
+| `reply::read_reply`, `reply::ReadFailure` | One reply line through the bound, or why none arrived |
+| `reply::judge_reply`, `reply::Reply` | Spec 025's reply rules: a `result`, a kernel error, or `bad_reply` |
+| `reply::kernel_exit` | A kernel error's exit, by its code |
+| `reply::unanswered` | `no_reply`, `reply_too_large` or `outcome_unknown`, by whether the command changes state |
+| `reply::request_line` | The request line, `id` 1, ended with a newline |
 | `json::write_compact` | The JSON form, with every terminal control escaped |
 | `json::write_human` | The human form, with every terminal control shown as `<U+XXXX>` |
 | `Envelope`, `Instance` | Spec 025's success and failure envelopes |

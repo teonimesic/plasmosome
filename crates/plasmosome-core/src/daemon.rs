@@ -356,6 +356,7 @@ fn waiting(error: &std::io::Error) -> bool {
 mod tests {
     use super::*;
     use crate::control::Handler;
+    use crate::nofollow::fixtures::root_bases;
     use crate::private_socket::{PrivateDir, PrivateListener, PrivateSocketError, effective_uid};
     use crate::protocol::WireError;
     use serde_json::{Value, json};
@@ -371,46 +372,6 @@ mod tests {
 
     const STATUS_REQUEST: &str = r#"{"id":1,"method":"plasmosome.status","params":{}}"#;
     const PATIENCE: Duration = Duration::from_secs(10);
-
-    #[cfg(target_os = "macos")]
-    #[allow(unsafe_code)]
-    fn root_bases() -> Vec<PathBuf> {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
-        // SAFETY: `buffer` is a live Vec of buffer.len() bytes, and confstr writes at most that
-        // many.
-        let length = unsafe {
-            libc::confstr(
-                libc::_CS_DARWIN_USER_TEMP_DIR,
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-            )
-        };
-        assert!(
-            length > 1 && length <= buffer.len(),
-            "confstr(_CS_DARWIN_USER_TEMP_DIR) returned {length}"
-        );
-        buffer.truncate(length - 1);
-        let base = PathBuf::from(OsStr::from_bytes(&buffer));
-        vec![
-            base.canonicalize()
-                .unwrap_or_else(|error| panic!("{} does not resolve: {error}", base.display())),
-        ]
-    }
-
-    #[cfg(target_os = "linux")]
-    fn root_bases() -> Vec<PathBuf> {
-        let mut bases: Vec<PathBuf> = std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|base| !base.is_empty())
-            .map(PathBuf::from)
-            .into_iter()
-            .collect();
-        let binary = std::env::current_exe().expect("the test binary knows its own path");
-        bases.extend(binary.parent().map(Path::to_path_buf));
-        bases
-    }
 
     #[cfg(target_os = "macos")]
     const SUN_PATH_MAX: usize = 103;
