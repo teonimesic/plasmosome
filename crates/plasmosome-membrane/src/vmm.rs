@@ -455,6 +455,9 @@ impl VmmChild {
 
     #[allow(unsafe_code)]
     fn signal_leader(&self) -> Result<(), SupervisionError> {
+        if leader_signal_withheld(self.pid) {
+            return Ok(());
+        }
         // SAFETY: kill takes no pointer, so the call is memory-safe whatever `self.pid` names. Its
         // callers reach it only after observe found the child running. The pid still names the
         // child then only while this handle is the only consuming waiter, as `VmmChild`'s doc
@@ -579,6 +582,7 @@ impl VmmChild {
     }
 
     fn report_drop(&self, error: SupervisionError, later: Option<SupervisionError>) {
+        note_drop_report();
         let signalling_forbidden = matches!(
             self.lifecycle,
             Lifecycle::Finished {
@@ -623,6 +627,44 @@ fn note_interrupted_wait() {}
 #[cfg(test)]
 fn interrupted_reaps() -> usize {
     INTERRUPTED_REAPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DROP_REPORTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_drop_report() {
+    DROP_REPORTS.set(DROP_REPORTS.get() + 1);
+}
+
+#[cfg(not(test))]
+fn note_drop_report() {}
+
+#[cfg(test)]
+fn drop_reports() -> usize {
+    DROP_REPORTS.get()
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static WITHHELD_LEADER_SIGNAL: std::cell::Cell<libc::pid_t> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn withhold_leader_signal(pid: libc::pid_t) {
+    WITHHELD_LEADER_SIGNAL.set(pid);
+}
+
+#[cfg(test)]
+fn leader_signal_withheld(pid: libc::pid_t) -> bool {
+    WITHHELD_LEADER_SIGNAL.get() == pid
+}
+
+#[cfg(not(test))]
+fn leader_signal_withheld(_pid: libc::pid_t) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -1536,11 +1578,15 @@ mod tests {
 #[cfg(test)]
 mod signal_pressure {
     use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
 
     const CHILDREN: usize = 64;
-    const SIGNALS_PER_BURST: usize = 512;
+    const INTERRUPTIONS_PER_REAP: usize = 2;
+    const SIGNALS_PER_REAP: usize = 512;
+    const YIELDS_PER_SIGNAL: usize = 1_000_000;
 
     static DELIVERED: AtomicUsize = AtomicUsize::new(0);
 
@@ -1548,16 +1594,89 @@ mod signal_pressure {
         DELIVERED.fetch_add(1, Ordering::Relaxed);
     }
 
-    struct SleepForever;
+    struct ExitOnRelease {
+        read: libc::c_int,
+        write: libc::c_int,
+    }
 
-    impl Launch for SleepForever {
+    impl Launch for ExitOnRelease {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
-            loop {
-                // SAFETY: pause takes no arguments and is async-signal-safe, which is all this
-                // forked child may call.
-                unsafe { libc::pause() };
+            let mut byte = 0u8;
+            // SAFETY: close, read and _exit are async-signal-safe, which is all this forked child
+            // may call. Both descriptors are the child's own copies. Closing its copy of the write
+            // end means read sees end of file once the test process is gone. `byte` is a local
+            // that read may write, and the length 1 matches it.
+            unsafe {
+                libc::close(self.write);
+                libc::read(self.read, &mut byte as *mut u8 as *mut libc::c_void, 1);
+                libc::_exit(0)
             }
+        }
+    }
+
+    struct Release {
+        read: Option<OwnedFd>,
+        write: OwnedFd,
+    }
+
+    impl Release {
+        fn open() -> Release {
+            let [read, write] = crate::spawn_lock::with_each_descriptor_held(close_on_exec_pipe)
+                .expect("a close-on-exec release pipe opens");
+            Release {
+                read: Some(read),
+                write,
+            }
+        }
+
+        fn read_end(&self) -> libc::c_int {
+            self.read
+                .as_ref()
+                .expect("the read end is open until the leader is forked")
+                .as_raw_fd()
+        }
+
+        fn write_end(&self) -> libc::c_int {
+            self.write.as_raw_fd()
+        }
+
+        fn close_read(&mut self) {
+            self.read = None;
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn close_on_exec_pipe(
+        _held: &crate::spawn_lock::DescriptorsHeld,
+    ) -> std::io::Result<[OwnedFd; 2]> {
+        let mut fds = [0; 2];
+        // SAFETY: `fds` is a local array of two c_int, the size pipe writes.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: pipe returned 0, so both entries are new descriptors, and nothing else owns them.
+        let ends = fds.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+        for end in &ends {
+            // SAFETY: fcntl with F_SETFD takes integers only, and `end` keeps its descriptor open
+            // for the call. with_each_descriptor_held checks the flag afterwards.
+            unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        Ok(ends)
+    }
+
+    struct WithheldLeaderSignal;
+
+    impl WithheldLeaderSignal {
+        fn for_leader(pid: libc::pid_t) -> WithheldLeaderSignal {
+            withhold_leader_signal(pid);
+            WithheldLeaderSignal
+        }
+    }
+
+    impl Drop for WithheldLeaderSignal {
+        fn drop(&mut self) {
+            withhold_leader_signal(0);
         }
     }
 
@@ -1614,60 +1733,66 @@ mod signal_pressure {
         }
     }
 
-    struct SignalStorm {
-        budget: Arc<AtomicUsize>,
-        running: Arc<AtomicBool>,
+    struct Aim {
+        release: libc::c_int,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct Interrupter {
+        aims: Option<mpsc::Sender<Aim>>,
+        released: mpsc::Receiver<Option<usize>>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
-    impl SignalStorm {
+    impl Interrupter {
         #[allow(unsafe_code)]
-        fn aimed_at_this_thread() -> SignalStorm {
+        fn aimed_at_this_thread() -> Interrupter {
             // SAFETY: pthread_self takes no arguments and cannot fail.
             let target = unsafe { libc::pthread_self() } as usize;
-            let budget = Arc::new(AtomicUsize::new(0));
-            let running = Arc::new(AtomicBool::new(true));
-            let thread = std::thread::spawn({
-                let budget = Arc::clone(&budget);
-                let running = Arc::clone(&running);
-                move || {
-                    while running.load(Ordering::Relaxed) {
-                        let claimed = budget
-                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
-                                left.checked_sub(1)
-                            })
-                            .is_ok();
-                        if claimed {
-                            // SAFETY: `target` is the thread that made this storm. The storm is
-                            // `Send`, but its one caller keeps it a local of that thread, so its
-                            // Drop runs there and joins this thread first. The target is therefore
-                            // alive for every signal.
-                            unsafe { libc::pthread_kill(target as libc::pthread_t, libc::SIGUSR1) };
-                        } else {
-                            std::thread::yield_now();
-                        }
+            let (aims, aimed) = mpsc::channel::<Aim>();
+            let (releases, released) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                for aim in aimed {
+                    let release = ReleaseOnDrop(aim.release);
+                    let unhandled = interrupt(target, &aim);
+                    drop(release);
+                    if releases.send(unhandled).is_err() {
+                        return;
                     }
                 }
             });
             set_sigusr1_blocked(true);
-            SignalStorm {
-                budget,
-                running,
+            Interrupter {
+                aims: Some(aims),
+                released,
                 thread: Some(thread),
             }
         }
 
-        fn burst(&self) -> Burst<'_> {
-            self.budget.store(SIGNALS_PER_BURST, Ordering::Relaxed);
+        fn drop_interrupted(&self, child: VmmChild, release: &Release) -> Option<usize> {
+            let dropped = Arc::new(AtomicBool::new(false));
+            self.aims
+                .as_ref()
+                .expect("the interrupter takes aims until it is dropped")
+                .send(Aim {
+                    release: release.write_end(),
+                    dropped: Arc::clone(&dropped),
+                })
+                .expect("the interrupter thread is running");
+            let _withheld = WithheldLeaderSignal::for_leader(child.pid());
             set_sigusr1_blocked(false);
-            Burst(&self.budget)
+            drop(child);
+            set_sigusr1_blocked(true);
+            dropped.store(true, Ordering::Relaxed);
+            self.released
+                .recv()
+                .expect("the interrupter releases every leader it was aimed at")
         }
     }
 
-    impl Drop for SignalStorm {
+    impl Drop for Interrupter {
         fn drop(&mut self) {
-            self.budget.store(0, Ordering::Relaxed);
-            self.running.store(false, Ordering::Relaxed);
+            self.aims.take();
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }
@@ -1675,48 +1800,107 @@ mod signal_pressure {
         }
     }
 
-    struct Burst<'a>(&'a AtomicUsize);
+    struct ReleaseOnDrop(libc::c_int);
 
-    impl Drop for Burst<'_> {
+    impl Drop for ReleaseOnDrop {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
-            self.0.store(0, Ordering::Relaxed);
-            set_sigusr1_blocked(true);
+            let byte = b'x';
+            // SAFETY: `byte` is a local and the length 1 matches it. The descriptor stays open
+            // while this guard lives, because the Release it belongs to outlives the test
+            // thread's wait for this aim's report, and that report or the end of this thread
+            // comes only after the guard is dropped.
+            unsafe { libc::write(self.0, &byte as *const u8 as *const libc::c_void, 1) };
         }
     }
 
-    #[test]
     #[allow(unsafe_code)]
+    fn interrupt(target: usize, aim: &Aim) -> Option<usize> {
+        let interruptions_before = interrupted_reaps();
+        let mut signals = 0;
+        let mut unhandled = None;
+        while unhandled.is_none()
+            && interrupted_reaps() - interruptions_before < INTERRUPTIONS_PER_REAP
+            && signals < SIGNALS_PER_REAP
+            && !aim.dropped.load(Ordering::Relaxed)
+        {
+            let delivered = DELIVERED.load(Ordering::Relaxed);
+            // SAFETY: `target` is the thread that made the interrupter. Its one caller keeps the
+            // interrupter a local of that thread, so its Drop runs there and joins this thread
+            // first. The target is therefore alive for every signal.
+            if unsafe { libc::pthread_kill(target as libc::pthread_t, libc::SIGUSR1) } != 0 {
+                break;
+            }
+            signals += 1;
+            let mut yields = 0;
+            while DELIVERED.load(Ordering::Relaxed) == delivered
+                && !aim.dropped.load(Ordering::Relaxed)
+            {
+                if yields == YIELDS_PER_SIGNAL {
+                    unhandled = Some(signals);
+                    break;
+                }
+                std::thread::yield_now();
+                yields += 1;
+            }
+        }
+        unhandled
+    }
+
+    #[allow(unsafe_code)]
+    fn assert_reaped_by_drop(pid: libc::pid_t, interruptions: usize) {
+        let mut status: libc::c_int = 0;
+        // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
+        // this process.
+        let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        let errno = last_errno();
+        if observed == 0 {
+            // SAFETY: as above. The leader was released, so it exits and this wait returns.
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+        }
+        assert!(
+            observed == -1 && errno == libc::ECHILD,
+            "pid {pid} survived a drop whose blocking wait was interrupted {interruptions} times"
+        );
+    }
+
+    #[test]
     fn a_reap_interrupted_by_a_signal_still_leaves_no_orphan() {
         let _handler = InterruptingHandler::install();
-        let storm = SignalStorm::aimed_at_this_thread();
-        let signals_before = DELIVERED.load(Ordering::Relaxed);
-        let interruptions_before = interrupted_reaps();
+        let interrupter = Interrupter::aimed_at_this_thread();
 
-        for _ in 0..CHILDREN {
-            let child = VmmChild::spawn(SleepForever).expect("fork succeeds");
+        for child_number in 1..=CHILDREN {
+            let mut release = Release::open();
+            let child = VmmChild::spawn(ExitOnRelease {
+                read: release.read_end(),
+                write: release.write_end(),
+            })
+            .expect("fork succeeds");
+            release.close_read();
             let pid = child.pid();
-            {
-                let _burst = storm.burst();
-                drop(child);
+            let signals_before = DELIVERED.load(Ordering::Relaxed);
+            let interruptions_before = interrupted_reaps();
+            reset_reap_record();
+            let reports_before = drop_reports();
+            let unhandled = interrupter.drop_interrupted(child, &release);
+            let reports = drop_reports() - reports_before;
+            let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
+            let interruptions = interrupted_reaps() - interruptions_before;
+            assert_reaped_by_drop(pid, interruptions);
+            assert_reaped_by_handle(pid);
+            assert_eq!(
+                reports, 0,
+                "child {child_number}: the drop reported a cleanup error"
+            );
+            if let Some(signal) = unhandled {
+                panic!(
+                    "child {child_number}: SIGUSR1 number {signal} was not handled by the reaping thread within {YIELDS_PER_SIGNAL} yields, so the interrupter released the leader early; something in the drop kept the signal blocked or ignored"
+                );
             }
-            let mut status: libc::c_int = 0;
-            // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
-            // this process.
-            let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-            let errno = std::io::Error::last_os_error().raw_os_error();
             assert!(
-                observed == -1 && errno == Some(libc::ECHILD),
-                "pid {pid} survived a drop taken under signal pressure"
+                interruptions >= INTERRUPTIONS_PER_REAP,
+                "child {child_number}: the reaping thread took {signals} SIGUSR1 and {interruptions} of them interrupted its blocking wait, fewer than {INTERRUPTIONS_PER_REAP}, so the retry after EINTR was not exercised"
             );
         }
-
-        drop(storm);
-        let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
-        let interruptions = interrupted_reaps() - interruptions_before;
-        assert!(signals > 0, "no SIGUSR1 reached the dropping thread");
-        assert!(
-            interruptions > 0,
-            "{signals} signals reached the dropping thread but none landed inside a blocking wait, so the EINTR retry was never exercised and this test proves nothing"
-        );
     }
 }
