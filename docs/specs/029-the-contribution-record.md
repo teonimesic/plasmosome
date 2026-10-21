@@ -303,10 +303,11 @@ tip `main` held before that push: the commit's first parent, `<sha>^1`. No push 
 been rerun yet, so the rerun counts as the commit's read only when its log reads
 `RANGE: <sha>^1..<sha>`, both written out in full as `git rev-parse` prints them. Rerunning is
 the owner's decision; no agent reruns a run. If no rerun reads it, the commit stays unread, and
-the report says so. Amended on 2026-10-21: until then a cancelled push run left its commit unread
-with no remedy. The rerun's line is compared with `<sha>^1`, not with the original run's line,
-because a run cancelled before the step prints none: run 37906198397 skipped its attribution step,
-and its log holds no `RANGE:` line.
+the report says so. A report that counts a rerun quotes its `RANGE:` line, because this
+repository keeps a run's log for 90 days. Amended on 2026-10-21: until then a cancelled push run
+left its commit unread with no remedy. The rerun's line is compared with `<sha>^1`, not with the
+original run's line, because a run cancelled before the step prints none: run 37906198397
+skipped its attribution step, and its log holds no `RANGE:` line.
 
 Spec 004 already settles cancellation: "On a push each commit has its own concurrency group, so
 no run on main is cancelled; only a pull request cancels its superseded run." 0613d04 (#147,
@@ -338,9 +339,9 @@ setting.
   never the message in between.
 - A merger who edits the squash message or supplies its author, and a changed merge setting. An
   edit at gh's interactive prompt, its "Edit commit subject" or "Edit commit message", is such an
-  edit. A model or an untraceable identity they add is found only after it lands, and a person's
-  address the merger supplies is never found. Amended on 2026-10-21: this named neither the
-  author nor gh's prompt, and said every such change is found.
+  edit. A model or an untraceable identity they add is found only after it lands. A person's
+  address the merger supplies, or a person's line the merger removes, is never found. Amended on
+  2026-10-21: this named neither the author nor gh's prompt, and said every such change is found.
 - The pull request's title. With more than one commit it becomes the squash's subject, and
   nothing reads it before the merge.
 - Commits under other identities before they are in a pull request, as in a fork.
@@ -523,14 +524,16 @@ domain such as `corp.locale.io`, because `example.com` is on section 4's list.
      too, not as untraceable: rule 2 decides before rule 4, and its name holds a vendor word.
      Refused as untraceable: `Probe <probe@>`, `Probe <probe@.>`, `Probe <@>`,
      `Probe <@corp.locale.io>`, `Probe < probe@corp.locale.io>`, `Probe <probe @corp.locale.io>`,
-     `Probe <probe@corp .locale.io>`, `Probe <probe@corp.locale.io >`,
-     `Probe <probe@corp.locale.io>` with a U+3000 before the `>`, `Probe <probe@corp.locale.io..>`,
-     `Probe <probe@.corp.locale.io>` and `Probe <probe@corp..locale.io>`. Cleared:
-     `Probe <probe@corp.locale.io.>` and `Jane Doe <jane.doe@corp.locale.io>`. Catches a rule 2
-     that tests no malformed shape or drops any one of its clauses, one that trims the address,
-     one that looks for whitespace only at the domain's end or only in ASCII, one that strips
-     every trailing dot, one that refuses the one trailing dot rule 4 ignores or every dot, and
-     one that decides after rule 4.
+     `Jane Doe <jane doe@corp.locale.io>`, `Probe <probe@corp .locale.io>`,
+     `Probe <probe@corp.locale.io >`, `Probe <probe@corp.locale.io>` with each other character of
+     rule 2's whitespace set before the `>`, one row per character with U+3000 among them,
+     `Probe <probe@corp.locale.io..>`, `Probe <probe@.corp.locale.io>` and
+     `Probe <probe@corp..locale.io>`. Cleared: `Probe <probe@corp.locale.io.>` and
+     `Jane Doe <jane.doe@corp.locale.io>`. Catches a rule 2 that tests no malformed shape or drops
+     any one of its clauses, one that trims the address, one that misses whitespace inside the
+     local part or anywhere but the domain's end, one that knows fewer whitespace characters than
+     rule 2 lists, ASCII alone included, one that strips every trailing dot, one that refuses the
+     one trailing dot rule 4 ignores or every dot, and one that decides after rule 4.
 2. **Raw identities.** A commit authored by `Claude <noreply@anthropic.com>`, whose tree holds a
    `.mailmap` mapping that identity to a person, is refused, and the refusal names the raw author.
    Catches a guard that reads `%aN`, `%aE` or `git log`'s default output.
