@@ -151,20 +151,21 @@ succeed or never ran, as after a red clippy step, it names that step and says th
 only what ran; it never then says that none was ignored. A test compiled out by `cfg` for the
 other OS is not a skip; the other OS's job runs it.
 
-A cancelled run has no report. On a push each commit has its own concurrency group, so a run on
-main is cancelled only by hand. A pull request's run is cancelled when a newer push to that pull
-request starts another, and review reads the newer run. `if: always()`, which this step had until
-the amendment below, differs from `!cancelled()` only in a cancelled run. There the report still
-ran `cargo test --no-run` for each test step that had started, so a run cancelled while a test
-step compiled finished that build for a summary of a head nobody merges, on a runner the newer
-run may be waiting for. GitHub also cancels a job that reaches its `timeout-minutes`. The report
-is not promised there either, and the test step's own log shows where it stopped. `ci.yml`'s
-attribution read ([spec 029](029-the-contribution-record.md)) and `audit.yml`'s issue job use the
-same condition, which GitHub's documentation recommends for a step that runs whatever the earlier
-steps' results were.
+A cancelled run has no report. On a push each commit has its own concurrency group, so no newer run
+cancels a run on main. A pull request's run is cancelled when a newer push to that pull request
+starts another, and review reads the newer run. `if: always()`, which this spec named until the
+amendment below, differs from `!cancelled()` only in a cancelled run. There the report still ran
+`cargo test --no-run` for each test step that had started, so a run cancelled while a test step
+compiled finished that build for a summary of a head nobody merges, on a runner the newer run may be
+waiting for. GitHub also cancels a job that reaches its `timeout-minutes`. The report is not
+promised there either, and the test step's own log shows where it stopped. `ci.yml`'s attribution
+read ([spec 029](029-the-contribution-record.md)) and `audit.yml`'s issue job use the same
+condition, which GitHub's documentation recommends for a step that runs whatever the earlier steps'
+results were.
 
-Amended on 2026-10-21: the report step ran under `if: always()`. Run 39579409827, cancelled on
-2026-10-21 by a newer push, ran both report steps and skipped the attribution read.
+Amended on 2026-10-21: this said `if: always()`, and plasmosome-ofaf moves both report steps in
+`ci.yml` off it. Run 39579409827, cancelled on 2026-10-21 by a newer push, ran both report steps and
+skipped the attribution read.
 
 ### The rustdoc step
 
