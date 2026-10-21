@@ -530,6 +530,12 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::RevokeReturnsAStranger(handle.class) {
             return Ok(a_stranger(handle));
         }
+        if self.defect == Defect::RevokeReturnsAnotherRecipe(handle.class) {
+            return Ok(LedgerEntry {
+                capability: substituted_recipe(&entry.capability),
+                ..entry
+            });
+        }
         Ok(entry)
     }
 
