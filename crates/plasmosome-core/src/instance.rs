@@ -453,12 +453,24 @@ impl InstanceRoot {
         let in_cells = self.largest_cell_number(&cells)?;
         #[cfg(test)]
         tests::between_listings();
-        let largest = in_cells.max(self.largest_cell_number(RETIRED_DIR)?);
-        largest
-            .checked_add(1)
-            .map(|next| next.max(lowest))
-            .filter(|next| *next <= MAX_CELL_NUMBER)
-            .ok_or(AllocateError::Exhausted)
+        let in_retired = self.largest_cell_number(RETIRED_DIR)?;
+        let (largest, holder) = if in_retired > in_cells {
+            (in_retired, name_of(RETIRED_DIR))
+        } else {
+            (in_cells, OsStr::new(CELLS_DIR))
+        };
+        let above = largest + 1;
+        if lowest.max(above) > MAX_CELL_NUMBER {
+            let holder = if lowest > above {
+                OsStr::new(CELLS_DIR)
+            } else {
+                holder
+            };
+            return Err(AllocateError::Exhausted {
+                path: self.path.join(holder),
+            });
+        }
+        Ok(lowest.max(above))
     }
 
     fn largest_cell_number(&self, name: &CStr) -> Result<u64, AllocateError> {
@@ -466,7 +478,8 @@ impl InstanceRoot {
         let dir = match open_private_directory(self.dir.as_fd(), name) {
             Ok(dir) => dir,
             Err(DirectoryRefusal::Missing) => return Ok(0),
-            Err(DirectoryRefusal::Symlink | DirectoryRefusal::NotADirectory) => {
+            Err(DirectoryRefusal::Symlink) => return Err(AllocateError::Symlink { path }),
+            Err(DirectoryRefusal::NotADirectory) => {
                 return Err(AllocateError::NotADirectory { path });
             }
             Err(DirectoryRefusal::Io(source)) => {
@@ -1058,9 +1071,10 @@ pub struct FileIdentity {
 #[derive(Debug)]
 pub enum AllocateError {
     ForeignLock { path: PathBuf },
+    Symlink { path: PathBuf },
     NotADirectory { path: PathBuf },
     Listing { path: PathBuf, source: io::Error },
-    Exhausted,
+    Exhausted { path: PathBuf },
     Contended { path: PathBuf },
     Create { cell: CellId, source: CellDirError },
 }
@@ -1468,17 +1482,21 @@ impl fmt::Display for AllocateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AllocateError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
+            AllocateError::Symlink { path } => {
+                write!(f, "{}, so no cell was allocated", symlink_text(path))
+            }
             AllocateError::NotADirectory { path } => write!(
                 f,
-                "{} is a symlink or not a directory, so no cell was allocated",
+                "{} is not a directory, so no cell was allocated",
                 path.display()
             ),
             AllocateError::Listing { path, source } => {
                 write!(f, "cannot list {}: {source}", path.display())
             }
-            AllocateError::Exhausted => write!(
+            AllocateError::Exhausted { path } => write!(
                 f,
-                "no cell ID is left: cell-{MAX_CELL_NUMBER} is already taken"
+                "no cell ID is left: cell-{MAX_CELL_NUMBER} is already taken in {}",
+                path.display()
             ),
             AllocateError::Contended { path } => write!(
                 f,
@@ -1499,8 +1517,9 @@ impl std::error::Error for AllocateError {
             AllocateError::Listing { source, .. } => Some(source),
             AllocateError::Create { source, .. } => Some(source),
             AllocateError::ForeignLock { .. }
+            | AllocateError::Symlink { .. }
             | AllocateError::NotADirectory { .. }
-            | AllocateError::Exhausted
+            | AllocateError::Exhausted { .. }
             | AllocateError::Contended { .. } => None,
         }
     }
