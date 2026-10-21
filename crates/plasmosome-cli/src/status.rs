@@ -13,7 +13,7 @@ use crate::envelope::{ClientError, EmitError, Envelope, ErrorBody, Instance, Str
 use crate::exchange::{Unreplied, exchange};
 use crate::json::Json;
 use crate::refusal::{PathOrigin, at, map_refusal, number, refusal};
-use crate::reply::{Reply, judge_reply, kernel_exit, request_line, unanswered};
+use crate::reply::{Reply, failure_of, judge_reply, kernel_exit, request_line, unanswered};
 
 #[cfg(target_os = "macos")]
 const MAX_SOCKET_PATH: usize = 103;
@@ -118,6 +118,7 @@ fn answer(
         ErrorBody::Client(match unreplied {
             Unreplied::NotSent(error) => error,
             Unreplied::Unanswered(failure) => unanswered(failure, command.changes_state),
+            Unreplied::CutOff(error) => unanswered(failure_of(&error), command.changes_state),
         })
     })?;
     match judge_reply(&line).map_err(ErrorBody::Client)? {

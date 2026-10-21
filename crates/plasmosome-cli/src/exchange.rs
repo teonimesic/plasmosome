@@ -18,8 +18,10 @@ const PIECE: usize = 64 * 1024;
 pub enum Unreplied {
     /// No byte of the request was written. The error says why.
     NotSent(ClientError),
-    /// The request was written, at least in part, and no whole reply line came back.
+    /// The request was written whole, and no whole reply line came back.
     Unanswered(ReadFailure),
+    /// Part of the request was written, then a write failed. The error says why.
+    CutOff(io::Error),
 }
 
 /// Sends `request` on `stream` and reads one reply line with [`read_reply`], within `deadline`.
