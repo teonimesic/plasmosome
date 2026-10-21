@@ -726,7 +726,7 @@ def a_failed_row_fails_the_run_whatever_rows_skip():
 
 
 def run_rows(rows):
-    failed, skipped = [], []
+    passed, failed, skipped = [], [], []
     for row in rows:
         try:
             row()
@@ -739,8 +739,9 @@ def run_rows(rows):
             print(f"FAIL {row.__name__}: {type(error).__name__}: {detail}", flush=True)
             traceback.print_exception(error)
         else:
+            passed.append(row.__name__)
             print(f"ok {row.__name__}")
-    print(f"{len(rows) - len(failed) - len(skipped)} passed, {len(failed)} failed, {len(skipped)} skipped")
+    print(f"{len(passed)} passed, {len(failed)} failed, {len(skipped)} skipped")
     return 1 if failed else 0
 
 
