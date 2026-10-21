@@ -253,9 +253,11 @@ fn judge(instances: &str, trusted_uid: u32) -> Result<Found, ClientError> {
         };
         let socket = socket_of(instances, &name);
         let socket = Path::new(&socket);
-        fits(socket)?;
         match check_private_path(socket, trusted_uid) {
-            Ok(_) => found.candidates.push(name),
+            Ok(_) => {
+                fits(socket)?;
+                found.candidates.push(name);
+            }
             Err(PrivateSocketError::NoSocket { .. }) => found.seen.push(name),
             Err(error) => {
                 return Err(map_refusal(&error, socket, PathOrigin::Home, trusted_uid));
