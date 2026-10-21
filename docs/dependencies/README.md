@@ -281,10 +281,13 @@ Every one of these ten keys is required, and no other key is allowed:
 - `file`: the artifact's path in the bundle, as the manifest's `files` names it.
 - `sha256`: that file's SHA-256.
 - `sources`: a non-empty array of strings. Each upstream input, with its version and its commit or
-  digest; each change the build made to an input, and who authorized it; and the build.
-- `licence`: an SPDX expression, read from the pinned source.
+  digest; each change the build made to an input, and who authorized it; the build; and each change
+  made to the build's output before it went into the bundle.
+- `licence`: an SPDX expression for the artifact's own code that its build compiled, read from the
+  files at the pinned commit. What else the bytes hold, such as a statically linked library or the
+  locked crates, goes in a distribution limit.
 - `limits`: `"none"`, or a non-empty array of strings. Each is a known fault, and says where it is
-  tracked.
+  tracked. A distribution limit says what distributing the bytes obliges.
 - `checks`: a table of exactly five strings. `cadence` is how often the checks are meant to run.
   `updates` and `advisories` say how to run each one. `by` says who runs them: until the owner
   answers spec 026's Q6, nobody does. `last` is `"never"`, or a line that starts with the date of
@@ -296,8 +299,13 @@ The other values are strings, and both digests are 64 lowercase hex digits. Long
 ### Where each fact comes from
 
 Every fact comes from what the repository pins: the bundle, a clone of each upstream at the pinned
-commit, and each tarball checked by its digest. No fact is copied from a website or taken from an
-upstream's maintainers.
+commit, and each tarball checked by its digest. A few come from the build's own outputs. No fact is
+copied from a website or taken from an upstream's maintainers.
+
+The bundle has no public copy, because no workflow publishes one. So the bundle's facts, such as
+`bundle_manifest_sha256`, `sha256`, the manifest's fields and the rpath, can be re-derived only on
+a machine that holds a copy. The build's outputs exist only where the build ran. The clones and
+the tarball can be had anywhere, and their commits and digests check them.
 
 **The bundle.** Use a copy of the bundle whose directory name is `PINNED_BUNDLE_ID`, in
 `crates/plasmosome-lanes/src/bundle.rs`. The "Testing" section of the lanes README says where the
@@ -311,7 +319,10 @@ That digest is `bundle_manifest_sha256`. Its first 16 digits must equal the dire
 `PINNED_BUNDLE_ID`. `file` is the path `bundle.rs` pins, `LIBKRUN` or `KERNEL`. `sha256` is the
 manifest's `files` entry for `file`, and `shasum -a 256 <bundle>/<file>` must print the same. The
 manifest's `pinned` names each upstream's repository, tag and commit, and each tarball's digest.
-Its `deviations` names each change the build made to an input.
+Its `deviations` names each change the build made to an input. `pinned` is the build's own list,
+not every input: read the upstream build too, its `Makefile` and each `build.rs`, for anything it
+fetches. libkrun's `Makefile` fetches a Debian sysroot for its init blob, which `pinned` does not
+name.
 
 **A clone.** Clone the repository the manifest names, with no checkout, and read every file from
 the pinned commit, so that nothing in a working tree reaches the record:
@@ -331,12 +342,23 @@ The tags must include the pinned tag. A clone you already have serves too, once
 it, such as `tar -xOJf <tarball> linux-<version>/COPYING`. The kernel's address is `KERNEL_REMOTE`
 in libkrunfw's `Makefile`.
 
+**The build's outputs.** Some facts are only in what the build left behind: the kernel config it
+built from, the padded copy of the kernel in libkrunfw, libkrun's build output before it was
+changed, the init blob libkrun embeds, the sysroot it was built against, and cargo's list of the
+files it compiled. Check each by the digest the record names, and say in the PR where it was read.
+Where no script or note names a step between the build and the bundle, compare the build's output
+with the bundled file. State the difference, say that it was measured, and name the commands, such
+as `otool -D`, `codesign -dv`, `nm -a` and `otool -l`.
+
 **Each field.**
 
 - `version`: for libkrun, spec 001 §4.2 and `LIBKRUN` name it. For the kernel,
   `BUNDLE_KERNEL_RELEASE` in `crates/plasmosome-lanes/tests/boot.rs` names it, and the tarball's
   `Makefile` must give it as `VERSION.PATCHLEVEL.SUBLEVEL`.
-- `licence`: libkrun's is `license` in `src/libkrun/Cargo.toml`. The kernel's is the
+- `licence`: libkrun's joins with `AND` the licences of the files its build compiled. Cargo's
+  dep-info file from that build, `target/release/libkrun.d`, lists them. Read each file at the
+  commit: its `SPDX-License-Identifier` lines, or another licence header, such as MIT's. A file
+  with neither takes the `license` of its crate's `Cargo.toml`. The kernel's is the
   `SPDX-License-Identifier` line of the tarball's `COPYING`. That line writes `GPL-2.0`, the
   deprecated SPDX name for `GPL-2.0-only`.
 - `sources`: each repository, tag, commit and digest as `pinned` gives it, and each count from the
@@ -344,13 +366,17 @@ in libkrunfw's `Makefile`.
   the commit is `git -C <clone> show <commit>:<path> | shasum -a 256`. Write each change in
   `deviations` out exactly, so that applying it to the upstream file gives the manifest's
   `config_used_sha256`. Where the build ran, and with which tools, comes from the manifest's
-  `os_identity` and `build_tools`, or from the plasmosome-itt notes that recorded the build. A fact
-  with neither source is left out.
+  `os_identity` and `build_tools`, or from the plasmosome-itt notes that recorded the build. The
+  kernel names its own compiler and linker in its version banner, which
+  `strings <bundle>/<file> | grep 'Linux version'` prints. A Debian package's version is the first
+  line of `usr/share/doc/<package>/changelog.Debian.gz` in the sysroot. A fact with no source is
+  left out.
 - `limits`: `otool -l <bundle>/<file>` prints each `LC_RPATH`, and the list must equal
-  `LIBKRUN_RPATHS` in `crates/plasmosome-lanes/src/dyld.rs`. The kernel's unset options are read
-  from the config used, which the upstream file and the change in `sources` rebuild, for example
-  with `grep -n -F '# CONFIG_SECURITY is not set' <config>`. This counts the crates.io packages
-  libkrun's lockfile locks:
+  `LIBKRUN_RPATHS` in `crates/plasmosome-lanes/src/dyld.rs`. The kernel's options are read from the
+  built config, the `.config` that `make olddefconfig` made from the config used, and that
+  `make Image` built from. The config used is not enough, because olddefconfig sets options it does
+  not name. For example, `grep -n -F '# CONFIG_SECURITY is not set' <built config>`. This counts the
+  crates.io packages libkrun's lockfile locks:
 
   ```shell
   git -C <clone> show <commit>:Cargo.lock \
@@ -362,7 +388,10 @@ in libkrunfw's `Makefile`.
 A PR that changes a pin updates the records, as spec 026 section 1 says. The pins are spec 001
 §4.2's libkrun version and commit, `PINNED_BUNDLE_ID`, `LIBKRUN` and `KERNEL` in `bundle.rs`,
 `LIBKRUNFW` and `LIBKRUN_RPATHS` in `dyld.rs`, `BUNDLE_KERNEL_RELEASE`, and every file in the
-bundle. Find each place that holds one with `git grep -n -F` and the record's version, its commit,
-or the bundle ID. A new bundle changes `bundle_manifest_sha256` in every record, even one whose
-file stays the same. A check of updates or advisories rewrites `checks.last` with its date and what
-it found.
+bundle. `crates/plasmosome-lanes/tests/dyld.rs` asserts `LIBKRUNFW` and the search list that
+`LIBKRUN_RPATHS` gives. The lanes `AGENTS.md` rules "Check the bundle before loading it" and "The
+bundle is pinned" name `libkrunfw.5.dylib` and `PINNED_BUNDLE_ID`. Find each place that holds a
+pin with `git grep -n -F` and the pin's own value, such as `libkrunfw.5.dylib` or
+`/opt/homebrew/opt/llvm/lib`, as well as the record's version, its commit or the bundle ID. A new
+bundle changes `bundle_manifest_sha256` in every record, even one whose file stays the same. A
+check of updates or advisories rewrites `checks.last` with its date and what it found.
