@@ -56,7 +56,7 @@ pub use gatekeeper::Gatekeeper;
 pub use instance::{
     AllocateError, CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass,
     FileIdentity, InstanceRoot, InstanceRootError, JournalAppend, JournalOpen, JournalRefusal,
-    LaunchedMarker, LockError, LockProbe, MarkerFault, MarkerRead, NotACell, RetireError,
+    LaunchedMarker, LockError, LockProbe, LockTest, MarkerFault, MarkerRead, NotACell, RetireError,
     SupervisorLock, WriterLock,
 };
 pub use kill_budget::{

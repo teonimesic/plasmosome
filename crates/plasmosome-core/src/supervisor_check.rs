@@ -2,11 +2,18 @@ use serde::Serialize;
 
 use crate::state::CellStatus;
 
-/// What the controller's `flock(LOCK_EX | LOCK_NB)` on a fresh descriptor found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What testing a cell's `supervisor.lock` found (spec 023 §8). Serializes as spec 001 §3.3a's
+/// `lock` values: `held`, `untestable` and `free`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LockFact {
     /// Another holder has the lock: a live supervisor.
     Held,
+    /// The controller cannot test the lock: a symlink, a directory or any other entry that is not
+    /// a regular file, one it cannot open, one whose `flock` fails for a reason other than another
+    /// holder, or a missing one it cannot create and lock. It is neither held nor free. It is not
+    /// a supervisor that is gone, so nothing stops or kills the cell's processes because of it.
+    Untestable,
     /// The controller got the lock, and holds it until the outcome is carried out. A missing
     /// `supervisor.lock` that the controller created exclusively and locked is free.
     Free,
@@ -49,6 +56,8 @@ pub enum SetAsideReason {
     Unresponsive,
     /// The supervisor still reported `germinating` at the cap.
     Germinating,
+    /// The cell's `supervisor.lock` cannot be tested.
+    LockUntestable,
     /// The cell would retire, but its journal holds an outstanding external obligation.
     ExternalObligations,
     /// The lock is free, but the marker is from this boot with no clean stop, or unreadable.
@@ -78,6 +87,7 @@ pub enum CheckOutcome {
 pub const fn decide(lock: LockFact, marker: MarkerFact, journal: JournalFact) -> CheckOutcome {
     match (lock, marker, journal) {
         (LockFact::Held, _, _) => CheckOutcome::Query,
+        (LockFact::Untestable, _, _) => CheckOutcome::SetAside(SetAsideReason::LockUntestable),
         (LockFact::Free, _, JournalFact::Corrupt) => CheckOutcome::Quarantine,
         (
             LockFact::Free,

@@ -19,6 +19,7 @@ use crate::runtime::line::{LineFault, read_line};
 use crate::state::{
     CELL_JOURNAL_FILE, CELLS_DIR, CellPathError, cell_ledger_path, validate_cell_id,
 };
+use crate::supervisor_check::LockFact;
 
 const LOCK_FILE: &str = "controller.lock";
 const PRIVATE_FILE: libc::mode_t = 0o600;
@@ -368,7 +369,8 @@ impl InstanceRoot {
     /// `supervisor.lock`, as spec 023 requires, which shows that no `membraned` still runs in
     /// the directory; this call does not take or check that lock. A caller holds it when it has
     /// a [`SupervisorLock`] for this cell that it has not handed over, from
-    /// [`CellDir::create_supervisor_lock`] or a `Free` [`CellDir::probe_supervisor_lock`].
+    /// [`CellDir::create_supervisor_lock`], a `Free` [`CellDir::probe_supervisor_lock`] or a
+    /// `Free` [`LockTest`].
     ///
     /// `retired` is created when it is missing. Every call sets it to mode 0700 and syncs the
     /// root, as [`InstanceRoot::create_cell_dir`] does for `cells`; if that sync fails, nothing
@@ -960,18 +962,37 @@ impl CellDir {
     /// probe's descriptor is closed. `Free` means the probe took the lock, which the returned
     /// [`SupervisorLock`] keeps until it is dropped. `Missing` means no entry named
     /// `supervisor.lock` exists; nothing is created. A symlink there is `Symlink`, and anything
-    /// but a regular file is `NotARegularFile`; neither is locked. The probe never calls
-    /// `LOCK_UN`.
+    /// but a regular file is `NotARegularFile`; neither is locked. An `flock` that fails for
+    /// another reason than another holder is `Io`. The probe never calls `LOCK_UN`.
     pub fn probe_supervisor_lock(&self) -> Result<LockProbe, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOCK_FILE);
         let Some(file) = self.open_supervisor_lock()? else {
             return Ok(LockProbe::Missing);
         };
-        match lock_exclusive_nonblocking(file.as_fd()) {
+        let locked = lock_exclusive_nonblocking(file.as_fd());
+        #[cfg(test)]
+        let locked = tests::probe_lock_result(locked);
+        match locked {
             Ok(()) => Ok(LockProbe::Free(SupervisorLock { file, path })),
             Err(error) if error.raw_os_error() == Some(libc::EWOULDBLOCK) => Ok(LockProbe::Held),
             Err(error) => Err(cell_dir_io(&path)(error)),
         }
+    }
+
+    /// Tests `supervisor.lock` as spec 023 §8's check does: it probes the lock, and creates and
+    /// locks a missing one as [`CellDir::create_supervisor_lock`] does. Only `Free` holds the
+    /// lock, until its [`SupervisorLock`] is dropped. Every error of the probe or the create is
+    /// `Untestable`, which keeps the error for logs and holds nothing. Use
+    /// [`CellDir::probe_supervisor_lock`] where a missing lock must not be created, as in spec 023
+    /// §4 step 6.
+    pub fn test_supervisor_lock(&self) -> LockTest {
+        self.probe_supervisor_lock()
+            .and_then(|probe| match probe {
+                LockProbe::Held => Ok(LockTest::Held),
+                LockProbe::Free(lock) => Ok(LockTest::Free(lock)),
+                LockProbe::Missing => self.create_supervisor_lock().map(LockTest::Free),
+            })
+            .unwrap_or_else(LockTest::Untestable)
     }
 
     /// The device and inode of the file named `supervisor.lock`, opened as
@@ -1103,6 +1124,27 @@ pub enum LockProbe {
     Held,
     Free(SupervisorLock),
     Missing,
+}
+
+/// What [`CellDir::test_supervisor_lock`] found. Only `Free` holds the lock. `Untestable` keeps
+/// the error that made the lock untestable.
+#[derive(Debug)]
+#[must_use = "a Free lock test holds the supervisor lock until it is dropped"]
+pub enum LockTest {
+    Held,
+    Free(SupervisorLock),
+    Untestable(CellDirError),
+}
+
+impl LockTest {
+    /// The fact spec 023 §8's table decides on.
+    pub fn fact(&self) -> LockFact {
+        match self {
+            Self::Held => LockFact::Held,
+            Self::Free(_) => LockFact::Free,
+            Self::Untestable(_) => LockFact::Untestable,
+        }
+    }
 }
 
 /// A file's device and inode, as `fstat` reports them.
