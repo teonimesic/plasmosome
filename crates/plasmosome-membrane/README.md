@@ -60,11 +60,12 @@ socket, to find or start a broker, or to accept connections while serving. The `
 anything (spec 023 §5). `membraned`'s `main` does not call it yet; native task `plasmosome-t8nq`
 wires it in.
 
-`read_config` reads descriptor 3 until EOF, or until it has read `MAX_RECORD_BYTES + 2` bytes,
-one more than the largest record, so a writer that never stops cannot make it read more. It
-closes the descriptor and decodes the bytes with core's `SupervisorConfig::decode`. A record of
-exactly 1,048,576 bytes before its newline is accepted, and one of 1,048,577 is `TooLarge`. A
-record for another cell than argv's `--cell=` is `CellMismatch`.
+`read_config` reads descriptor 3 until EOF, or until it has read `MAX_RECORD_BYTES + 2` bytes, one
+more than the largest record, so a writer that never stops cannot make it read more. The read has no
+deadline: a writer that stops without closing its end holds it there, and the controller closes its
+end once the record is written. It closes the descriptor and decodes the bytes with core's
+`SupervisorConfig::decode`. A record of exactly 1,048,576 bytes before its newline is accepted, and
+one of 1,048,577 is `TooLarge`. A record for another cell than argv's `--cell=` is `CellMismatch`.
 
 `adopt_lock` takes `flock(LOCK_EX | LOCK_NB)` on descriptor 4 and sets its close-on-exec flag.
 The handed-over descriptor shares the open file the controller locked, so the lock is taken at

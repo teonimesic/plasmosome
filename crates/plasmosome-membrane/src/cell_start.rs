@@ -42,8 +42,10 @@ pub enum CellStartRefusal {
 
 /// What spec 023 §5 has `membraned` do before its step 1. Reads `config`, descriptor 3, until
 /// EOF or until one byte more than the largest record has been read, then closes it, so a writer
-/// that never stops cannot make it read more. Decodes what it read with [`SupervisorConfig::decode`] under `limits`, and
-/// returns the record only when its `cell` is `args.cell`.
+/// that never stops cannot make it read more. The read has no deadline: it blocks until EOF, so a
+/// writer that stops without closing its end holds it there. The controller closes its end once
+/// the record is written. Decodes what it read with [`SupervisorConfig::decode`] under `limits`,
+/// and returns the record only when its `cell` is `args.cell`.
 ///
 /// Refuses a failed read as `Read`, anything `decode` refuses as `Record`, and a record for
 /// another cell as `CellMismatch`. It reads nothing else and creates nothing.
