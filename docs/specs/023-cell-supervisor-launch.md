@@ -109,9 +109,11 @@ Artifact under `<instance_root>/cells/`.
 The controller allocates the ID. It is `cell-<n>`, where `n` is one more than the largest such
 number under `<root>/cells/` or `<root>/retired/`, or 1 when there is none. An ID present in
 either directory is never allocated again. Allocation is serialized inside the controller by one
-mutex, held from the scan until the directory exists. The directory is created with an exclusive
+mutex, held from the scan until the directory exists and, for a `cell.new` with a `request_key`,
+until its `request` record is written and synced (§4). The directory is created with an exclusive
 `mkdir`; on `EEXIST` the controller scans again and tries the next number. `controller.lock`
-serializes controllers, not requests, so it does not provide this.
+serializes controllers, not requests, so it does not provide this. Amended on 2026-10-21: the
+mutex was "held from the scan until the directory exists", since no record was written under it.
 
 ### 3. The cell directory
 
@@ -120,6 +122,7 @@ serializes controllers, not requests, so it does not provide this.
   supervisor.lock             created and locked by the controller, then held by membraned
   launched                    created by membraned; holds the boot session
   created                     written by the controller once cell.new completed
+  request                     written by the controller when cell.new carries request_key
   membrane.uds                membraned's private socket (spec 001 §4, §4.1)
   ledger.ndjson               the cell's journal (spec 008), written by the controller
   membraned.log               membraned's stderr
@@ -140,6 +143,19 @@ serializes controllers, not requests, so it does not provide this.
   atomically by one that adds `"stopped": true`.
 - `created` is empty. The controller creates it exclusively and syncs it when `cell.new`
   completes (§4, step 8).
+- `request` holds the key of a `cell.new` that carried `request_key` (§4). It is one line of
+  strict JSON, `{"cell": "<id>", "request_key": "<key>", "params_sha256": "<64 hex>"}`, at most
+  4,096 bytes with its LF. `params_sha256` is the SHA-256, in lowercase hex, of the RFC 8785
+  canonical JSON of the request's `params` object without `kernel` and `request_key`. So key
+  order, spacing and string escapes do not change it, and a member left out differs from one sent
+  at its default value. The controller writes it at §4 step 4, under the allocation mutex, after
+  the directory and before `supervisor.lock`: it creates `request.tmp` exclusively, mode 0600,
+  syncs it, renames it to `request` with no replace, and syncs the directory. It is never
+  rewritten. It is read through spec 008's no-follow opens, with a read
+  bounded at one byte past 4,096. A cell whose `cell.new` carried no key has no `request`.
+  Spec 008's journal does not hold the key: a cell with no genome writes no journal record, and
+  the key must be found before any journal exists. Amended on 2026-10-21: this file is new, and
+  the layout above did not list it.
 - Spec 008's discovery reads `cells/` only. A retired directory is never queried or recovered.
 - The instance root must be on a local filesystem. NFS, SMB and FUSE-backed roots are out of
   scope; `flock` does not keep these semantics there.
@@ -152,15 +168,66 @@ serializes controllers, not requests, so it does not provide this.
 2. Verify `membraned` and the template's Artifacts (§1).
 3. Resolve the genome, if one is named, through D2b and spec 022. Every refusal that resolution
    can find is returned here.
-4. Under the allocation mutex, allocate the ID and create the directory. Create
-   `supervisor.lock` exclusively, mode 0600, close-on-exec, and take `flock(LOCK_EX | LOCK_NB)`.
+4. Under the allocation mutex, look `request_key` up again (below), allocate the ID and create
+   the directory. With a `request_key`, write `request` (§3). Create `supervisor.lock`
+   exclusively, mode 0600, close-on-exec, and take `flock(LOCK_EX | LOCK_NB)`. If `request`, like
+   any other file of this step, cannot be created, written or synced, the start fails here as a
+   failed start does (§6): no supervisor starts, the controller applies §8's check to the cell at
+   once, and the reply is 105 `{from: "germinating", to: "ready", cell}`. Once the check has
+   retired the cell, nothing holds the key, and no cell ever ran under it.
 5. Start `membraned` (below). Close the controller's copies of the lock descriptor and the pipe's
    read end, then write the configuration record to the pipe and close it.
 6. Wait, within the remaining start budget, until `membrane.status` on `membrane.uds` shows the
    guest up: any answer but `cell_not_ready` (§6). Meanwhile, try the lock on a fresh descriptor;
    if the controller gets it, `membraned` has exited and the controller stops waiting at once.
 7. With a genome, attach its members in one transaction under spec 008.
-8. Mark the cell ready, create `created`, and reply `{cell, state: "ready", plasmids}`.
+8. Create `created` and sync it, then mark the cell ready and reply `{cell, state: "ready",
+   plasmids}`. Until `created` is synced the cell is `germinating`, so a repeat is told `ready`
+   only for a cell whose `created` is durable. If `created` cannot be created or synced, the start
+   fails as a failed attach does (§6), with 105 `{from: "germinating", to: "ready", cell}`.
+
+**A repeat.** A `cell.new` may carry `request_key` (spec 001 §3.5). One whose key a cell in
+`cells/` holds is a repeat. Every rule below keeps this: while any cell holding a key has not been
+retired, no `cell.new` with that key makes a cell, and a repeat never waits for a kill.
+
+The controller looks the key up twice. The first lookup comes after step 1 and after spec 001
+§3.4's stop gate, so a repeat can get their refusals, `no_cell_runtime` and `stopping` included.
+The second comes at step 4, under the allocation mutex and after the stop gate's second check,
+so two requests with one key that arrive together make one cell. A key enters the index under
+that mutex, once its `request` is synced. A repeat found at the first lookup runs none of steps 2
+to 8. One found at the second has run steps 2 and 3, which verify and resolve and change nothing,
+and goes no further: it leaves the allocation mutex before it is answered or waits for a check.
+A request that misses the first lookup can still be refused at step 2 or 3. Either way a repeat
+leaves no state behind. Its parameters are compared first, by `params_sha256` (§3):
+
+- Other parameters: 102 `{target: "request <key>"}`, with no `cell` member.
+- A `ready` cell, whose `created` is synced (step 8): step 8's reply, `{cell, state: "ready",
+  plasmids}`, with the cell's attachments as they are now.
+- A `germinating`, `draining` or `dead` cell: at once, 105 `{from: <state>, to: "ready", cell,
+  detail: {kind: "repeat"}}`. It never waits for the first start or for a kill. The detail tells
+  it apart from a failed start's 105 (§6), which can have the same `from`.
+- A set-aside cell: §8's check runs, as on the next request naming a set-aside cell, and the
+  repeat waits for that check only. If the check adopts the cell, the repeat gets the reply above
+  for the cell's state after the check. A cell with no `created` is then `draining` under the
+  no-`created` rule (§8), so the repeat gets the 105 `repeat` from `draining` and does not wait
+  for that kill. If the check does not adopt the cell, the repeat is 101 `{target: "cell <id>"}`,
+  as every other verb naming a set-aside cell is. Once an earlier check has adopted the cell, or a
+  `cell.kill` has made it `draining`, the repeat waits no longer: it gets the reply above for the
+  cell's state then, so it never waits for a kill started before its own check.
+- A quarantined cell: 101 `{target: "cell <id>"}`.
+
+A repeat changes no state, apart from the check it runs on a set-aside cell. §6 counts it as a
+read, and none of its replies ends a cell. A key belongs to the instance and is shared by every
+client of it. It is held from the moment its `request` is synced until its cell's directory leaves
+`cells/`, with no time limit. A retired directory is never queried (§3), so a retired cell's key
+is forgotten, and the same request then starts a new cell. That includes a cell ended by §8's
+no-`created` rule, and a failed start whose cleanup finished (§6). At most one cell in `cells/`
+holds a key, so a repeat never makes a second cell beside one that may still run. §8 says how the
+controller finds the keys again after a restart. Amended on 2026-10-21: this paragraph is new.
+Step 4 read "Under the allocation mutex, allocate the ID and create the directory. Create
+`supervisor.lock` exclusively, mode 0600, close-on-exec, and take `flock(LOCK_EX | LOCK_NB)`.",
+and gave no outcome for a file it could not write. Step 8 read "Mark the cell ready, create
+`created`, and reply `{cell, state: "ready", plasmids}`."
 
 **The start.** `membraned` is executed directly, never through a shell. Its argv is exactly
 `[membraned.path, "--config-fd=3", "--lock-fd=4", "--cell=<id>"]`; the cell ID lets an operator
@@ -234,15 +301,20 @@ A `plasmosome.stop` makes a cell `draining` as spec 001 §3.4 says. A kill
 that gives up leaves it `draining` after a 106, and otherwise in the state its supervisor
 reports. `cell.list` and `cell.status` show these states. `cell.exec` and every plasmid
 verb on a `germinating` or `draining` cell refuse at once with 105 `{from: <state>, to:
-"ready"}`, before any wait. Mutations of one cell (`cell.new`, `plasmid.add`, `plasmid.remove`,
-`plasmid.reload`, `plasmid.renew`, `cell.kill`, a `plasmosome.stop`'s drain of the cell
-(spec 001 §3.4), the check of §8 and spec 028's expiry) run one
-at a time, in arrival order. Requests for other cells are not blocked. Reads never wait for
-mutations, except a read whose own query failed, which waits for the check it queued.
+"ready"}`, before any wait. Mutations of one cell (`cell.new` other than a repeat (§4),
+`plasmid.add`, `plasmid.remove`, `plasmid.reload`, `plasmid.renew`, `cell.kill`, a
+`plasmosome.stop`'s drain of the cell (spec 001 §3.4), the check of §8 and spec 028's expiry) run
+one at a time, in arrival order. Requests for other cells are not blocked. Reads never wait for
+mutations, except a read whose own query failed, which waits for the check it queued, and a
+repeat whose key a set-aside cell holds, which waits for §8's check and never for a kill, whoever
+started it (§4). A repeated `cell.new` (§4) is a read.
 `plasmid.list` is a read. Corrected on 2026-10-20: this listed "plasmid verbs" among the
 mutations, which read as including `plasmid.list`, and left out spec 028's expiry.
 Amended on 2026-10-21: this list did not name a `plasmosome.stop`'s drain of the cell, and only
-`cell.kill` made a cell `draining`.
+`cell.kill` made a cell `draining`. Amended on 2026-10-21: the list began "Mutations of one cell
+(`cell.new`, `plasmid.add`,", since no `cell.new` could be a repeat. The exception read "except a
+read whose own query failed, which waits for the check it queued.", and the sentence "A repeated
+`cell.new` (§4) is a read." is new.
 
 **From the supervisor.** A cell-configured membrane's `membrane.status` answers `{ready: true,
 state: "serving"}` exactly when its guest has said hello, no `membrane.workload.stop` or
@@ -470,9 +542,35 @@ reason (spec 008's partial discovery, or an adopted cell's unfinished cleanup or
 retires nothing and releases the locks.
 
 **A cell adopted with no `created` file**, at a startup that serves or by a later check, is one
-whose `cell.new` never replied, so no client knows it exists. The controller ends it as `cell.kill`
-does, with a budget of `stop_deadline_ms`, and writes a session log line naming it. If that kill
-does not finish, the cell stays listed with its state.
+whose `cell.new` never replied, so no client was told it is ready. A repeat may have named it,
+but never as ready (§4). The controller ends it as `cell.kill` does, with a budget of
+`stop_deadline_ms`, and writes a session log line naming it. If that kill does not finish, the
+cell stays listed with its state. A startup that serves starts these kills once its key index is
+rebuilt (below) and before it serves the first request, so each such cell is already `draining`.
+It serves while they run, and each such cell holds its key until it is retired.
+Amended on 2026-10-21: this said "so no client knows it exists", which a repeat now makes untrue,
+and did not say whether startup waits for these kills.
+
+**Request keys at startup.** At a startup that serves, after the check has acted and before the
+first request is served, the controller reads `request` (§3) in every validated cell directory
+left in `cells/`, whatever its state, set-aside and quarantined cells included, and rebuilds the
+index of held keys (§4). A missing `request` means the cell holds no key. A record that is not a
+regular file, cannot be opened or read, is over the bound, is not the record §3 defines, or names
+another cell, cannot be read. For each cell with such a record, and for each of two cells whose
+records hold one key, the controller writes a session log line naming the cell. Until no such
+cell is left in `cells/`, every `cell.new` with a `request_key` is 105 `{from:
+"request_unreadable", to: "germinating", cell}` at its first lookup. Of all such cells, `cell`
+names the one whose ID is first in byte order (so `cell-10` comes before `cell-9`), as spec 001
+§3.4 orders cells. A `cell.new` without a key is not affected. The unreadable record might hold
+the key a client is about to repeat, and taking it as absent would make the second cell §4
+prevents. An entry spec 008 does not validate, such as a symbolic link at `cells/cell-1`, is never
+read and holds no key. A crash between the directory's `mkdir` and the rename leaves no
+`request`, and a crash after the rename but before `supervisor.lock` leaves one. Either way the
+table's row "free | absent | nothing settled, nothing pending" retires the cell at the next
+startup, and its key, if it has one, goes with it. Two limits are known. A cell an operator
+moves out of `cells/` (open question 3) keeps its key held, and any refusal it causes, until the
+next startup. A log line the rebuild cannot append does not stop the rebuild. Amended on
+2026-10-21: this paragraph is new.
 
 ### 9. Isolation of the private socket
 
@@ -861,6 +959,99 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     it is then 101, `cell.list` omits it, `plasmosome.recovery` lists it as `lock_untestable` with
     marker `this_boot`, and `ready` is false. Catches: readiness decided only at startup, and a cell
     set aside while serving still listed. Amended on 2026-10-21: this item is new.
+20. With key `k`, `cell.new` replies `ready` for `cell-1`. The same request again replies `{cell:
+    "cell-1", state: "ready", plasmids}`. `cells/` and `retired/` hold one directory between
+    them, and one `membraned` ran. Catches: a second cell after a repeat. Amended on 2026-10-21:
+    this item is new.
+21. With item 1's held hello and key `k`, a second `cell.new` with `k` and the same parameters
+    replies at once 105 `{from: "germinating", to: "ready", cell: "cell-1", detail: {kind:
+    "repeat"}}`. After release, the first replies `ready`, and one directory exists. While a test
+    seam holds a first request with `k2` in step 8, before `created` is synced, a repeat with `k2`
+    gets the same 105 for that cell. Catches: a repeat that waits for the first start or starts a
+    second, a repeat reply that looks like a failed start, and a cell marked ready before
+    `created` is synced. Amended on 2026-10-21: this item is new.
+22. With `cell-1` made under `k` with `mock: "simulate"`, `k` with another `genome` or `mock`, or
+    with no `mock`, is 102 `{target: "request k"}`, with no `cell` member and no new directory. A
+    repeat whose members come in another order and spacing, with a letter of `simulate` written
+    as a JSON escape, and one that adds `kernel`, each reply as item 20 does. Another key with the
+    first request's parameters creates `cell-2`. Catches: a repeat that returns another client's
+    cell because the key matched and the parameters were not compared, a digest over the raw
+    request bytes or with `kernel` in it, and deduplication by parameters without a key. Amended
+    on 2026-10-21: this item is new.
+23. Two `cell.new` requests with `k` and the same parameters. A test seam holds the first after
+    its first lookup and before it takes the allocation mutex. The second, sent then, creates
+    `cell-1`; released, the first gets item 20's or item 21's reply for it. Then the seam holds a
+    first request with `k2` in step 4, after its directory exists and before its `request` is
+    written. A second request with `k2`, sent then, has no reply until the first is released, and
+    then gets item 20's or item 21's reply for that cell. Each time one directory is added.
+    Catches: a controller with only the first lookup, and a mutex released before `request` is
+    written. Amended on 2026-10-21: this item is new.
+24. With `cell-1` ready under `k`, SIGKILL the controller and start it again. A repeat with `k`
+    replies `ready` for `cell-1`, and no directory is added. In a second instance, build by hand,
+    as item 9 does, six validated cells, each with `created` and a membrane double that answers
+    `serving` and ends the cell on `cell.kill`, as item 13's does. `cell-5` has a directory at
+    `request`, `cell-6` a truncated record, `{"cell":"cell-6","requ`, `cell-7` a record naming
+    `cell-2`, and `cell-8` a record of 4,097 bytes. `cell-9` and `cell-10` have records that both
+    hold `k`. Startup serves, and the session log names each of the six. A `cell.new` with `k`, or
+    with any other key, is 105 `{from: "request_unreadable", to: "germinating", cell:
+    "cell-10"}`, the first of the six in byte order, and a `cell.new` with no key creates a cell.
+    Once `cell.kill` has retired `cell-9`, the refusal names `cell-5`. Each time `cell.kill` then
+    retires the cell the refusal names, the refusal names the next: `cell-6`, then `cell-7`, then
+    `cell-8`. Once it has retired `cell-8` too, a repeat with `k` replies `ready` for `cell-10`,
+    and a new key creates a cell. Catches: a key index kept only in memory; a record that is not a
+    regular file, is truncated, names another cell or is over the bound taken as no key, even with
+    its log line written, so a repeat makes a second cell
+    beside a running one; two cells with one key served from the first found; a refusal naming a
+    cell the build picks; and a refusal kept until the next restart. Amended on 2026-10-21: this
+    item is new.
+25. `cell.kill` retires `cell-1`, which held `k`. A repeat with `k` then creates `cell-2`.
+    Separately, with a helper that ignores `shutdown`, as in item 14, and a test seam that holds a
+    `cell.new` with `k` after the guest's hello and before `created`, SIGKILL the controller and
+    start it again: it ends that cell under the no-`created` rule. A repeat with `k`
+    while that kill runs is 105 `{from: "draining", to: "ready", cell, detail: {kind:
+    "repeat"}}`, and one after retirement creates a new cell. Catches: a key kept after its cell
+    left `cells/`, and a repeat during the no-`created` kill that starts a second cell. Amended
+    on 2026-10-21: this item is new.
+26. A `cell.new` whose `request_key` is empty, 65 characters long, holds a space or `é`, is
+    `null` or is a number is `-32602`, and no directory exists; a key of 64 characters is
+    accepted. Then startup over these validated cells, built by hand as item 9 does, each with a
+    `request` holding its own key and the `params_sha256` that §3 gives for the repeat's
+    parameters, computed by the test:
+
+    - D, `kd`: a membrane double holding the lock that answers `cell_not_ready` with `cell_state:
+      "dead"`, as after item 14's unclean teardown, and `created`;
+    - Q, `kq`: lock free and a corrupt journal, so startup quarantines it;
+    - S, `ks`: lock free and `launched` from this boot, so startup sets it aside as
+      `supervisor_lost`;
+    - R, `kr`: lock free, `launched` from another boot and an empty journal, so startup retires it.
+
+    Startup serves. A repeat with `kd` is 105 `{from: "dead", to: "ready", cell, detail: {kind:
+    "repeat"}}`. Repeats with `kq` and `ks` are 101 `cell <id>`. None of the three adds a
+    directory. A repeat with `kr` creates a new cell. Catches: keys the record or the log cannot
+    hold; a rebuild that reads only adopted cells, or skips quarantined or set-aside ones, so a
+    repeat makes a second cell beside a guest that may still run; and a rebuild run before the
+    check retires anything, so a retired cell's key stays held. Amended on 2026-10-21: this item
+    is new.
+27. With `cell-1` ready under `k`, a repeat replies `ready`. Then hold a `cell.kill` of `cell-1` at
+    its `membrane.cell.kill`, through a membrane double as item 13 uses: a repeat with `k` is 105
+    `{from: "draining", to: "ready", cell: "cell-1", detail: {kind: "repeat"}}`, never the ready
+    result. Release it with a bridge socket that cannot be removed, as in item 14: the kill lists
+    `teardown`, and a repeat with `k` is then 105 from `dead` with the repeat detail. No directory
+    is added. Catches: a controller that replays the first ready reply, and a key dropped when
+    `cell.kill` replies though its cell was not retired. Amended on 2026-10-21: this item is new.
+28. Stall the `membraned` of `cell-1`, ready under `k`, past its query while serving, so it is set
+    aside as `unresponsive`, then resume it. A repeat with `k` runs §8's check, which adopts the
+    cell, and replies `ready` for `cell-1`. Separately, SIGKILL the controller during a start with
+    `k2` while the helper holds hello, and start it again, so startup sets that cell aside as
+    `germinating`. Release hello, with a helper that ignores `shutdown`, as in item 14. A repeat
+    with `k2` runs the check, which adopts the cell and starts its no-`created` kill. The repeat
+    replies 105 `{from: "draining", to: "ready", cell, detail: {kind: "repeat"}}` while the kill
+    still runs, and the cell is still under `cells/` when it does. Last, stall the `membraned` of a
+    cell ready under `k3` in the same way, and do not resume it. While a `cell.kill` of it runs, as
+    in item 14, a repeat with `k3` replies 105 from `draining` with the repeat detail before the
+    kill replies. No directory is added. Catches: a controller that answers a set-aside repeat 101
+    without running the check, and a repeat that waits for a kill, whether its own check or an
+    earlier request started it. Amended on 2026-10-21: this item is new.
 
 ## Out of scope
 
@@ -868,6 +1059,8 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
 - How plasmids become capabilities. That is spec 022.
 - Cleaning an orphaned guest after a SIGKILLed supervisor (O-10).
 - Relaunching a cell after a host or supervisor crash.
-- A client request ID on `cell.new`, which spec 025 asks for; that is task plasmosome-bnkf.
 - Instance roots on NFS, SMB or FUSE filesystems.
 - `cell.clone`, `cell.save`, `cell.load` and `freeze`.
+
+Amended on 2026-10-21: this list had "A client request ID on `cell.new`, which spec 025 asks for;
+that is task plasmosome-bnkf.", now §4's `request_key`.
