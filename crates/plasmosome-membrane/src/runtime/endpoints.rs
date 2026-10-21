@@ -1,9 +1,9 @@
 use crate::runtime::RemoveOutcome;
 use crate::runtime::path::RecipePath;
-use crate::socket::OwnedSocketPath;
+use plasmosome_core::private_socket::{PrivateListener, PrivateSocketError, effective_uid};
 use std::io::{ErrorKind, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -19,48 +19,32 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// A control or data listener the supervisor binds at a recipe path before it
 /// launches the helper, and keeps until teardown.
 ///
-/// Get one from [`RuntimeListener::bind`]. Once that returns, its socket file
-/// has mode 0600, and its descriptor is nonblocking and close-on-exec. Closing
-/// or dropping it
-/// closes the listener, then removes the path only if a no-follow inspection
-/// still finds the socket it bound there.
+/// Get one from [`RuntimeListener::bind`]. It is core's `PrivateListener`: its
+/// socket file sits in a directory that walk found private, has mode 0600
+/// before it listens, and its descriptor is nonblocking and close-on-exec.
+/// Closing or dropping it closes the listener, then removes the socket file
+/// only while the entry at that name in the held directory is still the socket
+/// it bound.
 #[derive(Debug)]
 pub struct RuntimeListener {
     path: RecipePath,
-    listener: UnixListener,
-    owned: OwnedSocketPath,
+    listener: PrivateListener,
 }
 
 /// Why a listener could not be bound. When the refusal returns, no listener
 /// is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointRefusal {
-    /// Something already exists at `path`: a socket, live or stale, a file,
-    /// a directory or a symlink, dangling or not. It was left exactly as it
-    /// was.
-    AddressInUse { path: RecipePath },
-    /// Inspecting `path`, binding the socket or making it nonblocking failed
-    /// with `errno`. A path too long for a socket address gives `EIO`, since
-    /// std refuses it without an errno. When the inspection or the `bind` call
-    /// failed, nothing was created. When std's `listen` failed after its
-    /// `bind`, or the spawn lock closed a socket that was not close-on-exec,
-    /// the socket file stays at `path`, since no identity was read for it.
-    /// When making it nonblocking failed, the socket file was removed as for
-    /// [`EndpointRefusal::Permissions`].
-    Bind { path: RecipePath, errno: i32 },
-    /// After the bind, reading what is at `path` without following a symlink
-    /// failed with `errno`, or found something other than a socket, when
-    /// `errno` is `None`. That entry was left in place, since nothing shows it
-    /// is the socket this call bound.
-    Identity {
+    /// Core's private directory or listener refused: `refusal` names the rule
+    /// broken and the path that broke it. An entry already at `path`, of any
+    /// kind, is `AddressInUse` and was left as it was.
+    Private {
         path: RecipePath,
-        errno: Option<i32>,
+        refusal: PrivateSocketError,
     },
-    /// Setting the socket file to mode 0600 failed with `errno`. The listener
-    /// was closed, and the socket file removed only if a no-follow inspection
-    /// still found the socket this call bound; any other entry at `path` was
-    /// left in place.
-    Permissions { path: RecipePath, errno: i32 },
+    /// The spawn lock found the listener's descriptor not close-on-exec. It
+    /// closed the descriptor, which removed the socket file.
+    Inheritable { path: RecipePath },
 }
 
 /// One connection [`RuntimeListener::accept_ready`] took from the listener's
@@ -71,74 +55,43 @@ pub enum EndpointRefusal {
 )]
 #[derive(Debug)]
 pub(crate) enum Connection {
-    /// The stream, nonblocking and close-on-exec, with the process id
-    /// [`peer_pid`] read for its peer.
+    /// A peer of the trusted uid: the stream, nonblocking and close-on-exec,
+    /// with the process id [`peer_pid`] read for its peer.
     Identified {
         stream: UnixStream,
         pid: libc::pid_t,
     },
-    /// Making the stream nonblocking or reading its peer's process id failed
-    /// with `errno`, so the connection was closed. It says nothing about the
+    /// The peer was refused and its stream closed unread: its uid is not the
+    /// trusted one, its credentials or process id could not be read, or the
+    /// stream could not be made nonblocking. It says nothing about the
     /// listener, which can accept again. On Darwin a peer that closed its end
-    /// before the accept gives `ENOTCONN` here; on Linux the same peer is
+    /// before the accept is refused here; on Linux the same peer is
     /// `Identified` with the pid it had.
-    Unidentified { errno: i32 },
+    Refused(PrivateSocketError),
 }
 
 impl RuntimeListener {
-    /// Binds a listening socket at `path`, which must name nothing yet.
+    /// Binds a listening socket at `path` for peers of this process's
+    /// effective uid.
     ///
-    /// It never unlinks an entry it did not create: an existing entry of any
-    /// kind refuses with [`EndpointRefusal::AddressInUse`] and is left as it
-    /// was. The socket is created holding the write side of the spawn lock, so
-    /// no `VmmChild::spawn` forks while it is still inheritable. The path is
-    /// checked before the bind and the socket's identity is read after it.
-    /// Those are separate calls, so pass a path under a directory only this
-    /// supervisor can write; this call does not check the directory.
-    ///
-    /// The socket listens before it is set to 0600. Until then it has the mode
-    /// the umask leaves, so a process that can search the directory and that
-    /// mode admits can connect, and its connection stays queued after the
-    /// chmod. Pass a path under a directory no other principal can search.
+    /// The parent of `path` is opened with core's `PrivateDir`: walked from
+    /// `/` without following a symlink, every ancestor owned by root or this
+    /// uid and writable by neither group nor other, the directory itself owned
+    /// by this uid with no group or other bits. Core's `PrivateListener` then
+    /// binds the name inside that held directory, refusing any entry already
+    /// there and leaving it as it was, and sets the socket to 0600 before it
+    /// listens. The bind holds the write side of the spawn lock, so no
+    /// `VmmChild::spawn` forks while the socket is still inheritable.
     pub fn bind(path: &RecipePath) -> Result<RuntimeListener, EndpointRefusal> {
-        Self::bind_trusting(path, plasmosome_core::private_socket::effective_uid())
+        Self::bind_trusting(path, effective_uid())
     }
 
     fn bind_trusting(
         path: &RecipePath,
-        _trusted_uid: u32,
+        trusted_uid: u32,
     ) -> Result<RuntimeListener, EndpointRefusal> {
-        let bind_failed = |error: std::io::Error| EndpointRefusal::Bind {
-            path: path.clone(),
-            errno: errno_of(&error),
-        };
-        match std::fs::symlink_metadata(path.as_path()) {
-            Ok(_) => return Err(EndpointRefusal::AddressInUse { path: path.clone() }),
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(bind_failed(error)),
-        }
-        let listener =
-            crate::spawn_lock::with_descriptors_held(|_held| UnixListener::bind(path.as_path()))
-                .map_err(|error| match error.raw_os_error() {
-                    Some(libc::EADDRINUSE) => EndpointRefusal::AddressInUse { path: path.clone() },
-                    _ => bind_failed(error),
-                })?;
-        let owned = OwnedSocketPath::capture(path.as_path().to_owned()).map_err(|error| {
-            EndpointRefusal::Identity {
-                path: path.clone(),
-                errno: error.raw_os_error(),
-            }
-        })?;
-        restrict_to_owner(path).map_err(|errno| EndpointRefusal::Permissions {
-            path: path.clone(),
-            errno,
-        })?;
-        listener.set_nonblocking(true).map_err(bind_failed)?;
-        Ok(RuntimeListener {
-            path: path.clone(),
-            listener,
-            owned,
-        })
+        let _ = (path, trusted_uid);
+        todo!()
     }
 
     /// The path this listener was bound at.
@@ -147,61 +100,25 @@ impl RuntimeListener {
     }
 
     /// Accepts one pending connection without blocking, holding the write
-    /// side of the spawn lock. It makes the stream nonblocking and reads the
-    /// process id [`peer_pid`] reports for its peer right after the accept.
-    /// Returns `None` when no connection is pending, and an error only when
-    /// the listener's own accept fails.
+    /// side of the spawn lock. Core checks the peer's kernel uid and closes a
+    /// refused peer's stream unread. A trusted stream is made nonblocking, and
+    /// the process id [`peer_pid`] reports for its peer is read right after
+    /// the accept. Returns `None` when no connection is pending, and an error
+    /// only when the listener's own accept fails.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
     )]
     pub(crate) fn accept_ready(&self) -> std::io::Result<Option<Connection>> {
-        let stream = match crate::spawn_lock::with_descriptors_held(|_held| {
-            self.listener.accept().map(|(stream, _)| stream)
-        }) {
-            Ok(stream) => stream,
-            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let identified = stream
-            .set_nonblocking(true)
-            .and_then(|()| peer_pid(&stream));
-        Ok(Some(match identified {
-            Ok(pid) => Connection::Identified { stream, pid },
-            Err(error) => Connection::Unidentified {
-                errno: errno_of(&error),
-            },
-        }))
+        todo!()
     }
 
-    /// Closes the listener, then removes its socket file if a no-follow
-    /// inspection still finds the socket it bound, and says what it found.
-    /// Dropping the listener does the same and discards the outcome.
+    /// Closes the listener, then removes its socket file only while the entry
+    /// at that name in the held directory is still the socket it bound, and
+    /// says what it found. Dropping the listener does the same and discards
+    /// the outcome.
     pub fn close(self) -> RemoveOutcome {
-        let RuntimeListener {
-            listener, owned, ..
-        } = self;
-        drop(listener);
-        owned.remove()
-    }
-}
-
-#[allow(unsafe_code)]
-fn restrict_to_owner(path: &RecipePath) -> Result<(), i32> {
-    // SAFETY: The path is a NUL-terminated string `path` keeps alive for the call, and fchmodat
-    // keeps no pointer to it.
-    let changed = unsafe {
-        libc::fchmodat(
-            libc::AT_FDCWD,
-            path.as_c_str().as_ptr(),
-            0o600,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if changed == 0 {
-        Ok(())
-    } else {
-        Err(errno_of(&std::io::Error::last_os_error()))
+        todo!()
     }
 }
 
@@ -419,39 +336,15 @@ fn keep(transcript: &mut Transcript, read: &[u8]) {
     transcript.dropped += over.len() as u64;
 }
 
-fn errno_of(error: &std::io::Error) -> i32 {
-    error.raw_os_error().unwrap_or(libc::EIO)
-}
-
 impl std::fmt::Display for EndpointRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EndpointRefusal::AddressInUse { path } => write!(
+            EndpointRefusal::Private { path, refusal } => {
+                write!(f, "no listener was bound at {}: {refusal}", path.as_str())
+            }
+            EndpointRefusal::Inheritable { path } => write!(
                 f,
-                "{} already exists, so no listener was bound there",
-                path.as_str()
-            ),
-            EndpointRefusal::Bind { path, errno } => write!(
-                f,
-                "binding a listener at {} failed: errno {errno}",
-                path.as_str()
-            ),
-            EndpointRefusal::Identity {
-                path,
-                errno: Some(errno),
-            } => write!(
-                f,
-                "the entry bound at {} could not be inspected: errno {errno}",
-                path.as_str()
-            ),
-            EndpointRefusal::Identity { path, errno: None } => write!(
-                f,
-                "the entry at {} after the bind is not a socket",
-                path.as_str()
-            ),
-            EndpointRefusal::Permissions { path, errno } => write!(
-                f,
-                "{} could not be made private to its owner: errno {errno}",
+                "the listener bound at {} was not close-on-exec, so it was closed",
                 path.as_str()
             ),
         }
@@ -471,6 +364,7 @@ mod tests {
     use std::io::{ErrorKind, Write};
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::time::Instant;
 
@@ -505,6 +399,14 @@ mod tests {
 
     fn is_socket(path: &std::path::Path) -> bool {
         std::fs::symlink_metadata(path).is_ok_and(|found| found.file_type().is_socket())
+    }
+
+    #[allow(unsafe_code)]
+    fn make_fifo(path: &RecipePath) {
+        // SAFETY: the path is a NUL-terminated string `path` keeps alive for the call, and mkfifo
+        // keeps no pointer to it.
+        let made = unsafe { libc::mkfifo(path.as_c_str().as_ptr(), 0o600) };
+        assert_eq!(made, 0, "a FIFO is made at {path:?}");
     }
 
     fn absent(path: &std::path::Path) -> bool {
@@ -543,8 +445,8 @@ mod tests {
         loop {
             match listener.accept_ready().expect("accepting does not fail") {
                 Some(Connection::Identified { stream, pid }) => return (stream, pid),
-                Some(Connection::Unidentified { errno }) => {
-                    panic!("the peer is identified, but errno {errno} came back")
+                Some(Connection::Refused(refusal)) => {
+                    panic!("the peer is identified, but it was refused: {refusal}")
                 }
                 None => {}
             }
@@ -664,11 +566,18 @@ mod tests {
         let stale = scratch.path("stale.sock");
         drop(UnixListener::bind(stale.as_path()).unwrap());
         let stale_identity = identity(&stale);
+        let fifo = scratch.path("fifo.sock");
+        make_fifo(&fifo);
 
-        for path in [&file, &directory, &dangling, &to_victim, &stale] {
+        for path in [&file, &directory, &dangling, &to_victim, &stale, &fifo] {
             assert_eq!(
                 RuntimeListener::bind(path).err(),
-                Some(EndpointRefusal::AddressInUse { path: path.clone() }),
+                Some(EndpointRefusal::Private {
+                    path: path.clone(),
+                    refusal: PrivateSocketError::AddressInUse {
+                        path: path.as_path().to_owned()
+                    }
+                }),
                 "an existing entry at {path:?} refuses the bind"
             );
         }
@@ -689,6 +598,11 @@ mod tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"victim bytes");
         assert!(is_socket(stale.as_path()), "the stale socket stays");
         assert_eq!(identity(&stale), stale_identity, "it is the same socket");
+        assert!(
+            std::fs::symlink_metadata(fifo.as_path())
+                .is_ok_and(|found| found.file_type().is_fifo()),
+            "the FIFO stays"
+        );
     }
 
     #[test]
@@ -753,22 +667,29 @@ mod tests {
     }
 
     #[test]
-    fn a_bind_that_cannot_inspect_or_create_its_path_refuses_with_the_errno() {
+    fn a_parent_that_is_missing_or_not_a_directory_is_refused_by_name() {
         let scratch = Scratch::new();
         std::fs::write(scratch.root.join("file"), b"").unwrap();
-        for (name, errno) in [
-            ("missing/control.sock", libc::ENOENT),
-            ("file/control.sock", libc::ENOTDIR),
-        ] {
-            let path = scratch.path(name);
-            assert_eq!(
-                RuntimeListener::bind(&path).err(),
-                Some(EndpointRefusal::Bind {
-                    path: path.clone(),
-                    errno
-                })
-            );
-        }
+        let missing = scratch.path("missing/control.sock");
+        assert_eq!(
+            RuntimeListener::bind(&missing).err(),
+            Some(EndpointRefusal::Private {
+                path: missing.clone(),
+                refusal: PrivateSocketError::NoDirectory {
+                    path: scratch.root.join("missing")
+                }
+            })
+        );
+        let under_file = scratch.path("file/control.sock");
+        assert_eq!(
+            RuntimeListener::bind(&under_file).err(),
+            Some(EndpointRefusal::Private {
+                path: under_file.clone(),
+                refusal: PrivateSocketError::NotDirectory {
+                    path: scratch.root.join("file")
+                }
+            })
+        );
     }
 
     #[test]
@@ -898,9 +819,11 @@ mod tests {
             assert!(
                 matches!(
                     &taken,
-                    Ok(Some(Connection::Unidentified {
-                        errno: libc::ENOTCONN
-                    }))
+                    Ok(Some(Connection::Refused(
+                        PrivateSocketError::PeerCredentials {
+                            errno: libc::ENOTCONN
+                        }
+                    )))
                 ),
                 "Darwin cannot read the pid of a peer that exited: {taken:?}"
             );
@@ -1108,30 +1031,29 @@ mod tests {
     fn each_refusal_names_its_path_and_what_failed() {
         let path = RecipePath::parse("/run/c.sock").unwrap();
         let texts = [
-            EndpointRefusal::AddressInUse { path: path.clone() },
-            EndpointRefusal::Bind {
+            EndpointRefusal::Private {
                 path: path.clone(),
-                errno: 13,
+                refusal: PrivateSocketError::AddressInUse {
+                    path: path.as_path().to_owned(),
+                },
             },
-            EndpointRefusal::Identity {
+            EndpointRefusal::Private {
                 path: path.clone(),
-                errno: Some(5),
+                refusal: PrivateSocketError::SymlinkInPath {
+                    path: PathBuf::from("/run"),
+                },
             },
-            EndpointRefusal::Identity {
-                path: path.clone(),
-                errno: None,
-            },
-            EndpointRefusal::Permissions { path, errno: 1 },
+            EndpointRefusal::Inheritable { path },
         ]
         .map(|refusal| refusal.to_string());
         assert_eq!(
             texts,
             [
-                "/run/c.sock already exists, so no listener was bound there",
-                "binding a listener at /run/c.sock failed: errno 13",
-                "the entry bound at /run/c.sock could not be inspected: errno 5",
-                "the entry at /run/c.sock after the bind is not a socket",
-                "/run/c.sock could not be made private to its owner: errno 1",
+                "no listener was bound at /run/c.sock: /run/c.sock already exists and is left \
+                 untouched",
+                "no listener was bound at /run/c.sock: /run is a symlink; a private socket path \
+                 must not pass through one",
+                "the listener bound at /run/c.sock was not close-on-exec, so it was closed",
             ]
         );
     }
