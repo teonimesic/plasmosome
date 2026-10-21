@@ -198,7 +198,7 @@ impl RuntimeListener {
 /// `ENOTCONN`, and Linux still reports the pid the connector had. On neither
 /// platform does a pid show that the peer is still running.
 #[allow(unsafe_code)]
-pub fn peer_pid(stream: &UnixStream) -> std::io::Result<libc::pid_t> {
+pub(crate) fn peer_pid(stream: &UnixStream) -> std::io::Result<libc::pid_t> {
     #[cfg(target_os = "linux")]
     let (mut found, level, name) = (
         libc::ucred {
