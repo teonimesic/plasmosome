@@ -44,10 +44,10 @@ states what the tree serves now.
 | `plasmid new <name>` | Writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. |
 | `plasmosome --help` | Lists spec 025's commands, each marked not served; every command exits 2 with `not_served`. |
 
-The `plasmosome` executable serves no command yet, so there is no `plasmosome start`. The
-accepted future controller methods — `plasmosome.start/list/status/stop`,
-`cell.new/list/status/kill/exec`, `exec.status` and `plasmid.list/add/remove/reload` — are not
-implemented except for `plasmosome.status`. The membrane's desired-state, observe, kill and residue methods are also
+The `plasmosome` executable serves no command yet, so there is no `plasmosome start`. The accepted
+future controller methods — `plasmosome.start/list/status/stop`, `cell.new/list/status/kill/exec`,
+`exec.status` and `plasmid.list/add/remove/reload` — are not implemented except for
+`plasmosome.status`. The membrane's desired-state, observe, kill and residue methods are also
 reserved. See the [`plasmosome-core`](crates/plasmosome-core/README.md),
 [`plasmosome-membrane`](crates/plasmosome-membrane/README.md) and
 [`plasmid`](crates/plasmid/README.md) guides for their narrower current contracts.

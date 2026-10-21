@@ -3,13 +3,14 @@ use crate::commands::Command;
 const ABOUT: &str = "\
 Usage: plasmosome [FLAGS] COMMAND [FLAGS]
 
-Drives one Plasmosome kernel instance one step at a time. Each command sends one verb to the
-instance's socket and prints one line of JSON: the result on stdout, or the error on stderr.
+Drives one Plasmosome kernel instance one step at a time. A command with a verb sends that one
+verb to the instance's socket and prints one line of JSON: the result on stdout, or the error on
+stderr. The registry commands are spec 020's, and they reach no instance socket.
 ";
 
 const FLAGS: &str = "\
 Flags, before or after the command words and never after `--`. A flag given twice is a usage
-error.
+error, and so is --kernel, --socket or --deadline-ms on a registry command.
   --kernel NAME     the instance named NAME, at $HOME/.plasmosome/instances/NAME/control.uds
   --socket PATH     the socket at PATH, which is absolute with no empty, `.` or `..` component
   --deadline-ms N   the budget for the whole command, from 1 to 3600000 ms; 10000 by default

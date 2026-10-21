@@ -38,15 +38,19 @@ ships on its own.
   select no socket and connect nowhere. Help comes before every other rule.
 - **Names are checked with `plasmosome-core`'s `InstanceName`.** A copy of its rules here would
   drift from the rules the daemons use.
-- **A panic ends as `internal`.** `handle` runs the command under `catch_unwind`, and its hook
-  stays silent on that thread. The trigger a test uses to panic exists only under `cfg(test)`.
+- **A panic ends as `internal`.** `handle` runs the command under `catch_unwind`. Its hook is
+  installed once per process, through a `Once`, and is silent only on the thread running
+  `handle`. A hook installed on every call nests one wrapper per call, and calls on two threads
+  race and drop a hook. Tests make a command panic through a stdout that panics; nothing in the
+  code exists only to panic.
 - **No `unsafe` and no third-party dependency.** The package keeps `lints.workspace = true`.
   `plasmosome-core` is a dependency for `InstanceName`; `serde_json` is a dev-dependency only, the
   independent parser the escaping test checks against.
 
 ## Testing
 
-`cargo test -p plasmosome-cli`. A test that needs a terminal control builds it with
-`char::from_u32` or a byte value, and builds an escape from a backslash character and the hex
-digits. Never type the escape itself into an editor or a tool: a tool can decode it, and the test
-then checks nothing. Read a new test file with `xxd` before trusting it.
+`cargo test -p plasmosome-cli`. The panic tests are in `tests/panic.rs`, a process of their own, so
+their recording hook is set before the first call to `handle`. A test that needs a terminal control
+builds it with `char::from_u32` or a byte value, and builds an escape from a backslash character and
+the hex digits. Never type the escape itself into an editor or a tool: a tool can decode it, and the
+test then checks nothing. Read a new test file with `xxd` before trusting it.

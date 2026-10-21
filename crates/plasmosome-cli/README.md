@@ -21,7 +21,11 @@ binary, and the first rule that applies decides, as spec 025 §2 orders them:
    whether this build serves it, the global flags, `PLASMOSOME_KERNEL` and the exit codes. Words
    that name a group, such as `cell` or `registry source`, list the group. Words that name a
    command, followed by at most its operands, give that command's help, so `germinate --help` and
-   `germinate g --help` both work. Any other words are a usage error.
+   `germinate g --help` both work. Any other words are a usage error. Help reads words only up to
+   the first flag it does not know. A command's own flags are fixed by the task that serves it, so
+   until then the argument after an unknown flag may be its value or a word.
+   `exec status --cell c1 --help` gives `exec status`'s help, and `--frob cell list --help` gives
+   the binary's.
 2. `--version` as the sole argument prints `plasmosome VERSION`. Anywhere else before `--` it is a
    usage error.
 3. Leading words that name a command this build does not serve exit 2 with `not_served`. Its
@@ -32,13 +36,19 @@ binary, and the first rule that applies decides, as spec 025 §2 orders them:
    argument that is not UTF-8, anywhere; an unknown flag, a flag given twice, a value flag with
    no value, or `--json` with `--human`, whichever comes first; no command words; words that name
    no command, or only a group; `--`, since no served command takes one; a word past the
-   command's operands; then a bad value. `--kernel` takes a name that `plasmosome-core`'s
+   command's operands; `--kernel`, `--socket` or `--deadline-ms` on a registry command, which
+   reaches no control socket; then a bad value. `--kernel` takes a name that `plasmosome-core`'s
    `InstanceName` accepts and that holds no terminal control. `--socket` takes an absolute path
    with no empty, `.` or `..` component. `--deadline-ms` takes an integer from 1 to 3,600,000,
    and a longer digit string is refused, never parsed. A clean line gives an `Invocation`.
 
 A word is an argument before `--` that does not begin with `-` and is not a value. `--kernel`,
-`--socket` and `--deadline-ms` take the next argument as their value, whatever it is. A usage
+`--socket` and `--deadline-ms` take the next argument before `--` as their value, even one that
+begins with `-`, and a value is never read as a flag. So `cell list --kernel --human` keeps the
+JSON form, and `status --kernel --socket /x/control.uds` names the instance `--socket` and refuses
+`/x/control.uds` as a word past the operands. `-h`, `--help` and `--version` are the exception:
+spec 025 looks for them anywhere before `--`, a value's place included. `--` is never a value, so
+`status --kernel -- x` is refused because `--kernel` has none. A usage
 error is `invalid_argument` under `command: "invalid"`, exit 64, with `argument` holding the
 argument at fault, made UTF-8 with replacement characters when it was not. Its message names the
 argument too, so the human form shows it, each terminal control as `<U+XXXX>`. The human form is
@@ -46,9 +56,11 @@ used when `--human` is given once and `--json` is not, usage errors included.
 
 `handle` reads a line and writes the outcome. A failure to write help or the version to stdout is
 `local_io`, exit 1, with `errno` when the system gave one, under `command` `--help` or
-`--version`. A panic prints nothing of its own: it ends in one `internal` envelope on stderr and
-exit 70. `handle` installs a panic hook that stays silent on the thread running a command and
-passes any other panic to the hook before it.
+`--version`, a failed flush included. A panic prints nothing of its own: it ends in one
+`internal` envelope on stderr, in the form the line chose, and exit 70. The first call to `handle`
+installs a panic hook for the whole process. The hook is silent on a thread while it runs
+`handle`, and passes every other panic to the hook set before it, a panic on a helper thread
+included. A hook set after that first call replaces it.
 
 ## Reading a reply
 
