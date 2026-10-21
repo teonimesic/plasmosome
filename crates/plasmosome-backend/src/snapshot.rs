@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::backend::{BackendError, Capability, Handle, LedgerEntry};
+use crate::backend::{BackendError, CLASS_MISMATCH, Capability, Handle, LedgerEntry};
 use crate::recipe::RecipeError;
 use crate::universe::{CellOwner, OsState, UniverseOp};
 use crate::wire::{ObjectOnly, object_serde};
@@ -51,7 +51,10 @@ impl EnforcementSnapshot {
     /// Builds the account, or refuses it with the first failure in this order:
     ///
     /// 1. a standing object, issued record or unfinished effect whose capability fails
-    ///    `validate` returns `InvalidOperation` at its address, the reason decoding gives;
+    ///    `validate` returns `InvalidOperation` at its address, and an issued record whose handle
+    ///    class is not its capability's class returns `Fault`. Each names the rule encoding
+    ///    names. Decoding names the same rule for a row that breaks one. For a row that breaks
+    ///    two it can name the other, because it checks a nested recipe before the capability;
     /// 2. an address repeated in `incomplete` returns `IdentityConflict`;
     /// 3. an address both standing and in `incomplete` returns `IdentityConflict`;
     /// 4. a handle repeated in `grants` returns `IdentityConflict`;
@@ -73,6 +76,12 @@ impl EnforcementSnapshot {
         }
         for entry in &grants {
             valid(entry.handle, entry.capability.validate())?;
+            if entry.handle.class != entry.capability.class() {
+                return Err(BackendError::Fault(format!(
+                    "issued record {}: {CLASS_MISMATCH}",
+                    entry.handle
+                )));
+            }
         }
         for effect in &incomplete {
             valid(effect.handle(), effect.operation.validate())?;

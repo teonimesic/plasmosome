@@ -220,15 +220,15 @@ impl LedgerEntry {
     }
 }
 
+pub(crate) const CLASS_MISMATCH: &str = "ledger entry handle class does not match its capability";
+
 impl Serialize for LedgerEntry {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         if self.handle.class != self.capability.class() {
-            return Err(S::Error::custom(
-                "ledger entry handle class does not match its capability",
-            ));
+            return Err(S::Error::custom(CLASS_MISMATCH));
         }
 
         #[derive(Serialize)]
@@ -265,9 +265,7 @@ impl<'de> Deserialize<'de> for LedgerEntry {
 
         let wire = Wire::deserialize(ObjectOnly::new(deserializer))?;
         if wire.handle.class != wire.capability.class() {
-            return Err(D::Error::custom(
-                "ledger entry handle class does not match its capability",
-            ));
+            return Err(D::Error::custom(CLASS_MISMATCH));
         }
         Ok(LedgerEntry {
             handle: wire.handle,
