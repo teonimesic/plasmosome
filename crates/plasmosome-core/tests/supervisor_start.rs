@@ -31,7 +31,7 @@ const STARTED: &str = "the child controller started its supervisor";
 const ONE_MIB: usize = 1 << 20;
 const LAST_SIGNAL: libc::c_int = 64;
 
-const CASES: [(&str, fn()); 10] = [
+const CASES: [(&str, fn()); 11] = [
     (
         "starts_detached_with_only_0_to_4",
         starts_detached_with_only_0_to_4,
@@ -59,6 +59,10 @@ const CASES: [(&str, fn()); 10] = [
     (
         "no_handler_of_the_controller_runs_in_a_child",
         no_handler_of_the_controller_runs_in_a_child,
+    ),
+    (
+        "closes_from_5_to_the_per_process_top",
+        closes_from_5_to_the_per_process_top,
     ),
 ];
 
@@ -248,6 +252,33 @@ fn starts_detached_with_only_0_to_4() {
     assert_ne!(sid, u64::from(own_sid()), "{report}");
     assert_ne!(pgid, u64::from(own_pgid()), "{report}");
     assert_reparented(&report);
+}
+
+fn closes_from_5_to_the_per_process_top() {
+    let low = Planted::at(&[5, 6]);
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-109");
+    let lock = cell.lock();
+    let log = cell.log();
+    let record = cell.record();
+    let top = descriptor_top();
+    let limit = SoftLimit::raised_past(top);
+    let mut targets = vec![top];
+    if top > 200_000 {
+        targets.insert(0, 200_000);
+    }
+    let high = Planted::at(&targets);
+    limit.lower_to(256);
+    started(cell.start(&root.membraned(), lock, log, record));
+    drop(limit);
+    drop(high);
+    drop(low);
+    let report = Report::read(&cell.path);
+    assert_eq!(
+        report.numbers("open_above_four"),
+        [0u64; 0],
+        "descriptors 5, 6 and {targets:?} are closed, with the soft limit at 256; {report}"
+    );
 }
 
 fn lock_never_free_until_exit() {
@@ -1161,9 +1192,34 @@ impl std::fmt::Display for Report {
     }
 }
 
-struct Planted([RawFd; 2]);
+struct Planted(Vec<RawFd>);
 
 impl Planted {
+    #[allow(unsafe_code)]
+    fn at(targets: &[RawFd]) -> Planted {
+        let planted = targets
+            .iter()
+            .map(|&target| {
+                assert!(
+                    !is_open(target),
+                    "descriptor {target} is free before it is planted"
+                );
+                let copied = inheritable_null(|null| {
+                    // SAFETY: dup2 takes integers only, and `null` is open for the call. `target`
+                    // was free just above, so dup2 replaces nothing.
+                    unsafe { libc::dup2(null, target) }
+                });
+                assert_eq!(copied, target, "descriptor {target} is planted");
+                assert!(
+                    !is_close_on_exec(target),
+                    "the planted descriptor {target} is inheritable"
+                );
+                target
+            })
+            .collect();
+        Planted(planted)
+    }
+
     #[allow(unsafe_code)]
     fn low_and_last() -> Planted {
         // SAFETY: getdtablesize takes no arguments.
@@ -1185,18 +1241,131 @@ impl Planted {
             !is_close_on_exec(low) && !is_close_on_exec(high),
             "the planted descriptors are inheritable"
         );
-        Planted([low, high])
+        Planted(vec![low, high])
     }
 }
 
 impl Drop for Planted {
     #[allow(unsafe_code)]
     fn drop(&mut self) {
-        for fd in self.0 {
+        for &fd in &self.0 {
             // SAFETY: `fd` is a descriptor this Planted made and owns, closed once here.
             unsafe { libc::close(fd) };
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn descriptor_top() -> RawFd {
+    per_process_limit() - 1
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_top() -> RawFd {
+    let hard = descriptor_limit().rlim_max.min(1 << 20);
+    RawFd::try_from(hard).expect("the hard limit fits a descriptor") - 1
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn per_process_limit() -> RawFd {
+    let mut limit: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: The name is a static NUL-terminated string. `limit` and `size` are locals that
+    // sysctlbyname may write, `size` holds the bytes `limit` has, and no new value is passed.
+    let read = unsafe {
+        libc::sysctlbyname(
+            c"kern.maxfilesperproc".as_ptr(),
+            (&raw mut limit).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(read, 0, "kern.maxfilesperproc is readable");
+    limit
+}
+
+#[allow(unsafe_code)]
+fn descriptor_limit() -> libc::rlimit {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a local that getrlimit writes.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+        0,
+        "the descriptor limit is readable"
+    );
+    limit
+}
+
+#[allow(unsafe_code)]
+fn set_descriptor_limit(limit: libc::rlimit) -> std::io::Result<()> {
+    // SAFETY: `limit` is a local that setrlimit only reads. This case runs in its own process,
+    // so the limit reaches no other test.
+    match unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+#[allow(unsafe_code)]
+fn descriptor_table_size() -> RawFd {
+    // SAFETY: getdtablesize takes no arguments.
+    unsafe { libc::getdtablesize() }
+}
+
+struct SoftLimit(libc::rlimit);
+
+impl SoftLimit {
+    fn raised_past(top: RawFd) -> SoftLimit {
+        let saved = descriptor_limit();
+        let wanted = libc::rlim_t::try_from(top + 1).expect("a positive limit");
+        if saved.rlim_cur < wanted {
+            set_descriptor_limit(libc::rlimit {
+                rlim_cur: wanted,
+                rlim_max: saved.rlim_max,
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the soft descriptor limit rises to {wanted} under the hard limit {}: {error}",
+                    saved.rlim_max
+                )
+            });
+        }
+        assert!(
+            descriptor_table_size() > top,
+            "the descriptor table reaches {top} once the soft limit is raised"
+        );
+        SoftLimit(saved)
+    }
+
+    fn lower_to(&self, soft: libc::rlim_t) {
+        set_descriptor_limit(libc::rlimit {
+            rlim_cur: soft,
+            rlim_max: self.0.rlim_max,
+        })
+        .expect("the soft descriptor limit is lowered");
+        assert_eq!(
+            libc::rlim_t::try_from(descriptor_table_size()).ok(),
+            Some(soft),
+            "the descriptor table ends at the lowered soft limit"
+        );
+    }
+}
+
+impl Drop for SoftLimit {
+    fn drop(&mut self) {
+        let _ = set_descriptor_limit(self.0);
+    }
+}
+
+#[allow(unsafe_code)]
+fn is_open(fd: RawFd) -> bool {
+    // SAFETY: fcntl with F_GETFD takes no pointer.
+    unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
 }
 
 #[allow(unsafe_code)]
@@ -1602,18 +1771,10 @@ mod standin {
             .collect()
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[allow(unsafe_code)]
+    #[cfg(target_os = "macos")]
     fn open_descriptors_from(lowest: RawFd) -> Vec<RawFd> {
-        // SAFETY: getdtablesize takes no arguments.
-        let table = unsafe { libc::getdtablesize() };
-        (lowest..table).filter(|fd| is_open(*fd)).collect()
-    }
-
-    #[allow(unsafe_code)]
-    fn is_open(fd: RawFd) -> bool {
-        // SAFETY: fcntl with F_GETFD takes no pointer.
-        unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+        let last = descriptor_table_size().max(per_process_limit());
+        (lowest..last).filter(|fd| is_open(*fd)).collect()
     }
 
     fn write_atomically(directory: &Path, name: &str, contents: &[u8]) {
