@@ -1,17 +1,22 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use plasmosome_backend::{
-    Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FakeBackend, FileAccess, Grant,
-    GrantKind, PluginId, SessionFileRecipe,
+    CellId, CellOwner, DrainSpec, EnforcementBackend, FakeBackend, FileAccess, GrantId, GrantKind,
+    PluginId, SessionFileRecipe, UniverseOp,
 };
 use plasmosome_ledger::{Effect, InverseVia, Ledger};
 
-fn session_file(path: &str) -> Capability {
-    Capability::SessionFile {
+fn session_file(path: &str) -> UniverseOp {
+    UniverseOp::WriteSessionFile {
+        id: GrantId::new(),
         path: path.to_string(),
         recipe: SessionFileRecipe {
             contents: Vec::new(),
             mode: FileAccess::ReadOnly,
             guest_path: "/run/plasmosome/session".to_string(),
+        },
+        owner: CellOwner {
+            cell: CellId::from("bench-cell"),
+            plugin: PluginId::from("bench"),
         },
     }
 }
@@ -20,18 +25,12 @@ fn fixture(size: usize) -> (plasmosome_ledger::SealedLedger, FakeBackend) {
     let mut backend = FakeBackend::new();
     let mut ledger = Ledger::new("bench");
     for index in 0..size {
-        let entry = backend.grant(Grant {
-            owner: CellOwner {
-                cell: CellId::from("bench-cell"),
-                plugin: PluginId::from("bench"),
-            },
-            capability: session_file(&format!("/file-{index}")),
-            kind: GrantKind::Hot,
-        });
+        let operation = session_file(&format!("/file-{index}"));
         ledger.push(Effect::exact(
             format!("effect-{index}"),
-            InverseVia::Backend(entry.handle),
+            InverseVia::Backend(operation.handle()),
         ));
+        backend.grant(operation, GrantKind::Hot).unwrap();
     }
     match ledger.close() {
         plasmosome_ledger::Closure::ExternalFree(sealed) => (sealed, backend),

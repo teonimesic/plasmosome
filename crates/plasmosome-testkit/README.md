@@ -9,25 +9,51 @@ Three things live here. The first is the **conformance suite** — the behaviora
 is held to the same functions, unchanged; a backend that fails one is the thing that is wrong.
 That is what makes the fake a model of enforcement rather than a hope about it.
 
-`FakeBackend` and `CompositeBackend` over three fake leaves both pass all eleven clauses. The
+`FakeBackend` and `CompositeBackend` over three fake leaves both pass all thirteen clauses. The
 composite failed three of the original clauses when it was first wired in, because it lost the
 handle its leaf issued; task 008 fixed the backend rather than the clauses, which is the point of
 holding every backend to the same functions.
 
-The exact-grant clauses build expected objects from each request plus the issued identity, never
-from a backend's returned owner or capability. Applied-object withdrawal keeps observations from
-every other universe class standing. Dedicated defective backends alter each colliding resource
-field, substitute an owner, remove cross-class state, and choose the wrong exact instance. Three
-change only a recipe or launch, in the returned entry, in the recorded object, or in both, and
-`snapshot_never_invents_objects` must reject each. A fourth, `RevokeReturnsAnotherRecipe`, makes a
-revoke return the issued entry with another recipe, and `grant_is_replayable` must reject it.
+The exact-grant clauses build expected objects from each prepared operation, never from a
+backend's returned entry, and the returned handle must be the address the caller prepared.
+Applied-object withdrawal keeps observations from every other universe class standing. Dedicated
+defective backends alter each colliding resource field, substitute an owner, remove cross-class
+state, and choose the wrong exact instance. Three change only a recipe or launch, in the
+returned entry, in the recorded object, or in both, and `snapshot_never_invents_objects` must
+reject each. A fourth, `RevokeReturnsAnotherRecipe`, makes a revoke return the issued entry with
+another recipe, and `grant_is_replayable` must reject it.
 
-Six defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
-`GrantReturnsAnotherRecipe`, `GrantRecordsAnotherRecipe`, `RevokeReturnsAStranger` and
-`RevokeReturnsAnotherRecipe`. Their witnesses run each of them once for each of the five classes,
-against `snapshot_never_invents_objects` or `grant_is_replayable`. So those two clauses fail a
-witness if they check only their first grant. Every other defect runs once, and no other clause
-is held to that.
+Nine defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
+`GrantReturnsAnotherRecipe`, `GrantRecordsAnotherRecipe`, `RevokeReturnsAStranger`,
+`RevokeReturnsAnotherRecipe`, `AcceptsInvalidOperationsOf`, `LeaksAnInvalidOperationOf` and
+`RefusalRollsBackTheAddressOf`. The last three also name the call. Their witnesses run each of
+them once for each of the five classes, against `snapshot_never_invents_objects` or
+`grant_is_replayable`. So those two clauses fail a witness if they check only their first grant,
+or only one class of invalid operation at a fresh or at an issued address. Every other defect runs
+once, and no other clause is held to that.
+
+Callers prepare grants. `GrantClosure` collects one owner's capabilities in attach order. Each
+`PreparedGrant` knows its handle and its inverse, `backend_effect`, before `grant` runs. An
+identity source that fails panics inside `prepare`, before anything is recorded or granted.
+`grant_retry_returns_the_original_entry` holds a backend to spec 017's retry rules. The same
+standing operation and kind returns the original entry. Another kind, owner or capability at an
+issued address returns `IdentityConflict` and changes nothing. A grant at an applied or planted
+address returns `IdentityConflict`, changes nothing and issues no record, whether it carries the
+same payload, another owner or another capability. `fresh_backends_share_no_authority`, and the
+last step of `snapshot_never_invents_objects`, check that a backend fresh from the factory
+observes nothing an earlier instance did, so a backend that keeps its own durable record of grants
+fails both. The first instance then revokes its grants in both orders.
+
+`snapshot_never_invents_objects` also sends an invalid operation of every class through `grant`,
+`apply` and `plant`, each at a fresh address and at an issued one. Each call must return
+`InvalidOperation` and leave the state as it was just before that call. So must each revoke of
+the handle of a grant refused at a fresh address, which returns `UnknownHandle`. The state must not
+change between two of those calls either, so a refusal whose effect lands after it returned fails.
+A later check therefore cannot hide what an earlier refusal changed. A refusal that clears or swaps
+what stands at its address fails, and so does a revoke that tidies away residue. A private backend
+that refuses another launch at an occupied broker endpoint, as spec 017 allows a real adapter to
+do, passes every clause, so the relaunched broker in `repeated_grants_are_independently_removable`
+must keep its own command and sockets.
 
 A clause earns its place by being watched failing against a backend built to carry the defect it
 names. The suite started at five, and the three added by task 009 came from asking what a broken
@@ -185,8 +211,8 @@ refuse.
 
 | Module | Holds |
 | --- | --- |
-| `builders` | `PlasmidManifest`, capabilities, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
-| `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
+| `builders` | `PlasmidManifest`, capabilities, prepared grants (`GrantClosure`, `PreparedGrant`), `Effect`s and `DesiredState` — a test states only what it is about |
+| `conformance` | Thirteen clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
 | `differential` | Spec 027 §6's probe manifest for the membrane differential, its refusals, and `judge`, which compares the lanes' runs and gives the verdict |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |

@@ -1,16 +1,64 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, MockMode, PluginId,
-    ResidueReport,
+    CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, GrantId, LedgerEntry,
+    MockMode, PluginId, ResidueReport,
 };
 use plasmosome_core::ToolRegistry;
 use plasmosome_core::manifest::PlasmidManifest;
 use plasmosome_ledger::{Closure, Ledger};
 use plasmosome_testkit::builders::{
-    DesiredStateBuilder, GrantSequence, ManifestBuilder, exact_backend_effect, mount, proxy_map,
-    uds_socket,
+    DesiredStateBuilder, GrantClosure, ManifestBuilder, PreparedGrant, mount, proxy_map, uds_socket,
 };
+
+fn github_pr_closure(cell: &CellId, plugin: &PluginId, host: &str) -> GrantClosure {
+    GrantClosure::for_owner(CellOwner {
+        cell: cell.clone(),
+        plugin: plugin.clone(),
+    })
+    .hot(mount("/src/repo", "/workspace"))
+    .hot(uds_socket("/workspace/run/egressd.uds"))
+    .hot(proxy_map(host, "splice"))
+}
+
+fn prepare_then_grant(
+    backend: &mut FakeBackend,
+    log: &Path,
+    plugin: &PluginId,
+    prepared: Vec<PreparedGrant>,
+) -> Ledger {
+    let mut ledger = Ledger::new(plugin.clone());
+    for grant in &prepared {
+        ledger.push(grant.backend_effect());
+    }
+    ledger
+        .append_to_file(log)
+        .expect("the prepared closure reaches the log");
+    let durable = Ledger::open_file(log).expect("the log reopens");
+    assert_eq!(
+        durable.effects(),
+        ledger.effects(),
+        "the log must hold every inverse, in order, before the first grant"
+    );
+    assert!(backend.snapshot_os_state().is_empty());
+    for grant in prepared {
+        let entry = backend
+            .grant(grant.operation.clone(), grant.kind)
+            .expect("a prepared grant succeeds on the fake");
+        assert_eq!(
+            entry,
+            LedgerEntry {
+                handle: grant.handle(),
+                owner: grant.operation.owner().clone(),
+                capability: grant.operation.capability(),
+                kind: grant.kind,
+            }
+        );
+    }
+    durable
+}
 
 #[test]
 fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
@@ -42,24 +90,19 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
     let before = backend.snapshot_os_state();
     assert!(before.is_empty());
 
-    let mut ledger = Ledger::new(plugin.clone());
-    let mut attached = Vec::new();
-    for grant in GrantSequence::for_owner(CellOwner {
-        cell: cell_id.clone(),
-        plugin: plugin.clone(),
-    })
-    .hot(mount("/src/repo", "/workspace"))
-    .hot(uds_socket("/workspace/run/egressd.uds"))
-    .hot(proxy_map(
-        &manifest.network.as_ref().expect("a host").hosts[0],
-        "splice",
-    ))
-    .into_grants()
-    {
-        let effect = exact_backend_effect(&backend.grant(grant));
-        attached.push(effect.description.clone());
-        ledger.push(effect);
-    }
+    let host = &manifest.network.as_ref().expect("a host").hosts[0];
+    let prepared = github_pr_closure(&cell_id, &plugin, host).prepare();
+    let attached: Vec<String> = prepared
+        .iter()
+        .map(|grant| grant.backend_effect().description)
+        .collect();
+    let directory = tempfile::tempdir().unwrap();
+    let ledger = prepare_then_grant(
+        &mut backend,
+        &directory.path().join("github-pr.ledger"),
+        &plugin,
+        prepared,
+    );
     assert_eq!(ledger.len(), 3);
     assert_eq!(backend.snapshot_os_state().len(), 3);
 
@@ -93,6 +136,34 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
     let residue = ResidueReport::from_diff(Diff::between(&before, &after), Vec::new());
     assert_eq!(residue, ResidueReport::Empty, "{residue}");
     assert!(after.is_empty());
+}
+
+#[test]
+fn an_identity_source_that_fails_during_allocation_leaves_no_log_and_no_holding() {
+    let cell = CellId::from("cell-1");
+    let plugin = PluginId::from("github-pr");
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("github-pr.ledger");
+    let mut backend = FakeBackend::new();
+    let mut drawn = 0;
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let prepared = github_pr_closure(&cell, &plugin, "api.github.com").prepare_with(|| {
+            drawn += 1;
+            if drawn == 2 {
+                panic!("the system random source failed");
+            }
+            GrantId::new()
+        });
+        prepare_then_grant(&mut backend, &log, &plugin, prepared)
+    }));
+    let payload = outcome.expect_err("the identity source panics on its second draw");
+    assert_eq!(
+        payload.downcast_ref::<&str>().copied(),
+        Some("the system random source failed")
+    );
+    assert_eq!(drawn, 2);
+    assert!(!log.exists(), "a failed allocation must write no log");
+    assert!(backend.snapshot_os_state().is_empty());
 }
 
 #[test]

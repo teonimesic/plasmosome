@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use plasmosome_backend::{
-    BrokerLaunch, Capability, CellId, CellOwner, FileAccess, Grant, GrantKind, LedgerEntry,
-    MockMode, MountRecipe, ProxyRecipe, ProxyTransport, SessionFileRecipe, UdsRecipe,
+    BrokerLaunch, Capability, CellId, CellOwner, FileAccess, GrantId, GrantKind, Handle, MockMode,
+    MountRecipe, OsObject, ProxyRecipe, ProxyTransport, SessionFileRecipe, UdsRecipe, UniverseOp,
 };
 use plasmosome_core::manifest::{NetworkSpec, PlasmidManifest, ToolDeclaration};
 use plasmosome_core::reconciler::{DesiredCell, DesiredState};
@@ -90,60 +90,89 @@ impl ManifestBuilder {
     }
 }
 
-/// Collects the grants one owner asks for, in attach order. Replaying the
-/// matching ledger runs their inverses in the opposite order.
-pub struct GrantSequence {
-    owner: CellOwner,
-    grants: Vec<Grant>,
+/// One grant its caller has prepared: the complete operation, at the fresh identity the caller
+/// chose, and the kind of grant to ask for. Its inverse is known before the grant is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedGrant {
+    pub operation: UniverseOp,
+    pub kind: GrantKind,
 }
 
-impl GrantSequence {
-    /// Starts an empty sequence whose every grant is owned by `owner`, the plugin as attached to
+impl PreparedGrant {
+    /// The exact address the grant will hold: the operation's class and identity.
+    pub fn handle(&self) -> Handle {
+        self.operation.handle()
+    }
+
+    /// The `Exact` effect that undoes this grant by revoking its handle. The description names
+    /// the owner, the class and the handle, so a replay report distinguishes two grants of the
+    /// same capability class. Record it before calling `grant`.
+    pub fn backend_effect(&self) -> Effect {
+        Effect::exact(
+            format!(
+                "{} granted {} as {}",
+                self.operation.owner(),
+                self.operation.class().as_str(),
+                self.handle()
+            ),
+            InverseVia::Backend(self.handle()),
+        )
+    }
+}
+
+/// Collects the capabilities one owner asks for, in attach order, and prepares them. Replaying
+/// the matching ledger runs their inverses in the opposite order.
+pub struct GrantClosure {
+    owner: CellOwner,
+    requests: Vec<(Capability, GrantKind)>,
+}
+
+impl GrantClosure {
+    /// Starts an empty closure whose every grant is owned by `owner`, the plugin as attached to
     /// one cell.
-    pub fn for_owner(owner: CellOwner) -> GrantSequence {
-        GrantSequence {
+    pub fn for_owner(owner: CellOwner) -> GrantClosure {
+        GrantClosure {
             owner,
-            grants: Vec::new(),
+            requests: Vec::new(),
         }
     }
 
     /// Appends a capability the backend may change on a running cell.
-    pub fn hot(self, capability: Capability) -> GrantSequence {
-        self.push(capability, GrantKind::Hot)
+    pub fn hot(mut self, capability: Capability) -> GrantClosure {
+        self.requests.push((capability, GrantKind::Hot));
+        self
     }
 
     /// Appends a capability fixed for the life of the cell's generation.
-    pub fn generation_bound(self, capability: Capability) -> GrantSequence {
-        self.push(capability, GrantKind::GenerationBound)
-    }
-
-    pub fn into_grants(self) -> Vec<Grant> {
-        self.grants
-    }
-
-    fn push(mut self, capability: Capability, kind: GrantKind) -> GrantSequence {
-        self.grants.push(Grant {
-            owner: self.owner.clone(),
-            capability,
-            kind,
-        });
+    pub fn generation_bound(mut self, capability: Capability) -> GrantClosure {
+        self.requests.push((capability, GrantKind::GenerationBound));
         self
     }
-}
 
-/// The `Exact` effect that undoes `entry` by revoking its handle. The
-/// description names the handle, so a replay report distinguishes two grants of
-/// the same capability class.
-pub fn exact_backend_effect(entry: &LedgerEntry) -> Effect {
-    Effect::exact(
-        format!(
-            "{} granted {} as {}",
-            entry.owner,
-            entry.capability.class_str(),
-            entry.handle
-        ),
-        InverseVia::Backend(entry.handle),
-    )
+    /// Prepares every grant, in attach order, each at a fresh `GrantId::new()`.
+    pub fn prepare(self) -> Vec<PreparedGrant> {
+        self.prepare_with(GrantId::new)
+    }
+
+    /// Prepares every grant with identities from `next_id`, in attach order. A source that fails
+    /// panics inside this call, before the caller has recorded or granted anything.
+    pub fn prepare_with(self, mut next_id: impl FnMut() -> GrantId) -> Vec<PreparedGrant> {
+        let ids: Vec<GrantId> = self.requests.iter().map(|_| next_id()).collect();
+        let owner = self.owner;
+        self.requests
+            .into_iter()
+            .zip(ids)
+            .map(|((capability, kind), id)| PreparedGrant {
+                operation: OsObject {
+                    id,
+                    owner: owner.clone(),
+                    capability,
+                }
+                .operation(),
+                kind,
+            })
+            .collect()
+    }
 }
 
 /// Returns `Capability::SessionFile` holding exactly `path` and a fixed recipe: empty contents,
@@ -270,7 +299,109 @@ impl DesiredStateBuilder {
 
 #[cfg(test)]
 mod tests {
+    use plasmosome_backend::{PluginId, UniverseClass};
+
     use super::*;
+
+    fn github_pr_in(cell: &str) -> CellOwner {
+        CellOwner {
+            cell: CellId::from(cell),
+            plugin: PluginId::from("github-pr"),
+        }
+    }
+
+    #[test]
+    fn a_closure_prepares_each_capability_in_attach_order_at_the_identity_drawn_for_it() {
+        let owner = github_pr_in("cell-1");
+        let requested = [
+            (mount("/src/repo", "/workspace"), GrantKind::Hot),
+            (broker("egressd"), GrantKind::GenerationBound),
+            (session_file("/skills/pr.md"), GrantKind::Hot),
+        ];
+        let ids: Vec<GrantId> = requested.iter().map(|_| GrantId::new()).collect();
+        let mut source = ids.clone().into_iter();
+        let prepared = GrantClosure::for_owner(owner.clone())
+            .hot(requested[0].0.clone())
+            .generation_bound(requested[1].0.clone())
+            .hot(requested[2].0.clone())
+            .prepare_with(|| source.next().expect("one identity per capability"));
+        assert_eq!(source.next(), None, "every identity drawn, and no more");
+        assert_eq!(prepared.len(), requested.len());
+        for ((grant, (capability, kind)), id) in prepared.iter().zip(requested).zip(ids) {
+            assert_eq!(grant.operation.id(), id);
+            assert_eq!(grant.operation.owner(), &owner);
+            assert_eq!(grant.operation.capability(), capability);
+            assert_eq!(grant.kind, kind);
+        }
+    }
+
+    #[test]
+    fn prepare_draws_a_fresh_identity_for_every_grant() {
+        let closure = || {
+            GrantClosure::for_owner(github_pr_in("cell-1"))
+                .hot(session_file("/skills/pr.md"))
+                .hot(session_file("/skills/pr.md"))
+        };
+        let mut ids: Vec<GrantId> = closure()
+            .prepare()
+            .into_iter()
+            .chain(closure().prepare())
+            .map(|grant| grant.operation.id())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn an_empty_closure_draws_no_identity() {
+        let prepared = GrantClosure::for_owner(github_pr_in("cell-1"))
+            .prepare_with(|| panic!("an empty closure must not draw an identity"));
+        assert!(prepared.is_empty());
+    }
+
+    #[test]
+    fn a_prepared_grant_names_its_exact_address_and_the_revoke_that_undoes_it() {
+        let grant = GrantClosure::for_owner(github_pr_in("cell-1"))
+            .hot(uds_socket("/run/plasmosome/egressd.uds"))
+            .prepare()
+            .remove(0);
+        let handle = Handle {
+            class: UniverseClass::UdsPath,
+            id: grant.operation.id(),
+        };
+        assert_eq!(grant.handle(), handle);
+        assert_eq!(
+            grant.backend_effect(),
+            Effect::exact(
+                format!(
+                    "\"cell-1\"/\"github-pr\" granted uds-path as uds-path/{}",
+                    handle.id
+                ),
+                InverseVia::Backend(handle),
+            )
+        );
+    }
+
+    #[test]
+    fn the_inverse_description_tells_two_grants_of_one_class_apart() {
+        let prepared = GrantClosure::for_owner(github_pr_in("cell-1"))
+            .hot(session_file("/skills/pr.md"))
+            .hot(session_file("/skills/review.md"))
+            .prepare();
+        assert_ne!(
+            prepared[0].backend_effect().description,
+            prepared[1].backend_effect().description
+        );
+        let elsewhere = GrantClosure::for_owner(github_pr_in("cell-2"))
+            .hot(session_file("/skills/pr.md"))
+            .prepare_with(|| prepared[0].operation.id());
+        assert_ne!(
+            elsewhere[0].backend_effect().description,
+            prepared[0].backend_effect().description,
+            "the description names the owner's cell"
+        );
+    }
 
     #[test]
     fn session_file_holds_exactly_its_path_unchecked_and_the_default_recipe() {

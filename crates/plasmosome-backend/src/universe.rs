@@ -7,8 +7,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::{Uuid, Variant, Version};
 
 use crate::backend::{
-    BackendError, Capability, broker_rules, mount_rules, proxy_map_rules, session_file_rules,
-    uds_socket_rules,
+    BackendError, Capability, Handle, broker_rules, mount_rules, proxy_map_rules,
+    session_file_rules, uds_socket_rules,
 };
 use crate::recipe::{
     BrokerLaunch, MountRecipe, ProxyRecipe, RecipeError, SessionFileRecipe, UdsRecipe,
@@ -275,6 +275,55 @@ impl OsObject {
             self.capability
         )
     }
+
+    /// The operation that creates this object at its own address, so that
+    /// `object.operation().object() == object`.
+    pub fn operation(&self) -> UniverseOp {
+        let id = self.id;
+        let owner = self.owner.clone();
+        match self.capability.clone() {
+            Capability::SessionFile { path, recipe } => UniverseOp::WriteSessionFile {
+                id,
+                path,
+                recipe,
+                owner,
+            },
+            Capability::UdsSocket { path, recipe } => UniverseOp::BindUds {
+                id,
+                path,
+                recipe,
+                owner,
+            },
+            Capability::ProxyMap {
+                host,
+                route,
+                recipe,
+            } => UniverseOp::SetProxyMap {
+                id,
+                host,
+                route,
+                recipe,
+                owner,
+            },
+            Capability::Broker { name, launch } => UniverseOp::SpawnBroker {
+                id,
+                name,
+                launch,
+                owner,
+            },
+            Capability::Mount {
+                source,
+                target,
+                recipe,
+            } => UniverseOp::AddMount {
+                id,
+                source,
+                target,
+                recipe,
+                owner,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -342,18 +391,6 @@ impl OsState {
     /// Compares owner, complete capability, and multiplicity while ignoring grant identities.
     pub fn canonically_equivalent(&self, other: &OsState) -> bool {
         self.canonical_multiset() == other.canonical_multiset()
-    }
-
-    pub(crate) fn contains_id(&self, id: GrantId) -> bool {
-        [
-            UniverseClass::SessionFile,
-            UniverseClass::UdsPath,
-            UniverseClass::ProxyMap,
-            UniverseClass::BrokerPid,
-            UniverseClass::Mount,
-        ]
-        .into_iter()
-        .any(|class| self.objects.contains_key(&(class, id)))
     }
 
     fn canonical_multiset(&self) -> BTreeMap<(&CellOwner, &Capability), usize> {
@@ -558,17 +595,28 @@ impl UniverseOp {
         }
     }
 
-    pub fn object(&self) -> OsObject {
-        let owner = match self {
+    pub fn owner(&self) -> &CellOwner {
+        match self {
             UniverseOp::WriteSessionFile { owner, .. }
             | UniverseOp::BindUds { owner, .. }
             | UniverseOp::SetProxyMap { owner, .. }
             | UniverseOp::SpawnBroker { owner, .. }
-            | UniverseOp::AddMount { owner, .. } => owner.clone(),
-        };
+            | UniverseOp::AddMount { owner, .. } => owner,
+        }
+    }
+
+    /// The exact address this operation creates: its class and its identity.
+    pub fn handle(&self) -> Handle {
+        Handle {
+            class: self.class(),
+            id: self.id(),
+        }
+    }
+
+    pub fn object(&self) -> OsObject {
         OsObject {
             id: self.id(),
-            owner,
+            owner: self.owner().clone(),
             capability: self.capability(),
         }
     }
@@ -602,7 +650,8 @@ impl UniverseOp {
         }
     }
 
-    fn capability(&self) -> Capability {
+    /// The complete capability this operation creates, with its recipe or launch.
+    pub fn capability(&self) -> Capability {
         match self {
             UniverseOp::WriteSessionFile { path, recipe, .. } => Capability::SessionFile {
                 path: path.clone(),
@@ -1366,6 +1415,52 @@ mod tests {
                 serde_json::from_value::<UniverseClass>(serde_json::json!(name)).unwrap(),
                 class
             );
+        }
+    }
+
+    fn every_class() -> Vec<Capability> {
+        vec![
+            session_file("/skills/pr.md"),
+            fixtures::uds_socket("/run/plasmosome/egressd.uds"),
+            proxy_map("api.github.com", "splice"),
+            broker("egressd"),
+            mount("/srv/repo", "/workspace"),
+        ]
+    }
+
+    #[test]
+    fn an_operation_names_its_exact_handle_owner_and_capability() {
+        for capability in every_class() {
+            let id = GrantId::new();
+            let owner = cell_owner("cell-7", "audit");
+            let op = fixtures::op(id, owner.clone(), capability.clone());
+            assert_eq!(
+                op.handle(),
+                crate::backend::Handle {
+                    class: capability.class(),
+                    id,
+                }
+            );
+            assert_eq!(op.owner(), &owner);
+            assert_eq!(op.capability(), capability);
+        }
+    }
+
+    #[test]
+    fn an_object_and_the_operation_that_creates_it_invert_each_other() {
+        for capability in every_class() {
+            let object = OsObject {
+                id: GrantId::new(),
+                owner: cell_owner("cell-7", "audit"),
+                capability: capability.clone(),
+            };
+            let op = object.operation();
+            assert_eq!(
+                op,
+                fixtures::op(object.id, object.owner.clone(), capability)
+            );
+            assert_eq!(op.object(), object);
+            assert_eq!(op.object().operation(), op);
         }
     }
 
