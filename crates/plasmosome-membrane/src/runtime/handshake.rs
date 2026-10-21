@@ -1,9 +1,16 @@
 use super::digest::Digest;
-use super::endpoints::RuntimeListener;
-use super::hello::{BootToken, HelloRefusal};
-use crate::readiness::{Interest, ProbeBudget};
+use super::endpoints::{Connection, RuntimeListener, peer_pid};
+use super::hello::{
+    BootToken, ControlLane, HelloRefusal, hello_request, judge_normal, judge_withdrawal,
+};
+use crate::readiness::{
+    Frame, Halted, Interest, MAX_RESPONSE_BYTES, MAX_WAIT, ProbeBudget, ProbeStopped,
+    read_frame_within, send_within,
+};
 use crate::vmm::{SupervisionError, VmmState};
 use plasmosome_core::private_socket::PrivateSocketError;
+use std::cell::Cell;
+use std::io::ErrorKind;
 use std::os::fd::RawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -109,7 +116,8 @@ pub enum HandshakeFailure {
     FrameTooLarge { stage: Stage },
     /// Bytes followed the reply's newline in the same read.
     UnexpectedBytes { stage: Stage },
-    /// The peer closed its end before the reply's newline.
+    /// The peer closed its end while the request was sent or before the
+    /// reply's newline.
     Closed { stage: Stage },
     /// An accept, read, write or wait failed with this errno.
     Io { stage: Stage, errno: i32 },
@@ -135,12 +143,13 @@ pub enum HandshakeFailure {
 /// after each hello reply is read. What a match proves differs by platform.
 /// On Linux each read is `SO_PEERCRED`'s, the process that called `connect`,
 /// so the reads after the replies add nothing. On Darwin each read is
-/// `LOCAL_PEERPID`'s, the last process that created, connected or sent on the
-/// peer's socket. A match at the accept shows only that the helper was the
-/// last to use that socket, not that it connected; a match after a reply
-/// shows that the helper was the last to send on it, so a reply sent by
-/// another process fails. On neither platform does a pid show that the
-/// process still runs.
+/// `LOCAL_PEERPID`'s, the last process that created, connected, sent on or
+/// received on the peer's socket; a read that is still waiting counts. A match
+/// at the accept shows only that the helper was the last to use that socket,
+/// not that it connected. A match after a reply shows that the helper was the
+/// last to use it once the reply had arrived, so a reply sent by another
+/// process fails unless the helper used the socket after it. On neither
+/// platform does a pid show that the process still runs.
 ///
 /// Pass the listeners the cell bound before it launched the helper. On a
 /// failure this closes what it accepted but not the listeners: a connection
@@ -187,26 +196,233 @@ where
     N: Fn() -> Instant,
     W: FnMut(RawFd, Interest, Duration) -> std::io::Result<bool>,
 {
-    let _ = (control, data, expected, budget, alive, now, wait);
-    todo!()
+    let (mut alive, mut wait) = (alive, wait);
+    let ended = Cell::new(None);
+    let mut guarded = |fd: RawFd, interest: Interest, limit: Duration| match alive() {
+        Liveness::Running => wait(fd, interest, limit),
+        stopped => {
+            ended.set(Some(stopped));
+            Err(std::io::Error::other("the helper is not running"))
+        }
+    };
+    let mut steps = Steps {
+        expected,
+        budget,
+        now: &now,
+        wait: &mut guarded,
+        ended: &ended,
+    };
+    steps.gate(Stage::NormalAccept)?;
+    let mut normal = steps.accept(control, Stage::NormalAccept)?;
+    let boot = steps.hello(
+        &mut normal,
+        ControlLane::Normal,
+        Stage::NormalReply,
+        |frame| judge_normal(frame, expected.policy),
+    )?;
+    let mut withdrawal = steps.accept(control, Stage::WithdrawalAccept)?;
+    steps.hello(
+        &mut withdrawal,
+        ControlLane::Withdrawal,
+        Stage::WithdrawalReply,
+        |frame| judge_withdrawal(frame, expected.policy, &boot),
+    )?;
+    let data = steps.accept(data, Stage::DataAccept)?;
+    Ok(Association {
+        boot,
+        policy: *expected.policy,
+        peer: expected.peer,
+        normal,
+        withdrawal,
+        data,
+    })
+}
+
+struct Steps<'a, N, G> {
+    expected: Expected<'a>,
+    budget: &'a ProbeBudget<'a>,
+    now: &'a N,
+    wait: &'a mut G,
+    ended: &'a Cell<Option<Liveness>>,
+}
+
+impl<N, G> Steps<'_, N, G>
+where
+    N: Fn() -> Instant,
+    G: FnMut(RawFd, Interest, Duration) -> std::io::Result<bool>,
+{
+    fn gate(&self, stage: Stage) -> Result<Duration, HandshakeFailure> {
+        self.budget
+            .remaining_at((self.now)())
+            .map_err(|stop| stopped(stage, stop))
+    }
+
+    fn accept(
+        &mut self,
+        listener: &RuntimeListener,
+        stage: Stage,
+    ) -> Result<UnixStream, HandshakeFailure> {
+        loop {
+            match listener.accept_ready() {
+                Ok(Some(Connection::Identified { stream, pid })) => {
+                    self.authenticate(stage, pid)?;
+                    self.gate(stage)?;
+                    return Ok(stream);
+                }
+                Ok(Some(Connection::Refused(refusal))) => {
+                    return Err(HandshakeFailure::PeerRefused { stage, refusal });
+                }
+                Ok(None) => {}
+                Err(error) => return Err(io_failure(stage, &error)),
+            }
+            let left = self.gate(stage)?;
+            match (self.wait)(listener.as_raw_fd(), Interest::Readable, left.min(MAX_WAIT)) {
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => return Err(self.failed(stage, Halted::Failed(error))),
+            }
+        }
+    }
+
+    fn hello<T>(
+        &mut self,
+        stream: &mut UnixStream,
+        lane: ControlLane,
+        stage: Stage,
+        judge: impl FnOnce(&[u8]) -> Result<T, HelloRefusal>,
+    ) -> Result<T, HandshakeFailure> {
+        send_within(
+            stream,
+            hello_request(lane),
+            self.budget,
+            self.now,
+            self.wait,
+        )
+        .map_err(|halted| self.failed(stage, halted))?;
+        let (bytes, trailing) = match read_frame_within(stream, self.budget, self.now, self.wait) {
+            Ok(Frame::Line { bytes, trailing }) => (bytes, trailing),
+            Ok(Frame::TooLarge(_)) => return Err(HandshakeFailure::FrameTooLarge { stage }),
+            Err(halted) => return Err(self.failed(stage, halted)),
+        };
+        let sender = peer_pid(stream).map_err(|error| HandshakeFailure::PeerRefused {
+            stage,
+            refusal: PrivateSocketError::PeerCredentials {
+                errno: error.raw_os_error().unwrap_or(libc::EIO),
+            },
+        })?;
+        self.authenticate(stage, sender)?;
+        if trailing {
+            return Err(HandshakeFailure::UnexpectedBytes { stage });
+        }
+        judge(&bytes).map_err(|refusal| HandshakeFailure::Refused { stage, refusal })
+    }
+
+    fn authenticate(&self, stage: Stage, found: libc::pid_t) -> Result<(), HandshakeFailure> {
+        if authentic(self.expected.peer, found) {
+            return Ok(());
+        }
+        Err(HandshakeFailure::ForeignPeer {
+            stage,
+            expected: self.expected.peer,
+            found,
+        })
+    }
+
+    fn failed(&self, stage: Stage, halted: Halted) -> HandshakeFailure {
+        match self.ended.take() {
+            Some(Liveness::Ended(state)) => return HandshakeFailure::HelperEnded { stage, state },
+            Some(Liveness::Unknown(error)) => {
+                return HandshakeFailure::LivenessUnknown { stage, error };
+            }
+            Some(Liveness::Running) | None => {}
+        }
+        match halted {
+            Halted::Stopped(stop) => stopped(stage, stop),
+            Halted::Ended => HandshakeFailure::Closed { stage },
+            Halted::Failed(error) => io_failure(stage, &error),
+        }
+    }
+}
+
+fn stopped(stage: Stage, stop: ProbeStopped) -> HandshakeFailure {
+    match stop {
+        ProbeStopped::Cancelled => HandshakeFailure::Cancelled { stage },
+        ProbeStopped::TimedOut => HandshakeFailure::TimedOut { stage },
+    }
+}
+
+fn io_failure(stage: Stage, error: &std::io::Error) -> HandshakeFailure {
+    match error.kind() {
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset => HandshakeFailure::Closed { stage },
+        _ => HandshakeFailure::Io {
+            stage,
+            errno: error.raw_os_error().unwrap_or(libc::EIO),
+        },
+    }
 }
 
 fn authentic(expected: libc::pid_t, found: libc::pid_t) -> bool {
-    let _ = (expected, found);
-    todo!()
+    found > 0 && found == expected
 }
 
 impl std::fmt::Display for Stage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        f.write_str(match self {
+            Stage::NormalAccept => "the normal lane's accept",
+            Stage::NormalReply => "the normal lane's hello reply",
+            Stage::WithdrawalAccept => "the withdrawal lane's accept",
+            Stage::WithdrawalReply => "the withdrawal lane's hello reply",
+            Stage::DataAccept => "the data association's accept",
+        })
     }
 }
 
 impl std::fmt::Display for HandshakeFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            HandshakeFailure::Cancelled { stage } => {
+                write!(f, "at {stage}, shutdown cancelled the handshake")
+            }
+            HandshakeFailure::TimedOut { stage } => {
+                write!(f, "at {stage}, the handshake's allowance was spent")
+            }
+            HandshakeFailure::HelperEnded { stage, state } => {
+                write!(f, "at {stage}, the helper had ended: {state:?}")
+            }
+            HandshakeFailure::LivenessUnknown { stage, error } => {
+                write!(
+                    f,
+                    "at {stage}, the helper's state could not be read: {error}"
+                )
+            }
+            HandshakeFailure::ForeignPeer {
+                stage,
+                expected,
+                found,
+            } => write!(
+                f,
+                "at {stage}, the peer was process {found}, not the helper {expected}"
+            ),
+            HandshakeFailure::PeerRefused { stage, refusal } => {
+                write!(f, "at {stage}, the peer was refused: {refusal}")
+            }
+            HandshakeFailure::Refused { stage, refusal } => {
+                write!(f, "at {stage}, the reply was refused: {refusal}")
+            }
+            HandshakeFailure::FrameTooLarge { stage } => write!(
+                f,
+                "at {stage}, more than {MAX_RESPONSE_BYTES} bytes came before the newline"
+            ),
+            HandshakeFailure::UnexpectedBytes { stage } => {
+                write!(f, "at {stage}, bytes followed the reply's newline")
+            }
+            HandshakeFailure::Closed { stage } => {
+                write!(f, "at {stage}, the peer closed the stream")
+            }
+            HandshakeFailure::Io { stage, errno } => {
+                write!(f, "at {stage}, a call failed with errno {errno}")
+            }
+        }
     }
 }
 
