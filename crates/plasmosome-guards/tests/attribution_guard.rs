@@ -1281,6 +1281,7 @@ const RULE_2_ROWS_BEYOND_ACCEPTANCE_1: &[(&str, Verdict)] = &[
         Verdict::Model,
     ),
     ("Jane <jane@corp.locale.io\r>", Verdict::Untraceable),
+    ("Jane Doe <jane@corp.locale.io>\x0b", Verdict::Untraceable),
     (
         "Jane Doe\rProbe <noreply@anthropic.com>",
         Verdict::Untraceable,
