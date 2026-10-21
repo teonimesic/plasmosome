@@ -402,7 +402,27 @@ impl<'a> Line<'a> {
         if let Some(extra) = self.extra_word(&command, &words) {
             return extra;
         }
+        if let Some(fault) = self.socket_flag(command) {
+            return fault;
+        }
         self.values(command)
+    }
+
+    fn socket_flag(&self, command: Command) -> Option<Reading> {
+        if command.method().is_some() {
+            return None;
+        }
+        let (_, flag) = self
+            .flags()
+            .find(|(_, flag)| VALUE_FLAGS.iter().any(|known| *flag == *known))?;
+        Some(self.usage(
+            format!(
+                "plasmosome {} reaches no control socket, so it takes no {}",
+                command.words.join(" "),
+                flag.to_string_lossy()
+            ),
+            Some(flag),
+        ))
     }
 
     fn flag_fault(&self) -> Option<Reading> {
