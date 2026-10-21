@@ -413,7 +413,7 @@ fn membraned_exits_nonzero_naming_the_failure() {
     let no_arguments = membraned(&[]).output().expect("membraned runs");
     assert_eq!(
         no_arguments.status.code(),
-        Some(2),
+        Some(64),
         "membraned needs a config"
     );
     assert!(
@@ -440,6 +440,10 @@ fn membraned_exits_nonzero_naming_the_failure() {
         invalid.status.code(),
         Some(2),
         "a config that is not JSON is refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("malformed.json"),
+        "the refusal names the config it could not parse"
     );
 
     let control = dir.path().join("taken.uds");
