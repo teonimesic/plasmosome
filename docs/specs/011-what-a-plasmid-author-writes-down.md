@@ -385,6 +385,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   every index a later refusal names is the declaration's own. Spec 008 refuses a blank key when the
   journal is read, so no attach records one. Amended on 2026-10-21: this had no rule for such an
   entry.
+- **Each `[provides]` binding key is a capability key: a string that is not empty or only
+  whitespace.** A blank key is refused naming the binding by its field path, such as `provides.""`,
+  with `fix` exactly `remove this entry`, before anything inside the binding is checked, so no fix
+  writes the blank key back. No key is guessed for it, because a key is the name requirers ask for
+  and only its author can choose it. So following the fix deletes the binding with its tools, and an
+  author who meant them writes the key instead. Spec 008 refuses a blank provided key when the
+  journal is read, so no attach records one. Amended on 2026-10-21: this had no rule for such a key.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the
@@ -503,6 +510,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   `requires.capabilities[2]`, for `""` and then `" "`, and the result parses with requires `["a",
   "b"]`. Catches: a parser that drops an entry and shifts later indexes, and one that keeps a blank
   key. Amended on 2026-10-21: this item is new.
+- `[provides]` with bindings `"a:tools"`, `""` and `" "`, each declaring one described tool, is
+  refused at `provides.""` or `provides." "` with `fix` `remove this entry`. With that binding
+  removed, the other is refused the same way, and then the declaration parses with only the tool of
+  `a:tools`. `[provides]` with `"" = false`, or `[provides.""]` with only an unknown key `tool`, is
+  refused at `provides.""` with `remove this entry`. Catches: a parser that keeps a blank key, one
+  that drops it and its tools in silence, one that refuses only the empty key, a fix that writes the
+  blank key back, and a check inside the binding first. Amended on 2026-10-21: this item is new.
 - A plasmid granted two hosts and denied a third produces a report naming the denied host and the
   hosts field, in which neither granted host appears anywhere.
 - The denial report reaches the session log and the plasmid's status, and the calling code inside
