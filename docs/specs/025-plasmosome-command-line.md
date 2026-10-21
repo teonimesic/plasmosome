@@ -346,8 +346,8 @@ observes before acting again, and repeats only where the verb deduplicates by a 
 ID. `cell.new` and `cell.exec` deduplicate by a request ID, `request_key` (spec 001 §3.5, spec
 024 §1), which their commands pass as `--request-key`. Without one, repeating `cell new`
 creates a second cell, and repeating `cell exec` runs the program again. `cell exec` is served
-only while its verb deduplicates. A repeated `cell new` whose cell is still starting or ending
-exits 2 with 105 detail `repeat`, naming that cell. That is not a cell a failed start left
+only while its verb deduplicates. A repeated `cell new` whose cell is still starting, ending or
+`dead` exits 2 with 105 detail `repeat`, naming that cell. That is not a cell a failed start left
 behind: observe it, or repeat later. The task that serves each later command states how to
 observe it after exit 3. Amended on 2026-10-21: `cell.new` had no request ID, so this read
 "Repeating `cell new` creates a second cell, and repeating `cell exec` runs the program again, so

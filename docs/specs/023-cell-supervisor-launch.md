@@ -183,7 +183,8 @@ mutex was "held from the scan until the directory exists", since no record was w
 7. With a genome, attach its members in one transaction under spec 008.
 8. Create `created` and sync it, then mark the cell ready and reply `{cell, state: "ready",
    plasmids}`. Until `created` is synced the cell is `germinating`, so a repeat is told `ready`
-   only for a cell whose `created` is durable.
+   only for a cell whose `created` is durable. If `created` cannot be created or synced, the start
+   fails as a failed attach does (§6), with 105 `{from: "germinating", to: "ready", cell}`.
 
 **A repeat.** A `cell.new` may carry `request_key` (spec 001 §3.5). One whose key a cell in
 `cells/` holds is a repeat. Every rule below keeps this: while any cell holding a key has not been
@@ -191,13 +192,13 @@ retired, no `cell.new` with that key makes a cell, and a repeat never waits for 
 
 The controller looks the key up twice. The first lookup comes after step 1 and after spec 001
 §3.4's stop gate, so a repeat can get their refusals, `no_cell_runtime` and `stopping` included.
-The second comes at step 4, under the allocation mutex and after §3.4's second check of the gate,
+The second comes at step 4, under the allocation mutex and after the stop gate's second check,
 so two requests with one key that arrive together make one cell. A key enters the index under
 that mutex, once its `request` is synced. A repeat found at the first lookup runs none of steps 2
 to 8. One found at the second has run steps 2 and 3, which verify and resolve and change nothing,
-and goes no further. A request that misses the first lookup can still be refused at step 2 or 3.
-Either way a repeat leaves no state behind. Its parameters are compared first, by
-`params_sha256` (§3):
+and goes no further: it leaves the allocation mutex before it is answered or waits for a check.
+A request that misses the first lookup can still be refused at step 2 or 3. Either way a repeat
+leaves no state behind. Its parameters are compared first, by `params_sha256` (§3):
 
 - Other parameters: 102 `{target: "request <key>"}`, with no `cell` member.
 - A `ready` cell, whose `created` is synced (step 8): step 8's reply, `{cell, state: "ready",
@@ -210,7 +211,9 @@ Either way a repeat leaves no state behind. Its parameters are compared first, b
   for the cell's state after the check. A cell with no `created` is then `draining` under the
   no-`created` rule (§8), so the repeat gets the 105 `repeat` from `draining` and does not wait
   for that kill. If the check does not adopt the cell, the repeat is 101 `{target: "cell <id>"}`,
-  as every other verb naming a set-aside cell is.
+  as every other verb naming a set-aside cell is. Once an earlier check has adopted the cell, or a
+  `cell.kill` has made it `draining`, the repeat waits no longer: it gets the reply above for the
+  cell's state then, so it never waits for a kill started before its own check.
 - A quarantined cell: 101 `{target: "cell <id>"}`.
 
 A repeat changes no state, apart from the check it runs on a set-aside cell. §6 counts it as a
@@ -303,8 +306,8 @@ verb on a `germinating` or `draining` cell refuse at once with 105 `{from: <stat
 `plasmosome.stop`'s drain of the cell (spec 001 §3.4), the check of §8 and spec 028's expiry) run
 one at a time, in arrival order. Requests for other cells are not blocked. Reads never wait for
 mutations, except a read whose own query failed, which waits for the check it queued, and a
-repeat whose key a set-aside cell holds, which waits for §8's check and never for a kill that
-check starts (§4). A repeated `cell.new` (§4) is a read.
+repeat whose key a set-aside cell holds, which waits for §8's check and never for a kill, whoever
+started it (§4). A repeated `cell.new` (§4) is a read.
 `plasmid.list` is a read. Corrected on 2026-10-20: this listed "plasmid verbs" among the
 mutations, which read as including `plasmid.list`, and left out spec 028's expiry.
 Amended on 2026-10-21: this list did not name a `plasmosome.stop`'s drain of the cell, and only
@@ -540,10 +543,11 @@ retires nothing and releases the locks.
 
 **A cell adopted with no `created` file**, at a startup that serves or by a later check, is one
 whose `cell.new` never replied, so no client was told it is ready. A repeat may have named it,
-but only in a 105 (§4). The controller ends it as `cell.kill` does, with a budget of
+but never as ready (§4). The controller ends it as `cell.kill` does, with a budget of
 `stop_deadline_ms`, and writes a session log line naming it. If that kill does not finish, the
-cell stays listed with its state. A startup that serves does not wait for these kills: it serves
-while they run, and each such cell holds its key until it is retired.
+cell stays listed with its state. A startup that serves starts these kills once its key index is
+rebuilt (below) and before it serves the first request, so each such cell is already `draining`.
+It serves while they run, and each such cell holds its key until it is retired.
 Amended on 2026-10-21: this said "so no client knows it exists", which a repeat now makes untrue,
 and did not say whether startup waits for these kills.
 
@@ -961,9 +965,11 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     this item is new.
 21. With item 1's held hello and key `k`, a second `cell.new` with `k` and the same parameters
     replies at once 105 `{from: "germinating", to: "ready", cell: "cell-1", detail: {kind:
-    "repeat"}}`. After release, the first replies `ready`, and one directory exists. Catches: a
-    repeat that waits for the first start or starts a second, and a repeat reply that looks like
-    a failed start. Amended on 2026-10-21: this item is new.
+    "repeat"}}`. After release, the first replies `ready`, and one directory exists. While a test
+    seam holds a first request with `k2` in step 8, before `created` is synced, a repeat with `k2`
+    gets the same 105 for that cell. Catches: a repeat that waits for the first start or starts a
+    second, a repeat reply that looks like a failed start, and a cell marked ready before
+    `created` is synced. Amended on 2026-10-21: this item is new.
 22. With `cell-1` made under `k` with `mock: "simulate"`, `k` with another `genome` or `mock`, or
     with no `mock`, is 102 `{target: "request k"}`, with no `cell` member and no new directory. A
     repeat whose members come in another order and spacing, with a letter of `simulate` written
@@ -973,13 +979,13 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     request bytes or with `kernel` in it, and deduplication by parameters without a key. Amended
     on 2026-10-21: this item is new.
 23. Two `cell.new` requests with `k` and the same parameters. A test seam holds the first after
-    its first lookup and before step 4's. The second, sent then, creates `cell-1`; released, the
-    first gets item 20's or item 21's reply for it. Then the seam holds a first request with `k2`
-    in step 4, after its directory exists and before its `request` is written. A second request
-    with `k2`, sent then, has no reply until the first is released, and then gets item 21's reply
-    for that cell. Each time one directory is added. Catches: a controller with only the first
-    lookup, and a mutex released before `request` is written. Amended on 2026-10-21: this item is
-    new.
+    its first lookup and before it takes the allocation mutex. The second, sent then, creates
+    `cell-1`; released, the first gets item 20's or item 21's reply for it. Then the seam holds a
+    first request with `k2` in step 4, after its directory exists and before its `request` is
+    written. A second request with `k2`, sent then, has no reply until the first is released, and
+    then gets item 20's or item 21's reply for that cell. Each time one directory is added.
+    Catches: a controller with only the first lookup, and a mutex released before `request` is
+    written. Amended on 2026-10-21: this item is new.
 24. With `cell-1` ready under `k`, SIGKILL the controller and start it again. A repeat with `k`
     replies `ready` for `cell-1`, and no directory is added. In a second instance, build by hand,
     as item 9 does, six validated cells, each with `created` and a membrane double that answers
@@ -989,16 +995,19 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     hold `k`. Startup serves, and the session log names each of the six. A `cell.new` with `k`, or
     with any other key, is 105 `{from: "request_unreadable", to: "germinating", cell:
     "cell-10"}`, the first of the six in byte order, and a `cell.new` with no key creates a cell.
-    Once `cell.kill` has retired `cell-9`, the refusal names `cell-5`. Once it has retired `cell-5`
-    to `cell-8` too, a repeat with `k` replies `ready` for `cell-10`, and a new key creates a cell.
-    Catches: a key index kept only in memory; a record that is not a regular file, is truncated,
-    names another cell or is over the bound taken as no key, so a repeat makes a second cell
+    Once `cell.kill` has retired `cell-9`, the refusal names `cell-5`. Each time `cell.kill` then
+    retires the cell the refusal names, the refusal names the next: `cell-6`, then `cell-7`, then
+    `cell-8`. Once it has retired `cell-8` too, a repeat with `k` replies `ready` for `cell-10`,
+    and a new key creates a cell. Catches: a key index kept only in memory; a record that is not a
+    regular file, is truncated, names another cell or is over the bound taken as no key, even with
+    its log line written, so a repeat makes a second cell
     beside a running one; two cells with one key served from the first found; a refusal naming a
     cell the build picks; and a refusal kept until the next restart. Amended on 2026-10-21: this
     item is new.
 25. `cell.kill` retires `cell-1`, which held `k`. A repeat with `k` then creates `cell-2`.
-    Separately, SIGKILL the controller after the guest's hello and before a `cell.new` with `k`
-    replies, and start it again: it ends that cell under the no-`created` rule. A repeat with `k`
+    Separately, with a helper that ignores `shutdown`, as in item 14, and a test seam that holds a
+    `cell.new` with `k` after the guest's hello and before `created`, SIGKILL the controller and
+    start it again: it ends that cell under the no-`created` rule. A repeat with `k`
     while that kill runs is 105 `{from: "draining", to: "ready", cell, detail: {kind:
     "repeat"}}`, and one after retirement creates a new cell. Catches: a key kept after its cell
     left `cells/`, and a repeat during the no-`created` kill that starts a second cell. Amended
@@ -1006,7 +1015,8 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
 26. A `cell.new` whose `request_key` is empty, 65 characters long, holds a space or `é`, is
     `null` or is a number is `-32602`, and no directory exists; a key of 64 characters is
     accepted. Then startup over these validated cells, built by hand as item 9 does, each with a
-    `request` holding its own key:
+    `request` holding its own key and the `params_sha256` that §3 gives for the repeat's
+    parameters, computed by the test:
 
     - D, `kd`: a membrane double holding the lock that answers `cell_not_ready` with `cell_state:
       "dead"`, as after item 14's unclean teardown, and `created`;
@@ -1023,9 +1033,9 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     check retires anything, so a retired cell's key stays held. Amended on 2026-10-21: this item
     is new.
 27. With `cell-1` ready under `k`, a repeat replies `ready`. Then hold a `cell.kill` of `cell-1` at
-    its withdrawal through the membrane double, as item 13 does: a repeat with `k` is 105 `{from:
-    "draining", to: "ready", cell: "cell-1", detail: {kind: "repeat"}}`, never the ready result.
-    Release it with a bridge socket that cannot be removed, as in item 14: the kill lists
+    its `membrane.cell.kill`, through a membrane double as item 13 uses: a repeat with `k` is 105
+    `{from: "draining", to: "ready", cell: "cell-1", detail: {kind: "repeat"}}`, never the ready
+    result. Release it with a bridge socket that cannot be removed, as in item 14: the kill lists
     `teardown`, and a repeat with `k` is then 105 from `dead` with the repeat detail. No directory
     is added. Catches: a controller that replays the first ready reply, and a key dropped when
     `cell.kill` replies though its cell was not retired. Amended on 2026-10-21: this item is new.
@@ -1036,9 +1046,12 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     `germinating`. Release hello, with a helper that ignores `shutdown`, as in item 14. A repeat
     with `k2` runs the check, which adopts the cell and starts its no-`created` kill. The repeat
     replies 105 `{from: "draining", to: "ready", cell, detail: {kind: "repeat"}}` while the kill
-    still runs, and the cell is still under `cells/` when it does. No directory is added. Catches:
-    a controller that answers a set-aside repeat 101 without running the check, and a repeat that
-    waits for the kill the check starts. Amended on 2026-10-21: this item is new.
+    still runs, and the cell is still under `cells/` when it does. Last, stall the `membraned` of a
+    cell ready under `k3` in the same way, and do not resume it. While a `cell.kill` of it runs, as
+    in item 14, a repeat with `k3` replies 105 from `draining` with the repeat detail before the
+    kill replies. No directory is added. Catches: a controller that answers a set-aside repeat 101
+    without running the check, and a repeat that waits for a kill, whether its own check or an
+    earlier request started it. Amended on 2026-10-21: this item is new.
 
 ## Out of scope
 
