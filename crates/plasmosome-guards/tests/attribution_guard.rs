@@ -1076,3 +1076,38 @@ fn clears_a_look_alike_domain_when_the_caller_sets_lc_all() {
         );
     });
 }
+
+#[test]
+fn prints_both_offences_when_a_line_git_reads_as_blank_parts_two_model_co_authors() {
+    check_workspace(|root| {
+        let harm = "credits a model: GitHub shows it on main as a co-author.";
+        std::thread::scope(|scope| {
+            for (name, line) in [
+                ("a space", " "),
+                ("a tab", "\t"),
+                ("a carriage return", "\r"),
+                ("a carriage return, a space and a carriage return", "\r \r"),
+            ] {
+                scope.spawn(move || {
+                    let repository = repository_with_commit(&format!(
+                        "docs: a change\n\nCo-authored-by: Gemini <probe@corp.locale.io>\n{line}\nCo-authored-by: Copilot <probe@corp.locale.io>\n"
+                    ));
+                    let head = git(repository.path(), &["rev-parse", "HEAD"], None);
+                    let sha = String::from_utf8_lossy(&head.stdout)[..9].to_owned();
+                    let output = run_guard_in(root, repository.path(), "HEAD");
+                    let said = said(&output);
+                    let naming = format!("attribution-guard: {sha} ");
+                    let lines: Vec<&str> = said.lines().filter(|text| text.starts_with(&naming)).collect();
+                    let expected = [
+                        format!("{naming}Co-authored-by \"Gemini <probe@corp.locale.io>\" {harm}"),
+                        format!("{naming}Co-authored-by \"Copilot <probe@corp.locale.io>\" {harm}"),
+                    ];
+                    assert!(
+                        !output.status.success() && lines == expected,
+                        "a model co-author, a line holding only {name}, then a second model co-author must be refused by both lines, in this order: {expected:?}. Git reads the line as blank, so each co-author is a trailer of its own paragraph. A guard that keeps the two paragraphs as one hands git only the last, and the first offence stays hidden until the second is fixed.\nthe lines naming its commit are {lines:?}\nguard said:\n{said}"
+                    );
+                });
+            }
+        });
+    });
+}
