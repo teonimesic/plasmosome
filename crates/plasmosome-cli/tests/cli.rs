@@ -662,7 +662,7 @@ fn the_full_parse_names_the_leftmost_fault() {
 }
 
 #[test]
-fn the_lines_that_read_two_ways_follow_mains_rulings() {
+fn the_lines_that_read_two_ways_name_the_settled_argument() {
     let status = status_served();
     let search = search_and_show_served();
     let rows: Vec<(&[Command], &str, Option<&str>)> = vec![
