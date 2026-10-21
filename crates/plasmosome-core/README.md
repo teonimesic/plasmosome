@@ -125,7 +125,9 @@ toml builds, so a declaration that passes has a tree at most 32 levels deep. A h
 two whatever it names, so under a plain table header the count is above the tree's depth, up to
 about twice it: a 16-part table header with a key under it counts 33 and is refused, although its
 tree is 17 deep.
-`WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
+`WireError::manifest_refusal` turns any of them into code 108. A `Field` refusal carries its
+`field`, its `fix` and, unless it names `id`, its `plasmid`, as members a client reads without
+parsing `detail`. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of them.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description.
 
