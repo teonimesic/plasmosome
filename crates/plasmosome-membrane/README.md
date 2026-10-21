@@ -363,18 +363,28 @@ the way. A name can pass whose path goes through a directory someone can write a
 the sealed volume, and whoever can write that directory can change where it leads afterwards. For
 example, `/usr/lib/cron` leads to `/private/var/at`, owned by `daemon` with mode 0755, so a process
 running as `daemon` could make `/private/var/at/x` a link to a sealed file, let `/usr/lib/cron/x`
-pass, and then replace it. Reasoned from a review's reading of this Mac, not measured for every
-chain: no step of such a chain is writable by the supervisor's user today. Refusing a symlink on
-the way is not an option, because it would refuse framework names such as
-`/System/Library/Frameworks/Foundation.framework/Foundation`, which go through `Versions/Current`.
+pass, and then replace it. Measured on macOS 26.6.2 (25G83), no step of such a chain is writable
+by the supervisor's user: of the 11,459 symlinks under `/usr/lib` and `/System/Library`, 64 live
+ones end off the sealed volume, which with the seven firmlinked directories makes 71 entry points,
+and none of the 5,740 directories under them, nor any of their ancestors, is writable by that
+user. A tighter check would cost little. Of the 3,649 install names in that Mac's shared cache,
+3,599 pass the audit today. Refusing any symlink on the way would refuse 19 more, all under the
+private `TextToSpeechKonaSupport.framework`; requiring every existing step of a name to be on the
+sealed volume would refuse none of the 3,599. The audit keeps this limit for now, and
+plasmosome-0xun owns the tighter check.
 
-The audit does not look everywhere dyld does. For every absolute name, dyld also tries
-`/System/Volumes/Preboot/Cryptexes/OS` followed by the name, and the names in the shared cache,
-such as `/usr/lib/libSystem.B.dylib`, come from the shared cache in that cryptex. That tree is on
-the Preboot volume, which is read-write and not sealed; its `usr/lib` and `System/Library` are
-owned by root with the `restricted` flag, so SIP alone keeps them closed. Refusing that path would
-refuse every system library, so the audit relies on SIP there and does not check it. Whether
-`kern.osversion` changes when only the cryptex is updated is not measured.
+The audit does not look everywhere dyld does. When an absolute name is not on disk, dyld also
+tries `/System/Volumes/Preboot/Cryptexes/OS` followed by the name. Every name in the shared
+cache, such as `/usr/lib/libSystem.B.dylib`, is one of those, and the shared cache itself lives in
+that cryptex. That tree is on the Preboot volume, which is read-write and not sealed. `OS/usr/lib` and
+`OS/System/Library` are owned by root with the `restricted` flag, as are all but one of the
+directories under them (`OS/System/Library/Extensions` has only `sunlnk`). Their parent
+`/System/Volumes/Preboot/Cryptexes` is mode 0777 with no flags and no sticky bit, and
+`Cryptexes/OS` is owned by root, mode 0755, with `sunlnk`. So against the supervisor's own user
+the prefix relies on root ownership, and on `sunlnk` stopping a rename of `OS`, not on SIP alone.
+Refusing that path would refuse every system library, so the audit does not check it. Whether
+dyld would take a file at the cryptex path over the shared cache is not measured, nor whether
+`kern.osversion` changes when only the cryptex is updated.
 
 The audit sees load commands only. It does not see the images the running helper loads
 (`ImageInventory::NotIndependentlyObserved`, owner gate O-5 of `plasmosome-qep`), nor a name that

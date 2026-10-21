@@ -547,10 +547,12 @@ pub struct ClosureEvidence {
     pub resolved: Vec<(ArtifactRole, String, ArtifactRole)>,
     /// Each load name relied on as a system name, once, in the order first met: the deepest part
     /// of its path that exists was on the sealed system volume. dyld may still load it from
-    /// elsewhere. For every absolute name it also tries `/System/Volumes/Preboot/Cryptexes/OS`
-    /// followed by the name, and the names in the shared cache come from the shared cache in that
-    /// cryptex. That tree is on the read-write Preboot volume, closed by SIP alone, and the audit
-    /// does not look there, because refusing it would refuse every system library.
+    /// elsewhere. When an absolute name is not on disk, which is true of every name in the shared
+    /// cache, dyld also tries `/System/Volumes/Preboot/Cryptexes/OS` followed by the name, and the
+    /// shared cache itself lives in that cryptex. That tree is on the read-write Preboot volume.
+    /// Against the supervisor's own user it is closed by root ownership and by `sunlnk` on
+    /// `Cryptexes/OS`, whose parent is mode 0777, not by SIP alone. The audit does not look there,
+    /// because refusing it would refuse every system library.
     pub system_names: Vec<String>,
     /// `kern.osversion`, such as `25G83`: the OS build, which names the sealed system volume. The
     /// audit reads nothing of the OS cryptex or its shared cache, and whether this value changes
