@@ -235,6 +235,26 @@ fn a_leader_that_names_another_process_of_its_list_fails() {
 }
 
 #[test]
+fn fields_are_taken_in_byte_order_so_an_upper_case_name_sorts_first() {
+    let manifest = with_rules(
+        "hint-env",
+        &[("Pid", RuleKind::Pid), ("PPid", RuleKind::Pid)],
+    );
+    let mut runs = runs();
+    each_run(&mut runs, "hint-env", "Pid", |lane, run| {
+        json!(200 + seed(lane, run))
+    });
+    each_run(&mut runs, "hint-env", "PPid", |lane, run| match lane {
+        Lane::Cell => json!(200 + seed(lane, run)),
+        _ => json!(100 + seed(lane, run)),
+    });
+    assert_eq!(
+        verdict(&manifest, &runs),
+        Verdict::Fail(vec![differs("hint-env", "Pid")])
+    );
+}
+
+#[test]
 fn two_files_that_report_one_inode_in_two_fields_fail_and_a_hard_linked_pair_passes() {
     let manifest = with_rules(
         "op-inodes",
@@ -329,6 +349,30 @@ fn two_kinds_that_name_things_are_never_numbered_together() {
                 second.name()
             );
         }
+    }
+}
+
+#[test]
+fn a_boot_id_or_a_resolved_address_shares_no_numbers_with_process_ids() {
+    for kind in [RuleKind::BootId, RuleKind::ResolvedAddress] {
+        let manifest = with_rules(
+            "hint-env",
+            &[("a_pids", RuleKind::Pid), (kind.name(), kind)],
+        );
+        let mut runs = runs();
+        each_run(&mut runs, "hint-env", "a_pids", |lane, run| match lane {
+            Lane::Cell => json!([1, 100 + seed(lane, run)]),
+            _ => json!([1]),
+        });
+        each_run(&mut runs, "hint-env", kind.name(), |lane, run| {
+            sample(kind, seed(lane, run))
+        });
+        assert_eq!(
+            verdict(&manifest, &runs),
+            Verdict::Fail(vec![differs("hint-env", "a_pids")]),
+            "{}",
+            kind.name()
+        );
     }
 }
 
@@ -439,7 +483,7 @@ fn placeholders_name_their_kind_and_names_share_numbers_across_fields() {
             "mounts": [20, 21],
             "z_parents": [1, 20],
             "elapsed": [7, 3],
-            "times": [30, 10, 30],
+            "times": [30, 10, 30, 40],
             "rss": [5, 5, 6],
             "other": 4
         })),
@@ -450,7 +494,12 @@ fn placeholders_name_their_kind_and_names_share_numbers_across_fields() {
             "mounts": ["<mount_id:1>", "<mount_id:2>"],
             "z_parents": ["<mount_id:3>", "<mount_id:1>"],
             "elapsed": ["<duration>", "<duration>"],
-            "times": ["<system_time:2>", "<system_time:1>", "<system_time:2>"],
+            "times": [
+                "<system_time:2>",
+                "<system_time:1>",
+                "<system_time:2>",
+                "<system_time:3>"
+            ],
             "rss": ["<memory_counter:1>", "<memory_counter:1>", "<memory_counter:2>"],
             "other": 4
         })))
@@ -495,6 +544,7 @@ fn time_placeholders_keep_the_order_of_the_times() {
             &fail,
         ),
         ([json!([-0.5, 0.25]), json!([-0.25, 0.5])], &Verdict::Pass),
+        ([json!([-0.0, 0.0]), json!([-0.0, 0.0])], &fail),
     ] {
         let mut runs = runs();
         for (run, times) in cell.iter().enumerate() {
