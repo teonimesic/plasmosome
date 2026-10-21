@@ -356,9 +356,10 @@ as `otool -D`, `codesign -dv`, `nm -a` and `otool -l`.
   `BUNDLE_KERNEL_RELEASE` in `crates/plasmosome-lanes/tests/boot.rs` names it, and the tarball's
   `Makefile` must give it as `VERSION.PATCHLEVEL.SUBLEVEL`.
 - `licence`: libkrun's joins with `AND` the licences of the files its build compiled. Cargo's
-  dep-info file from that build, `target/release/libkrun.d`, lists them. Read each file at the
-  commit: its `SPDX-License-Identifier` lines, or another licence header, such as MIT's. A file
-  with neither takes the `license` of its crate's `Cargo.toml`. The kernel's is the
+  dep-info file from that build, `target/release/libkrun.d`, lists them. Read each whole file at
+  the commit: its `SPDX-License-Identifier` lines, and any other licence notice in it, such as the
+  MIT header of `jsmn.h` or the ISC notice inside `init.c`. A file with neither takes the
+  `license` of its crate's `Cargo.toml`. The kernel's is the
   `SPDX-License-Identifier` line of the tarball's `COPYING`. That line writes `GPL-2.0`, the
   deprecated SPDX name for `GPL-2.0-only`.
 - `sources`: each repository, tag, commit and digest as `pinned` gives it, and each count from the
