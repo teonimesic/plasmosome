@@ -1058,3 +1058,21 @@ fn reads_a_paragraph_both_ways_when_a_line_is_blank_only_to_another_reader() {
         );
     });
 }
+
+#[test]
+fn clears_a_look_alike_domain_when_the_caller_sets_lc_all() {
+    check_workspace(|root| {
+        let repository =
+            repository_with_commit("docs: a change\n\nCo-authored-by: Probe <probe@te\u{17f}t>\n");
+        let output = guard_command(root, repository.path())
+            .env("LC_ALL", "C.UTF-8")
+            .arg("HEAD")
+            .output()
+            .expect("the guard runs");
+        assert!(
+            output.status.success(),
+            "the guard refused `probe@te\u{17f}t`, a look-alike of a listed domain, when the caller set LC_ALL=C.UTF-8. A guard that sets only LC_CTYPE or LANG leaves grep in the caller's LC_ALL, where GNU grep folds the long s onto `s`.\nguard said:\n{}",
+            said(&output)
+        );
+    });
+}
