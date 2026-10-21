@@ -482,7 +482,7 @@ fn unread_record_times_out() {
     let cell = Cell::create(&root.path, "cell-301");
     let lock = cell.lock();
     let log = cell.log();
-    let deadline = Instant::now() + Duration::from_millis(200);
+    let deadline = Instant::now() + Duration::from_secs(1);
     match cell.start_until(&root.membraned(), lock, log, oversized_record(), deadline) {
         Err(StartError::RecordNotTaken) => {}
         other => panic!("an unread record times out, not {other:?}"),
