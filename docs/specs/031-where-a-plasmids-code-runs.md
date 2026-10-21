@@ -563,7 +563,7 @@ spec to settle W1 to W4 and W10. Until then this spec fixes nothing about these 
 These are proposed text. The PR that adds this spec edits no other document. Each change is
 applied by a later reviewed change to the document it amends, before any task that relies on it:
 F1 to F5 in this PR's follow-up list, none of which starts while this spec is a draft. Each item
-quotes the text it changes with its lines at main 5f26ed05.
+quotes the text it changes with its lines at main 388e97f2.
 
 **Spec 001** (F1).
 
