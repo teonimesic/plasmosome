@@ -8,7 +8,7 @@ use tempfile::TempDir;
 
 const HOOKS: [&str; 3] = ["pre-push", "attribution-guard", "provenance-guard"];
 
-const OFFENCE: &str = "credits a model as an author";
+const OFFENCE: &str = "Co-authored-by \"Claude <noreply@anthropic.com>\" credits a model: ";
 
 const CLEARED: &str = "attribution-guard: clean";
 
@@ -167,7 +167,7 @@ fn assert_refused(push: &Output, offender: &str, why: &str) {
         !push.status.success(),
         "the pre-push hook let through a push that {why}; it exists to refuse exactly this before it leaves the machine.\nhook and git said:\n{said}"
     );
-    let named = format!("{} {OFFENCE}", &offender[..9]);
+    let named = format!("attribution-guard: {} {OFFENCE}", &offender[..9]);
     assert!(
         said.contains(&named),
         "the pre-push hook refused a push that {why}, but its output never names the offending commit with `{named}`; a hook that refuses for some other reason, or reads some other commit, would satisfy the exit status alone.\nhook and git said:\n{said}"
