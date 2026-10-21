@@ -28,7 +28,7 @@ const STARTED: &str = "the child controller started its supervisor";
 const ONE_MIB: usize = 1 << 20;
 const LAST_SIGNAL: libc::c_int = 64;
 
-const CASES: [(&str, fn()); 9] = [
+const CASES: [(&str, fn()); 10] = [
     (
         "starts_detached_with_only_0_to_4",
         starts_detached_with_only_0_to_4,
@@ -52,6 +52,10 @@ const CASES: [(&str, fn()); 9] = [
     (
         "a_cell_holding_a_nul_is_refused_before_any_fork",
         a_cell_holding_a_nul_is_refused_before_any_fork,
+    ),
+    (
+        "no_handler_of_the_controller_runs_in_a_child",
+        no_handler_of_the_controller_runs_in_a_child,
     ),
 ];
 
@@ -111,6 +115,7 @@ fn run_every_case(arguments: &[OsString]) -> ExitCode {
 fn run_case(name: &str) -> Result<(), String> {
     let mut child = Command::new(this_executable())
         .env(CASE, name)
+        .process_group(0)
         .stdin(Stdio::null())
         .spawn()
         .map_err(|error| format!("the case process does not start: {error}"))?;
@@ -361,6 +366,138 @@ fn a_cell_holding_a_nul_is_refused_before_any_fork() {
         other => panic!("a cell ID holding a NUL is refused, not {other:?}"),
     }
     assert_no_child_left();
+}
+
+fn no_handler_of_the_controller_runs_in_a_child() {
+    assert_eq!(
+        own_pgid(),
+        std::process::id(),
+        "the case leads its own process group, so its signals reach no other process"
+    );
+    let caught = Caught::install();
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-108");
+    let missing =
+        RecipePath::parse(&format!("{}/missing", root.path.display())).expect("a canonical path");
+    let storm = Storm::start();
+    for _ in 0..20 {
+        let lock = cell.lock();
+        match cell.start(&missing, lock, cell.log(), cell.record(), WAIT) {
+            Err(StartError::Exec { lock, .. }) => drop(lock),
+            Err(StartError::SupervisorClosedPipe) => {}
+            other => panic!("a missing membraned under signals fails, not {other:?}"),
+        }
+        assert_no_child_left();
+        std::fs::remove_file(cell.path.join("supervisor.lock")).expect("the lock is removed");
+    }
+    let sent = storm.stop();
+    assert!(sent > 100, "the storm sent {sent} signals");
+    assert_eq!(
+        caught.pids_other_than_this(),
+        Vec::<libc::pid_t>::new(),
+        "the controller's SIGUSR1 handler ran only in the controller"
+    );
+}
+
+static HANDLER_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+static HANDLER_OWNER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+extern "C" fn note_foreign_handler(_signal: libc::c_int) {
+    let me = own_pid();
+    if me != HANDLER_OWNER.load(std::sync::atomic::Ordering::Relaxed) {
+        let bytes = me.to_ne_bytes();
+        let pipe = HANDLER_PIPE.load(std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: `bytes` is a local of four bytes that write only reads. getpid and write are
+        // async-signal-safe, which is all a signal handler may call.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::write(pipe, bytes.as_ptr().cast(), bytes.len())
+        };
+    }
+}
+
+struct Caught(File);
+
+impl Caught {
+    #[allow(unsafe_code)]
+    fn install() -> Caught {
+        let mut ends: [RawFd; 2] = [-1; 2];
+        // SAFETY: `ends` is a local array of two c_int, the size pipe writes.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "a pipe");
+        // SAFETY: pipe returned 0, so both entries are new descriptors, which nothing else owns.
+        let [read, write] = ends.map(|end| unsafe { OwnedFd::from_raw_fd(end) });
+        for end in [&read, &write] {
+            // SAFETY: fcntl with F_SETFL takes an integer flag set, and `end` is open.
+            unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        }
+        HANDLER_PIPE.store(
+            std::os::fd::IntoRawFd::into_raw_fd(write),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        HANDLER_OWNER.store(own_pid(), std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: An all-zero libc::sigaction is a valid empty action with no flags. The handler
+        // only calls getpid and write, which are async-signal-safe. `action` is a local that
+        // outlives the calls, and sigaction copies what it reads.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = note_foreign_handler as *const () as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()),
+                0
+            );
+        }
+        Caught(File::from(read))
+    }
+
+    fn pids_other_than_this(mut self) -> Vec<libc::pid_t> {
+        let mut bytes = Vec::new();
+        let _ = self.0.read_to_end(&mut bytes);
+        bytes
+            .chunks_exact(4)
+            .map(|chunk| libc::pid_t::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+}
+
+struct Storm {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    sender: thread::JoinHandle<usize>,
+}
+
+impl Storm {
+    #[allow(unsafe_code)]
+    fn start() -> Storm {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = std::sync::Arc::clone(&stop);
+        let group = own_pid();
+        let sender = thread::spawn(move || {
+            let mut sent = 0;
+            while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                assert_eq!(
+                    kill_group(group, libc::SIGUSR1),
+                    0,
+                    "the case signals its own group"
+                );
+                sent += 1;
+                thread::sleep(Duration::from_micros(20));
+            }
+            sent
+        });
+        Storm { stop, sender }
+    }
+
+    fn stop(self) -> usize {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.sender.join().expect("the storm thread ends")
+    }
+}
+
+#[allow(unsafe_code)]
+fn own_pid() -> libc::pid_t {
+    // SAFETY: getpid takes no arguments and is async-signal-safe.
+    unsafe { libc::getpid() }
 }
 
 fn assert_descriptors(report: &Report, cell: &Cell) {
