@@ -510,12 +510,29 @@ fn assert_unsafe(home: &Home, rule: &str, path: &Path) -> Value {
 fn a_symbolic_link_in_instances_refuses_the_selection() {
     let elsewhere = Home::new();
     let target = elsewhere.listening("a");
-    let home = Home::new();
-    let a = home.listening("a");
-    let link = home.instances().join("l");
-    std::os::unix::fs::symlink(elsewhere.instances().join("a"), &link).expect("a symlink");
-    assert_unsafe(&home, "symlink", &link);
-    assert_never_reached(&a, "a selection with a symbolic link");
+    let file = elsewhere.path().join("file");
+    fs::write(&file, b"not an instance").expect("a regular file");
+    let pointees = [
+        ("a directory", elsewhere.instances().join("a")),
+        ("a socket", elsewhere.socket("a")),
+        ("a file", file),
+        ("nothing", elsewhere.path().join("missing")),
+    ];
+    for (what, pointee) in pointees {
+        let home = Home::new();
+        let a = home.listening("a");
+        let link = home.instances().join("l");
+        std::os::unix::fs::symlink(&pointee, &link).expect("a symlink");
+        let ran = run(&["status"], home.vars());
+        assert_eq!(
+            ran.exit,
+            Exit::Refused,
+            "a link to {what}: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert_unsafe(&home, "symlink", &link);
+        assert_never_reached(&a, &format!("a selection beside a link to {what}"));
+    }
     assert_never_reached(&target, "a selection with a symbolic link");
 }
 
@@ -704,22 +721,98 @@ fn an_oversized_name_from_the_variable_names_the_variable() {
     assert_never_reached(&a, "an oversized request");
 }
 
+fn datagram(home: &Home, name: &str) -> std::os::unix::net::UnixDatagram {
+    home.dir(name);
+    let socket = home.socket(name);
+    let datagram = std::os::unix::net::UnixDatagram::bind(&socket).expect("a datagram socket");
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("0600");
+    datagram
+}
+
 #[cfg(target_os = "macos")]
 #[test]
-fn a_candidate_that_cannot_be_connected_to_refuses_the_selection() {
+fn a_lone_candidate_that_cannot_be_connected_to_is_transport() {
     let eprototype = 41;
-    for with_a in [false, true] {
-        let home = Home::new();
-        let _a = with_a.then(|| home.listening("a"));
-        home.dir("b");
-        let socket = home.socket("b");
-        let _datagram = std::os::unix::net::UnixDatagram::bind(&socket).expect("a datagram socket");
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("0600");
-        let envelope = failure(&run(&["status"], home.vars()), Exit::Unavailable);
-        let error = &envelope["error"];
-        assert_eq!(error["code"], "transport", "{with_a}: {error}");
-        assert_eq!(error["path"], text(&socket));
-        assert_eq!(error["errno"], eprototype);
-        assert_eq!(envelope.get("instance").is_some(), !with_a, "{envelope}");
-    }
+    let home = Home::new();
+    let _datagram = datagram(&home, "b");
+    let envelope = failure(&run(&["status"], home.vars()), Exit::Unavailable);
+    let error = &envelope["error"];
+    assert_eq!(error["code"], "transport", "{error}");
+    assert_eq!(error["path"], text(&home.socket("b")));
+    assert_eq!(error["errno"], eprototype);
+    assert_eq!(
+        envelope["instance"],
+        json!({"name": "b", "socket": text(&home.socket("b"))})
+    );
+}
+
+#[test]
+fn several_candidates_are_ambiguous_whatever_each_connect_gives() {
+    let home = Home::new();
+    let a = home.live("a", 1);
+    let _datagram = datagram(&home, "b");
+    let before = home.stale("c");
+    let envelope = failure(&run(&["status"], home.vars()), Exit::Refused);
+    let error = &envelope["error"];
+    assert_eq!(error["code"], "ambiguous_instance", "{error}");
+    assert_eq!(error["candidates"], json!(["a", "b", "c"]));
+    assert_eq!(error["unreachable"], json!(["b", "c"]));
+    assert!(envelope.get("instance").is_none(), "{envelope}");
+    assert_eq!(a.ended(1), [Vec::<u8>::new()]);
+    assert_eq!(inode(&home.socket("c")), before);
+}
+
+fn too_long(home: &Home) -> String {
+    let around = text(&home.instances()).len() + "/".len() + "/control.uds".len();
+    let name = "s".repeat(MAX_PATH + 1 - around);
+    assert_eq!(home.socket(&name).as_os_str().len(), MAX_PATH + 1);
+    name
+}
+
+#[test]
+fn a_stopped_instance_with_a_long_name_blocks_nothing() {
+    let home = Home::new();
+    let long = too_long(&home);
+    home.dir(&long);
+    let a = home.live("a", 1);
+
+    let envelope = success(&run(&["status"], home.vars()));
+    assert_eq!(
+        envelope["instance"],
+        json!({"name": "a", "socket": text(&home.socket("a"))})
+    );
+    assert_eq!(requests(&a, 1)[0]["params"], json!({"name": "a"}));
+    drop(a);
+    fs::remove_dir_all(home.instances().join("a")).expect("a is removed");
+
+    let envelope = failure(&run(&["status"], home.vars()), Exit::Unavailable);
+    let error = &envelope["error"];
+    assert_eq!(error["code"], "no_instance", "{error}");
+    assert_eq!(error["seen"], json!([long]));
+}
+
+#[test]
+fn a_candidate_whose_path_is_too_long_refuses_the_selection() {
+    let home = Home::new();
+    let a = home.listening("a");
+    let long = too_long(&home);
+    home.dir(&long);
+    let elsewhere = Home::new();
+    let bound = elsewhere.path().join("s.uds");
+    let listener = UnixListener::bind(&bound).expect("a socket at a short path");
+    listener
+        .set_nonblocking(true)
+        .expect("the listener does not block");
+    let socket = home.socket(&long);
+    fs::rename(&bound, &socket).expect("the socket moves to the long path");
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("0600");
+
+    let envelope = failure(&run(&["status"], home.vars()), Exit::Refused);
+    let error = &envelope["error"];
+    assert_eq!(error["code"], "socket_path_too_long", "{error}");
+    assert_eq!(error["path"], text(&socket));
+    assert_eq!(error["max_bytes"], MAX_PATH);
+    assert!(envelope.get("instance").is_none(), "{envelope}");
+    assert_never_reached(&a, "a selection with a candidate too long to connect to");
+    assert_never_reached(&listener, "a selection with a candidate too long to connect to");
 }

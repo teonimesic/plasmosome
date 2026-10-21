@@ -366,9 +366,10 @@ mod tests {
         assert_eq!(judged("/Users/me"), Ok("/Users/me".to_string()));
         assert_eq!(judged("/Users/me/"), Ok("/Users/me".to_string()));
         assert_eq!(judged("/"), Ok(String::new()));
+        assert_eq!(judged("//"), Ok(String::new()));
         for refused in [
             "",
-            "//",
+            "///",
             "/Users/me//",
             "/Users//me",
             "Users/me",
