@@ -299,6 +299,13 @@ impl Drop for DiagnosticTranscript {
     }
 }
 
+enum Taken {
+    Bytes(usize),
+    Nothing,
+    End,
+    Failed,
+}
+
 fn drain(mut pipe: std::fs::File, stop: &AtomicBool, ended: &mpsc::Sender<()>) -> Transcript {
     let mut transcript = Transcript::default();
     let mut chunk = vec![0u8; 65_536];
@@ -306,19 +313,54 @@ fn drain(mut pipe: std::fs::File, stop: &AtomicBool, ended: &mpsc::Sender<()>) -
         if !readable_within(&pipe, POLL_INTERVAL) {
             continue;
         }
-        match pipe.read(&mut chunk) {
-            Ok(0) => {
-                transcript.eof = true;
+        match take(&mut pipe, &mut chunk, &mut transcript) {
+            Taken::Bytes(_) | Taken::Nothing => {}
+            Taken::End => {
                 let _ = ended.send(());
-                break;
+                return transcript;
             }
-            Ok(count) => keep(&mut transcript, &chunk[..count]),
-            Err(error)
-                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
-            Err(_) => break,
+            Taken::Failed => return transcript,
+        }
+    }
+    let held = bytes_held(&pipe);
+    let mut taken = 0;
+    while taken <= held && readable_within(&pipe, Duration::ZERO) {
+        match take(&mut pipe, &mut chunk, &mut transcript) {
+            Taken::Bytes(count) => taken += count,
+            Taken::Nothing | Taken::End | Taken::Failed => break,
         }
     }
     transcript
+}
+
+fn take(pipe: &mut std::fs::File, chunk: &mut [u8], transcript: &mut Transcript) -> Taken {
+    match pipe.read(chunk) {
+        Ok(0) => {
+            transcript.eof = true;
+            Taken::End
+        }
+        Ok(count) => {
+            keep(transcript, &chunk[..count]);
+            Taken::Bytes(count)
+        }
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+            Taken::Nothing
+        }
+        Err(_) => Taken::Failed,
+    }
+}
+
+#[allow(unsafe_code)]
+fn bytes_held(pipe: &std::fs::File) -> usize {
+    let mut held: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one c_int to `held`, a local that outlives the call, and `pipe`
+    // keeps its descriptor open for the call.
+    let asked = unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &raw mut held) };
+    if asked == 0 {
+        usize::try_from(held).unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 #[allow(unsafe_code)]
