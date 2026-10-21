@@ -54,6 +54,28 @@ pub enum EndpointRefusal {
     Permissions { path: RecipePath, errno: i32 },
 }
 
+/// One connection [`RuntimeListener::accept_ready`] took from the listener's
+/// queue.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
+)]
+#[derive(Debug)]
+pub(crate) enum Connection {
+    /// The stream, nonblocking and close-on-exec, with the process id
+    /// [`peer_pid`] read for its peer.
+    Identified {
+        stream: UnixStream,
+        pid: libc::pid_t,
+    },
+    /// Making the stream nonblocking or reading its peer's process id failed
+    /// with `errno`, so the connection was closed. It says nothing about the
+    /// listener, which can accept again. On Darwin a peer that closed its end
+    /// before the accept gives `ENOTCONN` here; on Linux the same peer is
+    /// `Identified` with the pid it had.
+    Unidentified { errno: i32 },
+}
+
 impl RuntimeListener {
     /// Binds a listening socket at `path`, which must name nothing yet.
     ///
@@ -104,14 +126,15 @@ impl RuntimeListener {
     }
 
     /// Accepts one pending connection without blocking, holding the write
-    /// side of the spawn lock, and returns it nonblocking and close-on-exec
-    /// with the process id [`peer_pid`] reads for its peer right after the
-    /// accept. Returns `None` when no connection is pending.
+    /// side of the spawn lock. It makes the stream nonblocking and reads the
+    /// process id [`peer_pid`] reports for its peer right after the accept.
+    /// Returns `None` when no connection is pending, and an error only when
+    /// the listener's own accept fails.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
     )]
-    pub(crate) fn accept_ready(&self) -> std::io::Result<Option<(UnixStream, libc::pid_t)>> {
+    pub(crate) fn accept_ready(&self) -> std::io::Result<Option<Connection>> {
         let stream = match crate::spawn_lock::with_descriptors_held(|_held| {
             self.listener.accept().map(|(stream, _)| stream)
         }) {
@@ -119,9 +142,13 @@ impl RuntimeListener {
             Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(None),
             Err(error) => return Err(error),
         };
-        stream.set_nonblocking(true)?;
+        if let Err(error) = stream.set_nonblocking(true) {
+            return Ok(Some(Connection::Unidentified {
+                errno: errno_of(&error),
+            }));
+        }
         let pid = peer_pid(&stream)?;
-        Ok(Some((stream, pid)))
+        Ok(Some(Connection::Identified { stream, pid }))
     }
 
     /// Closes the listener, then removes its socket file if a no-follow
@@ -429,8 +456,12 @@ mod tests {
     fn accepted_within(listener: &RuntimeListener) -> (UnixStream, libc::pid_t) {
         let deadline = Instant::now() + PATIENCE;
         loop {
-            if let Some(accepted) = listener.accept_ready().expect("accepting does not fail") {
-                return accepted;
+            match listener.accept_ready().expect("accepting does not fail") {
+                Some(Connection::Identified { stream, pid }) => return (stream, pid),
+                Some(Connection::Unidentified { errno }) => {
+                    panic!("the peer is identified, but errno {errno} came back")
+                }
+                None => {}
             }
             assert!(
                 Instant::now() < deadline,
