@@ -91,6 +91,7 @@ enum Defect {
     AConflictingGrantKeepsARecord,
     LeaksAnInvalidOperationOf(UniverseClass, Call),
     RefusalRollsBackTheAddressOf(UniverseClass, Call),
+    ConflictWithdrawsTheLiveGrantOfItsKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -692,6 +693,18 @@ impl EnforcementBackend for DefectiveBackend {
             } else if !promotes {
                 if self.defect == Defect::AConflictingGrantKeepsARecord {
                     self.ledger.insert(handle, entry);
+                } else if self.defect == Defect::ConflictWithdrawsTheLiveGrantOfItsKey {
+                    let live: Vec<OsObject> = self
+                        .ledger
+                        .values()
+                        .filter(|issued| {
+                            issued.owner == entry.owner && issued.capability == entry.capability
+                        })
+                        .map(LedgerEntry::object)
+                        .collect();
+                    for object in live {
+                        self.state.remove(&removal_of(&object), &object.owner);
+                    }
                 }
                 return Err(identity_conflict(handle));
             }
@@ -1878,6 +1891,52 @@ fn the_retry_clause_rejects_a_conflicting_grant_that_keeps_a_record() {
             Defect::AConflictingGrantKeepsARecord,
         ))
     });
+}
+
+#[test]
+fn the_retry_clause_rejects_a_conflict_that_withdraws_the_live_grant_of_its_key() {
+    assert_rejected(|| {
+        conformance::grant_retry_returns_the_original_entry(carrying(
+            Defect::ConflictWithdrawsTheLiveGrantOfItsKey,
+        ))
+    });
+}
+
+#[test]
+fn a_conflict_that_withdraws_a_live_grant_keeps_its_record_and_a_later_apply_hides_it() {
+    let capability = mount("/src", "/work");
+    let owner = conformance::conformance_owner;
+    for defect in [Defect::None, Defect::ConflictWithdrawsTheLiveGrantOfItsKey] {
+        let mut backend = DefectiveBackend::carrying(defect);
+        let live = conformance::op_for(GrantId::new(), owner(), capability.clone());
+        let entry = backend.grant(live.clone(), GrantKind::Hot).unwrap();
+        let applied = conformance::op_for(GrantId::new(), owner(), capability.clone());
+        backend.apply(applied.clone()).unwrap();
+        assert_eq!(
+            backend.grant(applied.clone(), GrantKind::Hot),
+            Err(identity_conflict(applied.handle()))
+        );
+        let withdrawn = defect == Defect::ConflictWithdrawsTheLiveGrantOfItsKey;
+        let mut expected = OsState::new();
+        if !withdrawn {
+            expected.insert(live.object()).unwrap();
+        }
+        expected.insert(applied.object()).unwrap();
+        assert_eq!(backend.snapshot_os_state(), expected, "{defect:?}");
+        assert_eq!(
+            backend.ledger.get(&entry.handle),
+            Some(&entry),
+            "{defect:?}"
+        );
+        backend.apply(live.clone()).unwrap();
+        assert!(
+            backend
+                .snapshot_os_state()
+                .objects()
+                .any(|held| *held == live.object()),
+            "{defect:?}"
+        );
+    }
 }
 
 #[test]
