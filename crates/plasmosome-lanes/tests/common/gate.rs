@@ -268,15 +268,19 @@ fn bundle_sums() -> BTreeMap<String, String> {
 }
 
 pub fn test_commit() -> String {
+    commit_at(&manifest_dir())
+}
+
+pub fn commit_at(dir: &Path) -> String {
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
-        .current_dir(manifest_dir())
+        .current_dir(dir)
         .output()
         .expect("git runs");
     let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
     let clean = Command::new("git")
         .args(["diff", "--quiet", "HEAD"])
-        .current_dir(manifest_dir())
+        .current_dir(dir)
         .status()
         .expect("git runs")
         .success();
