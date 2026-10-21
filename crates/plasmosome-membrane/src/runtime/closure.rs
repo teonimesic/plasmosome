@@ -228,3 +228,843 @@ pub fn audit_closure(
     todo!()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ArtifactRole::{Helper, Library};
+    use ClosureFault::*;
+    use proptest::prelude::*;
+
+    const MH_EXECUTE: u32 = 0x2;
+    const MH_DYLIB: u32 = 0x6;
+    const LC_LOAD_DYLIB: u32 = 0xc;
+    const LC_ID_DYLIB: u32 = 0xd;
+    const LC_LOAD_DYLINKER: u32 = 0xe;
+    const LC_LOAD_WEAK_DYLIB: u32 = 0x8000_0018;
+    const LC_RPATH: u32 = 0x8000_001c;
+    const LC_REEXPORT_DYLIB: u32 = 0x8000_001f;
+    const LC_LAZY_LOAD_DYLIB: u32 = 0x20;
+    const LC_LOAD_UPWARD_DYLIB: u32 = 0x8000_0023;
+    const LC_DYLD_ENVIRONMENT: u32 = 0x27;
+    const ARM64: u32 = 0x0100_000c;
+    const X86_64: u32 = 0x0100_0007;
+    const LOAD_KINDS: [(u32, LoadKind); 5] = [
+        (LC_LOAD_DYLIB, LoadKind::Load),
+        (LC_LOAD_WEAK_DYLIB, LoadKind::Weak),
+        (LC_REEXPORT_DYLIB, LoadKind::Reexport),
+        (LC_LAZY_LOAD_DYLIB, LoadKind::Lazy),
+        (LC_LOAD_UPWARD_DYLIB, LoadKind::Upward),
+    ];
+
+    const HELPER: &str = "/b/bin/krun-helper";
+    const LIBKRUN: &str = "/b/lib/libkrun.1.19.4.dylib";
+    const KRUN_NAME: &str = "@executable_path/../lib/libkrun.1.19.4.dylib";
+    const LIBSYSTEM: &str = "/usr/lib/libSystem.B.dylib";
+    const HYPERVISOR: &str =
+        "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor";
+
+    fn le(fields: &[u32]) -> Vec<u8> {
+        fields
+            .iter()
+            .flat_map(|field| field.to_le_bytes())
+            .collect()
+    }
+
+    fn command(header: &[u32], name: &str) -> Vec<u8> {
+        let mut bytes = le(header);
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        bytes.resize(bytes.len().next_multiple_of(8), 0);
+        let size = u32::try_from(bytes.len()).expect("a small command");
+        bytes[4..8].copy_from_slice(&size.to_le_bytes());
+        bytes
+    }
+
+    fn dylib(cmd: u32, name: &str) -> Vec<u8> {
+        command(&[cmd, 0, 24, 2, 0x1_0000, 0x1_0000], name)
+    }
+
+    fn text(cmd: u32, text: &str) -> Vec<u8> {
+        command(&[cmd, 0, 12], text)
+    }
+
+    fn load(name: &str) -> Vec<u8> {
+        dylib(LC_LOAD_DYLIB, name)
+    }
+
+    fn image(cpu: u32, filetype: u32, commands: &[Vec<u8>]) -> Vec<u8> {
+        let body = commands.concat();
+        let count = |n: usize| u32::try_from(n).expect("small");
+        let mut bytes = le(&[
+            0xfeed_facf,
+            cpu,
+            0,
+            filetype,
+            count(commands.len()),
+            count(body.len()),
+            0,
+            0,
+        ]);
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(&[0x5a; 16]);
+        bytes
+    }
+
+    fn executable(commands: &[Vec<u8>]) -> Vec<u8> {
+        let mut all = vec![text(LC_LOAD_DYLINKER, "/usr/lib/dyld")];
+        all.extend_from_slice(commands);
+        image(ARM64, MH_EXECUTE, &all)
+    }
+
+    fn library(commands: &[Vec<u8>]) -> Vec<u8> {
+        image(ARM64, MH_DYLIB, commands)
+    }
+
+    fn fat(members: &[(u32, Vec<u8>)]) -> Vec<u8> {
+        let small = |n: usize| u32::try_from(n).expect("small");
+        let mut table = vec![0xcafe_babe, small(members.len())];
+        let mut body = Vec::new();
+        let start = (8 + 20 * members.len()).next_multiple_of(16);
+        for (cpu, member) in members {
+            body.resize(body.len().next_multiple_of(16), 0);
+            table.extend([*cpu, 0, small(start + body.len()), small(member.len()), 4]);
+            body.extend_from_slice(member);
+        }
+        let mut bytes: Vec<u8> = table.iter().flat_map(|field| field.to_be_bytes()).collect();
+        bytes.resize(start, 0);
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    fn put(bytes: &[u8], at: usize, value: u32) -> Vec<u8> {
+        let mut bytes = bytes.to_vec();
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        bytes
+    }
+
+    fn path(text: &str) -> RecipePath {
+        RecipePath::parse(text).unwrap_or_else(|error| panic!("{text}: {error:?}"))
+    }
+
+    fn read(bytes: &[u8]) -> Result<MachOImage, ClosureFault> {
+        read_macho(bytes, CpuType::ARM64)
+    }
+
+    fn names(bytes: &[u8], cpu: CpuType) -> Vec<(LoadKind, String)> {
+        read_macho(bytes, cpu).expect("the image reads").names
+    }
+
+    fn loads(list: &[&str]) -> Vec<(LoadKind, String)> {
+        list.iter()
+            .map(|name| (LoadKind::Load, (*name).to_owned()))
+            .collect()
+    }
+
+    fn resolve_in(
+        name: &str,
+        loader_dir: &str,
+        listed: &[&str],
+    ) -> Result<Resolution, ClosureFault> {
+        let listed: Vec<RecipePath> = listed.iter().map(|text| path(text)).collect();
+        resolve(
+            name,
+            loader_dir,
+            "/b/bin",
+            &listed.iter().collect::<Vec<_>>(),
+        )
+    }
+
+    fn unlisted(name: &str, resolved: Option<&str>) -> ClosureFault {
+        UnlistedLibrary {
+            name: name.to_owned(),
+            resolved: resolved.map(str::to_owned),
+        }
+    }
+
+    const BIN: &str = "/b/bin";
+
+    fn refused(helper: &[u8], libraries: &[(&str, Vec<u8>)]) -> (ArtifactRole, ClosureFault) {
+        audit(helper, libraries).expect_err("the audit refuses")
+    }
+
+    fn audit(
+        helper: &[u8],
+        libraries: &[(&str, Vec<u8>)],
+    ) -> Result<AuditedNames, (ArtifactRole, ClosureFault)> {
+        let helper_path = path(HELPER);
+        let paths: Vec<RecipePath> = libraries.iter().map(|(text, _)| path(text)).collect();
+        let inputs: Vec<(&RecipePath, &[u8])> = paths
+            .iter()
+            .zip(libraries)
+            .map(|(path, (_, bytes))| (path, bytes.as_slice()))
+            .collect();
+        audit_images(CpuType::ARM64, (&helper_path, helper), &inputs)
+            .map_err(|refusal| (refusal.image, refusal.fault))
+    }
+
+    fn qualified_helper() -> Vec<u8> {
+        executable(&[
+            load(KRUN_NAME),
+            load("/usr/lib/libiconv.2.dylib"),
+            load(LIBSYSTEM),
+        ])
+    }
+
+    fn libkrun_with(extra: &[Vec<u8>]) -> Vec<u8> {
+        let mut commands = vec![
+            dylib(LC_ID_DYLIB, KRUN_NAME),
+            load(HYPERVISOR),
+            load("/usr/lib/libiconv.2.dylib"),
+            load(LIBSYSTEM),
+        ];
+        commands.extend_from_slice(extra);
+        library(&commands)
+    }
+
+    #[test]
+    fn the_host_cpu_is_the_build_target() {
+        let expected = match std::env::consts::ARCH {
+            "aarch64" => Some(CpuType::ARM64),
+            "x86_64" => Some(CpuType::X86_64),
+            _ => None,
+        };
+        assert_eq!(CpuType::host(), expected);
+    }
+
+    #[test]
+    fn a_thin_image_yields_its_load_names_and_dynamic_linker() {
+        let image = read(&executable(&[load(LIBSYSTEM)])).expect("it reads");
+
+        assert_eq!(image.names, loads(&[LIBSYSTEM]));
+        assert_eq!(image.dylinkers, ["/usr/lib/dyld"]);
+        assert!(image.rpaths.is_empty() && !image.has_dyld_environment);
+    }
+
+    #[test]
+    fn a_fat_file_yields_the_member_for_the_cpu_asked_not_the_first() {
+        let x86 = image(X86_64, MH_EXECUTE, &[load("/x86/only.dylib")]);
+        let bytes = fat(&[(X86_64, x86), (ARM64, executable(&[load(LIBSYSTEM)]))]);
+
+        assert_eq!(names(&bytes, CpuType::ARM64), loads(&[LIBSYSTEM]));
+        assert_eq!(names(&bytes, CpuType::X86_64), loads(&["/x86/only.dylib"]));
+    }
+
+    #[test]
+    fn a_file_with_no_image_or_two_images_for_the_host_cpu_refuses() {
+        let x86 = image(X86_64, MH_EXECUTE, &[load(LIBSYSTEM)]);
+        let arm = executable(&[load(LIBSYSTEM)]);
+
+        assert_eq!(read(&fat(&[(X86_64, x86.clone())])), Err(NoMemberForHost));
+        assert_eq!(read(&fat(&[])), Err(NoMemberForHost));
+        assert_eq!(read(&x86), Err(NoMemberForHost));
+        assert!(matches!(
+            read(&fat(&[(ARM64, arm.clone()), (ARM64, arm)])),
+            Err(Malformed { offset: 28, .. })
+        ));
+    }
+
+    #[test]
+    fn other_formats_are_not_macho() {
+        let fat64 = [
+            &0xcafe_babf_u32.to_be_bytes()[..],
+            &fat(&[(ARM64, executable(&[]))])[4..],
+        ]
+        .concat();
+        let swapped = [&0xfeed_facf_u32.to_be_bytes()[..], &executable(&[])[4..]].concat();
+        let rows: [&[u8]; 7] = [
+            b"",
+            b"\xcf\xfa\xed",
+            b"#!/bin/sh\n",
+            b"\x7fELF\x02\x01\x01\x00",
+            &put(&executable(&[]), 0, 0xfeed_face),
+            &swapped,
+            &fat64,
+        ];
+        for bytes in rows {
+            assert_eq!(read(bytes), Err(NotMachO), "{bytes:02x?}");
+        }
+    }
+
+    #[test]
+    fn every_load_kind_is_collected_in_order_and_the_install_name_is_not() {
+        let mut commands = vec![dylib(LC_ID_DYLIB, "/b/lib/self.dylib")];
+        commands.extend(
+            LOAD_KINDS
+                .iter()
+                .map(|(cmd, _)| dylib(*cmd, &format!("/usr/lib/{cmd:x}.dylib"))),
+        );
+        let expected: Vec<_> = LOAD_KINDS
+            .iter()
+            .map(|(cmd, kind)| (*kind, format!("/usr/lib/{cmd:x}.dylib")))
+            .collect();
+
+        assert_eq!(names(&library(&commands), CpuType::ARM64), expected);
+    }
+
+    #[test]
+    fn an_unlisted_library_named_by_any_load_kind_refuses() {
+        for (cmd, _) in LOAD_KINDS {
+            let helper = executable(&[dylib(cmd, "/opt/homebrew/lib/libz.dylib")]);
+            assert_eq!(
+                refused(&helper, &[]),
+                (Helper, unlisted("/opt/homebrew/lib/libz.dylib", None)),
+                "{cmd:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_rpath_or_dyld_environment_refuses_in_the_helper_and_in_a_library_with_clean_names() {
+        let rpath = |path: &str| RpathPresent {
+            path: path.to_owned(),
+        };
+        let environment = text(LC_DYLD_ENVIRONMENT, "DYLD_INSERT_LIBRARIES=/tmp/x.dylib");
+        let llvm = "/opt/homebrew/opt/llvm/lib";
+        let with_library =
+            |extra: Vec<u8>| refused(&qualified_helper(), &[(LIBKRUN, libkrun_with(&[extra]))]);
+
+        assert_eq!(
+            refused(&executable(&[load(LIBSYSTEM), text(LC_RPATH, "/b/r")]), &[]),
+            (Helper, rpath("/b/r"))
+        );
+        assert_eq!(
+            with_library(text(LC_RPATH, llvm)),
+            (Library(0), rpath(llvm))
+        );
+        assert_eq!(
+            refused(&executable(&[environment.clone()]), &[]),
+            (Helper, DyldEnvironment)
+        );
+        assert_eq!(with_library(environment), (Library(0), DyldEnvironment));
+    }
+
+    #[test]
+    fn rpath_names_bare_names_and_unknown_at_names_refuse_as_searched() {
+        let searched = |name: &str| SearchedName {
+            name: name.to_owned(),
+        };
+        for name in [
+            "@rpath/libx.dylib",
+            "libx.dylib",
+            "lib/x.dylib",
+            "",
+            "@executable_pathx/x",
+            "@loader_path",
+            "@x/y",
+        ] {
+            assert_eq!(
+                resolve_in(name, "/b/bin", &[LIBKRUN]),
+                Err(searched(name)),
+                "{name:?}"
+            );
+        }
+        let helper = executable(&[load("@rpath/libkrun.1.19.4.dylib")]);
+        assert_eq!(
+            refused(&helper, &[]),
+            (Helper, searched("@rpath/libkrun.1.19.4.dylib"))
+        );
+    }
+
+    #[test]
+    fn a_loader_relative_name_resolves_lexically_to_exactly_one_listed_library() {
+        let listed = |name, loader_dir, listed| resolve_in(name, loader_dir, listed);
+        let joined = |name: &str, loader_dir| match resolve_in(name, loader_dir, &[]) {
+            Err(UnlistedLibrary { resolved, .. }) => resolved.expect("a joined path"),
+            other => panic!("{name}: {other:?}"),
+        };
+        let dotted = "@executable_path/./../lib//libkrun.1.19.4.dylib";
+
+        assert_eq!(
+            listed(KRUN_NAME, BIN, &[LIBKRUN]),
+            Ok(Resolution::Listed(0))
+        );
+        assert_eq!(
+            listed(KRUN_NAME, BIN, &["/b/lib/x", LIBKRUN]),
+            Ok(Resolution::Listed(1))
+        );
+        assert_eq!(listed(dotted, BIN, &[LIBKRUN]), Ok(Resolution::Listed(0)));
+        assert_eq!(
+            listed("@loader_path/../lib/d", BIN, &["/b/lib/d"]),
+            Ok(Resolution::Listed(0))
+        );
+        assert_eq!(
+            listed("@executable_path/../lib/d", "/c/lib", &["/b/lib/d"]),
+            Ok(Resolution::Listed(0))
+        );
+        assert_eq!(joined(KRUN_NAME, BIN), LIBKRUN);
+        assert_eq!(joined("@executable_path/../../../x.dylib", BIN), "/x.dylib");
+        assert_eq!(joined("@executable_path/", BIN), BIN);
+        assert_eq!(
+            joined("@loader_path/libextra.dylib", "/b/lib"),
+            "/b/lib/libextra.dylib"
+        );
+    }
+
+    #[test]
+    fn an_absolute_listed_path_is_listed_before_the_system_rule_and_compared_exactly() {
+        let dotted = "/b/lib/../lib/libkrun.1.19.4.dylib";
+
+        assert_eq!(
+            resolve_in(LIBKRUN, BIN, &[LIBKRUN]),
+            Ok(Resolution::Listed(0))
+        );
+        assert_eq!(
+            resolve_in(LIBSYSTEM, BIN, &[LIBSYSTEM]),
+            Ok(Resolution::Listed(0))
+        );
+        assert_eq!(
+            resolve_in(dotted, BIN, &[LIBKRUN]),
+            Err(unlisted(dotted, None))
+        );
+    }
+
+    const SYSTEM: [&str; 5] = [
+        LIBSYSTEM,
+        "/usr/lib/swift/libswiftCore.dylib",
+        HYPERVISOR,
+        "/usr/lib/cronx.dylib",
+        "/System/Library/User Template/x.dylib",
+    ];
+
+    const NOT_SYSTEM: [&str; 16] = [
+        "/usr/libx/e.dylib",
+        "/usr/lib/../../tmp/e.dylib",
+        "/usr/lib/./e.dylib",
+        "/usr//lib/e.dylib",
+        "/usr/lib/",
+        "/usr/lib",
+        "/System/Library",
+        "/opt/homebrew/lib/libz.dylib",
+        "/usr/local/lib/x.dylib",
+        "/opt/homebrew/opt/llvm/lib/libkrunfw.5.dylib",
+        "/USR/LIB/libSystem.B.dylib",
+        "/System/library/Frameworks/x",
+        "/usr/lib/libe\u{301}.dylib",
+        "/usr/lib/lib\u{e9}.dylib",
+        "/tmp/e.dylib",
+        "/usr/lib/e.dylib\u{0}",
+    ];
+
+    #[test]
+    fn only_a_clean_ascii_name_under_the_two_system_prefixes_is_system() {
+        for name in SYSTEM {
+            assert!(is_system_name(name), "{name}");
+            assert_eq!(
+                resolve_in(name, "/b/bin", &[LIBKRUN]),
+                Ok(Resolution::System(name.to_owned()))
+            );
+        }
+        for name in NOT_SYSTEM {
+            assert!(!is_system_name(name), "{name:?}");
+            assert_eq!(
+                resolve_in(name, "/b/bin", &[LIBKRUN]),
+                Err(unlisted(name, None)),
+                "{name:?}"
+            );
+        }
+        assert!(!is_system_name(KRUN_NAME));
+    }
+
+    #[test]
+    fn the_qualified_shape_without_its_rpath_passes_and_records_each_resolution_once() {
+        let helper = executable(&[
+            load(KRUN_NAME),
+            load(LIBSYSTEM),
+            dylib(LC_LOAD_WEAK_DYLIB, LIBSYSTEM),
+        ]);
+        let audited = audit(&helper, &[(LIBKRUN, libkrun_with(&[]))]).expect("it passes");
+
+        assert_eq!(
+            audited.resolved,
+            [(Helper, KRUN_NAME.to_owned(), Library(0))]
+        );
+        assert_eq!(
+            audited.system_names,
+            [LIBSYSTEM, HYPERVISOR, "/usr/lib/libiconv.2.dylib"]
+        );
+    }
+
+    #[test]
+    fn a_listed_librarys_own_unlisted_name_refuses_with_that_library_as_the_image() {
+        let libkrun = libkrun_with(&[load("@loader_path/libextra.dylib")]);
+        let fault = unlisted("@loader_path/libextra.dylib", Some("/b/lib/libextra.dylib"));
+
+        assert_eq!(
+            refused(&qualified_helper(), &[(LIBKRUN, libkrun)]),
+            (Library(0), fault)
+        );
+    }
+
+    #[test]
+    fn library_to_library_names_resolve_against_the_helpers_and_their_own_directories() {
+        let helper = executable(&[load("@executable_path/../lib/sub/a.dylib")]);
+        let a = library(&[
+            load("@executable_path/../lib/b.dylib"),
+            load("@loader_path/../c.dylib"),
+        ]);
+        let libraries = [
+            ("/b/lib/sub/a.dylib", a),
+            ("/b/lib/b.dylib", library(&[])),
+            ("/b/lib/c.dylib", library(&[])),
+            ("/b/lib/unused.dylib", library(&[])),
+        ];
+
+        let audited = audit(&helper, &libraries).expect("it passes");
+
+        assert_eq!(
+            audited.resolved,
+            [
+                (
+                    Helper,
+                    "@executable_path/../lib/sub/a.dylib".to_owned(),
+                    Library(0)
+                ),
+                (
+                    Library(0),
+                    "@executable_path/../lib/b.dylib".to_owned(),
+                    Library(1)
+                ),
+                (Library(0), "@loader_path/../c.dylib".to_owned(), Library(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_foreign_dynamic_linker_or_unreadable_image_refuses_with_its_role() {
+        let foreign = image(ARM64, MH_EXECUTE, &[text(LC_LOAD_DYLINKER, "/tmp/dyld")]);
+        let dylinker = |name: &str| UnexpectedDylinker {
+            name: name.to_owned(),
+        };
+        let in_library = library(&[text(LC_LOAD_DYLINKER, "/usr/lib/dyld2")]);
+
+        assert_eq!(refused(&foreign, &[]), (Helper, dylinker("/tmp/dyld")));
+        assert_eq!(
+            refused(&qualified_helper(), &[(LIBKRUN, in_library)]),
+            (Library(0), dylinker("/usr/lib/dyld2"))
+        );
+        assert_eq!(
+            refused(&qualified_helper(), &[(LIBKRUN, b"nope".to_vec())]),
+            (Library(0), NotMachO)
+        );
+        assert_eq!(refused(b"", &[]), (Helper, NotMachO));
+    }
+
+    #[test]
+    fn a_cut_or_inconsistent_header_load_command_or_name_refuses_malformed_where_it_breaks() {
+        let one = executable(&[]);
+        let named = library(&[load("/usr/lib/libSystem.B.dyl")]);
+        let no_nul = put(&named, 76, u32::from_le_bytes(*b"ylib"));
+        let mut not_utf8 = named.clone();
+        not_utf8[57] = 0xff;
+        let rows: [(&str, Vec<u8>, u64); 12] = [
+            ("header cut short", one[..20].to_vec(), 0),
+            ("ncmds past sizeofcmds", put(&one, 16, 3), 64),
+            ("sizeofcmds past the file", put(&one, 20, 4096), 20),
+            ("cmdsize 0", put(&one, 36, 0), 32),
+            ("cmdsize not a multiple of 8", put(&one, 36, 20), 32),
+            ("cmdsize past sizeofcmds", put(&one, 36, 40), 32),
+            ("name offset past its command", put(&named, 40, 4096), 32),
+            (
+                "name offset inside the dylib header",
+                put(&named, 40, 8),
+                32,
+            ),
+            ("name without NUL", no_nul, 32),
+            ("name not UTF-8", not_utf8, 32),
+            (
+                "dylib command too short",
+                library(&[text(LC_LOAD_DYLIB, "/x")]),
+                32,
+            ),
+            (
+                "rpath command too short",
+                put(&library(&[text(LC_RPATH, "")]), 36, 8),
+                32,
+            ),
+        ];
+        for (what, bytes, offset) in rows {
+            assert!(
+                matches!(read(&bytes), Err(Malformed { offset: at, .. }) if at == offset),
+                "{what}: {:?}",
+                read(&bytes)
+            );
+        }
+    }
+
+    #[test]
+    fn a_fat_table_or_member_past_the_end_refuses_malformed_at_the_table() {
+        let good = fat(&[(ARM64, executable(&[]))]);
+        let be = |bytes: &[u8], at: usize, value: u32| {
+            let mut bytes = bytes.to_vec();
+            bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
+            bytes
+        };
+        for bytes in [
+            be(&good, 4, 1_000_000),
+            be(&good, 20, 1_000_000),
+            be(&be(&good, 16, u32::MAX), 20, u32::MAX),
+            good[..12].to_vec(),
+        ] {
+            assert!(
+                matches!(read(&bytes), Err(Malformed { offset: 8, .. })),
+                "{:?}",
+                read(&bytes)
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn no_mutated_or_random_image_panics_the_reader_or_the_audit(
+            seed in proptest::collection::vec(any::<u8>(), 0..256),
+            flips in proptest::collection::vec((any::<usize>(), any::<u8>()), 0..16),
+            cut in any::<usize>(),
+        ) {
+            let _ = read(&seed);
+            let thin = qualified_helper();
+            let both = fat(&[(X86_64, thin.clone()), (ARM64, libkrun_with(&[text(LC_RPATH, "/r")]))]);
+            for mut bytes in [thin, both] {
+                for (at, value) in &flips {
+                    let index = at % bytes.len();
+                    bytes[index] = *value;
+                }
+                let _ = read(&bytes[..cut % (bytes.len() + 1)]);
+                let _ = audit(&bytes, &[(LIBKRUN, bytes.clone())]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_read_stops_one_byte_past_the_bound_and_reports_a_failed_read() {
+        struct Failing;
+        impl std::io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from_raw_os_error(libc::EIO))
+            }
+        }
+
+        assert_eq!(read_bounded(&[7u8; 16][..], 16), Ok(vec![7u8; 16]));
+        assert_eq!(read_bounded(&[7u8; 17][..], 16), Err(TooLarge { max: 16 }));
+        assert_eq!(
+            read_bounded(std::io::repeat(1), 16),
+            Err(TooLarge { max: 16 })
+        );
+        assert_eq!(
+            read_bounded(Failing, 16),
+            Err(Io {
+                op: "pread",
+                errno: libc::EIO
+            })
+        );
+    }
+
+    #[test]
+    fn a_refusal_displays_its_image_and_rule() {
+        let show = |image, fault| ClosureRefusal { image, fault }.to_string();
+
+        assert_eq!(
+            show(
+                Library(0),
+                RpathPresent {
+                    path: "/l".to_owned()
+                }
+            ),
+            "Library(0): LC_RPATH /l is a search path"
+        );
+        assert_eq!(
+            show(Helper, unlisted("@loader_path/x", Some("/b/bin/x"))),
+            "Helper: @loader_path/x resolves to /b/bin/x, which is not a listed library"
+        );
+        assert_eq!(
+            show(Helper, unlisted("/o/x", None)),
+            "Helper: /o/x is neither a listed library nor on the sealed system volume"
+        );
+        let name = || "/n".to_owned();
+        for fault in [
+            Unsupported,
+            TooLarge { max: 1 },
+            Io {
+                op: "pread",
+                errno: 5,
+            },
+            NotMachO,
+            NoMemberForHost,
+            Malformed {
+                offset: 3,
+                what: "header",
+            },
+            DyldEnvironment,
+            UnexpectedDylinker { name: name() },
+            SearchedName { name: name() },
+            OsIdentity {
+                name: "kern.osversion",
+                errno: 2,
+            },
+        ] {
+            assert!(
+                show(Helper, fault.clone()).len() > "Helper: ".len(),
+                "{fault:?}"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_macos_the_audit_refuses_unsupported() {
+        let helper =
+            crate::runtime::artifacts::verified_for_test(Helper, std::path::Path::new("/dev/null"));
+
+        assert_eq!(
+            audit_closure(&helper, &[]),
+            Err(ClosureRefusal {
+                image: Helper,
+                fault: Unsupported
+            })
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    mod darwin {
+        use super::*;
+        use crate::runtime::artifacts::verify_artifact;
+        use crate::runtime::digest::Digest;
+        use crate::runtime::recipe::Artifact;
+        use crate::runtime::strict_json;
+        use crate::runtime::test_fixtures::tree::ArtifactTree;
+        use std::path::Path;
+        use std::process::Command;
+
+        fn cc(args: &[&Path]) {
+            let status = Command::new("cc").args(args).status().expect("cc runs");
+            assert!(status.success(), "cc {args:?}: {status}");
+        }
+
+        fn verified(role: ArtifactRole, path: &Path) -> VerifiedArtifact {
+            let pin = Digest::of(&std::fs::read(path).expect("read"));
+            let text =
+                serde_json::json!({"path": path.to_str().expect("UTF-8"), "sha256": pin.hex()});
+            let value = strict_json::parse_value(text.to_string().as_bytes()).expect("JSON");
+            let artifact = Artifact::from_value(&value, "helper").expect("an artifact");
+            verify_artifact(role, &artifact).unwrap_or_else(|refusal| panic!("{refusal}"))
+        }
+
+        fn bundle() -> (ArtifactTree, VerifiedArtifact, VerifiedArtifact) {
+            let work = tempfile::tempdir().expect("a build directory");
+            let file = |name: &str, text: &str| {
+                let path = work.path().join(name);
+                std::fs::write(&path, text).expect("write");
+                path
+            };
+            let source = file("t.c", "int t_value(void) { return 7; }\n");
+            let main = file(
+                "main.c",
+                "int t_value(void);\nint main(void) { return t_value(); }\n",
+            );
+            let (dylib, program) = (work.path().join("libt.dylib"), work.path().join("prog"));
+            let install = Path::new("@executable_path/../lib/libt.dylib");
+            cc(&[
+                Path::new("-dynamiclib"),
+                Path::new("-install_name"),
+                install,
+                Path::new("-o"),
+                &dylib,
+                &source,
+            ]);
+            cc(&[Path::new("-o"), &program, &main, &dylib]);
+            let tree = ArtifactTree::new();
+            tree.dir("bin", 0o755);
+            tree.dir("lib", 0o755);
+            let helper = tree.immutable_file("bin/prog", &std::fs::read(&program).expect("read"));
+            let library =
+                tree.immutable_file("lib/libt.dylib", &std::fs::read(&dylib).expect("read"));
+            let (helper, library) = (verified(Helper, &helper), verified(Library(0), &library));
+            (tree, helper, library)
+        }
+
+        fn sysctl(name: &str) -> String {
+            let output = Command::new("/usr/sbin/sysctl")
+                .args(["-n", name])
+                .output()
+                .expect("sysctl runs");
+            String::from_utf8(output.stdout)
+                .expect("UTF-8")
+                .trim_end()
+                .to_owned()
+        }
+
+        #[test]
+        fn a_toolchain_built_program_and_dylib_in_the_bundle_shape_pass_and_fail_unlisted() {
+            let (tree, helper, library) = bundle();
+
+            let evidence = audit_closure(&helper, &[library]).expect("the closure passes");
+
+            assert_eq!(
+                evidence.resolved,
+                [(
+                    Helper,
+                    "@executable_path/../lib/libt.dylib".to_owned(),
+                    Library(0)
+                )]
+            );
+            assert!(
+                evidence.system_names.contains(&LIBSYSTEM.to_owned()),
+                "{evidence:?}"
+            );
+            assert_eq!(evidence.os_build, sysctl("kern.osversion"));
+            assert_eq!(evidence.os_product_version, sysctl("kern.osproductversion"));
+            assert_eq!(
+                evidence.loaded_images,
+                ImageInventory::NotIndependentlyObserved
+            );
+            assert_eq!(evidence.runtime_loads, RuntimeLoads::NotAudited);
+            let resolved = tree.join("lib/libt.dylib");
+            let fault = unlisted("@executable_path/../lib/libt.dylib", resolved.to_str());
+            assert_eq!(
+                audit_closure(&helper, &[]),
+                Err(ClosureRefusal {
+                    image: Helper,
+                    fault
+                })
+            );
+        }
+
+        #[test]
+        fn a_system_name_is_on_the_sealed_volume_only_if_its_nearest_existing_path_is() {
+            for name in [LIBSYSTEM, HYPERVISOR, "/usr/lib/no-such-dir/no-such.dylib"] {
+                assert_eq!(on_sealed_volume(name), Ok(true), "{name}");
+            }
+            for name in [
+                "/System/Library/Caches/x.dylib",
+                "/System/Library/Speech/x.dylib",
+                "/usr/lib/cron/x.dylib",
+                "/usr/lib/cron",
+                "/usr/lib/ruby/site_ruby/x.bundle",
+                "/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice",
+                "/System/Library/Templates/Data/private/etc/localtime/x.dylib",
+                "/System/Library/PrivateFrameworks/XPCServices/x.dylib",
+            ] {
+                assert_eq!(on_sealed_volume(name), Ok(false), "{name}");
+            }
+        }
+
+        #[test]
+        fn a_system_name_that_leaves_the_sealed_volume_refuses_as_unlisted() {
+            let tree = ArtifactTree::new();
+            tree.dir("bin", 0o755);
+            let bytes = executable(&[
+                load(LIBSYSTEM),
+                dylib(LC_LOAD_WEAK_DYLIB, "/usr/lib/cron/libx.dylib"),
+            ]);
+            let helper = verified(Helper, &tree.immutable_file("bin/helper", &bytes));
+
+            let fault = unlisted("/usr/lib/cron/libx.dylib", None);
+            assert_eq!(
+                audit_closure(&helper, &[]),
+                Err(ClosureRefusal {
+                    image: Helper,
+                    fault
+                })
+            );
+        }
+    }
+}

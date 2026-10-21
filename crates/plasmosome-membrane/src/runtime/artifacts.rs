@@ -439,6 +439,24 @@ fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
     }
 }
 
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn verified_for_test(role: ArtifactRole, path: &std::path::Path) -> VerifiedArtifact {
+    let file = File::open(path).expect("the test file opens");
+    let metadata = stat(&file).expect("fstat");
+    VerifiedArtifact {
+        role,
+        path: RecipePath::parse(path.to_str().expect("UTF-8")).expect("a canonical path"),
+        walk: Walk::from_root(path).expect("the walk starts"),
+        identity: FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        },
+        stamp: stamp(&metadata),
+        digest: Digest::of(b""),
+        file,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
