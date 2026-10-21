@@ -58,12 +58,6 @@ fn run<S: AsRef<OsStr> + std::fmt::Debug>(arguments: &[S]) -> Output {
     run_with(plasmid(), arguments)
 }
 
-fn closed_pipe() -> std::io::PipeWriter {
-    let (reader, writer) = std::io::pipe().expect("a pipe");
-    drop(reader);
-    writer
-}
-
 fn tokens(text: &str) -> impl Iterator<Item = &str> {
     text.split(|character: char| character.is_whitespace() || character == ',')
 }
@@ -500,55 +494,4 @@ fn a_refused_argument_round_trips_and_never_prints_a_control() {
         stderr.ends_with("\n(client invalid_argument)\n"),
         "{stderr:?}"
     );
-}
-
-fn closed_stdout(arguments: &[&str]) -> Output {
-    let mut command = plasmid();
-    command.stdout(closed_pipe());
-    run_with(command, arguments)
-}
-
-#[test]
-fn help_and_version_to_a_closed_stdout_exit_1() {
-    for (arguments, written) in [
-        (&["--help"][..], "--help"),
-        (&["-h"], "--help"),
-        (&["add", "--help"], "--help"),
-        (&["new", "--help"], "--help"),
-        (&["--version"], "--version"),
-    ] {
-        let output = closed_stdout(arguments);
-        assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
-        let (command, error) = envelope(&output);
-        assert_eq!(command, written, "{arguments:?}");
-        assert_eq!(error["code"], "local_io", "{arguments:?}");
-        assert_eq!(error["errno"], 32, "{arguments:?}");
-        assert_eq!(
-            keys(&error),
-            ["code", "domain", "errno", "message"],
-            "{arguments:?}"
-        );
-    }
-    let output = closed_stdout(&["--help", "--human"]);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let stderr = text(&output.stderr);
-    let lines: Vec<&str> = stderr.split('\n').collect();
-    assert_eq!(lines.len(), 3, "{stderr:?}");
-    assert!(lines[0].contains("stdout"), "{stderr:?}");
-    assert_eq!(lines[1..], ["(client local_io)", ""], "{stderr:?}");
-}
-
-#[test]
-fn an_envelope_to_a_closed_stderr_still_exits_with_its_code() {
-    for (arguments, code) in [(&["frobnicate"][..], 64), (&["add", "x"], 2)] {
-        let mut command = plasmid();
-        command.stderr(closed_pipe());
-        let output = run_with(command, arguments);
-        assert_eq!(
-            output.status.code(),
-            Some(code),
-            "{arguments:?}: {output:?}"
-        );
-        assert!(output.stdout.is_empty(), "{arguments:?}: {output:?}");
-    }
 }

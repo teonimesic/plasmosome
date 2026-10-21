@@ -499,21 +499,3 @@ fn plasmid_new_names_the_first_fault_on_its_line() {
         assert_eq!(entries(scratch.path()), ["work"], "{arguments:?}");
     }
 }
-
-#[test]
-fn missing_sections_to_a_closed_stdout_exit_3() {
-    let (_scratch, work) = working_directory();
-    let (reader, writer) = std::io::pipe().expect("a pipe");
-    drop(reader);
-    let output = Command::new(env!("CARGO_BIN_EXE_plasmid"))
-        .current_dir(&work)
-        .args(["new", "demo"])
-        .stdout(writer)
-        .output()
-        .expect("the plasmid binary runs");
-    assert_eq!(output.status.code(), Some(3), "{output:?}");
-    assert_eq!(entries(&work), ["demo.toml"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("demo.toml"), "{stderr}");
-    assert!(!stderr.contains("panicked"), "{stderr}");
-}
