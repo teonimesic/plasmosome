@@ -105,6 +105,14 @@ backend and ledger together through their public APIs, with the outside world re
 the seams — the first of them attaches a plasmid's capabilities, replays its ledger on detach,
 and verifies the backend snapshot shows no residue.
 
+`tests/artifact_verdicts.rs`, on macOS only, also runs the membrane. It builds 27 real files in
+the per-user temp directory and runs each through the controller's artifact check, core's
+`artifact::verify_artifact`, and the membrane's, `runtime::artifacts::verify_artifact`. Both
+must give each file its row's verdict, written in core's `ArtifactFault`. Spec 023 §1 needs this:
+a file the controller admits is one the membrane admits at launch, so `cell.new` refuses an
+untrusted file before it allocates anything. One function, `as_core`, turns the membrane's fault
+into core's. A row the two callers disagree on is a defect in one of them, not in the table.
+
 The third is the **membrane differential** of spec 027 §6, a test fixture that no product path
 uses. It holds the probe manifest and the comparator. `differential::load` reads the manifest
 from JSON and refuses it, naming what is wrong, before anything is compared:
