@@ -22,8 +22,10 @@ pub fn entries(directory: &Path) -> Vec<String> {
     names
 }
 
-fn keys(object: &Map<String, Value>) -> Vec<&str> {
-    object.keys().map(String::as_str).collect()
+pub fn keys(object: &Map<String, Value>) -> Vec<&str> {
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    keys
 }
 
 pub fn envelope(output: &Output) -> (String, Map<String, Value>) {
@@ -38,9 +40,11 @@ pub fn envelope(output: &Output) -> (String, Map<String, Value>) {
     let Value::Object(mut envelope) = value else {
         panic!("the envelope is an object: {stderr:?}");
     };
-    let mut seen = keys(&envelope);
-    seen.sort_unstable();
-    assert_eq!(seen, ["command", "error", "schema"], "{stderr:?}");
+    assert_eq!(
+        keys(&envelope),
+        ["command", "error", "schema"],
+        "{stderr:?}"
+    );
     assert_eq!(envelope["schema"], 1, "{stderr:?}");
     let Some(Value::String(command)) = envelope.remove("command") else {
         panic!("command is a string: {stderr:?}");

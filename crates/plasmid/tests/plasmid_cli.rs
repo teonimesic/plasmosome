@@ -3,7 +3,7 @@ use std::process::{Command, Output};
 
 mod support;
 
-use support::{entries, envelope, text, usage_error};
+use support::{entries, envelope, keys, text, usage_error};
 
 const UNSERVED: [(&str, &[&str], &str); 5] = [
     ("list", &[], "plasmid.list"),
@@ -80,9 +80,11 @@ fn assert_not_served(output: &Output, method: &str) {
     assert_eq!(command, method, "{output:?}");
     assert_eq!(error["code"], "not_served", "{output:?}");
     assert_eq!(error["method"], method, "{output:?}");
-    let mut keys: Vec<&str> = error.keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    assert_eq!(keys, ["code", "domain", "message", "method"], "{output:?}");
+    assert_eq!(
+        keys(&error),
+        ["code", "domain", "message", "method"],
+        "{output:?}"
+    );
 }
 
 #[test]
