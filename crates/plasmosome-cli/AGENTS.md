@@ -29,6 +29,9 @@ its envelopes and its client codes. It is `publish = false` and never ships on i
   human form is about 66 times the reply's size.
 - **The client codes are a closed list.** A new code lands in spec 025 first, then in
   `ClientCode::ALL`. The table test reads spec 025's table.
+- **Each private-socket refusal has its own arm.** `map_refusal` names every `PrivateSocketError`
+  variant and has no catch-all arm, so a new variant stops the build. It gets a row in spec 025
+  §5's table first, then its arm. The refusal test reads that table.
 - **Spec 026 §5 lists `scan` and `read_reply`.** A change to either's bound, or to the scan's
   depth handling, updates that row.
 - **`read_reply` takes only its line.** It consumes the line and its newline from a `BufRead`
