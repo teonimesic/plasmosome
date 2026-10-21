@@ -258,6 +258,8 @@ pub struct WireError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     fix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verb: Option<String>,
@@ -282,6 +284,7 @@ impl WireError {
             deadline_ms: None,
             detail: None,
             path: None,
+            field: None,
             fix: None,
             verb: None,
         }
@@ -388,9 +391,10 @@ impl WireError {
         error
     }
 
-    /// Code 108 with no `fix`, for a fault the author cannot repair from the
-    /// refusal, such as spec 022's operator faults. A `ManifestError` goes
-    /// through `manifest_refusal` instead, which keeps its fix.
+    /// Code 108 with no `field`, `fix` or `plasmid`, for a fault the author
+    /// cannot repair from the refusal, such as spec 022's operator faults. A
+    /// `ManifestError` goes through `manifest_refusal` instead, which keeps
+    /// its field, fix and plasmid.
     pub fn manifest_invalid(detail: String, path: String) -> WireError {
         let mut error = WireError::bare(
             ErrorCode::ManifestInvalid,
@@ -414,22 +418,36 @@ impl WireError {
     }
 
     /// Code 108 for a declaration `PlasmidManifest` refused: `path` is the
-    /// declaration file and `detail` the refusal's text. `fix` is present only
-    /// when the refusal names a field, in one of three forms: the TOML to
-    /// write in place of that field, a bare entry for the list the field names
-    /// (written in place of the entry when the field ends in an index), or
-    /// exactly `remove this entry`. A file that could not be read, is not
-    /// TOML (a syntax error included), is over `MAX_MANIFEST_BYTES` or nests
-    /// more than `MAX_MANIFEST_DEPTH` levels (`TooDeep`) carries none.
+    /// declaration file and `detail` the refusal's text. A `Field` refusal
+    /// also carries `field`, `fix` and `plasmid`, so a client never splits
+    /// `detail`. `field` is the declaration field it names, as a TOML path
+    /// with `[i]` for an entry in a list. `fix` is in one of three forms: the
+    /// TOML to write in place of that field, a bare entry for the list the
+    /// field names (written in place of the entry when the field ends in an
+    /// index), or exactly `remove this entry`. `plasmid` is the declaration's
+    /// id itself, not the quoted form `detail` writes; a refusal of the `id`
+    /// carries none. A file that could not be read (`Io`), is not TOML
+    /// (`Parse`, a syntax error included), is over `MAX_MANIFEST_BYTES`
+    /// (`TooLarge`) or nests more than `MAX_MANIFEST_DEPTH` levels (`TooDeep`)
+    /// carries no `field`, `fix` or `plasmid`.
     pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
         let mut wire = WireError::manifest_invalid(error.to_string(), path);
-        wire.fix = match error {
-            ManifestError::Field { fix, .. } => Some(fix.clone()),
+        match error {
+            ManifestError::Field {
+                plasmid,
+                field,
+                fix,
+                ..
+            } => {
+                wire.plasmid = plasmid.clone();
+                wire.field = Some(field.clone());
+                wire.fix = Some(fix.clone());
+            }
             ManifestError::Io(_)
             | ManifestError::Parse(_)
             | ManifestError::TooLarge { .. }
-            | ManifestError::TooDeep { .. } => None,
-        };
+            | ManifestError::TooDeep { .. } => {}
+        }
         wire
     }
 
