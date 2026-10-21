@@ -878,8 +878,8 @@ impl CellDir {
     /// close-on-exec. `flock(LOCK_EX | LOCK_NB)` is taken on it, it is renamed to
     /// `supervisor.lock` without replacing anything, and this directory is synced. With one call
     /// at a time, a probe sees no entry and then a held lock, never a free one. The returned
-    /// [`SupervisorLock`] holds the lock. On Linux the rename needs a filesystem with `RENAME_NOREPLACE`; on one without it the
-    /// call is an `Io` error.
+    /// [`SupervisorLock`] holds the lock. On Linux the rename needs a filesystem with
+    /// `RENAME_NOREPLACE`; on one without it the call is an `Io` error.
     ///
     /// Any `supervisor.lock.tmp` left by an earlier call is removed first; a symlink there is
     /// removed, not followed. Every failure before the rename removes the temporary. An existing
@@ -893,10 +893,10 @@ impl CellDir {
     /// the second call's file into place. So after the rename the call reads the entry named
     /// `supervisor.lock`, without following a symlink, and returns the lock only when that entry
     /// is the file it holds. Otherwise it is `LockNotNamed`, naming `supervisor.lock` in this
-    /// cell, no lock is returned, and the entry is left as it is. `Ok` therefore always means
-    /// that `supervisor.lock` names the held file. When calls race, any of them can fail, and a
-    /// file no call returned can be left at `supervisor.lock`; a probe reads it `Free` once
-    /// nothing holds it.
+    /// cell, no lock is returned, and the entry is left as it is. If the name is gone by then, the
+    /// error is `Io` naming `supervisor.lock`. `Ok` therefore always means that `supervisor.lock`
+    /// names the held file. When calls race, any of them can fail, and a file no call returned can
+    /// be left at `supervisor.lock`; a probe reads it `Free` once nothing holds it.
     ///
     /// A directory at `supervisor.lock.tmp` cannot be unlinked, so every call is then an `Io`
     /// error naming it, while a probe reads `Missing`. Only a writer under the root can plant
