@@ -3,10 +3,12 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// The leaf name libkrun v1.19.4 passes to `dlopen` inside `krun_create_ctx`.
+/// The leaf name libkrun v1.19.4 passes to `dlopen` inside `krun_create_ctx`. That libkrun's
+/// record is `docs/dependencies/native/libkrun.toml`.
 pub const LIBKRUNFW: &str = "libkrunfw.5.dylib";
 
-/// The `LC_RPATH` entries of the pinned bundle's libkrun.
+/// The `LC_RPATH` entries of the pinned bundle's libkrun. That libkrun's record is
+/// `docs/dependencies/native/libkrun.toml`.
 pub const LIBKRUN_RPATHS: &[&str] = &["/opt/homebrew/opt/llvm/lib"];
 
 /// dyld's default fallback directories for a leaf name.
