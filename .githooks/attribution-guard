@@ -154,6 +154,28 @@ record_offending_trailers() {
   done <<< "$parsed"
 }
 
+# Answers whether the line on $1 holds only characters that some reader may call blank: git's
+# three, a vertical tab, a form feed and the Unicode spaces. It compares UTF-8 bytes, because the
+# guard runs in the C locale. The first test turns an ordinary line away after one pattern match.
+# That test alone is not enough: U+30C0, a letter, is made only of bytes from the set. So the
+# Unicode spaces are then removed whole, and anything left other than git's three, a vertical tab
+# or a form feed makes the line text.
+blank_to_another_reader() {
+  local rest=$1
+  case $rest in
+    *[!$' \t\r\v\f\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x9a\x9f\xa0\xa8\xa9\xaf\xbb\xbf\xc2\xe1\xe2\xe3\xef']*) return 1 ;;
+  esac
+  rest=${rest//$'\xc2'[$'\x85\xa0']/}
+  rest=${rest//$'\xe1\x9a\x80'/}
+  rest=${rest//$'\xe2\x80'[$'\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\xa8\xa9\xaf']/}
+  rest=${rest//$'\xe2\x81\x9f'/}
+  rest=${rest//$'\xe3\x80\x80'/}
+  rest=${rest//$'\xef\xbb\xbf'/}
+  case $rest in
+    *[!$' \t\r\v\f']*) return 1 ;;
+  esac
+}
+
 # Splits the message on $1 into paragraphs and offers each to `record_offending_trailers`.
 #
 # A paragraph ends at a line holding nothing but spaces, tabs and carriage returns, not only at an
@@ -162,15 +184,20 @@ record_offending_trailers() {
 # empty line collapsed such a message into one paragraph, which git then read as prose, so a
 # mid-body trailer in it went unseen. Splitting at any other line, such as one holding only a
 # vertical tab, cuts a trailer block git reads whole, and the trailers above the cut go unseen.
+#
+# Another reader may call such a line blank, and split there. So when $2 is set, a line that
+# `blank_to_another_reader` accepts ends a paragraph too, and the caller reads a message both ways.
 record_offending_trailers_in_message() {
-  local message=$1 line paragraph=''
+  local message=$1 wide=${2-} line paragraph=''
   matches "$nominate" "$message" || return 0
   while IFS= read -r line; do
     line=${line%$'\r'}
     case $line in
       *[!$' \t\r']*)
-        paragraph+="$line"$'\n'
-        continue
+        if [ -z "$wide" ] || ! blank_to_another_reader "$line"; then
+          paragraph+="$line"$'\n'
+          continue
+        fi
         ;;
     esac
     record_offending_trailers "$paragraph"
@@ -195,6 +222,10 @@ for sha in $commits; do
   fi
   offences=()
   record_offending_trailers_in_message "$message"
+  # Git's reading refused nothing: read again, splitting where another reader may.
+  if [ "${#offences[@]}" -eq 0 ]; then
+    record_offending_trailers_in_message "$message" wide
+  fi
   for refused in "${offences[@]+"${offences[@]}"}"; do
     echo "attribution-guard: ${sha:0:9} $refused"
     status=1
