@@ -21,7 +21,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here verifies an artifact or boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
 
 ## Use
 
@@ -206,6 +206,56 @@ The lock covers only those paths. Forks that do not go through `VmmChild::spawn`
 control socket, spawns its brokers and serves requests on one thread, so none of them can overlap
 a fork. Code that creates descriptors or forks on a second thread must take the lock first.
 
+## Verifying the pinned artifacts
+
+Spec 001 §4.2 refuses a replaceable parent or a mutable artifact rather than trust it after hashing,
+and asks that verification keep the selected inode and bytes, because the helper and libkrun open
+artifacts by path. `runtime::artifacts::verify_artifact` checks one artifact that way, and
+`verify_recipe_artifacts` checks all of a recipe's in field order, stopping at the first refusal.
+
+The path is walked from `/` with core's no-follow walk, `plasmosome_core::nofollow`. No component
+may be a symlink. Every directory on the way must be owned by root or the effective uid and writable
+by neither group nor other, with no sticky-bit exception and, on macOS, no ACL allow entry that
+grants a right to replace its entries, whoever the entry names. On macOS no directory may sit on a
+volume mounted with ownership ignored (`noowners`), where owner and mode keep no one out. The file
+must be a regular file owned by root or the effective uid, with no write bit, no set-id bit and no
+ACL entry granting write, and on macOS `uchg` or `schg` must be set. Off macOS immutability cannot
+be shown, so every artifact that passes the other rules is refused with `ImmutabilityUnverifiable`.
+Only then are the bytes hashed, through the same descriptor with positioned reads, and compared with
+the pin. The hash reads at most one byte past the size the file was checked at. Nothing bounds that
+size: a process that opened the file for writing before it was locked can extend it first, and in a
+review probe on macOS 26.6.2, in the dev profile, a writer that kept extending a 64 MiB file made
+its verification take 43 to 340 s, against 3.9 to 5.5 s alone. The file's size, modification time
+and change time must be the same after the hash as before it, or it is refused as
+`ChangedWhileHashing`.
+
+On macOS pass the canonical path: `/var` is a symlink, so `/var/folders/...` is refused at `/var`.
+Measured on macOS 26.6.2 on 2026-10-21, the qualified bundle's kernel is refused at
+`/usr/local/var`, which has mode 0775; that is owner gate O-1 on `plasmosome-qep`.
+
+A `VerifiedArtifact` keeps the descriptor, the file's device and inode, its size and times, and its
+digest. `file()` still reads the verified inode after the path is made to name another file.
+`reconfirm()` opens the path again under the same checks. It refuses another inode as `Replaced`,
+and a file whose size or times moved since it was verified as `ChangedSinceVerification`. Call it
+just before the launch that relies on the path. Root and the effective uid can still clear `uchg`
+and change a file, or replace a directory they own; that is owner gate O-4. A process that opened
+the file for writing before it was locked can still write it too, because the mode and `uchg`
+refuse only new opens. Measured on macOS 26.6.2, such a write moves the file's times, so
+`reconfirm()` refuses a change made before it runs, but not one made after.
+
+`reconfirm()` sees a change to the file's bytes only if the change moves the device, inode, size,
+modification time or change time. A shared mapping made before the file was locked, from a
+descriptor opened for writing, can change the bytes whatever protection it had when the file was
+locked, because `mprotect` can add write later. Such a write moves the times only at `msync` or
+`munmap`, if at all, so neither `reconfirm()` nor verification sees it. Measured on macOS 26.6.2 on
+APFS on 2026-10-21, a write through such a mapping, writable at the lock or made writable after it,
+changes what `pread` and a fresh open read at once, while the size and times stay as they were until
+`msync` or `munmap`; at `munmap` of the mapping made writable after the lock, only the change time
+moved. A mapping made from a descriptor opened read-only cannot gain write (`mprotect` fails with
+`EACCES`), and neither can a mapping made after the lock: `mmap` with `PROT_WRITE` fails with
+`EPERM`, and adding write with `mprotect` fails with `EACCES`. Hashing again in `reconfirm()` would
+only narrow the window, because the mapping can write after any hash, so it does not.
+
 ## Launching the VMM helper
 
 `runtime::launch::HelperExec` runs the pinned VMM helper the way spec 001 §4.2 says: argv is
@@ -241,9 +291,10 @@ with the machine lightly loaded and up to about 680 ms under heavy load.
 An empty environment and the working directory `/` mean no `DYLD_*` or `LD_*` variable and no
 relative path can add to where the helper's loader looks for libraries. They do not remove a search
 path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
-names in the qualified libkrun. The launch checks no artifact either, and nothing in this crate
-verifies one yet: the cell, plasmosome-7em, which is not built yet, must verify the helper and its
-libraries before it prepares the launch.
+names in the qualified libkrun. The launch checks no artifact either: the cell, plasmosome-7em,
+which is not built yet, must verify the helper and its libraries with `runtime::artifacts` before it
+prepares the launch. That checks only the files the recipe lists. plasmosome-vev, also not built,
+audits the helper's Mach-O load names against those verified libraries.
 
 ## The runtime's listeners and diagnostics
 

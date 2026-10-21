@@ -11,7 +11,7 @@ pub struct CellArgs {
 }
 
 impl CellArgs {
-    /// Takes the arguments after argv[0]. Returns the form only when there are exactly three, in
+    /// Takes the arguments after `argv[0]`. Returns the form only when there are exactly three, in
     /// this order: `--config-fd=3` and `--lock-fd=4`, spelled exactly so, then `--cell=` and a
     /// cell ID that `parse_cell_id` accepts. Any other list is `None`, including one with an
     /// argument that is not UTF-8.

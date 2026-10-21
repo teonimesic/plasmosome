@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod confinement;
 pub use plasmosome_backend::digest;
 pub mod endpoints;

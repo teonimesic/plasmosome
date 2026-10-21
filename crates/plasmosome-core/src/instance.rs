@@ -14,6 +14,7 @@ use plasmosome_backend::{BootSession, CellId};
 use serde_json::Value;
 
 use crate::runtime::cell_id::{MAX_CELL_NUMBER, format_cell_id, parse_cell_id};
+use crate::runtime::cell_paths::RUNTIME_DIR;
 use crate::runtime::line::{LineFault, read_line};
 use crate::state::{
     CELL_JOURNAL_FILE, CELLS_DIR, CellPathError, cell_ledger_path, validate_cell_id,
@@ -30,7 +31,6 @@ const NEW_FILE_FLAGS: libc::c_int =
 const LAUNCHED_FILE: &CStr = c"launched";
 const LAUNCHED_TEMPORARY: &CStr = c"launched.tmp";
 const CREATED_FILE: &CStr = c"created";
-const RUNTIME_DIR: &CStr = c"runtime";
 const RETIRED_DIR: &CStr = c"retired";
 const CELLS_NAME: &CStr = c"cells";
 const SUPERVISOR_LOCK_FILE: &CStr = c"supervisor.lock";
