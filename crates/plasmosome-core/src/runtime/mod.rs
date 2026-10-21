@@ -1,7 +1,7 @@
 pub mod cell_id;
 #[cfg(test)]
 pub(crate) mod fixtures;
-mod line;
+pub(crate) mod line;
 pub mod path;
 pub mod recipe;
 pub mod strict_json;

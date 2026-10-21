@@ -1,0 +1,828 @@
+#!/usr/bin/env python3
+"""Build the workload root image: raw ext4 from a digest-pinned base, with spec 024's account.
+
+Usage: tools/root-image build --base NAME@sha256:HEX --work-root DIR --images-root DIR
+       [--platform linux/arm64] [--size-mib 1024] [--source-date-epoch UNIX] [--add SRC:DEST:MODE]
+
+It prints one JSON line and exits 0, or prints `root-image: refused <step>: <detail>` and exits 1.
+The repository README's "Root image" section says what the image holds and how to pin it.
+"""
+
+import argparse
+from collections import namedtuple
+import hashlib
+import io
+import json
+import math
+import os
+from pathlib import Path
+import posixpath
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+
+IMAGE_FORMAT = "plasmosome-root-image/1"
+TASK = "plasmosome-2s1x"
+WORKLOAD = {"user": "workload", "uid": 1000, "gid": 1000, "home": "/home/workload", "shell": "/bin/bash"}
+PASSWD_LINE = b"workload:x:1000:1000::/home/workload:/bin/bash"
+GROUP_LINE = b"workload:x:1000:"
+SOFTWARE_DIRS = ("opt", "usr/local/bin")
+EMPTIED_DIRS = ("dev", "proc", "sys")
+SKEL = "etc/skel/"
+CREATE_TIMED = ("dev", "proc", "sys", "etc", "etc/mtab")
+PROTECTED = ("opt", "usr/local/bin", "proc", "dev", "sys", "tmp", "home/workload")
+ACCOUNT_FILES = (("etc/passwd", (2, 3), ()), ("etc/group", (2,), (3,)), ("etc/shadow", (), ()),
+                 ("etc/gshadow", (), (2, 3)))
+NETWORK_FILES = {
+    "etc/hostname": b"localhost\n",
+    "etc/hosts": b"127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n",
+    "etc/resolv.conf": b"nameserver 127.0.0.53\n",
+}
+HINTS = ("plasmosome", "plasmid")
+MAX_ACCOUNT_FILE_BYTES = 1 << 20
+MAX_ADD_BYTES = 256 << 20
+MAX_OUTPUT_BYTES = 16 << 20
+MAX_OWN_FILE_BYTES = 1 << 20
+MAX_LINK_BYTES = 4095
+HOLE = 64 << 10
+COMMAND_TIMEOUT = 1800
+BLOCK_SIZE = 4096
+TREE = "/tree"
+NOT_FOUND = "File not found by ext2_lookup"
+PROBES = (("cat /etc/passwd", "passwd"), ("cat /etc/group", "group"),
+          ("stat /home/workload", "home.stat"), ("ls -p /home/workload", "home.ls"),
+          ("stat /tmp", "tmp.stat"), ("ls -p /opt", "opt.ls"), ("ls -p /usr/local/bin", "usr-local-bin.ls"))
+FORMS = {"application/vnd.oci.image.index.v1+json": "index",
+         "application/vnd.docker.distribution.manifest.list.v2+json": "index",
+         "application/vnd.oci.image.manifest.v1+json": "manifest",
+         "application/vnd.docker.distribution.manifest.v2+json": "manifest"}
+LIMITS = ["The base is spec 027 Q3's default, debian:bookworm-slim pinned by digest. "
+          "The owner may change it, and a change is a new build with a new pin.",
+          "The base checks itself: its own tar and sh unpack the stage, and its mke2fs, e2fsck, dumpe2fs and debugfs "
+          "make and read back the filesystem, so the read-back reports only what that base chooses to report.",
+          "content.jsonl lists the stage tar the image was made from. It is not a listing read back from rootfs.raw."]
+REFERENCE = re.compile(r"(?P<name>[^@\s]+)@(?P<digest>sha256:[0-9a-f]{64})\Z")
+PLATFORM = re.compile(r"[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?\Z")
+DEST = re.compile(r"(/[A-Za-z0-9._+-]+)+\Z")
+MODE = re.compile(r"[0-7]{3,4}\Z")
+STAT_TYPE = re.compile(r"Type: ([a-z]+)[ \t]+Mode:[ \t]+([0-7]{1,7})\b")
+STAT_OWNER = re.compile(r"User:[ \t]+([0-9]{1,10})[ \t]+Group:[ \t]+([0-9]{1,10})\b")
+OCTAL = re.compile(r"[0-7]{1,7}")
+DECIMAL = re.compile(r"[0-9]{1,10}")
+TAR_TYPES = {"dir": tarfile.DIRTYPE, "file": tarfile.REGTYPE, "symlink": tarfile.SYMTYPE, "hardlink": tarfile.LNKTYPE}
+
+Base = namedtuple("Base", "reference digest")
+Add = namedtuple("Add", "source dest mode")
+Result = namedtuple("Result", "code out err")
+
+
+class Refused(Exception):
+    """A step refused; `step` names it and `detail` says what a stranger must fix."""
+
+    def __init__(self, step, detail):
+        super().__init__(f"{step}: {detail}")
+        self.step, self.detail = step, detail
+
+
+def parse_args(argv):
+    """Parse the build command line; argparse exits 2 on a malformed one."""
+    parser = argparse.ArgumentParser(prog="root-image")
+    commands = parser.add_subparsers(dest="command", required=True)
+    build_parser = commands.add_parser("build")
+    build_parser.add_argument("--base", required=True)
+    build_parser.add_argument("--platform", default="linux/arm64")
+    build_parser.add_argument("--work-root", required=True)
+    build_parser.add_argument("--images-root", required=True)
+    build_parser.add_argument("--size-mib", type=int, default=1024)
+    build_parser.add_argument("--source-date-epoch", type=int)
+    build_parser.add_argument("--add", action="append", default=[])
+    return parser.parse_args(argv)
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def open_regular(path, step, what):
+    """Open path for reading without blocking or following a final symlink; refuse a non-regular file."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise Refused(step, f"{what} is missing") from None
+    except OSError as error:
+        raise Refused(step, f"cannot read {what}: {error.strerror}") from None
+    handle = os.fdopen(descriptor, "rb")
+    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        handle.close()
+        raise Refused(step, f"{what} is not a regular file")
+    return handle
+
+
+def read_bounded(path, step, limit, what=None):
+    """Return the bytes of a regular file, read through a limit of `limit` plus one byte."""
+    what = what or str(path)
+    with open_regular(path, step, what) as handle:
+        try:
+            data = handle.read(limit + 1)
+        except OSError as error:
+            raise Refused(step, f"cannot read {what}: {error.strerror}") from None
+    if len(data) > limit:
+        raise Refused(step, f"{what} is larger than {limit} bytes")
+    return data
+
+
+def hash_bounded(path, step, limit, what):
+    """Return the SHA-256 of a regular file, refusing one larger than `limit` bytes."""
+    digest, total = hashlib.sha256(), 0
+    with open_regular(path, step, what) as handle:
+        try:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                total += len(chunk)
+                if total > limit:
+                    raise Refused(step, f"{what} is larger than {limit} bytes")
+                digest.update(chunk)
+        except OSError as error:
+            raise Refused(step, f"cannot read {what}: {error.strerror}") from None
+    return digest.hexdigest()
+
+
+def parse_base(text):
+    """Return the Base for `NAME[:TAG]@sha256:HEX`, refusing any reference without a digest."""
+    match = REFERENCE.match(text)
+    if not match:
+        raise Refused("base", f"{text!r} names no sha256 digest; pass NAME@sha256:<64 lowercase hex>")
+    return Base(text, match.group("digest"))
+
+
+def parse_add(text):
+    """Return the Add for `SRC:DEST:MODE`, refusing a destination or mode the image cannot take."""
+    parts = text.rsplit(":", 2)
+    if len(parts) != 3 or not parts[0]:
+        raise Refused("add", f"{text!r} is not SRC:DEST:MODE")
+    source, dest, mode = parts
+    if not DEST.match(dest) or posixpath.normpath(dest) != dest:
+        raise Refused("add", f"{dest!r} must be an absolute normalised path of letters, digits and . _ + -")
+    for protected in PROTECTED:
+        if dest[1:] == protected or dest[1:].startswith(protected + "/"):
+            raise Refused("add", f"{dest} is under /{protected}, which the tool keeps for the image contract")
+    if not MODE.match(mode) or int(mode, 8) & 0o7000:
+        raise Refused("add", f"mode {mode!r} must be 3 or 4 octal digits without setuid, setgid or sticky")
+    return Add(source, dest, int(mode, 8))
+
+
+def docker_env(environ):
+    """Return the environment every command runs with: PATH, HOME and DOCKER_* settings only."""
+    return {key: value for key, value in environ.items() if key in ("PATH", "HOME") or key.startswith("DOCKER_")}
+
+
+def make_work_root(path):
+    """Create the work root with mode 0700, refusing one that already exists."""
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        raise Refused("work root", f"{path} already exists; every build takes a new work root") from None
+    except OSError as error:
+        raise Refused("work root", f"cannot create {path}: {error.strerror}") from None
+    os.chmod(path, 0o700)
+    return path
+
+
+def inspect(run, env, argv, base):
+    result = run(argv, env)
+    if result.code != 0:
+        raise Refused("export", f"{base.reference} is not a local image ({result.err.strip()}); "
+                                f"run `docker pull {base.reference}` first, since the build never pulls")
+    try:
+        record = json.loads(result.out)[0]
+    except (ValueError, IndexError, KeyError, TypeError, RecursionError):
+        record = None
+    if not isinstance(record, dict):
+        raise Refused("export", f"`{' '.join(argv)}` printed no image record")
+    return record
+
+
+def export_base(run, env, base, platform, work):
+    """Check the local base carries the pinned digest, export it to work/base.tar, return its record."""
+    top = inspect(run, env, ["docker", "image", "inspect", base.reference], base)
+    digests = top.get("RepoDigests") or []
+    descriptor = top.get("Descriptor") or {}
+    if not isinstance(digests, list) or not isinstance(descriptor, dict) or \
+            not isinstance(descriptor.get("mediaType", ""), str):
+        raise Refused("export", f"`docker image inspect {base.reference}` printed a record in a shape Docker "
+                                f"does not write")
+    if not any(isinstance(d, str) and d.endswith("@" + base.digest) for d in digests) or \
+            descriptor.get("digest", base.digest) != base.digest:
+        raise Refused("export", f"the local {base.reference} does not carry {base.digest}; "
+                                f"its repository digests are {digests}")
+    target = inspect(run, env, ["docker", "image", "inspect", "--platform", platform, base.reference], base)
+    target_descriptor = target.get("Descriptor") or {}
+    if not isinstance(target_descriptor, dict):
+        raise Refused("export", f"`docker image inspect --platform {platform}` printed a record in a shape Docker "
+                                f"does not write")
+    if [target.get("Os"), target.get("Architecture")] != platform.split("/")[:2]:
+        raise Refused("export", f"the local {base.reference} has no {platform} image; "
+                                f"run `docker pull --platform {platform} {base.reference}` first")
+    created = run(["docker", "create", "--pull", "never", "--platform", platform, "--network", "none",
+                   base.reference, "/bin/true"], env)
+    container = created.out.strip()
+    if created.code != 0 or not re.fullmatch(r"[0-9a-f]{12,64}", container):
+        raise Refused("export", f"docker create exited {created.code}: {created.err.strip()}")
+    try:
+        exported = run(["docker", "export", "-o", str(work / "base.tar"), container], env)
+    finally:
+        removed = run(["docker", "rm", container], env)
+    if exported.code != 0:
+        raise Refused("export", f"docker export exited {exported.code}: {exported.err.strip()}")
+    if removed.code != 0:
+        raise Refused("export", f"docker rm {container} exited {removed.code}, so the container remains")
+    return {"reference": base.reference, "digest": base.digest,
+            "digest_form": FORMS.get(descriptor.get("mediaType"), "unknown"), "platform": platform,
+            "platform_manifest_digest": target_descriptor.get("digest"), "image_id": top.get("Id")}
+
+
+class LimitedReader:
+    """A seekable view of a file that refuses any read ending past `limit` bytes, and never asks for more."""
+
+    def __init__(self, handle, limit, what):
+        self.handle, self.limit, self.what = handle, limit, what
+
+    def read(self, size=-1):
+        room = max(self.limit + 1 - self.handle.tell(), 0)
+        size = room if size is None or size < 0 else min(size, room)
+        data = self.handle.read(size)
+        if self.handle.tell() > self.limit:
+            raise Refused("stage", f"{self.what} is larger than {self.limit} bytes")
+        return data
+
+    def seek(self, offset, whence=0):
+        return self.handle.seek(offset, whence)
+
+    def tell(self):
+        return self.handle.tell()
+
+
+def kind_of(member):
+    if member.isdir():
+        return "dir"
+    if member.issym():
+        return "symlink"
+    if member.islnk():
+        return "hardlink"
+    return "file" if member.isreg() else None
+
+
+def tar_info(name, kind, mode, uid, gid, mtime, size=0, link=""):
+    info = tarfile.TarInfo(name)
+    info.type, info.mode, info.uid, info.gid, info.mtime = TAR_TYPES[kind], mode, uid, gid, int(mtime)
+    info.size, info.linkname = size, link
+    return info
+
+
+def under(name, directory):
+    return name == directory or name.startswith(directory + "/")
+
+
+def resolve(members, path):
+    """Follow symlinks among the base's members, as a process rooted in the image would."""
+    parts, resolved, hops = path.split("/"), [], 40
+    while parts:
+        part = parts.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            resolved = resolved[:-1]
+            continue
+        member = members.get("/".join(resolved + [part]))
+        if member is not None and member.issym():
+            hops -= 1
+            if hops < 0:
+                return None
+            parts = member.linkname.split("/") + parts
+            resolved = [] if member.linkname.startswith("/") else resolved
+            continue
+        resolved.append(part)
+    member = members.get("/".join(resolved))
+    return members.get(member.linkname) if member is not None and member.islnk() else member
+
+
+def read_member(source, member, limit):
+    data = source.extractfile(member).read(limit + 1)
+    if len(data) > limit:
+        raise Refused("stage", f"/{member.name} is larger than {limit} bytes")
+    return data
+
+
+def base_members(source):
+    """Return the base's kept members by name, in order, refusing names and types the image cannot hold."""
+    members = {}
+    for member in source.getmembers():
+        name = member.name
+        if "\0" in name or "\0" in member.linkname:
+            raise Refused("stage", f"the base holds a member {name!r} whose name or link holds a NUL byte")
+        if len(os.fsencode(member.linkname)) > MAX_LINK_BYTES:
+            raise Refused("stage", f"/{name} has a link target of {len(os.fsencode(member.linkname))} bytes, over the "
+                                   f"{MAX_LINK_BYTES} that Linux allows")
+        if name in ("", ".") or name.startswith("/") or ".." in name.split("/") or \
+                posixpath.normpath(name) != name:
+            raise Refused("stage", f"the base holds a member named {name!r}, not a normalised relative path")
+        if name in members:
+            raise Refused("stage", f"the base holds /{name} twice")
+        if name == ".dockerenv" or any(name.startswith(d + "/") for d in EMPTIED_DIRS):
+            continue
+        parent = posixpath.dirname(name)
+        if parent and (parent not in members or kind_of(members[parent]) != "dir"):
+            raise Refused("stage", f"/{name} has no earlier directory /{parent} in the base, so GNU tar would put it "
+                                   f"wherever /{parent} leads")
+        kind = kind_of(member)
+        if kind is None:
+            raise Refused("stage", f"/{name} is not a regular file, directory or link")
+        if not math.isfinite(member.mtime):
+            raise Refused("stage", f"/{name} has an mtime of {member.mtime}, not a finite number")
+        target = members.get(member.linkname) if member.islnk() else None
+        if member.islnk() and (target is None or kind_of(target) != "file"):
+            raise Refused("stage", f"/{name} is a hard link to /{member.linkname}, which is not an earlier file")
+        members[name] = member
+    return members
+
+
+def check_layout(members, adds):
+    for name, member in members.items():
+        if any(hint in (name + "\0" + member.linkname).casefold() for hint in HINTS):
+            raise Refused("stage", f"/{name} names {' or '.join(HINTS)}, which tells the workload where it runs")
+        for directory in SOFTWARE_DIRS:
+            if name.startswith(directory + "/"):
+                raise Refused("stage", f"/{name} is under /{directory}, which spec 027 requires empty in the image")
+        if name.startswith("tmp/") or under(name, "home/workload"):
+            raise Refused("stage", f"the base already holds /{name}")
+        if name.startswith(SKEL) and ("/" in name.removeprefix(SKEL) or kind_of(member) != "file"):
+            raise Refused("stage", f"/{name} in /etc/skel is not a regular file, which is all the tool copies")
+        if member.islnk() and member.linkname in (*NETWORK_FILES, *(n for n, *_ in ACCOUNT_FILES)):
+            raise Refused("stage", f"/{name} is a hard link to /{member.linkname}, which the tool rewrites")
+    for name in ("opt", "usr", "usr/local", "usr/local/bin", "tmp", "home", *EMPTIED_DIRS, *NETWORK_FILES):
+        member = members.get(name)
+        wants_dir = name not in NETWORK_FILES
+        if member is not None and (kind_of(member) == "dir") != wants_dir:
+            raise Refused("stage", f"/{name} is a {kind_of(member)} in the base")
+    bash = resolve(members, "bin/bash")
+    if bash is None or kind_of(bash) != "file" or not bash.mode & 0o111:
+        raise Refused("stage", "the base has no executable /bin/bash for the workload's shell")
+    for add in adds:
+        parts = add.dest[1:].split("/")
+        if any(hint in add.dest.casefold() for hint in HINTS):
+            raise Refused("stage", f"{add.dest} names {' or '.join(HINTS)}, which tells the workload where it runs")
+        for depth in range(1, len(parts)):
+            parent = members.get("/".join(parts[:depth]))
+            if parent is None or not parent.isdir():
+                raise Refused("stage", f"--add {add.dest} needs /{'/'.join(parts[:depth])} to be a directory in the base")
+
+
+def listed(field):
+    """Return a member list's names as glibc's files backend reads them: comma separated, leading blanks skipped."""
+    return [name.lstrip() for name in field.split(b",")]
+
+
+def accounts(source, members, epoch):
+    """Return the four account files with the workload account appended, refusing a collision.
+
+    glibc's files backend skips blanks at the start of a line, so a name is compared after them. It also ends a line
+    at a NUL byte, so a file that holds one is refused.
+    """
+    days = epoch // 86400
+    lines = {"etc/passwd": PASSWD_LINE + b"\n", "etc/group": GROUP_LINE + b"\n",
+             "etc/shadow": b"workload:!:%d:0:99999:7:::\n" % days, "etc/gshadow": b"workload:!::\n"}
+    rewritten = {}
+    for name, id_fields, list_fields in ACCOUNT_FILES:
+        member = members.get(name)
+        if member is None or kind_of(member) != "file":
+            raise Refused("stage", f"the base has no regular /{name}")
+        data = read_member(source, member, MAX_ACCOUNT_FILE_BYTES)
+        if b"\0" in data:
+            raise Refused("stage", f"/{name} holds a NUL byte, where glibc's files backend ends the line")
+        for number, line in enumerate(data.split(b"\n"), 1):
+            fields = line.lstrip().split(b":")
+            if fields[0] == b"workload":
+                raise Refused("stage", f"/{name} line {number} already names workload")
+            if any(len(fields) > i and fields[i].isdigit() and fields[i].lstrip(b"0") == b"1000" for i in id_fields):
+                raise Refused("stage", f"/{name} line {number} already has id 1000")
+            if any(len(fields) > i and b"workload" in listed(fields[i]) for i in list_fields):
+                raise Refused("stage", f"/{name} line {number} already lists workload as a member")
+        rewritten[name] = data + (b"\n" if data and not data.endswith(b"\n") else b"") + lines[name]
+    judge_accounts(rewritten["etc/passwd"], rewritten["etc/group"], step="stage")
+    return rewritten
+
+
+def stage(base_tar, stage_tar, adds, epoch, limit):
+    """Write stage_tar from base_tar with the image contract applied; return the facts it read."""
+    with open_regular(base_tar, "stage", str(base_tar)) as handle:
+        try:
+            with tarfile.open(fileobj=LimitedReader(handle, limit, str(base_tar)), mode="r:") as source:
+                members = base_members(source)
+                check_layout(members, adds)
+                return write_stage_tar(source, members, adds, epoch, stage_tar)
+        except (tarfile.TarError, ValueError, EOFError) as error:
+            raise Refused("stage", f"{base_tar} is not a readable tar archive: {error}") from None
+        except OSError as error:
+            raise Refused("stage", f"cannot stage {base_tar} into {stage_tar}: {error.strerror}") from None
+
+
+def write_stage_tar(source, members, adds, epoch, stage_tar):
+    rewritten = accounts(source, members, epoch)
+    skel = [name for name in members if name.startswith(SKEL)]
+    entries = []
+    for name, member in members.items():
+        kind = kind_of(member)
+        if name in NETWORK_FILES:
+            entries.append((tar_info(name, "file", 0o644, 0, 0, epoch, len(NETWORK_FILES[name])), NETWORK_FILES[name]))
+        elif name in rewritten:
+            entries.append((tar_info(name, "file", member.mode, member.uid, member.gid, epoch, len(rewritten[name])),
+                            rewritten[name]))
+        elif name in EMPTIED_DIRS:
+            entries.append((tar_info(name, "dir", 0o755, 0, 0, epoch), None))
+        elif name == "tmp":
+            entries.append((tar_info(name, "dir", 0o1777, 0, 0, epoch), None))
+        else:
+            link = member.linkname if kind in ("symlink", "hardlink") else ""
+            mtime = epoch if name in CREATE_TIMED else member.mtime
+            entries.append((tar_info(name, kind, member.mode, member.uid, member.gid, mtime,
+                                     member.size if kind == "file" else 0, link), member if kind == "file" else None))
+    for name, mode in [*((d, 0o755) for d in EMPTIED_DIRS), ("tmp", 0o1777), ("home", 0o755)]:
+        if name not in members:
+            entries.append((tar_info(name, "dir", mode, 0, 0, epoch), None))
+    for name, data in NETWORK_FILES.items():
+        if name not in members:
+            entries.append((tar_info(name, "file", 0o644, 0, 0, epoch, len(data)), data))
+    entries.append((tar_info("home/workload", "dir", 0o700, 1000, 1000, epoch), None))
+    for name in skel:
+        data = read_member(source, members[name], MAX_ACCOUNT_FILE_BYTES)
+        entries.append((tar_info("home/workload/" + name.removeprefix(SKEL), "file", members[name].mode,
+                                 1000, 1000, epoch, len(data)), data))
+    added, names = [], {info.name for info, _ in entries}
+    for add in adds:
+        if add.dest[1:] in names:
+            raise Refused("stage", f"--add {add.dest} would replace {add.dest} in the image")
+        names.add(add.dest[1:])
+        try:
+            data = read_bounded(os.path.realpath(add.source), "stage", MAX_ADD_BYTES, add.source)
+        except Refused as refusal:
+            raise Refused("stage", f"--add {add.dest}: {refusal.detail}") from None
+        entries.append((tar_info(add.dest[1:], "file", add.mode, 0, 0, epoch, len(data)), data))
+        added.append({"dest": add.dest, "mode": f"{add.mode:04o}", "sha256": sha256(data)})
+    with tarfile.open(stage_tar, "w", format=tarfile.PAX_FORMAT) as out:
+        for info, data in entries:
+            if isinstance(data, bytes):
+                out.addfile(info, io.BytesIO(data))
+            else:
+                out.addfile(info, source.extractfile(data) if data is not None else None)
+    version = members.get("etc/debian_version")
+    if version is not None and kind_of(version) == "file":
+        version = read_member(source, version, MAX_ACCOUNT_FILE_BYTES).decode(errors="replace").strip()
+    return {"debian_version": version if isinstance(version, str) else None,
+            "skel": sorted(name.removeprefix(SKEL) for name in skel), "added": added}
+
+
+def content_listing(stage_tar):
+    """Return content.jsonl: one sorted JSON line per stage member, independent of ext4 layout."""
+    records = []
+    with tarfile.open(stage_tar) as source:
+        for member in source:
+            kind, digest = kind_of(member), None
+            if kind == "file":
+                hasher = hashlib.sha256()
+                data = source.extractfile(member)
+                for chunk in iter(lambda: data.read(1 << 20), b""):
+                    hasher.update(chunk)
+                digest = hasher.hexdigest()
+            link = member.linkname if kind == "symlink" else "/" + member.linkname if kind == "hardlink" else None
+            records.append({"path": "/" + member.name, "type": kind, "mode": f"{member.mode:04o}",
+                            "uid": member.uid, "gid": member.gid, "size": member.size if kind == "file" else 0,
+                            "sha256": digest, "link": link})
+    records.sort(key=lambda record: record["path"])
+    return "".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in records).encode()
+
+
+def fs_uuid(content_sha256):
+    """Return the filesystem UUID: the first 16 bytes of the content digest."""
+    h = content_sha256
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def build_script(uuid, size_mib, adds):
+    """Return the shell script the build container runs over the bind-mounted work root at /w."""
+    probes = [*PROBES, *(probe for number, add in enumerate(adds, 1)
+                         for probe in ((f"stat {add.dest}", f"add-{number}.stat"),
+                                       (f"cat {add.dest}", f"add-{number}.data")))]
+    lines = [
+        "set -eu",
+        "test -f /w/stage.tar || { echo '/w is empty: Docker does not share the work root' >&2; exit 3; }",
+        f"mkdir {TREE}",
+        f"tar --numeric-owner -xpf /w/stage.tar -C {TREE}",
+        "mke2fs -V 2>/w/check/mke2fs-version",
+        f"mke2fs -q -t ext4 -b {BLOCK_SIZE} -d {TREE} -U {uuid} -E hash_seed={uuid},root_owner=0:0 "
+        f"/w/rootfs.raw {size_mib}M",
+        "if e2fsck -fn /w/rootfs.raw >/w/check/e2fsck.out 2>&1; then echo 0; else echo $?; fi >/w/check/e2fsck.code",
+        "dumpe2fs -h /w/rootfs.raw >/w/check/dumpe2fs 2>/w/check/dumpe2fs.err",
+        *(f"debugfs -R '{command}' /w/rootfs.raw >/w/check/{name} 2>/w/check/{name}.err" for command, name in probes),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def filesystem(run, env, base, platform, work, uuid, size_mib, adds):
+    """Make work/rootfs.raw inside the pinned base, refusing unless e2fsck -fn is clean."""
+    (work / "check").mkdir(mode=0o700, exist_ok=True)
+    result = run(["docker", "run", "--rm", "--pull", "never", "--network", "none", "--platform", platform,
+                  "--user", "0:0", "-v", f"{work}:/w", base.reference, "sh", "-c",
+                  build_script(uuid, size_mib, adds)], env)
+    if result.code != 0:
+        raise Refused("filesystem", f"the build container exited {result.code}: {result.err.strip()[-2000:]}")
+    try:
+        is_directory = stat.S_ISDIR(os.lstat(work / "check").st_mode)
+    except OSError:
+        is_directory = False
+    if not is_directory:
+        raise Refused("filesystem", f"{work / 'check'} is no longer a directory after the build container ran")
+    code = read_bounded(work / "check" / "e2fsck.code", "filesystem", 64).decode(errors="replace").strip()
+    if code != "0":
+        output = read_bounded(work / "check" / "e2fsck.out", "filesystem", MAX_OUTPUT_BYTES)
+        raise Refused("filesystem", f"e2fsck -fn exited {code}: {output.decode(errors='replace').strip()[-2000:]}")
+
+
+def canonical(field):
+    return re.fullmatch(rb"0|[1-9][0-9]{0,9}", field) is not None and int(field) <= 0xFFFFFFFF
+
+
+def judge_accounts(passwd, group, step="check"):
+    """Refuse unless passwd and group meet spec 024's image contract."""
+    for path, data, width, line, kind in (("/etc/passwd", passwd, 7, PASSWD_LINE, "uid"),
+                                          ("/etc/group", group, 4, GROUP_LINE, "gid")):
+        lines = data.split(b"\n")
+        if lines[-1] == b"":
+            lines.pop()
+        rows = []
+        for number, text in enumerate(lines, 1):
+            fields = text.split(b":")
+            if not text or text.lstrip()[:1] in (b"+", b"-") or len(fields) != width or not canonical(fields[2]) or \
+                    (width == 7 and not canonical(fields[3])):
+                raise Refused(step, f"{path} line {number} is malformed")
+            rows.append((number, fields))
+        ids = [number for number, fields in rows if int(fields[2]) == 1000]
+        if not ids:
+            raise Refused(step, f"{path} has no line with {kind} 1000")
+        if len(ids) > 1:
+            raise Refused(step, f"{path} lines {', '.join(map(str, ids))} have {kind} 1000; the contract needs one")
+        named = [number for number, fields in rows if fields[0].lstrip() == b"workload" and number != ids[0]]
+        if named:
+            raise Refused(step, f"{path} line {named[0]} names workload with another {kind}")
+        found = b":".join(rows[ids[0] - 1][1])
+        if found != line:
+            raise Refused(step, f"{path} line {ids[0]} reads {found.decode(errors='replace')!r}; "
+                                f"the contract needs {line.decode()!r}")
+
+
+def check_text(check, name):
+    return read_bounded(check / name, "check", MAX_OUTPUT_BYTES, f"check/{name}").decode("utf-8", "replace")
+
+
+def read_stat(check, name, path):
+    """Return debugfs stat's type, mode, uid and gid: the first Type and Mode, then the first User and Group after them.
+
+    Each search is linear in the read-back's size, and every number is ASCII digits short enough for int().
+    """
+    text = check_text(check, name)
+    kind = STAT_TYPE.search(text)
+    owner = STAT_OWNER.search(text, kind.end()) if kind else None
+    if owner:
+        return kind.group(1), int(kind.group(2), 8), int(owner.group(1)), int(owner.group(2))
+    error = check_text(check, f"{name}.err")
+    if NOT_FOUND in error:
+        raise Refused("check", f"{path} is missing from the image")
+    raise Refused("check", f"cannot read {path} back: {error.strip()}")
+
+
+def read_listing(check, name, path, absent_ok):
+    rows = {}
+    for line in check_text(check, name).splitlines():
+        parts = line.split("/")
+        if not line:
+            continue
+        if len(parts) != 8 or parts[0] or parts[7] or not OCTAL.fullmatch(parts[2]) or \
+                not DECIMAL.fullmatch(parts[3]) or not DECIMAL.fullmatch(parts[4]):
+            raise Refused("check", f"cannot parse the listing of {path}: {line!r}")
+        rows[parts[5]] = (int(parts[2], 8), int(parts[3]), int(parts[4]))
+    if rows:
+        return rows
+    if absent_ok and NOT_FOUND in check_text(check, f"{name}.err"):
+        return rows
+    raise Refused("check", f"cannot list {path}: {check_text(check, f'{name}.err').strip()}")
+
+
+def check_node(check, name, path, uid, mode):
+    kind, found_mode, found_uid, _ = read_stat(check, name, path)
+    if kind != "directory":
+        raise Refused("check", f"{path} is a {kind}; the image contract needs a directory")
+    if found_uid != uid:
+        raise Refused("check", f"{path} is owned by uid {found_uid}; it needs {uid}")
+    if found_mode != mode:
+        raise Refused("check", f"{path} has mode {found_mode:04o}; it needs {mode:04o}")
+
+
+def dump_field(dump, key):
+    match = re.search(rf"^{key}:\s*(.*)$", dump, re.M)
+    return match.group(1).strip() if match else None
+
+
+def check_image(check, facts, uuid):
+    """Apply the image contract to the debugfs read-back in `check`; return the filesystem facts."""
+    version = re.match(r"mke2fs (\S+) ", check_text(check, "mke2fs-version"))
+    if not version:
+        raise Refused("check", "cannot read the mke2fs version from check/mke2fs-version")
+    dump = check_text(check, "dumpe2fs")
+    if dump_field(dump, "Filesystem UUID") != uuid:
+        raise Refused("check", f"the filesystem UUID is {dump_field(dump, 'Filesystem UUID')}, not {uuid}")
+    if dump_field(dump, "Block size") != str(BLOCK_SIZE):
+        raise Refused("check", f"the block size is {dump_field(dump, 'Block size')}, not {BLOCK_SIZE}")
+    judge_accounts(read_bounded(check / "passwd", "check", MAX_ACCOUNT_FILE_BYTES, "/etc/passwd read back"),
+                   read_bounded(check / "group", "check", MAX_ACCOUNT_FILE_BYTES, "/etc/group read back"))
+    check_node(check, "home.stat", "/home/workload", 1000, 0o700)
+    check_node(check, "tmp.stat", "/tmp", 0, 0o1777)
+    home = read_listing(check, "home.ls", "/home/workload", absent_ok=False)
+    for name in facts["skel"]:
+        mode, uid, gid = home.get(name, (0, None, None))
+        if not stat.S_ISREG(mode) or (uid, gid) != (1000, 1000):
+            raise Refused("check", f"/home/workload/{name} from /etc/skel is missing or not owned by 1000:1000")
+    for name, path in (("opt.ls", "/opt"), ("usr-local-bin.ls", "/usr/local/bin")):
+        extra = sorted(set(read_listing(check, name, path, absent_ok=True)) - {".", ".."})
+        if extra:
+            raise Refused("check", f"{path} holds {', '.join(extra)}; spec 027 requires it empty in the image")
+    for number, added in enumerate(facts["added"], 1):
+        found = read_stat(check, f"add-{number}.stat", added["dest"])
+        if found != ("regular", int(added["mode"], 8), 0, 0):
+            raise Refused("check", f"{added['dest']} reads back as {found[0]} {found[1]:04o} {found[2]}:{found[3]}, "
+                                   f"not a regular {added['mode']} file owned by 0:0")
+        if hash_bounded(check / f"add-{number}.data", "check", MAX_ADD_BYTES, added["dest"]) != added["sha256"]:
+            raise Refused("check", f"{added['dest']} reads back with other bytes than its source")
+    return {"mke2fs_version": version.group(1), "features": (dump_field(dump, "Filesystem features") or "").split()}
+
+
+def copy_rootfs(work, stage_dir, size):
+    """Copy work/rootfs.raw into the stage through exactly `size` bytes, zero runs left as holes; return its sha256."""
+    digest, total = hashlib.sha256(), 0
+    with open_regular(work / "rootfs.raw", "publish", "rootfs.raw") as source, \
+            open(stage_dir / "rootfs.raw", "xb") as out:
+        for chunk in iter(lambda: source.read(min(HOLE, size + 1 - total)), b""):
+            total += len(chunk)
+            digest.update(chunk)
+            if chunk.count(0) == len(chunk):
+                out.seek(len(chunk), os.SEEK_CUR)
+            else:
+                out.write(chunk)
+        out.truncate(total)
+    if total != size:
+        raise Refused("publish", f"rootfs.raw is not exactly {size} bytes, the --size-mib the filesystem was made with")
+    return digest.hexdigest()
+
+
+def write_stage(images_root, work, listing, size, fields):
+    """Lay out the image under images_root/.stage-*; return the stage path and the manifest.
+
+    `listing` is content.jsonl as the tool hashed it. Nothing the build container wrote is read but rootfs.raw.
+    """
+    try:
+        stage_dir = Path(tempfile.mkdtemp(prefix=".stage-", dir=images_root))
+    except OSError as error:
+        raise Refused("publish", f"cannot make a stage directory in {images_root}: {error.strerror}") from None
+    try:
+        files = {"rootfs.raw": copy_rootfs(work, stage_dir, size), "content.jsonl": sha256(listing)}
+        (stage_dir / "content.jsonl").write_bytes(listing)
+        sums = "".join(f"{digest}  {name}\n" for name, digest in sorted(files.items())).encode()
+        (stage_dir / "SHA256SUMS").write_bytes(sums)
+        manifest = {**fields, "files": files, "sha256sums_sha256": sha256(sums)}
+        (stage_dir / "manifest.json").write_bytes((json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode())
+        for name in os.listdir(stage_dir):
+            os.chmod(stage_dir / name, 0o444)
+    except OSError as error:
+        shutil.rmtree(stage_dir)
+        raise Refused("publish", f"cannot lay out the image: {error}") from None
+    except BaseException:
+        shutil.rmtree(stage_dir)
+        raise
+    return stage_dir, manifest
+
+
+def place(run, env, images_root, stage_dir):
+    """Rename the stage to images_root/<id16>, read-only and uchg; return (image_dir, id16, manifest sha256).
+
+    rename(2) replaces an empty directory made at the target after the lexists check. It held nothing, so
+    nothing is lost.
+    """
+    digest = sha256(read_bounded(stage_dir / "manifest.json", "place", MAX_OWN_FILE_BYTES, "manifest.json"))
+    target = images_root / digest[:16]
+    if os.path.lexists(target):
+        raise Refused("place", f"{target} exists; a published image is never replaced or deleted")
+    try:
+        os.rename(stage_dir, target)
+    except OSError as error:
+        raise Refused("place", f"cannot rename the stage to {target}: {error.strerror}") from None
+    try:
+        os.chmod(target, 0o555)
+    except OSError as error:
+        raise Refused("place", f"{target} is in place but chmod 0555 failed: {error.strerror}") from None
+    result = run(["chflags", "-R", "uchg", str(target)], env)
+    if result.code != 0:
+        raise Refused("place", f"{target} is in place but chflags -R uchg exited {result.code}: {result.err.strip()}")
+    return target, digest[:16], digest
+
+
+def build(args, run, now, environ):
+    """Run every step for parsed `args`; return the result line's fields."""
+    base = parse_base(args.base)
+    if not PLATFORM.match(args.platform):
+        raise Refused("platform", f"{args.platform!r} is not OS/ARCH, such as linux/arm64")
+    if args.size_mib <= 0:
+        raise Refused("size", f"--size-mib {args.size_mib} must be positive")
+    adds = [parse_add(text) for text in args.add]
+    images_root = Path(args.images_root)
+    if not images_root.is_dir():
+        raise Refused("images root", f"{images_root} is not a directory; create it first")
+    if not os.access(images_root, os.W_OK | os.X_OK):
+        raise Refused("images root", f"{images_root} is not writable by this user; the image is staged inside it")
+    tool_sha256 = sha256(read_bounded(Path(os.path.realpath(__file__)), "tool", MAX_OWN_FILE_BYTES, "tools/root-image"))
+    created = int(now())
+    epoch = created if args.source_date_epoch is None else args.source_date_epoch
+    if epoch < 0:
+        raise Refused("source date epoch", f"{epoch} is before 1970")
+    env = docker_env(environ)
+    work = make_work_root(Path(args.work_root))
+    record = export_base(run, env, base, args.platform, work)
+    facts = stage(work / "base.tar", work / "stage.tar", adds, epoch, args.size_mib << 20)
+    try:
+        listing = content_listing(work / "stage.tar")
+        (work / "content.jsonl").write_bytes(listing)
+    except OSError as error:
+        raise Refused("stage", f"cannot list {work / 'stage.tar'} into {work / 'content.jsonl'}: "
+                               f"{error.strerror}") from None
+    content_sha256 = sha256(listing)
+    uuid = fs_uuid(content_sha256)
+    filesystem(run, env, base, args.platform, work, uuid, args.size_mib, adds)
+    fs = check_image(work / "check", facts, uuid)
+    kind = "test" if adds else "product"
+    stage_dir, manifest = write_stage(images_root, work, listing, args.size_mib << 20, {
+        "image_format": IMAGE_FORMAT, "task": TASK, "tool_sha256": tool_sha256, "kind": kind, "created_unix": created,
+        "source_date_epoch": epoch, "base": {**record, "debian_version": facts["debian_version"]},
+        "workload": WORKLOAD, "added": facts["added"], "content_sha256": content_sha256, "limits": LIMITS,
+        "fs": {"type": "ext4", "block_size": BLOCK_SIZE, "size_mib": args.size_mib, "uuid": uuid,
+               "e2fsck": "clean", **fs},
+    })
+    try:
+        image_dir, id16, manifest_sha256 = place(run, env, images_root, stage_dir)
+    except BaseException:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir)
+        raise
+    return {"image_dir": str(image_dir), "image_id16": id16, "manifest_sha256": manifest_sha256,
+            "rootfs_sha256": manifest["files"]["rootfs.raw"], "content_sha256": content_sha256, "kind": kind}
+
+
+def bounded_text(handle, argv):
+    handle.seek(0)
+    data = handle.read(MAX_OUTPUT_BYTES + 1)
+    if len(data) > MAX_OUTPUT_BYTES:
+        raise Refused("command", f"{argv[0]} wrote more than {MAX_OUTPUT_BYTES} bytes")
+    return data.decode("utf-8", "replace")
+
+
+def run_command(argv, env):
+    """Run argv with env and no stdin; return its exit code and bounded output."""
+    try:
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            try:
+                code = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                      timeout=COMMAND_TIMEOUT).returncode
+            except FileNotFoundError:
+                raise Refused("command", f"{argv[0]} is not installed") from None
+            except subprocess.TimeoutExpired:
+                raise Refused("command", f"{argv[0]} ran longer than {COMMAND_TIMEOUT} s") from None
+            return Result(code, bounded_text(out, argv), bounded_text(err, argv))
+    except OSError as error:
+        raise Refused("command", f"cannot run {argv[0]}: {error.strerror}") from None
+
+
+def main(argv=None, run=run_command, now=None, environ=None):
+    """Print the result line and return 0, or print the refusal and return 1."""
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        result = build(args, run, now or time.time, os.environ if environ is None else environ)
+    except Refused as refusal:
+        print(f"root-image: refused {refusal.step}: {refusal.detail}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

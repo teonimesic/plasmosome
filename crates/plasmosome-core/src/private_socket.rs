@@ -1,7 +1,6 @@
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
 use std::io;
-use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -293,11 +292,21 @@ impl PrivateListener {
     }
 
     /// Accepts one pending connection without blocking. `Ok(None)`: nothing pending. A peer
-    /// whose effective UID is not trusted, or whose credentials cannot be read, is shut down and
-    /// closed before any byte is read and reported as `Accepted::Refused`. A trusted stream is
-    /// returned in blocking mode; the caller sets its timeouts. A caller that forks from another
-    /// thread must hold its descriptor lock around this call, because on macOS the accepted
-    /// descriptor is marked close-on-exec only after it exists.
+    /// whose effective UID is not trusted, or whose credentials cannot be read, is reported as
+    /// `Accepted::Refused`. Its stream is closed inside this call, and no code here reads from it.
+    /// No shutdown comes before the close. On Linux, a refused peer that sent bytes then fails its
+    /// next read with `ECONNRESET`, every time. The reset shows that the stream was closed, not
+    /// shut down, while some of the peer's bytes were still queued. It does not show that none of
+    /// them was read. A shutdown first would let a read that runs between the shutdown and the
+    /// close return end of file. A refused peer that sent nothing reads end of file on Linux. On
+    /// macOS a refused peer reads end of file either way. A trusted stream is returned in
+    /// blocking mode; the caller sets its timeouts.
+    ///
+    /// A caller that forks from another thread must hold its descriptor lock around this call,
+    /// for two reasons. On macOS the accepted descriptor is marked close-on-exec only after it
+    /// exists. On both platforms, a copy of a refused stream's descriptor, such as one held by a
+    /// child forked without exec, keeps the refused peer waiting until that copy closes, because
+    /// the close here ends only this descriptor. No caller forks without exec today.
     pub fn accept(&self) -> io::Result<Option<Accepted>> {
         let stream = match self.listener.accept() {
             Ok((stream, _)) => stream,
@@ -305,7 +314,7 @@ impl PrivateListener {
             Err(error) => return Err(error),
         };
         if let Err(refusal) = check_peer_uid(&stream, self.trusted_uid) {
-            let _ = stream.shutdown(Shutdown::Both);
+            drop(stream);
             return Ok(Some(Accepted::Refused(refusal)));
         }
         stream.set_nonblocking(false)?;
