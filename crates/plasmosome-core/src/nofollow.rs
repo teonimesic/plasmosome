@@ -1149,6 +1149,40 @@ mod tests {
     }
 
     #[test]
+    fn pass_holds_each_owner_to_the_effective_uid_not_to_itself() {
+        let root = TestRoot::new();
+        let start = root.start();
+        let euid = effective_uid();
+        let third = euid.wrapping_add(4242);
+        assert_eq!(
+            pass(
+                &start,
+                &facts(Kind::Directory, third, 0o755),
+                euid,
+                root.path()
+            ),
+            Err(WalkRefusal::ForeignOwner {
+                path: root.path().to_path_buf(),
+                uid: third
+            }),
+            "a 0755 directory a third user owns"
+        );
+        assert_eq!(
+            pass(
+                &start,
+                &facts(Kind::Directory, euid, 0o755),
+                euid,
+                root.path()
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            pass(&start, &facts(Kind::Directory, 0, 0o755), euid, root.path()),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn ancestor_judge_refuses_group_or_other_writable_and_sticky_directories() {
         let at = Path::new("/a");
         assert_eq!(

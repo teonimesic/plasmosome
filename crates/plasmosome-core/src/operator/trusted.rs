@@ -327,18 +327,28 @@ mod tests {
     }
 
     #[test]
-    fn the_bytes_come_from_the_checked_descriptor_not_the_path_text() {
+    fn the_checks_and_the_read_use_the_open_descriptors_not_the_path_text() {
         let root = TestRoot::new();
         make_dir(&root.join("a"), 0o700);
+        make_dir(&root.join("a/sub"), 0o700);
+        write_file(&root.join("a/sub/f.json"), b"good", 0o600);
         make_dir(&root.join("b"), 0o700);
-        write_file(&root.join("a/f.json"), b"good", 0o600);
-        write_file(&root.join("b/f.json"), b"bad!", 0o600);
+        make_dir(&root.join("b/sub"), 0o700);
+        make_dir(&root.join("b/sub/f.json"), 0o700);
+        set_mode(&root.join("b/sub"), 0o777);
         let start = OwnedFd::from(fs::File::open(root.join("a")).expect("a opens"));
-        let walk = Walk::from_dir(start, &root.join("b"), Path::new("f.json"))
+        let walk = Walk::from_dir(start, &root.join("b"), Path::new("sub/f.json"))
             .expect("a normal relative path");
-        let file = TrustedFile::from_walk(walk).expect("the file in a opens");
-        assert_eq!(file.path(), root.join("b/f.json"));
+        let file = TrustedFile::from_walk(walk).expect("the file below a opens");
+        assert_eq!(file.path(), root.join("b/sub/f.json"));
         assert_eq!(file.bytes(), b"good");
+        assert_eq!(
+            file.chain(),
+            [
+                identity_of(&root.join("a")),
+                identity_of(&root.join("a/sub"))
+            ]
+        );
     }
 
     #[test]
@@ -506,32 +516,70 @@ mod tests {
     }
 
     struct EndlessZeros {
-        asked: usize,
+        given: usize,
+        calls: usize,
+        most_per_read: usize,
+        interrupt_every: Option<usize>,
+    }
+
+    impl EndlessZeros {
+        fn new() -> EndlessZeros {
+            EndlessZeros {
+                given: 0,
+                calls: 0,
+                most_per_read: usize::MAX,
+                interrupt_every: None,
+            }
+        }
     }
 
     impl Read for EndlessZeros {
         fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            self.asked += buffer.len();
+            self.calls += 1;
+            if self
+                .interrupt_every
+                .is_some_and(|every| self.calls.is_multiple_of(every))
+            {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let length = buffer.len().min(self.most_per_read);
+            buffer[..length].fill(0);
+            self.given += length;
             assert!(
-                self.asked <= MAX_TRUSTED_BYTES + 1,
-                "the read asked for {} bytes, more than one byte over the bound",
-                self.asked
+                self.given <= MAX_TRUSTED_BYTES + 1,
+                "the reader gave {} bytes, more than one byte over the bound",
+                self.given
             );
-            buffer.fill(0);
-            Ok(buffer.len())
+            Ok(length)
         }
     }
 
-    #[test]
-    fn the_read_asks_for_at_most_one_byte_more_than_the_bound() {
-        let mut endless = EndlessZeros { asked: 0 };
-        match read_bounded(&mut endless, Path::new("/endless")).map(|bytes| bytes.len()) {
+    fn refused_as_size(reader: &mut EndlessZeros) {
+        match read_bounded(reader, Path::new("/endless")).map(|bytes| bytes.len()) {
             Err(Fault::Check(TrustCheck::Size, reason)) => {
                 assert_eq!(reason, "/endless holds more than 1048576 bytes");
             }
             other => panic!("an endless reader gave {other:?}"),
         }
-        assert_eq!(endless.asked, MAX_TRUSTED_BYTES + 1);
+    }
+
+    #[test]
+    fn a_short_or_interrupted_read_still_stops_one_byte_past_the_bound() {
+        let mut endless = EndlessZeros {
+            most_per_read: 4_093,
+            interrupt_every: Some(3),
+            ..EndlessZeros::new()
+        };
+        refused_as_size(&mut endless);
+        assert_eq!(endless.given, MAX_TRUSTED_BYTES + 1);
+        assert!(endless.calls > 3);
+    }
+
+    #[test]
+    fn the_read_asks_for_at_most_one_byte_more_than_the_bound() {
+        let mut endless = EndlessZeros::new();
+        refused_as_size(&mut endless);
+        assert_eq!(endless.given, MAX_TRUSTED_BYTES + 1);
         assert_eq!(
             read_bounded(
                 std::io::repeat(0).take(MAX_TRUSTED_BYTES as u64),
