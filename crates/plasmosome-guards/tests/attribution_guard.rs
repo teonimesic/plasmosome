@@ -1025,6 +1025,14 @@ const IDENTITIES: &[(&str, Verdict)] = &[
     ("Probe <noreply@anthropic.com.>", Verdict::Cleared),
     ("Probe <claudet@users.noreply.github.com>", Verdict::Cleared),
     (
+        "Jane Doe <4242+janedoe-claude@users.noreply.github.com>",
+        Verdict::Cleared,
+    ),
+    (
+        "Probe <81847+claude@users.noreply.githubxcom>",
+        Verdict::Cleared,
+    ),
+    (
         "Jane <jane@corp.locale.io> <noreply@anthropic.com>",
         Verdict::Model,
     ),
