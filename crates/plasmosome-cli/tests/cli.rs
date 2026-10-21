@@ -422,6 +422,14 @@ fn an_unserved_command_reads_only_the_form_flags() {
     );
     let (command, code, _) = refused(&reading);
     assert_eq!((command, code), ("cell.list", ClientCode::NotServed));
+    for (line, method) in [
+        ("cell list a<0xff>", "cell.list"),
+        ("cell exec -- a<0xff>", "cell.exec"),
+    ] {
+        let reading = read(&spoken(line), COMMANDS);
+        let (command, code, _) = refused(&reading);
+        assert_eq!((command, code), (method, ClientCode::NotServed), "{line}");
+    }
     let Reading::Refuse { form, .. } = read(&args(&["cell", "list", "--human"]), COMMANDS) else {
         panic!("cell list is refused");
     };
@@ -688,6 +696,8 @@ fn the_lines_that_read_two_ways_name_the_settled_argument() {
         (&status, "-- --help", Some("--")),
         (&status, "-- a<0xff>", Some("--")),
         (&status, "--kernel a -- a<0xff>", Some("--")),
+        (&status, "--kernel a -- x", Some("--")),
+        (&status, "--human -- x", Some("--")),
     ];
     let wrong = misnamed(&rows);
     assert!(
@@ -777,12 +787,6 @@ fn the_form_flags_count_only_the_arguments_before_dashes() {
             COMMANDS,
             &["cell", "exec", "--human", "--", "--json"],
             "cell.exec",
-            ClientCode::NotServed,
-        ),
-        (
-            COMMANDS,
-            &["status", "--human", "--", "--human"],
-            "plasmosome.status",
             ClientCode::NotServed,
         ),
         (

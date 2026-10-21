@@ -394,6 +394,7 @@ fn usage_errors() {
         ),
         Some("--"),
     );
+    assert_usage(&plasmosome(&["--json", "--", "x"]), Some("--"));
     assert_usage(&plasmosome(&["--kernel", "--"]), Some("--kernel"));
     assert_usage(&plasmosome(&["--kernel=work"]), Some("--kernel=work"));
     assert_usage(&plasmosome(&["--frob", "--kernel", "../x"]), Some("--frob"));
@@ -434,7 +435,7 @@ fn usage_errors() {
 
 #[test]
 fn the_form_counts_only_the_arguments_before_dashes() {
-    let output = plasmosome(&["status", "--human", "--", "--human"]);
+    let output = plasmosome(&["cell", "exec", "--human", "--", "tool", "--human"]);
     assert_eq!(code(&output), 2, "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     let shown = text(&output.stderr);
