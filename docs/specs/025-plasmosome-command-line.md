@@ -314,11 +314,11 @@ indented, one key per line. A failure prints the message, then a `fix:` line whe
 `fix`, then the domain and code in parentheses. Every string it prints, whatever its source,
 shows each terminal control as `<U+XXXX>`. Streams and exit codes are those of the JSON form. The
 human form is not a stable interface, and nothing may parse it. `--json` names the JSON form;
-`--json` together with `--human` is a usage error. A line chooses the human form only when it
-holds `--human` once and `--json` not at all, a flag's value aside. On every other line each
-envelope is JSON, the usage error included, so a line with `--human` twice, or with both
-flags, is refused in JSON. Amended on 2026-10-21: this did not say which form such a line
-gets.
+`--json` together with `--human` is a usage error. A line chooses the human form only when its
+arguments before `--`, a flag's value aside, hold `--human` once and `--json` not at all. On
+every other line each envelope is JSON, the usage error included, so a line with `--human`
+twice, or with both flags, is refused in JSON, and `plasmid add x --human -- --human` answers
+in the human form. Amended on 2026-10-21: this did not say which form such a line gets.
 
 Three commands print something other than an envelope on stdout: `--help`, `--version`
 (section 6) and `plasmid new` (spec 011).
@@ -570,8 +570,9 @@ These rules hold for `plasmosome`, `plasmosomed`, `membraned` and `plasmid`.
   each marked served or not served in this build, with the global flags, `PLASMOSOME_KERNEL` and
   the exit-code table. For these two binaries, section 2's reading order applies.
 - When help or the version cannot be written to stdout, `plasmosome` and `plasmid` exit 1 with
-  `local_io` on stderr, as section 3 says. That failure is the one exception to the exit 0 and
-  the empty stderr above. Amended on 2026-10-21: this did not name that exception.
+  `local_io` on stderr, as section 3 says. For these two binaries, and apart from section 2's
+  usage errors, that failure is the one exception to the exit 0 and the empty stderr above.
+  Amended on 2026-10-21: this did not name that exception.
 - For the daemons, `-h`, `--help` and `--version` count only as the sole argument. Every other
   sole argument is still a configuration path, so a file named `--version` is passed as
   `./--version`, as `./--help` already is. `membraned` also accepts exactly the three arguments
@@ -654,13 +655,16 @@ on Linux they are deferred with the platform.
    `plasmid --json --human new demo` names `--json`; `plasmid --json --human frobnicate` names
    `--human`; `plasmid frobnicate --frob` names `frobnicate`, and so does `plasmid frobnicate`
    followed by an argument that is not UTF-8; `plasmid add x y --help` names `y`;
-   `plasmid add x --json --human --json` names `--human`; and bare `plasmid --` and
-   `plasmid -- --help` name `--`. `plasmid --kernel --help` prints help, and
-   `plasmid add x --kernel --human` is refused with `not_served` in JSON. Catches: prose usage
-   errors, hand-built JSON that breaks on a quote, raw controls, a fault named out of order or
-   one kind of fault judged before another, help read after `--`, and a flag's value read as a
-   flag. Amended on 2026-10-21: this did not check which argument a usage error names, or a
-   flag's value position.
+   `plasmid add x --json --human --json` names `--human`; `plasmid --kernel --` names
+   `--kernel`; `plasmid --kernel=work` names `--kernel=work`; and bare `plasmid --` and
+   `plasmid -- --help` name `--`. `plasmid --=x add x` exits 2 with `not_served`, and
+   `plasmid add x - --help` prints the help of `add`. `plasmid --kernel --help` prints help,
+   and `plasmid add x --kernel --human` is refused with `not_served` in JSON. Catches: prose
+   usage errors, hand-built JSON that breaks on a quote, raw controls, a fault named out of
+   order or one kind of fault judged before another, `--` refused before the scan, help read
+   after `--`, a flag's value read as a flag, and a flag shape other than section 2's.
+   Amended on 2026-10-21: this did not check which argument a usage error names, or a flag's
+   value position.
 5. `--help` on each binary exits 0 with empty stderr. `plasmid --help` lists `new`, `list`, `add`,
    `remove`, `reload` and `renew` with their served marks. With stdout a pipe whose reader has
    exited, `plasmid --help` and `plasmid -h` exit 1 with `local_io` under `command` `--help`,
@@ -761,18 +765,20 @@ on Linux they are deferred with the platform.
     or unsafe candidate, and a request sent on a second, unchecked connection.
 21. Each of these exits 64 with code `invalid_argument`, empty stdout and no connection: bare
     `plasmosome`; an unknown command; an unknown flag; `--kernel` twice; `--kernel ../x`;
-    `PLASMOSOME_KERNEL=../x`; `--kernel` holding ESC; `PLASMOSOME_KERNEL` set to the empty
-    string; a relative `--socket`; `--socket /a//b/control.uds`; `--deadline-ms 0` and
-    `3600001`; a non-UTF-8 argument; `--json` with `--human`; `--version` after a command;
+    `PLASMOSOME_KERNEL=../x` with `argument` `PLASMOSOME_KERNEL`; `--kernel` holding ESC;
+    `PLASMOSOME_KERNEL` set to the empty string; a relative `--socket`, named as the path
+    given; `--socket /a//b/control.uds`; `--deadline-ms 0` and `3600001`; a non-UTF-8 argument;
+    `--json` with `--human`; `--version` after a command;
     `--help` after words that name no command. `frobnicate --frob` names `frobnicate`, and so
     does `frobnicate` followed by an argument that is not UTF-8; `status --frob extra` and
     `--frob --kernel ../x` name `--frob`; `status --kernel ../x extra` names `../x`;
-    `--kernel --` names `--kernel`; bare `--`, `-- --version` and `-- --help` name `--`; and a
-    non-UTF-8 argument is named as section 2 says, with each invalid byte sequence replaced by
-    U+FFFD. Catches: last-one-wins, traversal through a name, an oversized deadline panicking, an
-    empty variable falling through, a fault named per pass instead of leftmost, a UTF-8 check
-    run before the scan, help read after `--`, and `--` read as a value. Amended on 2026-10-21:
-    this did not check which argument each names.
+    `--kernel --` names `--kernel`; bare `--`, `-- --version`, `-- --help`, and `--` followed
+    by an argument that is not UTF-8 name `--`; and a non-UTF-8 argument is named as section 2
+    says, with each invalid byte sequence replaced by U+FFFD. Catches: last-one-wins, traversal
+    through a name, an oversized deadline panicking, an empty variable falling through, a fault
+    named per pass instead of leftmost, a UTF-8 check run before the scan, the words after `--`
+    checked for UTF-8 before `--` is judged, help read after `--`, and `--` read as a value.
+    Amended on 2026-10-21: this did not check which argument each names.
 22. `plasmosome cell list` exits 2 with `not_served` and `method` `cell.list`, without
     connecting, even with an invalid `PLASMOSOME_KERNEL`. `plasmosome registry search` exits 2
     with `not_served`, `command` `search` and no `method`. `plasmosome cell list --help` exits 0
@@ -881,10 +887,11 @@ every other client code and every registry refusal exits2." with
 > may have been received, and 1 otherwise. Every other client code and every registry refusal
 > exits 2.
 
-Why: one binary should have one exit table. Spec 020's output default for a served command's
-result is not amended; open question 4 asks about it. The client's own refusals are JSON by
-default on every command, registry commands included (section 3). Amended on 2026-10-21: this
-said spec 020's output default was not amended, and did not name the client's own refusals.
+Why: one binary should have one exit table. Spec 020's output default for what a served command
+prints once it runs, its result or its refusal, is not amended; open question 4 asks about it.
+What the client prints before any command runs is JSON by default on every command, registry
+commands included (section 3). Amended on 2026-10-21: this said spec 020's output default was
+not amended, and did not set apart what the client prints before any command runs.
 
 **Not amended.** Spec 010: its "After the name-holding delivery" section already lets
 `crates/plasmosome` gain a binary (open question 5). Decision 009: it already says where client
@@ -905,9 +912,9 @@ logic goes when its trigger fires. Spec 011: `plasmid new` keeps its exit 2. Spe
    needs amendments to both accepted specs. Keep the split, or merge?
 4. **The output default.** This spec makes JSON the default for its commands, whatever the
    terminal, so an agent never needs a flag. Spec 020 makes the human form the default for
-   registry commands, in the same binary. Should one default hold for every served command's
-   result, and which? The client's own refusals are JSON by default whatever the answer
-   (section 3). Amended on 2026-10-21: this did not set the client's own refusals apart.
+   registry commands, in the same binary. Should one default hold for what every served command
+   prints once it runs, and which? What the client prints before any command runs is JSON by
+   default whatever the answer (section 3). Amended on 2026-10-21: this did not set that apart.
 5. **Is `status` alone a usable tool?** Spec 010 lets `crates/plasmosome` gain a binary once there
    is a usable tool to install. Task B serves one command. Is that enough, or should the binary
    wait for a command that changes state? Until the owner answers, this spec proceeds on yes:
