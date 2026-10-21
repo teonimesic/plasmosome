@@ -387,12 +387,20 @@ fn an_unconfirmed_exec_leaves_membraned_an_empty_record() {
 }
 
 fn test_threads_is_a_usage_error() {
-    assert_refused(&["--test-threads", "1"], "--test-threads");
+    assert_refused(
+        &["--test-threads", "1", "--exact", "no_case_has_this_name"],
+        "--test-threads",
+    );
 }
 
 fn skip_is_a_usage_error_not_a_filter() {
     assert_refused(
-        &["--skip", "a_cell_holding_a_nul_is_refused_before_any_fork"],
+        &[
+            "--skip",
+            "a_cell_holding_a_nul_is_refused_before_any_fork",
+            "--exact",
+            "no_case_has_this_name",
+        ],
         "--skip",
     );
 }
