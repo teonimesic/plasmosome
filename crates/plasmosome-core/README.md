@@ -283,18 +283,21 @@ rules are spec 025 §6's. Exits 2 and 1 are unchanged.
     component, or `/` itself;
   - a template that carries one of the three per-cell paths, lacks or adds a key, or holds a
     value this host refuses, such as `vcpus: 0` or `architecture: "sparc"`. The template is
-    completed once, with the paths of the longest cell ID, `cell-9999999999`, and that recipe is
-    kept so `cell.new` can verify the template's Artifacts from it;
+    completed once, with the paths of the longest cell ID, `cell-9999999999`. That recipe is kept
+    privately, as the source `CellRuntime::artifacts` lists the template's Artifacts from, and
+    belongs to no cell, so nothing can launch it;
   - an `instance_root` that makes that cell's `membrane.uds`, `runtime/data.uds` or
-    `runtime/control.uds` longer than this host's `sun_path` holds, 103 bytes on macOS. Of
-    several, the refusal names the shortest;
+    `runtime/control.uds` longer than 103 bytes, spec 023's Darwin bound. The bound is the same
+    on every host, so a config that starts the daemon on Linux, whose `sun_path` holds 107, starts
+    it on a Mac too. Of several, the refusal names the shortest;
   - a template Artifact under `<instance_root>/cells/`, where it could be some cell's own path
     and that cell's recipe would be refused after its directory exists;
   - a template whose largest config record, for that cell with the largest boot deadline, is
     over 1,048,576 bytes.
 
   So a `cell_runtime` that starts the daemon cannot make a later `cell.new` refuse its recipe or
-  its config record. A key repeated anywhere inside `cell_runtime` is refused, as is `null`. The
+  its config record, while the host reports the same limits: `CellRuntime` does not keep the ones
+  it was checked under. A key repeated anywhere inside `cell_runtime` is refused, as is `null`. The
   host's limits are read only when the key is present. None of this opens a file: `cell.new`
   verifies the Artifacts, and this build does not serve it.
 
@@ -533,16 +536,23 @@ base passes, the test fails and names each base with the ancestor that refused i
 `artifact::verify_artifact` is the controller's check of one spec 001 §4.2 Artifact under spec
 023 §1's rule, which `cell.new` runs before it allocates anything. Nothing calls it yet. It walks
 the path from `/` with `nofollow`, so no component is a symlink and every directory above the
-file meets the ancestor rule. The file must be a regular file owned by root or the effective UID,
-writable by neither group nor other, with no ACL allow entry that grants write. A FIFO is refused
-at once. Only then is it hashed, through the descriptor that was checked, so a file that breaks a
-rule is refused even when its digest matches. The read stops one byte past the size `fstat`
-reported, so it ends even if the file grows. An `ArtifactRefusal` names the path and the broken
-rule, and its `wire` is the 108 `cell.new` answers, with that path.
+file, its own directory included, meets the ancestor rule: owned by root or the effective UID,
+writable by neither group nor other, and on macOS with no ACL entry that lets another principal
+replace its entries. The file must be a regular file owned by root or the effective UID, with no
+write bit at all, no set-user-ID or set-group-ID bit, no ACL allow entry that grants write, and
+`uchg` or `schg` set. Off macOS every Artifact is refused as `ImmutabilityUnverifiable`. Spec 023
+§1 has the membrane repeat these file rules at launch. A FIFO is refused at once. Only then is the
+file hashed, through the descriptor that was checked, so a file that breaks a rule is refused even
+when its digest matches. An `ArtifactRefusal` names the path and the broken rule, and its `wire`
+is the 108 `cell.new` answers, with that path and a message that names an untrusted artifact.
+
+The read stops one byte past the size `fstat` reported at the check, so it ends even if the file
+grows. That bound is the apparent size: a huge sparse file is read, zeros included, for as long
+as it claims to be, so its check is slow. Only root or the controller's UID can place such a file
+at an artifact path, because every directory above it must be theirs.
 
 `CellRuntime::artifacts` lists what to verify: `membraned`, then the template's Artifacts in
-recipe order, read from the recipe the startup check completed. Unlike `TrustedFile`, there is no
-link-count rule, no rule on the owner of the file's own directory, and no size cap: a root image
-can be large. Spec 001 §4.2 also has `membraned` check the files it launches, with rules of its
-own. That check belongs to `plasmosome-membrane`, is separate from this one, and is not built
-yet.
+recipe order, read from the recipe the startup check completed. Unlike `TrustedFile`, the file and
+its own directory may be root's as well as the effective UID's, there is no link-count rule, and
+there is no size cap: a root image can be large. Spec 001 §4.2 also has `membraned` check the
+files it launches. That check belongs to `plasmosome-membrane` and is separate from this one.

@@ -112,7 +112,8 @@ impl std::error::Error for ConfigError {
 /// `instance_root` must also be a canonical path, so that the longest cell
 /// ID's three socket paths can be measured, the template completed with that
 /// cell's paths, and the largest config record encoded. A `cell_runtime` that
-/// passes cannot make any later `cell.new` refuse its recipe or its record.
+/// passes cannot make any later `cell.new` refuse its recipe or its record,
+/// while the host reports the same limits.
 /// Nothing on disk is read or created, the Artifacts included: `cell.new`
 /// verifies those with [`crate::artifact::verify_artifact`].
 pub fn parse_config(text: &str) -> Result<DaemonConfig, ConfigError> {
