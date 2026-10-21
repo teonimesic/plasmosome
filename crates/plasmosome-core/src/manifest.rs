@@ -1382,6 +1382,89 @@ mod tests {
     }
 
     #[test]
+    fn blank_binding_keys_are_refused_one_at_a_time() {
+        let mut declaration = "id = \"github-pr\"\ndescription = \"Read pull requests.\"\n\
+                               impl.wasm = \"pr.wasm\"\n\
+                               [provides.\"a:tools\".tools]\n\"a.read\" = \"Read a.\"\n\
+                               [provides.\"\".tools]\n\"b.read\" = \"Read b.\"\n\
+                               [provides.\" \".tools]\n\"c.read\" = \"Read c.\"\n\
+                               [provides.\"\\t\".tools]\n\"d.read\" = \"Read d.\"\n"
+            .to_string();
+        let blank = [String::new(), " ".to_string(), raw(0x09).to_string()];
+        let fixture: toml::Table = toml::from_str(&declaration).unwrap();
+        let bindings: std::collections::BTreeSet<String> = fixture["provides"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let expected = blank.iter().cloned().chain(["a:tools".to_string()]);
+        assert_eq!(bindings, expected.collect());
+        let mut refused: Vec<String> = Vec::new();
+        for _ in 0..4 {
+            if PlasmidManifest::parse(&declaration).is_ok() {
+                break;
+            }
+            let (plasmid, field, fix) = field_refusal(&declaration);
+            assert_eq!(plasmid.as_deref(), Some("github-pr"), "{field}");
+            assert_eq!(fix, REMOVAL, "{field}");
+            let (keys, index) = field_keys(&field);
+            assert_eq!(index, None, "{field}");
+            let [section, key] = keys.as_slice() else {
+                panic!("{field} does not name a binding");
+            };
+            assert_eq!(section, "provides", "{field}");
+            assert!(
+                blank.contains(key) && !refused.contains(key),
+                "{field} is not a blank binding refused for the first time"
+            );
+            refused.push(key.clone());
+            declaration = with_fix(&declaration, &field, &fix);
+        }
+        assert_eq!(refused.len(), 3, "{refused:?}");
+        assert_eq!(
+            PlasmidManifest::parse(&declaration).unwrap().provides_tools,
+            vec![ToolDeclaration {
+                name: "a.read".into(),
+                description: "Read a.".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_blank_binding_key_is_refused_before_anything_inside_it() {
+        let base =
+            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
+        let ideographic = format!("\"{}\"", concat!("\\", "u3000"));
+        for (key, decoded) in [
+            ("\"\"".to_string(), String::new()),
+            ("\" \"".to_string(), " ".to_string()),
+            ("\"\\t\"".to_string(), raw(0x09).to_string()),
+            (ideographic, raw(0x3000).to_string()),
+        ] {
+            for tail in [
+                format!("[provides]\n{key} = false"),
+                format!("[provides]\n{key} = {{}}"),
+                format!("[provides.{key}]\ntool = {{ \"x.read\" = \"Read x.\" }}"),
+                format!("[provides]\n{key} = {{ tools = [\"x.read\"] }}"),
+                format!("[provides]\n{key} = {{ tools = {{}} }}"),
+                format!("[provides]\n{key} = {{ tools = {{ \"x.read\" = 42 }} }}"),
+            ] {
+                let source = format!("{base}{tail}");
+                let fixture: toml::Table = toml::from_str(&source).unwrap();
+                let bindings: Vec<&String> =
+                    fixture["provides"].as_table().unwrap().keys().collect();
+                assert_eq!(bindings, [&decoded], "{tail}");
+                assert_eq!(
+                    field_fix(&source, &format!("provides.{key}")),
+                    REMOVAL,
+                    "{tail}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn equivalent_tables_and_provenance_comments_preserve_author_descriptions() {
         let base = "id = \"github-pr\"\ndescription = \" Read pull requests. \"\nimpl.wasm = \"pr.wasm\"\n";
         let nested =
@@ -3002,6 +3085,24 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 github,
                 "network.hosts",
                 "\"uploads.github.example\"",
+            ),
+            (
+                declared("impl.wasm = \"pr.wasm\"\n[provides.\"\".tools]\n\"b.read\" = \"Read b.\""),
+                github,
+                "provides.\"\"",
+                REMOVAL,
+            ),
+            (
+                declared("impl.wasm = \"pr.wasm\"\n[provides.\" \".tools]\n\"b.read\" = \"Read b.\""),
+                github,
+                "provides.\" \"",
+                REMOVAL,
+            ),
+            (
+                declared("impl.wasm = \"pr.wasm\"\n[provides.\"\\t\".tools]\n\"b.read\" = \"Read b.\""),
+                github,
+                "provides.\"\\t\"",
+                REMOVAL,
             ),
         ]
         .into_iter()
