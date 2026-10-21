@@ -20,7 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. Nothing here verifies an artifact or boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here verifies an artifact or boots a cell yet |
 
 ## Use
 
@@ -170,16 +170,17 @@ or keep forking. `mem::forget` leaks an unfinished handle.
 Darwin cannot create a pipe, a socket or an accepted connection already close-on-exec, so each one
 exists for a moment before `FD_CLOEXEC` is set, and a fork in that moment hands it to the child.
 `VmmChild::spawn` forks holding the read side of one process-wide lock. The readiness probe
-creates its socket holding the write side, and `HelperExec::prepare` creates the helper's two pipes
-the same way, so a spawn waits while either is created; on Linux both are close-on-exec from the
-start, so the wait matters only on Darwin. Creation under the write side returns the values that
+creates its socket holding the write side, `HelperExec::prepare` creates the helper's two pipes the
+same way, and so does `RuntimeListener` for its socket and each connection it accepts. A spawn
+waits while any of them is created; on Linux all are close-on-exec from the start, so the wait
+matters only on Darwin. Creation under the write side returns the values that
 own its descriptors, and only those descriptors are checked: if any is not already close-on-exec,
 all of them are closed before the lock is released and creation fails. A descriptor created under
 the lock and kept anywhere else is not checked, so the code that creates it must mark it
 close-on-exec before the lock is released. A spawn from the thread that holds the write side returns
 `SpawnError::DescriptorLockHeld` instead of waiting on itself.
 
-The lock covers only those three paths. Forks that do not go through `VmmChild::spawn`, such as
+The lock covers only those paths. Forks that do not go through `VmmChild::spawn`, such as
 `std::process::Command`, do not take it, and neither do the standard library's `bind` in
 `daemon.rs` and `accept` in `control.rs`. Those two are safe only because `membraned` binds its
 control socket, spawns its brokers and serves requests on one thread, so none of them can overlap
@@ -223,6 +224,33 @@ path built into the helper or its libraries, such as the one owner gate O-6 of `
 names in the qualified libkrun. The launch checks no artifact either, and nothing in this crate
 verifies one yet: the cell, plasmosome-7em, which is not built yet, must verify the helper and its
 libraries before it prepares the launch.
+
+## The runtime's listeners and diagnostics
+
+Spec 001 §4.2 has the supervisor create the control and data listeners before it launches the
+helper, and keep them. `runtime::endpoints::RuntimeListener::bind` makes one at a recipe path. It
+refuses any entry already there with `AddressInUse` and leaves it as it was: a live or stale socket,
+a file, a directory or a symlink, dangling or not. It inspects the path without following a symlink
+before the bind, because Darwin's `bind` follows a dangling symlink and creates the socket at its
+target (measured on macOS 26.6.2). Then it records the socket's device and inode, sets the file to
+mode 0600 with `fchmodat` and `AT_SYMLINK_NOFOLLOW`, and makes the listener nonblocking. On Linux,
+glibc makes that call with the kernel's `fchmodat2` or through `/proc`; where it cannot, it fails
+with `EOPNOTSUPP` and the bind refuses with `Permissions` rather than fall back to a call that
+follows a symlink. Closing or dropping the listener removes the path only while that same socket is
+there, with the code `membraned` uses for its control socket, below. The inspection, the bind and
+the identity read are separate calls, so the path must be in a directory only the supervisor can
+write. The cell, plasmosome-7em, which is not built yet, is to check that directory; another process
+of the same uid is owner gate O-4 on `plasmosome-qep`.
+
+`accept_ready` accepts one pending connection without blocking and returns the peer's process id as
+the kernel recorded it: `LOCAL_PEERPID` on Darwin, `SO_PEERCRED` on Linux. That is the process that
+called `connect`, so the handshake can compare it with the helper's pid.
+
+`DiagnosticTranscript` reads the read end of the diagnostic pipe that `HelperExec::prepare` returns,
+on a thread of its own, so a helper that writes a lot never blocks on descriptor 2. It keeps the
+first 1,048,576 bytes and counts the rest. `finish(wait)` waits up to `wait` for end of file and
+returns within `wait` plus one 25 ms poll interval, unless the machine is too loaded to schedule its
+thread. `eof` is true only when every holder of the write end has closed it.
 
 ## Control-socket ownership
 
