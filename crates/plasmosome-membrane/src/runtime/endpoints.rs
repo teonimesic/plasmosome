@@ -1,10 +1,11 @@
 use crate::runtime::RemoveOutcome;
 use crate::runtime::path::RecipePath;
 use crate::socket::OwnedSocketPath;
-use std::os::fd::OwnedFd;
+use std::io::{ErrorKind, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -12,6 +13,8 @@ use std::time::Duration;
 /// How many bytes of the helper's diagnostics a [`Transcript`] keeps. Later
 /// bytes are read and counted, never kept.
 pub const TRANSCRIPT_CAP: usize = 1_048_576;
+
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A control or data listener the supervisor binds at a recipe path before it
 /// launches the helper, and keeps until teardown.
@@ -62,13 +65,42 @@ impl RuntimeListener {
     /// Those are separate calls, so pass a path under a directory only this
     /// supervisor can write; this call does not check the directory.
     pub fn bind(path: &RecipePath) -> Result<RuntimeListener, EndpointRefusal> {
-        let _ = path;
-        todo!()
+        let bind_failed = |error: std::io::Error| EndpointRefusal::Bind {
+            path: path.clone(),
+            errno: errno_of(&error),
+        };
+        match std::fs::symlink_metadata(path.as_path()) {
+            Ok(_) => return Err(EndpointRefusal::AddressInUse { path: path.clone() }),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(bind_failed(error)),
+        }
+        let listener =
+            crate::spawn_lock::with_descriptors_held(|_held| UnixListener::bind(path.as_path()))
+                .map_err(|error| match error.raw_os_error() {
+                    Some(libc::EADDRINUSE) => EndpointRefusal::AddressInUse { path: path.clone() },
+                    _ => bind_failed(error),
+                })?;
+        let owned = OwnedSocketPath::capture(path.as_path().to_owned()).map_err(|error| {
+            EndpointRefusal::Identity {
+                path: path.clone(),
+                errno: error.raw_os_error(),
+            }
+        })?;
+        restrict_to_owner(path).map_err(|errno| EndpointRefusal::Permissions {
+            path: path.clone(),
+            errno,
+        })?;
+        listener.set_nonblocking(true).map_err(bind_failed)?;
+        Ok(RuntimeListener {
+            path: path.clone(),
+            listener,
+            owned,
+        })
     }
 
     /// The path this listener was bound at.
     pub fn path(&self) -> &RecipePath {
-        todo!()
+        &self.path
     }
 
     /// Accepts one pending connection without blocking, holding the write
@@ -80,23 +112,86 @@ impl RuntimeListener {
         expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
     )]
     pub(crate) fn accept_ready(&self) -> std::io::Result<Option<(UnixStream, libc::pid_t)>> {
-        todo!()
+        let stream = match crate::spawn_lock::with_descriptors_held(|_held| {
+            self.listener.accept().map(|(stream, _)| stream)
+        }) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        stream.set_nonblocking(true)?;
+        let pid = peer_pid(&stream)?;
+        Ok(Some((stream, pid)))
     }
 
     /// Closes the listener, then removes its socket file if a no-follow
     /// inspection still finds the socket it bound, and says what it found.
     /// Dropping the listener does the same and discards the outcome.
     pub fn close(self) -> RemoveOutcome {
-        todo!()
+        let RuntimeListener {
+            listener, owned, ..
+        } = self;
+        drop(listener);
+        owned.remove()
+    }
+}
+
+#[allow(unsafe_code)]
+fn restrict_to_owner(path: &RecipePath) -> Result<(), i32> {
+    // SAFETY: The path is a NUL-terminated string `path` keeps alive for the call, and fchmodat
+    // keeps no pointer to it.
+    let changed = unsafe {
+        libc::fchmodat(
+            libc::AT_FDCWD,
+            path.as_c_str().as_ptr(),
+            0o600,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if changed == 0 {
+        Ok(())
+    } else {
+        Err(errno_of(&std::io::Error::last_os_error()))
     }
 }
 
 /// The process id the kernel recorded for the peer of `stream` when it
 /// connected: `LOCAL_PEERPID` on Darwin, `SO_PEERCRED` on Linux. It is the
 /// process that called `connect`, not one that later received the descriptor.
+#[allow(unsafe_code)]
 pub fn peer_pid(stream: &UnixStream) -> std::io::Result<libc::pid_t> {
-    let _ = stream;
-    todo!()
+    #[cfg(target_os = "linux")]
+    let (mut found, level, name) = (
+        libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        },
+        libc::SOL_SOCKET,
+        libc::SO_PEERCRED,
+    );
+    #[cfg(not(target_os = "linux"))]
+    let (mut found, level, name): (libc::pid_t, _, _) = (0, libc::SOL_LOCAL, libc::LOCAL_PEERPID);
+    let mut length = std::mem::size_of_val(&found) as libc::socklen_t;
+    // SAFETY: `found` is a local of `length` bytes that getsockopt may write, and `stream` keeps
+    // its descriptor open for the call.
+    let got = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            level,
+            name,
+            (&raw mut found).cast(),
+            &mut length,
+        )
+    };
+    if got != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(target_os = "linux")]
+    let pid = found.pid;
+    #[cfg(not(target_os = "linux"))]
+    let pid = found;
+    Ok(pid)
 }
 
 /// A thread that reads the helper's diagnostic pipe as fast as it is written,
@@ -130,27 +225,116 @@ impl DiagnosticTranscript {
     /// Starts reading `read_end` on a new thread, which owns it from now on.
     /// Fails only when the thread cannot be started.
     pub fn start(read_end: OwnedFd) -> std::io::Result<DiagnosticTranscript> {
-        let _ = read_end;
-        todo!()
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ended, done) = mpsc::channel();
+        let stopping = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("diagnostic-transcript".to_owned())
+            .spawn(move || drain(std::fs::File::from(read_end), &stopping, &ended))?;
+        Ok(DiagnosticTranscript {
+            stop,
+            done,
+            thread: Some(thread),
+        })
     }
 
     /// Waits up to `wait` for end of file, then stops the thread and returns
     /// what it read. It returns within `wait` plus one poll interval even when
     /// a process still holds the write end; `eof` is then false.
-    pub fn finish(self, wait: Duration) -> Transcript {
-        let _ = wait;
-        todo!()
+    pub fn finish(mut self, wait: Duration) -> Transcript {
+        let _ = self.done.recv_timeout(wait);
+        self.stop.store(true, Ordering::Release);
+        self.thread
+            .take()
+            .and_then(|thread| thread.join().ok())
+            .unwrap_or_default()
     }
 }
 
 impl Drop for DiagnosticTranscript {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+fn drain(mut pipe: std::fs::File, stop: &AtomicBool, ended: &mpsc::Sender<()>) -> Transcript {
+    let mut transcript = Transcript::default();
+    let mut chunk = vec![0u8; 65_536];
+    while !stop.load(Ordering::Acquire) {
+        if !readable_within(&pipe, POLL_INTERVAL) {
+            continue;
+        }
+        match pipe.read(&mut chunk) {
+            Ok(0) => {
+                transcript.eof = true;
+                let _ = ended.send(());
+                break;
+            }
+            Ok(count) => keep(&mut transcript, &chunk[..count]),
+            Err(error)
+                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+            Err(_) => break,
+        }
+    }
+    transcript
+}
+
+#[allow(unsafe_code)]
+fn readable_within(pipe: &std::fs::File, interval: Duration) -> bool {
+    let mut watched = libc::pollfd {
+        fd: pipe.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let wait_ms = libc::c_int::try_from(interval.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `watched` is one local pollfd, matching the count of 1, and `pipe` keeps its
+    // descriptor open for the call.
+    unsafe { libc::poll(&mut watched, 1, wait_ms) > 0 }
+}
+
+fn keep(transcript: &mut Transcript, read: &[u8]) {
+    let room = TRANSCRIPT_CAP.saturating_sub(transcript.bytes.len());
+    let (kept, over) = read.split_at(read.len().min(room));
+    transcript.bytes.extend_from_slice(kept);
+    transcript.dropped += over.len() as u64;
+}
+
+fn errno_of(error: &std::io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
 }
 
 impl std::fmt::Display for EndpointRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            EndpointRefusal::AddressInUse { path } => write!(
+                f,
+                "{} already exists, so no listener was bound there",
+                path.as_str()
+            ),
+            EndpointRefusal::Bind { path, errno } => write!(
+                f,
+                "binding a listener at {} failed: errno {errno}",
+                path.as_str()
+            ),
+            EndpointRefusal::Identity {
+                path,
+                errno: Some(errno),
+            } => write!(
+                f,
+                "the entry bound at {} could not be inspected: errno {errno}",
+                path.as_str()
+            ),
+            EndpointRefusal::Identity { path, errno: None } => write!(
+                f,
+                "the entry at {} after the bind is not a socket",
+                path.as_str()
+            ),
+            EndpointRefusal::Permissions { path, errno } => write!(
+                f,
+                "{} could not be made private to its owner: errno {errno}",
+                path.as_str()
+            ),
+        }
     }
 }
 

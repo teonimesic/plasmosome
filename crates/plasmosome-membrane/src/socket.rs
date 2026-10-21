@@ -1,4 +1,5 @@
 use crate::runtime::RemoveOutcome;
+use std::mem::ManuallyDrop;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::PathBuf;
 
@@ -40,7 +41,10 @@ impl OwnedSocketPath {
     /// Removes the pathname if it still names the captured socket, and says
     /// what it found there.
     pub(crate) fn remove(self) -> RemoveOutcome {
-        todo!()
+        let mut owned = ManuallyDrop::new(self);
+        let outcome = owned.unlink();
+        drop(std::mem::take(&mut owned.path));
+        outcome
     }
 
     fn unlink(&self) -> RemoveOutcome {
