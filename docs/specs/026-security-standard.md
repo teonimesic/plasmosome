@@ -296,6 +296,61 @@ An `unsafe extern` block documents what each declaration assumes about the forei
 reads that, so it is a reviewer item. The safety comment is the one inline `//` comment the code
 carries. That needs the `AGENTS.md` amendment below.
 
+**What the reviewer reads, because no lint does.** Six forms pass clippy with `-D warnings` and the
+levels above, yet each weakens a rule of this section. PR #181's review found them as N1, N2b, N3a
+to N3c and N9, and plasmosome-986s measured each again on Rust 1.99.1. The reviewer is the only
+check on each.
+
+- **A `safe fn` or `safe static` in an `unsafe extern` block (N1).** A caller then needs no `unsafe`
+  block, no allow and no safety comment. So the whole safety argument sits on the declaration: its
+  `///` says why every call is sound, with any arguments and from any thread.
+- **An `unsafe(no_mangle)`, `unsafe(export_name = ...)` or `unsafe(link_section = ...)` attribute
+  (N2b).** It needs the item's allow, but no lint asks for a reason. A `no_mangle` function named
+  like a C library symbol replaces that symbol for the whole process. So the item's `///` says why
+  its name or section collides with nothing else the process loads. Any other `unsafe(...)`
+  attribute, such as `unsafe(naked)`, is read the same way: the item's `///` says why it is sound.
+  This adds no inline comment, so the root `AGENTS.md` rule stays as it is.
+- **A lint attribute naming `unsafe_code` in any form but a plain outer `#[allow(unsafe_code)]`
+  (N3a to N3c).** That covers an inner `#![...]`, one behind `cfg_attr`, `expect` in place of
+  `allow`, `unsafe_code` listed with other lints, and the raw name `r#unsafe_code`. Each lifts the
+  deny over its whole item. On the crate root, or on a module the crate's `AGENTS.md` does not
+  name, it is the wider allow this section refuses. On a single item or a named FFI module, the
+  reviewer asks for the plain outer spelling, which the command below does not print.
+- **An item nested inside an allowed item (N9).** It inherits the allow. The reviewer reads the
+  body of each allowed item for nested items that hold `unsafe`, and asks for the allow on the
+  nested item instead.
+
+One command prints every line of the first three kinds. Run it on the PR's fetched commit and on
+`origin/main` after a fetch. Each line it prints reads `<revision>:<path>:<line>:<text>`, so
+compare only the path and the text. A line the first run prints and the second does not is one
+the PR adds, and the reviewer reads each.
+
+```shell
+git grep -n -P '(?<![A-Za-z0-9_])safe\s+(fn|static)\b|\bunsafe\s*\(|\b(no_mangle|export_name|link_section)\b|^(?!\s*#\[allow\(unsafe_code\)\]\s*$).*\b(allow|expect)\s*\([^)]*\bunsafe_code\b' <commit> -- ':(top)*.rs'
+```
+
+Its control is main. At 607718f4 it printed exactly four lines there: the `safe fn` declarations of
+`_dyld_image_count` and `_dyld_get_image_name` in lanes' `krun.rs`, and the two
+`unsafe(link_section = ...)` attributes on `RECORD_INHERITED` in plasmosome-core's
+`tests/supervisor_start.rs`. While those stay, a run at main that prints none of them is broken. It
+needs `-P`. Apple Git's `-E` refuses the lookarounds, and reads `\b` and `\s` as the letters `b` and
+`s` with no error, so an `-E` rewrite of the pattern prints nothing. It reads one line at a time, so
+an attribute that rustfmt wraps over two lines escapes it, and so does one a macro writes. It also
+prints prose that names a `safe fn`. It does not print a plain outer `#[allow(unsafe_code)]`, so one
+the PR adds on a `mod` shows only in the diff. It cannot see nesting, so N9 is the reviewer's
+reading alone.
+
+No check refuses these forms, for three reasons. No clippy lint reaches them: with clippy's
+restriction, pedantic, nursery and cargo groups all on, no lint fired on a `safe` declaration, an
+`unsafe(...)` attribute or a nested item for being one. On the lint attributes only
+`allow_attributes` and `allow_attributes_without_reason` fired, and both fire on every plain allow
+too; a crate-wide `cfg_attr(all(), expect(unsafe_code, reason = "..."))` passed both at `deny`. A
+guard fails spec 013's bar: each form is a line a reviewer sees in the diff, the next commit can
+revert it, and section 7 already gives a wider allow to the reviewer. A check for N9 needs a Rust
+parser, which means `syn` as a new direct dependency of `plasmosome-guards`, admitted under section
+1, for a form a reader sees in the diff. Amended on 2026-10-21: everything from "What the
+reviewer reads" to here is new.
+
 **What the lint levels do not reach.**
 
 - **`unsafe` expanded from another crate's macro.** rustc does not report lints raised inside
@@ -427,6 +482,7 @@ maximum size and, where it applies, a maximum nesting depth and a time budget.
 | Git-only step | `.githooks/build-input-guard`, its TOML reading | A PR's author, through the commit the step judges | 8 MiB per file (`MAX_BYTES`), read from `git cat-file blob` through a limit; nesting bounded by Python's recursion limit; 60 s per git call. The tree listing from `git ls-tree` has the 60 s bound only. Anything it cannot read, decode or parse is refused | Bound only |
 | Root image base export | `tools/root-image`, its reading of the export, of what the build container leaves in the work root, and of Docker's output | The publisher of the base image, pinned by digest, and the base's own programs, which run as root in the build container and write `rootfs.raw` and the read-back | The export at most `--size-mib` MiB, and each account, skel and version file in it 1 MiB; `rootfs.raw` exactly `--size-mib` MiB, copied through that bound; the passwd and group read-back 1 MiB each, each `--add` read-back and source 256 MiB, and every other read-back file and Docker's output 16 MiB; the tool's own manifest and source 1 MiB each. Every one is read through a limit. Every file is opened without following a link, except an `--add` source and the tool's own source, which the operator names and which are opened through `realpath`. The tool reads nothing the container writes beyond `rootfs.raw` and the read-back in `check/`, and `check/` must still be a directory. The stage tar is the tool's own, written before the container runs. JSON nested deeper than Python can parse is refused, and so are a member or link name that holds a NUL byte, a link target over 4,095 bytes and an account file that holds a NUL byte. The stat and listing read-backs are parsed in time linear in their size, and their numbers must be ASCII digits short enough to convert; 1,800 s per command. Anything it cannot read or parse is refused with the tool's refused line | Bound only |
 | Lane console | `plasmosome-lanes` `run.rs`, `console.rs` | The guest a test lane boots | 16 MiB (`MAX_CONSOLE_BYTES`), read through a limit; JSON depth 128 | Bound only |
+| Helper and library load commands | `plasmosome-membrane` `runtime/closure.rs`, `read_macho` | The runtime bundle's publisher, through a verified artifact: `runtime::artifacts` matched the bytes to the recipe's SHA-256 pin, and the audit reads them through the same descriptor | 512 MiB per image (`MAX_IMAGE_BYTES`), read through a limit of the bound plus one byte. One fat level; each load command must lie inside `sizeofcmds`, and `sizeofcmds` inside the image. The reader's time is linear in the size; the audit then makes one volume check per distinct system name, an `lstat` walk, a `statfs` and a `getattrlist`. Amended on 2026-10-21: this row is new. | Bound only |
 
 The controller's own journals are not on this list: the session log, the ledger and spec 008's
 recovery journal. Only the controller writes them. Any other process that could rewrite them runs
@@ -473,7 +529,7 @@ when Q1 is answered. It never names a route nobody receives.
 | `unsafe` in a forbid package or outside an allowed item; a missing `// SAFETY:` comment or `# Safety` section | The compiler and clippy, through declared lint levels. In doctests, only a forbid package's library-root attribute declares a level, and clippy never runs | Not a guard. See the spec 013 amendment. Corrected on 2026-10-20: this row did not say that doctests are reached only through that attribute. |
 | A forbid package's library root without `#![doc(test(attr(forbid(unsafe_code))))]`; in a register package, an `unsafe` block in a doctest without the `allow(unsafe_code)` and `// SAFETY:` comment that library code needs | Reviewer | Judgement. Each change shows in the diff: the deleted or misspelled attribute, and the `unsafe` block in the example. Section 8 reads the attribute as code. Amended on 2026-10-20: this row is new. |
 | `unsafe` expanded from a dependency's macro, or from a forbid package's own exported macro in any target outside its library: doctests, integration tests, binaries, examples and benches | The record's `expands_unsafe` field and the reviewer; for a package's own macro, the reviewer alone | Judgement, because no lint sees it. Amended on 2026-10-20: this row named only a dependency's macro. |
-| An `allow(unsafe_code)` wider than an item or a named FFI module; an undocumented `unsafe extern` declaration; joining the register without both lints or a reason | Reviewer | Judgement |
+| An `allow(unsafe_code)` wider than an item or a named FFI module; an undocumented `unsafe extern` declaration; a `safe` foreign item whose `///` does not argue every call; an `unsafe(...)` attribute whose item's `///` gives no reason; a lint attribute naming `unsafe_code` in any spelling but a plain outer `#[allow(unsafe_code)]`; `unsafe` in an item nested inside an allowed one; joining the register without both lints or a reason | Reviewer, with section 2's command | Judgement. Amended on 2026-10-21: the `safe` item, attribute, spelling and nesting cases and the command are new. |
 | Native code in a forbid package | The compiler, for linked code; the reviewer, for test-built programs | Judgement for the second |
 | A dependency rule that is a judgement: the thousand-line rule, the narrowest crate, features, record contents, release age, a stale record, an approval link, a copied crate | Reviewer | Judgement |
 | Running anything from a contributor's PR, its git hooks included, before reading it | Reviewer | A rule about who does what |

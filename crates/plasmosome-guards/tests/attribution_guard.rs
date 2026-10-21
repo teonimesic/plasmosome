@@ -355,41 +355,58 @@ fn refuses_a_model_trailer_mid_body_when_paragraph_breaks_hold_whitespace() {
     });
 }
 
+const QUOTED_TRAILERS: [&str; 2] = [
+    "Co-Authored-By: Claude (Fable 5)",
+    "Co-Authored-By: Probe <noreply@anthropic.com>",
+];
+
 #[test]
 fn clears_a_body_that_quotes_a_trailer_inside_a_sentence() {
     check_workspace(|root| {
-        assert_cleared(
-            root,
-            "ci(guard): refuse a commit that credits a model as an author\n\nTwo commits carry a `Co-Authored-By: Claude (Fable 5)` line that the guard cannot see.\n",
-            "mentions a trailer inside a sentence rather than writing one",
-        );
+        for quoted in QUOTED_TRAILERS {
+            assert_cleared(
+                root,
+                &format!(
+                    "ci(guard): refuse a commit that credits a model as an author\n\nTwo commits carry a `{quoted}` line that the guard cannot see.\n"
+                ),
+                "mentions a trailer inside a sentence rather than writing one",
+            );
+        }
     });
 }
 
 #[test]
 fn clears_a_body_that_indents_a_trailer_as_an_example() {
     check_workspace(|root| {
-        assert_cleared(
-            root,
-            "ci(guard): refuse a commit that credits a model as an author\n\nThe shape the guard now refuses:\n\n    Co-Authored-By: Claude (Fable 5)\n\nA model is a tool, and tools do not co-author.\n",
-            "shows a trailer as an indented example",
-        );
+        for quoted in QUOTED_TRAILERS {
+            assert_cleared(
+                root,
+                &format!(
+                    "ci(guard): refuse a commit that credits a model as an author\n\nThe shape the guard now refuses:\n\n    {quoted}\n\nA model is a tool, and tools do not co-author.\n"
+                ),
+                "shows a trailer as an indented example",
+            );
+        }
     });
 }
 
 #[test]
 fn clears_a_paragraph_that_mixes_prose_with_a_quoted_trailer() {
     check_workspace(|root| {
-        assert_cleared(
-            root,
-            "ci(guard): refuse a commit that credits a model as an author\n\nThe guard refuses this line:\nCo-Authored-By: Claude (Fable 5)\n",
-            "puts a quoted trailer under a line of prose in the same paragraph",
-        );
+        for quoted in QUOTED_TRAILERS {
+            assert_cleared(
+                root,
+                &format!(
+                    "ci(guard): refuse a commit that credits a model as an author\n\nThe guard refuses this line:\n{quoted}\n"
+                ),
+                "puts a quoted trailer under a line of prose in the same paragraph",
+            );
+        }
     });
 }
 
 #[test]
-fn refuses_a_trailer_naming_a_vendor_whose_name_no_person_carries() {
+fn refuses_a_coding_agents_listed_address_under_its_products_name() {
     check_workspace(|root| {
         assert_refused_crediting_each(
             root,
@@ -399,7 +416,7 @@ fn refuses_a_trailer_naming_a_vendor_whose_name_no_person_carries() {
                 "Devin <devin@cognition.ai>",
                 "Grok <noreply@x.ai>",
             ],
-            "credits a coding agent this guard did not name before",
+            "credits a coding agent by its listed tool address, under the name of its product",
         );
     });
 }
@@ -443,6 +460,57 @@ fn refuses_a_tool_identity_under_a_neutral_name() {
                 "Probe <noreply@x.ai>",
             ],
             "credits a model's own address under a name that holds no vendor word",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_tools_suggestion_taken_with_githubs_co_author_line() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a change\n\nSome body prose.\n\nCo-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>\n",
+            "closes with the line GitHub's suggestion button adds for CodeRabbit, a model tool behind a bot account, which the tool list decides before any bot is cleared",
+        );
+    });
+}
+
+#[test]
+fn clears_dependabots_sign_off_and_co_author_in_one_closing_block() {
+    check_workspace(|root| {
+        assert_cleared(
+            root,
+            "chore(deps): bump actions/checkout (#22)\n\nBumps the actions group with 1 update in the / directory: [actions/checkout](https://github.com/actions/checkout).\n\n\nUpdates `actions/checkout` from 5.1.0 to 7.0.1\n- [Release notes](https://github.com/actions/checkout/releases)\n\n---\nupdated-dependencies:\n- dependency-name: actions/checkout\n  dependency-version: 7.0.1\n  dependency-type: direct:production\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\n",
+            "closes as #22's squash did, with Dependabot's sign-off and GitHub's co-author line for it in one block. Dependabot is a bot that is not a model tool, and spec 029 section 5 clears it until the owner answers Q1",
+        );
+    });
+}
+
+#[test]
+fn names_the_canonical_position_however_the_key_is_spelled() {
+    check_workspace(|root| {
+        let value = "Probe <noreply@anthropic.com>";
+        let probes: Vec<Probe> = [
+            ("CO-AUTHORED-BY : ", Position::CoAuthoredBy),
+            ("signed-off-by:", Position::SignedOffBy),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (key, position))| {
+            let line = format!("{key}{value}");
+            Probe {
+                label: format!("{line:?}"),
+                message: format!("probe {index}\n\n{line}\n"),
+                refusal: Verdict::Model
+                    .refusal(position)
+                    .map(|refusal| format!("{} \"{value}\" {refusal}", position.as_printed())),
+            }
+        })
+        .collect();
+        assert_each_probe_judged(
+            root,
+            "Git reads a trailer key in any case, with whitespace before its colon or none after it, and the refusal names the position as spec 029 spells it, so",
+            &probes,
         );
     });
 }
@@ -617,6 +685,20 @@ fn refuses_a_message_whose_trailers_it_cannot_parse() {
 }
 
 #[test]
+fn refuses_a_folded_trailer_git_cannot_print_as_written() {
+    check_workspace(|root| {
+        let repository = repository_with_commit(
+            "docs: a change\n\nSome body prose.\n\nCo-authored-by: A Colleague\n <colleague@corp.locale.io>\n",
+        );
+        assert_refused_saying(
+            &run_guard_with_git_refusing(root, repository.path(), "--only-trailers"),
+            "cannot parse the trailers",
+            "a commit whose trailer goes on over two lines while `git interpret-trailers` cannot print its trailers as they are written, which leaves the guard unable to tell that the trailer was folded",
+        );
+    });
+}
+
+#[test]
 fn clears_a_body_larger_than_a_pipe_buffer_whose_first_line_is_trailer_shaped() {
     check_workspace(|root| {
         let mut message = String::from("ci(guard): a body that outgrows a pipe buffer\n\n");
@@ -651,8 +733,24 @@ fn tells_the_contributor_how_to_fix_an_untraceable_trailer() {
     });
 }
 
-fn assert_refused_when_grep_fails_on_the_address(root: &Path, arms: &str, check: &str) {
-    let repository = repository_with_commit(UNTRACEABLE_CO_AUTHOR);
+fn assert_refused_when_grep_fails_on_the_address(root: &Path, arms: &str, check: &str) -> Output {
+    assert_refused_when_grep_fails_judging(
+        root,
+        UNTRACEABLE_CO_AUTHOR,
+        ("me@laptop.local", "is untraceable"),
+        arms,
+        check,
+    )
+}
+
+fn assert_refused_when_grep_fails_judging(
+    root: &Path,
+    message: &str,
+    (address, verdict): (&str, &str),
+    arms: &str,
+    check: &str,
+) -> Output {
+    let repository = repository_with_commit(message);
     let grep = real_tool("grep");
     let stub = format!(
         "#!/bin/sh\ninput=$(cat)\ncase \"$*\" in\n{arms}\nesac\nprintf '%s\\n' \"$input\" | exec {} \"$@\"\n",
@@ -663,13 +761,25 @@ fn assert_refused_when_grep_fails_on_the_address(root: &Path, arms: &str, check:
     assert_refused_saying(
         &output,
         "grep exited 2",
-        &format!("a commit crediting `me@laptop.local` while grep fails only on {check}"),
+        &format!("a commit crediting `{address}` while grep fails only on {check}"),
     );
     assert!(
-        !said(&output).contains("is untraceable"),
-        "the guard reported the address untraceable although grep could not answer {check}, so that check never asked grep.\nguard said:\n{}",
+        !said(&output).contains(verdict),
+        "the guard said `{verdict}` about `{address}` although grep could not answer {check}, so that check never asked grep.\nguard said:\n{}",
         said(&output)
     );
+    let unreadable: Vec<String> = output
+        .stdout
+        .split(|&byte| byte == b'\n')
+        .filter(|line| line.windows(11).any(|word| word == b"grep exited"))
+        .filter(|line| !line.iter().all(|byte| (b' '..=b'~').contains(byte)))
+        .map(|line| String::from_utf8_lossy(line).into_owned())
+        .collect();
+    assert!(
+        unreadable.is_empty(),
+        "the line naming grep's failure holds a byte outside printable ASCII while grep fails only on {check}. A carriage return there sends a terminal back to the line's start, and an invisible space hides a byte, so the reader cannot see the pattern that failed: {unreadable:?}"
+    );
+    output
 }
 
 #[test]
@@ -679,7 +789,7 @@ fn judges_a_domain_through_the_matcher_it_checks() {
             root,
             "  *localdomain*) [ \"$input\" = me@laptop.local ] && exit 2 ;;",
             "the domain check (if the guard's domain pattern no longer holds `localdomain`, point the stub at the new pattern; that alone is not a guard bug)",
-        )
+        );
     });
 }
 
@@ -690,18 +800,66 @@ fn judges_whether_there_is_an_address_through_the_matcher_it_checks() {
             root,
             r#"  '-qiE @') [ "$input" = me@laptop.local ] && exit 2 ;;"#,
             "the check that the address holds an `@`, which grep runs with the pattern `@` alone (if the guard asks that question another way, point the stub at it; that alone is not a guard bug)",
-        )
+        );
     });
 }
 
 #[test]
 fn judges_a_malformed_address_through_the_matcher_it_checks() {
     check_workspace(|root| {
-        assert_refused_when_grep_fails_on_the_address(
+        let output = assert_refused_when_grep_fails_on_the_address(
             root,
             r#"  *'\.\.'*) [ "$input" = me@laptop.local ] && exit 2 ;;"#,
             "the check that the address is malformed (if the guard's malformed pattern no longer holds two escaped dots in a row, point the stub at a fragment only that pattern holds; that alone is not a guard bug)",
-        )
+        );
+        let escaped = r"|[ \x09\x0d\x0b\x0c]|\xc2[\x85\xa0]|\xe1\x9a\x80|";
+        assert!(
+            said(&output).contains(escaped),
+            "the line naming grep's failure must write each byte of the malformed pattern outside printable ASCII as a backslash, an `x` and two hex digits, so it shows `{escaped}`.\nguard said:\n{}",
+            said(&output)
+        );
+    });
+}
+
+#[test]
+fn judges_a_tool_address_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_judging(
+            root,
+            "docs: a change\n\nSome body prose.\n\nCo-authored-by: Probe <noreply@anthropic.com>\n",
+            ("noreply@anthropic.com", "credits a model"),
+            r#"  *'noreply@anthropic\.com'*) [ "$input" = noreply@anthropic.com ] && exit 2 ;;"#,
+            "the tool address list, the one pattern holding `noreply@anthropic\\.com` (the `@` and malformed checks before it run the real grep; if the list is matched another way, point the stub at it; that alone is not a guard bug)",
+        );
+    });
+}
+
+#[test]
+fn judges_a_tool_login_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_judging(
+            root,
+            "docs: a change\n\nSome body prose.\n\nCo-authored-by: Probe <81847+claude@users.noreply.github.com>\n",
+            ("81847+claude@users.noreply.github.com", "credits a model"),
+            r#"  *'users\.noreply\.github\.com'*) [ "$input" = 81847+claude@users.noreply.github.com ] && exit 2 ;;"#,
+            "the tool login list, the one pattern holding `users\\.noreply\\.github\\.com` (if the logins are matched another way, point the stub at it; that alone is not a guard bug)",
+        );
+    });
+}
+
+#[test]
+fn judges_a_line_break_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_judging(
+            root,
+            "docs: a change\n\nSome body prose.\n\nCo-authored-by: Claude <noreply@anthropic.com>\r<jane@corp.locale.io>\n",
+            (
+                "Claude <noreply@anthropic.com>, a carriage return, then <jane@corp.locale.io>",
+                "credits a model",
+            ),
+            r#"  *"$(printf '[\r\v\f]')"*) [ "$input" = "$(printf 'Claude <noreply@anthropic.com>\r<jane@corp.locale.io>')" ] && exit 2 ;;"#,
+            "the line-break check, the one pattern holding a carriage return, a vertical tab and a form feed alone in one bracket (if the guard asks that question another way, point the stub at it; that alone is not a guard bug)",
+        );
     });
 }
 
@@ -806,7 +964,143 @@ const IDENTITIES: &[(&str, Verdict)] = &[
     ),
     ("dependabot[bot] <support@github.com>", Verdict::Cleared),
     ("Probe Person <probe@corp.locale.io>", Verdict::Cleared),
+    ("Probe <noreply@anthropic.com>", Verdict::Model),
+    ("Probe <cursoragent@cursor.com>", Verdict::Model),
+    ("Probe <codex@openai.com>", Verdict::Model),
+    ("Probe <devin@cognition.ai>", Verdict::Model),
+    ("Probe <noreply@x.ai>", Verdict::Model),
+    (
+        "Probe <81847+claude@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <209825114+claude[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <198982749+Copilot@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <175728472+Copilot@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <136622811+coderabbitai[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <161369871+google-labs-jules[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <176961590+gemini-code-assist[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <158243242+devin-ai-integration[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <199175422+chatgpt-codex-connector[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <215057067+openai-codex[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <206951365+cursor[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <199161495+cursoragent@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    ("Claude <NOREPLY@ANTHROPIC.COM>", Verdict::Model),
+    (
+        "Probe <claude[bot]@users.noreply.github.com>",
+        Verdict::Model,
+    ),
+    (
+        "Probe <209825114+CLAUDE[BOT]@USERS.NOREPLY.GITHUB.COM>",
+        Verdict::Model,
+    ),
+    ("Jane Doe <jane@anthropic.com>", Verdict::Cleared),
+    ("Sam Roe <sam@cursor.com>", Verdict::Cleared),
+    (
+        "Claude Monet <claude.monet@corp.locale.io>",
+        Verdict::Cleared,
+    ),
+    ("Alex Aitken <alex.aitken@corp.locale.io>", Verdict::Cleared),
+    ("Ana Gemini <ana@corp.locale.io>", Verdict::Cleared),
+    (
+        "Jane Doe <4242+janedoe@users.noreply.github.com>",
+        Verdict::Cleared,
+    ),
+    ("Kevin Devin <kevin.devin@cognition.ai>", Verdict::Cleared),
+    (
+        "Claude Monet <81848+claudemonet@users.noreply.github.com>",
+        Verdict::Cleared,
+    ),
+    ("Gemini <probe@corp.locale.io>", Verdict::Cleared),
+    ("Copilot <probe@corp.locale.io>", Verdict::Cleared),
+    ("Probe <noreply@anthropic.com.evil.io>", Verdict::Cleared),
+    (
+        "Probe <81847+claude@users.noreply.github.com.evil.io>",
+        Verdict::Cleared,
+    ),
+    ("Probe <xnoreply@anthropic.com>", Verdict::Cleared),
+    ("Probe <noreply@anthropicxcom>", Verdict::Cleared),
+    ("Probe <noreply@anthropic.com.>", Verdict::Cleared),
+    ("Probe <claudet@users.noreply.github.com>", Verdict::Cleared),
+    (
+        "Jane Doe <4242+janedoe-claude@users.noreply.github.com>",
+        Verdict::Cleared,
+    ),
+    (
+        "Probe <81847+claude@users.noreply.githubxcom>",
+        Verdict::Cleared,
+    ),
+    (
+        "Jane <jane@corp.locale.io> <noreply@anthropic.com>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Cleared,
+    ),
+    (
+        "noreply@anthropic.com <jane@corp.locale.io>",
+        Verdict::Cleared,
+    ),
+    (
+        "81847+claude@users.noreply.github.com <jane@corp.locale.io>",
+        Verdict::Cleared,
+    ),
+    (
+        "Probe <81847+claude@users.noreply.github.com.>",
+        Verdict::Cleared,
+    ),
+    ("Probe <+claude@users.noreply.github.com>", Verdict::Cleared),
 ];
+
+fn identities() -> Vec<(String, Verdict)> {
+    let letter = |point: u32| {
+        char::from_u32(point)
+            .unwrap_or_else(|| panic!("setup: {point:#x} is a Unicode scalar value"))
+    };
+    let mut rows = owned(IDENTITIES);
+    rows.push((
+        format!("Claude{}o Roe <>", letter(0xf1)),
+        Verdict::Untraceable,
+    ));
+    rows.push((
+        format!("Jos{}gemini Roe <>", letter(0xe9)),
+        Verdict::Untraceable,
+    ));
+    rows
+}
 
 const PROBES_PER_REPOSITORY: usize = 8;
 
@@ -956,6 +1250,42 @@ const RULE_2_ROWS_BEYOND_ACCEPTANCE_1: &[(&str, Verdict)] = &[
     ("Probe <probe@@corp.locale.io>", Verdict::Cleared),
     ("Probe <@@corp.locale.io>", Verdict::Cleared),
     ("Probe <probe@corp@.locale.io>", Verdict::Untraceable),
+    ("Jane Doe <jane..doe@corp.locale.io>", Verdict::Cleared),
+    ("Probe <.probe.@corp.locale.io>", Verdict::Cleared),
+    (
+        "Claude <noreply@anthropic.com>\r<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\x0b<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\x0c<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\u{85}<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\u{2028}<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\u{2029}<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\rCo-authored-by: A Colleague <colleague@corp.locale.io>",
+        Verdict::Model,
+    ),
+    ("Jane <jane@corp.locale.io\r>", Verdict::Untraceable),
+    ("Jane Doe <jane@corp.locale.io>\x0b", Verdict::Untraceable),
+    (
+        "Jane Doe\rProbe <noreply@anthropic.com>",
+        Verdict::Untraceable,
+    ),
 ];
 
 fn rule_2_rows() -> Vec<(String, Verdict)> {
@@ -1031,13 +1361,15 @@ fn assert_each_identity_judged_in<Identity: AsRef<str>>(
 #[test]
 fn judges_each_identity_as_a_co_author() {
     check_workspace(|root| {
-        assert_each_identity_judged_in(root, Position::CoAuthoredBy, IDENTITIES)
+        assert_each_identity_judged_in(root, Position::CoAuthoredBy, &identities())
     });
 }
 
 #[test]
 fn judges_each_identity_as_a_sign_off() {
-    check_workspace(|root| assert_each_identity_judged_in(root, Position::SignedOffBy, IDENTITIES));
+    check_workspace(|root| {
+        assert_each_identity_judged_in(root, Position::SignedOffBy, &identities())
+    });
 }
 
 #[test]
@@ -1054,10 +1386,104 @@ fn judges_each_malformed_address_as_a_sign_off() {
     });
 }
 
+const FOLDED_TRAILERS: &[(&str, &str, &str, Verdict)] = &[
+    (
+        "a model's trailer that a line starting with a space ends with a person's address",
+        "KEY: Claude <noreply@anthropic.com>\n <jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a model's trailer that a line starting with a tab ends with a person's address",
+        "KEY: Claude <noreply@anthropic.com>\n\t<jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a model's trailer that a line starting with a carriage return ends with a person's address",
+        "KEY: Claude <noreply@anthropic.com>\n\r<jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a person's trailer whose address goes on a line of its own",
+        "KEY: Jane Doe\n <jane@corp.locale.io>\n",
+        "Jane Doe <jane@corp.locale.io>",
+        Verdict::Untraceable,
+    ),
+    (
+        "a folded trailer above a person's trailer on one line",
+        "KEY: A Colleague\n <colleague@corp.locale.io>\nKEY: Jane Doe <jane@corp.locale.io>\n",
+        "A Colleague <colleague@corp.locale.io>",
+        Verdict::Untraceable,
+    ),
+    (
+        "a person's trailer on one line above a folded trailer",
+        "KEY: Jane Doe <jane@corp.locale.io>\nKEY: A Colleague\n <colleague@corp.locale.io>\n",
+        "A Colleague <colleague@corp.locale.io>",
+        Verdict::Untraceable,
+    ),
+    (
+        "a folded trailer under another key above a person's trailer on one line",
+        "Reviewed-by: A Reviewer\n <reviewer@corp.locale.io>\nKEY: Jane Doe <jane@corp.locale.io>\n",
+        "",
+        Verdict::Cleared,
+    ),
+    (
+        "a model's folded trailer below a trailer under another key",
+        "Reviewed-by: A Reviewer <reviewer@corp.locale.io>\nKEY: Claude <noreply@anthropic.com>\n <jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a person's trailer on one line above a folded trailer under another key",
+        "KEY: Jane Doe <jane@corp.locale.io>\nReviewed-by: A Reviewer\n <reviewer@corp.locale.io>\n",
+        "",
+        Verdict::Cleared,
+    ),
+];
+
+fn assert_each_folded_trailer_judged_in(root: &Path, position: Position) {
+    let probes: Vec<Probe> = FOLDED_TRAILERS
+        .iter()
+        .enumerate()
+        .map(|(index, &(label, block, value, verdict))| Probe {
+            label: label.to_owned(),
+            message: format!(
+                "probe {index}\n\n{}",
+                block.replace("KEY", position.as_written())
+            ),
+            refusal: verdict
+                .refusal(position)
+                .map(|refusal| format!("{} \"{value}\" {refusal}", position.as_printed())),
+        })
+        .collect();
+    assert_each_probe_judged(
+        root,
+        &format!(
+            "git unfolds a trailer that goes on over lines starting with whitespace into one value, which a reader of the message sees as more than one line, so it counts as no address and its name decides the refusal. As {}",
+            position.as_written()
+        ),
+        &probes,
+    );
+}
+
+#[test]
+fn judges_each_folded_trailer_as_a_co_author() {
+    check_workspace(|root| assert_each_folded_trailer_judged_in(root, Position::CoAuthoredBy));
+}
+
+#[test]
+fn judges_each_folded_trailer_as_a_sign_off() {
+    check_workspace(|root| assert_each_folded_trailer_judged_in(root, Position::SignedOffBy));
+}
+
 #[test]
 fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
     check_workspace(|root| {
-        let model = format!("Co-authored-by \"Gemini <probe@corp.locale.io>\" {CO_AUTHOR_MODEL}");
+        let model = format!(
+            "Co-authored-by \"Gemini <176961590+gemini-code-assist[bot]@users.noreply.github.com>\" {CO_AUTHOR_MODEL}"
+        );
         let lines: &[(&str, &str, bool)] = &[
             ("U+3000, an ideographic space", "\u{3000}", true),
             ("U+2003, an em space", "\u{2003}", true),
@@ -1073,7 +1499,7 @@ fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
             .enumerate()
             .map(|(index, (name, line, git_reads_text))| Probe {
                 label: format!("a line holding only {name}"),
-                message: format!("probe {index}\n\nProse A\nProse B\nProse C\nCo-authored-by: Gemini <probe@corp.locale.io>\n{line}\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n"),
+                message: format!("probe {index}\n\nProse A\nProse B\nProse C\nCo-authored-by: Gemini <176961590+gemini-code-assist[bot]@users.noreply.github.com>\n{line}\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n"),
                 refusal: git_reads_text.then(|| model.clone()),
             })
             .collect();
@@ -1088,9 +1514,11 @@ fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
 #[test]
 fn reads_a_paragraph_both_ways_when_a_line_is_blank_only_to_another_reader() {
     check_workspace(|root| {
-        let model = "Co-authored-by: Gemini <probe@corp.locale.io>";
-        let refused: &str =
-            &format!("Co-authored-by \"Gemini <probe@corp.locale.io>\" {CO_AUTHOR_MODEL}");
+        let model =
+            "Co-authored-by: Gemini <176961590+gemini-code-assist[bot]@users.noreply.github.com>";
+        let refused: &str = &format!(
+            "Co-authored-by \"Gemini <176961590+gemini-code-assist[bot]@users.noreply.github.com>\" {CO_AUTHOR_MODEL}"
+        );
         let person = "Co-authored-by: A Colleague <colleague@corp.locale.io>";
         let sign_off = "Signed-off-by: A Colleague <colleague@corp.locale.io>";
         let untraceable = "Co-authored-by: Probe <me@laptop.local>";
@@ -1206,7 +1634,7 @@ fn prints_both_offences_when_a_line_git_reads_as_blank_parts_two_model_co_author
             ] {
                 scope.spawn(move || {
                     let repository = repository_with_commit(&format!(
-                        "docs: a change\n\nCo-authored-by: Gemini <probe@corp.locale.io>\n{line}\nCo-authored-by: Copilot <probe@corp.locale.io>\n"
+                        "docs: a change\n\nCo-authored-by: Gemini <176961590+gemini-code-assist[bot]@users.noreply.github.com>\n{line}\nCo-authored-by: Copilot <198982749+Copilot@users.noreply.github.com>\n"
                     ));
                     let head = git(repository.path(), &["rev-parse", "HEAD"], None);
                     let sha = String::from_utf8_lossy(&head.stdout)[..9].to_owned();
@@ -1215,8 +1643,8 @@ fn prints_both_offences_when_a_line_git_reads_as_blank_parts_two_model_co_author
                     let naming = format!("attribution-guard: {sha} ");
                     let lines: Vec<&str> = said.lines().filter(|text| text.starts_with(&naming)).collect();
                     let expected = [
-                        format!("{naming}Co-authored-by \"Gemini <probe@corp.locale.io>\" {harm}"),
-                        format!("{naming}Co-authored-by \"Copilot <probe@corp.locale.io>\" {harm}"),
+                        format!("{naming}Co-authored-by \"Gemini <176961590+gemini-code-assist[bot]@users.noreply.github.com>\" {harm}"),
+                        format!("{naming}Co-authored-by \"Copilot <198982749+Copilot@users.noreply.github.com>\" {harm}"),
                     ];
                     assert!(
                         !output.status.success() && lines == expected,

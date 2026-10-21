@@ -1,21 +1,37 @@
 #!/usr/bin/env python3
 """Defend health-report uncertainty, delivery windows, pagination, security issues and read-only failure boundaries."""
 
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
+import errno
+import io
 import json
 import os
 from pathlib import Path
 import runpy
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import traceback
 
 
 SOURCE = Path(__file__).resolve().with_name("check-pipeline-health")
 API = runpy.run_path(str(SOURCE))
 NOW = datetime(2026, 9, 12, 15, tzinfo=timezone.utc)
 START = NOW - timedelta(hours=1)
+
+
+class Skipped(Exception):
+    """A row that cannot run on this platform, with the reason the run prints."""
+
+
+def only_on_macos(reason):
+    if sys.platform != "darwin":
+        raise Skipped(f"macOS only: {reason}")
 
 
 def responses(*items):
@@ -435,13 +451,35 @@ def cli_exit_metadata():
             assert "AWS_AUTH_RETRIES=[REDACTED]" in detail and "token=[REDACTED]" in detail
 
 
-def runner_released_group_identity():
-    # Reuse is injected at the syscall boundary; its replacement is a real owned process.
+def process_state(pid):
+    result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=10)
+    state = result.stdout.strip()
+    return state if result.returncode == 0 and state else None
+
+
+def wait_for_zombie(pid):
+    end = time.monotonic() + 15
+    while not (process_state(pid) or "").startswith("Z"):
+        assert time.monotonic() < end, f"source child {pid} never became an exited, unreaped zombie"
+        time.sleep(0.01)
+
+
+def ended_within(pid, seconds):
+    end = time.monotonic() + seconds
+    while True:
+        state = process_state(pid)
+        if state is None or state.startswith("Z"):
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.01)
+
+
+@contextmanager
+def runner_syscalls(killpg, *, exited_before_read=False):
     namespace = API["JsonRunner"].__call__.__globals__
     original_os, original_subprocess = namespace["os"], namespace["subprocess"]
-    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, start_new_session=True)
 
     class Processes:
         child = None
@@ -455,49 +493,285 @@ def runner_released_group_identity():
 
     processes = Processes()
 
-    class RecycledGroups:
+    class Syscalls:
         def __getattr__(self, name):
             return getattr(original_os, name)
 
         def killpg(self, group, sig):
-            child = processes.child
-            if child is not None and group == child.pid and child.returncode is not None:
-                try:
-                    original_os.waitpid(child.pid, original_os.WNOHANG)
-                except ChildProcessError:
-                    # The original identity is actually released, not merely an exited child.
-                    original_os.killpg(victim.pid, sig)
-                    victim.wait(timeout=5)
-                else:
-                    raise AssertionError("fixture expected a reaped source child")
-            else:
-                original_os.killpg(group, sig)
+            return killpg(processes.child, group, sig)
 
-    namespace["subprocess"], namespace["os"] = processes, RecycledGroups()
+        def read(self, fd, size):
+            if exited_before_read:
+                wait_for_zombie(processes.child.pid)
+            return original_os.read(fd, size)
+
+    namespace["subprocess"], namespace["os"] = processes, Syscalls()
     try:
-        result = API["JsonRunner"](Path.cwd(), timeout=2, budget=5)(
-            [sys.executable, "-c", "print('{\"ok\":true}')"])
+        yield processes
+    finally:
+        namespace["subprocess"], namespace["os"] = original_subprocess, original_os
+        if processes.child is not None and processes.child.returncode is None:
+            processes.child.kill()
+            processes.child.wait(timeout=10)
+
+
+def runner_released_group_identity():
+    # Reuse is injected at the syscall boundary; its replacement is a real owned process.
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def killpg(child, group, sig):
+        if child is not None and group == child.pid and child.returncode is not None:
+            try:
+                os.waitpid(child.pid, os.WNOHANG)
+            except ChildProcessError:
+                # The original identity is actually released, not merely an exited child.
+                os.killpg(victim.pid, sig)
+                victim.wait(timeout=5)
+            else:
+                raise AssertionError("fixture expected a reaped source child")
+        else:
+            os.killpg(group, sig)
+
+    try:
+        with runner_syscalls(killpg):
+            result = API["JsonRunner"](Path.cwd(), timeout=2, budget=5)(
+                [sys.executable, "-c", "print('{\"ok\":true}')"])
         assert result == {"ok": True}
         assert victim.poll() is None, "successful collection killed a replacement process group"
     finally:
-        namespace["subprocess"], namespace["os"] = original_subprocess, original_os
         if victim.poll() is None:
             victim.kill()
         victim.wait(timeout=5)
 
 
-def main():
-    native_uncertainty()
-    delivery_boundaries()
-    security_issues()
-    cli_security_issues()
-    cli_failure_isolation()
-    cli_readonly_startup()
-    runner_boundaries()
-    cli_exit_metadata()
-    runner_released_group_identity()
-    print("PASS: native uncertainty/ownership/drift/pause, complete-or-unknown delivery windows/pagination, security issues with ages or unknown, CLI clock/failure isolation, bounded reaped source commands")
+def runner_refused_group_of_exited_leader():
+    calls = []
+
+    def killpg(child, group, sig):
+        calls.append("after reap" if group != child.pid or child.returncode is not None else "injected")
+        assert calls[-1] == "injected", "signalled a group after its leader was reaped"
+        try:
+            os.killpg(group, sig)
+        except PermissionError:
+            calls[-1] = "kernel"
+            raise
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-exited-leader-") as directory, \
+            runner_syscalls(killpg, exited_before_read=True) as processes:
+        runner = API["JsonRunner"](Path(directory), timeout=10, budget=30, output_limit=1024)
+        try:
+            runner([sys.executable, "-c", "print('x' * 2048)"])
+        except RuntimeError as exc:
+            assert "exceeded byte limit" in str(exc), exc
+        else:
+            raise AssertionError("oversized source accepted")
+        child = processes.child
+        assert child.returncode is not None, "the exited leader of a refused group was left unreaped"
+        assert child.stdout.closed and child.stderr.closed, "a refused group left its pipes open"
+        assert "after reap" not in calls, f"signalled a group after its leader was reaped: {calls}"
+        assert len(calls) == 1, f"expected exactly one killpg, saw {calls}"
+    return calls
+
+
+def the_kernel_refuses_killpg_on_a_group_whose_only_member_is_a_zombie():
+    only_on_macos("killpg on a group whose leader exited unreaped returns EPERM only on Darwin")
+    calls = runner_refused_group_of_exited_leader()
+    assert calls == ["kernel"], f"the kernel did not refuse a group whose only member is a zombie: {calls}"
+
+
+def runner_refused_group_of_live_leader():
+    def killpg(child, group, sig):
+        assert group == child.pid and child.returncode is None, "signalled a group after its leader was reaped"
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-live-leader-") as directory, \
+            runner_syscalls(killpg) as processes:
+        runner = API["JsonRunner"](Path(directory), timeout=0.5, budget=60)
+        runner.exit_grace = 0.5
+        try:
+            runner([sys.executable, "-c", "import time; time.sleep(30)"])
+        except RuntimeError as exc:
+            assert "refused SIGKILL" in str(exc) and "sleep" not in str(exc), exc
+        else:
+            raise AssertionError("a live group that refused SIGKILL was accepted")
+        child = processes.child
+        assert child.poll() is None, "the refusing leader was not live, so the row tested nothing"
+        assert child.stdout.closed and child.stderr.closed, "a refused group left its pipes open"
+
+
+def runner_refused_group_of_exiting_leader():
+    calls, timers = [], []
+
+    def killpg(child, group, sig):
+        calls.append("after reap" if group != child.pid or child.returncode is not None else "refused")
+        assert calls[-1] == "refused", "signalled a group after its leader was reaped"
+        timer = threading.Timer(1, child.kill)
+        timers.append(timer)
+        timer.start()
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-exiting-leader-") as directory, \
+            runner_syscalls(killpg) as processes:
+        # The call's deadline is the whole budget, so no time is left when the refusal comes.
+        runner = API["JsonRunner"](Path(directory), timeout=0.5, budget=0.5)
+        # A loaded Mac can run the 1 s timer seconds late. Six times the runner's grace leaves room
+        # for that, and a grace of 0 still fails. The leader sleeps past the grace: only the timer ends it.
+        runner.exit_grace *= 6
+        try:
+            runner([sys.executable, "-c", "import time; time.sleep(60)"])
+        except RuntimeError as exc:
+            assert str(exc) == "source command timed out", exc
+        else:
+            raise AssertionError("timed-out source accepted")
+        finally:
+            for timer in timers:
+                timer.cancel()
+                timer.join()
+        assert processes.child.returncode is not None, "a leader that exited during the grace was left unreaped"
+        assert calls == ["refused"], f"expected exactly one killpg, saw {calls}"
+
+
+def runner_ends_descendants_of_exited_leader():
+    def killpg(child, group, sig):
+        os.killpg(group, sig)
+
+    leader = ("import os, pathlib, time\n"
+              "pid = os.fork()\n"
+              "if pid == 0:\n"
+              "    quiet = os.open(os.devnull, os.O_RDWR)\n"
+              "    for fd in (0, 1, 2):\n"
+              "        os.dup2(quiet, fd)\n"
+              "    time.sleep(60)\n"
+              "    os._exit(0)\n"
+              "pathlib.Path('descendant').write_text(str(pid))\n"
+              "print('x' * 2048)\n")
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-descendant-") as directory, \
+            runner_syscalls(killpg, exited_before_read=True) as processes:
+        record = Path(directory) / "descendant"
+        try:
+            runner = API["JsonRunner"](Path(directory), timeout=10, budget=30, output_limit=1024)
+            try:
+                runner([sys.executable, "-c", leader])
+            except RuntimeError as exc:
+                assert "exceeded byte limit" in str(exc), exc
+            else:
+                raise AssertionError("oversized source accepted")
+            assert ended_within(int(record.read_text()), 10), "a descendant of an exited leader outlived the call"
+        finally:
+            if record.exists():
+                descendant = int(record.read_text())
+                try:
+                    if os.getpgid(descendant) == processes.child.pid and not ended_within(descendant, 0):
+                        os.kill(descendant, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def only_on_macos_skips_by_name_off_darwin():
+    platform = sys.platform
+    try:
+        sys.platform = "linux"
+        try:
+            only_on_macos("a probe reason")
+        except Skipped as skipped:
+            assert str(skipped) == "macOS only: a probe reason", skipped
+        else:
+            raise AssertionError("only_on_macos let a row run off Darwin")
+        sys.platform = "darwin"
+        try:
+            returned = only_on_macos("a probe reason")
+        except Skipped as skipped:
+            raise AssertionError(f"only_on_macos skipped a row on Darwin: {skipped}") from None
+        assert returned is None, returned
+    finally:
+        sys.platform = platform
+
+
+def a_failed_row_fails_the_run_whatever_rows_skip():
+    def passes():
+        pass
+
+    def fails():
+        raise AssertionError("broken")
+
+    def crashes():
+        raise RuntimeError("crashed")
+
+    def exits():
+        raise SystemExit(0)
+
+    def ends():
+        sys.exit()
+
+    def skips():
+        raise Skipped("macOS only: a probe reason")
+
+    def run(rows):
+        try:
+            return run_rows(rows)
+        except SystemExit as error:
+            return f"ended by {error!r}"
+
+    printed, errors = io.StringIO(), io.StringIO()
+    with redirect_stdout(printed), redirect_stderr(errors):
+        statuses = [run([skips, fails]), run([crashes, skips]), run([passes, skips]), run([exits, passes]), run([ends, passes])]
+    assert statuses == [1, 1, 0, 1, 1], statuses
+    assert printed.getvalue().splitlines() == [
+        "skip skips: macOS only: a probe reason", "FAIL fails: AssertionError: broken", "0 passed, 1 failed, 1 skipped",
+        "FAIL crashes: RuntimeError: crashed", "skip skips: macOS only: a probe reason", "0 passed, 1 failed, 1 skipped",
+        "ok passes", "skip skips: macOS only: a probe reason", "1 passed, 0 failed, 1 skipped",
+        "FAIL exits: SystemExit: exit code 0", "ok passes", "1 passed, 1 failed, 0 skipped",
+        "FAIL ends: SystemExit: exit code None", "ok passes", "1 passed, 1 failed, 0 skipped",
+    ], printed.getvalue()
+    assert errors.getvalue().count("Traceback") == 4, errors.getvalue()
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        long_run = run([passes] * len(TESTS) + [fails])
+    assert long_run == 1, f"one failed row in a run as long as TESTS ended {long_run!r}"
+
+
+def run_rows(rows):
+    passed, failed, skipped = [], [], []
+    for row in rows:
+        try:
+            row()
+        except Skipped as reason:
+            skipped.append(row.__name__)
+            print(f"skip {row.__name__}: {reason}")
+        except (Exception, SystemExit) as error:
+            failed.append(row.__name__)
+            detail = f"exit code {error.code!r}" if isinstance(error, SystemExit) else error
+            print(f"FAIL {row.__name__}: {type(error).__name__}: {detail}", flush=True)
+            traceback.print_exception(error)
+        else:
+            passed.append(row.__name__)
+            print(f"ok {row.__name__}")
+    print(f"{len(passed)} passed, {len(failed)} failed, {len(skipped)} skipped")
+    return 1 if failed else 0
+
+
+TESTS = [
+    only_on_macos_skips_by_name_off_darwin,
+    native_uncertainty,
+    delivery_boundaries,
+    security_issues,
+    cli_security_issues,
+    cli_failure_isolation,
+    cli_readonly_startup,
+    runner_boundaries,
+    cli_exit_metadata,
+    runner_released_group_identity,
+    runner_refused_group_of_exited_leader,
+    the_kernel_refuses_killpg_on_a_group_whose_only_member_is_a_zombie,
+    runner_refused_group_of_live_leader,
+    runner_refused_group_of_exiting_leader,
+    runner_ends_descendants_of_exited_leader,
+    a_failed_row_fails_the_run_whatever_rows_skip,
+]
 
 
 if __name__ == "__main__":
-    main()
+    a_failed_row_fails_the_run_whatever_rows_skip()
+    sys.exit(run_rows(TESTS))

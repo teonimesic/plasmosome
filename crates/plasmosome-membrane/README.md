@@ -22,7 +22,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
 
 ## Use
 
@@ -315,8 +315,87 @@ relative path can add to where the helper's loader looks for libraries. They do 
 path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
 names in the qualified libkrun. The launch checks no artifact either: the cell, plasmosome-7em,
 which is not built yet, must verify the helper and its libraries with `runtime::artifacts` before it
-prepares the launch. That checks only the files the recipe lists. plasmosome-vev, also not built,
-audits the helper's Mach-O load names against those verified libraries.
+prepares the launch. That checks only the files the recipe lists. `runtime::closure` audits the
+names the helper and those libraries load; see the next section.
+
+## Auditing the helper's load names
+
+Spec 001 §4.2 asks that every library the helper loads be a listed, verified library or part of
+Darwin's sealed system, and that each be found without any search. `runtime::closure::audit_closure`
+checks what the files can show of that before exec. Pass it the verified helper and the verified
+libraries in recipe order. It reads each through its verified descriptor, at most 512 MiB, and
+reads the load commands of the 64-bit image for the host CPU: a thin file, or the one member of a
+fat file for that CPU. A fat file with two members for the host CPU is refused, because the audit
+cannot know which one dyld would pick.
+
+Every name in an `LC_LOAD_DYLIB`, `LC_LOAD_WEAK_DYLIB`, `LC_REEXPORT_DYLIB`, `LC_LAZY_LOAD_DYLIB`
+or `LC_LOAD_UPWARD_DYLIB` command, in the helper and in each library, must resolve by rule:
+
+- `@executable_path/` joins the helper's directory, and `@loader_path/` the directory of the image
+  that holds the command. The join is lexical, and the result must equal a listed path exactly. A
+  run of `..` straight after the prefix is allowed, because it leaves directories the artifact
+  walk verified, as in `@executable_path/../lib/libkrun.1.19.4.dylib`. A `..` after a directory
+  the name itself writes is refused (`DotDotAfterNamedDirectory`): dyld resolves it on the file
+  system, through that directory even when it is a symlink, and nothing verified it. Measured on
+  macOS 26.6.2, `@executable_path/sub/../libt.dylib` with `sub` a symlink loaded a library from
+  outside the bundle. An absolute name with such a `..` is refused the same way.
+- An absolute name that equals a listed path is that library.
+- Any other absolute name must be clean ASCII under `/usr/lib/` or `/System/Library/`, and the
+  deepest part of it that exists must be on the sealed system volume; a symlink that leads nowhere
+  is refused. That volume is the one `statfs` reports mounted at `/` and read-only, whose
+  capabilities, read with `getattrlist(ATTR_VOL_CAPABILITIES)` on its mount point, report
+  `VOL_CAP_FMT_SEALED` as valid and set. When that call fails, or does not report the capability,
+  the volume counts as not sealed. The check is needed because those prefixes are not all sealed.
+  On macOS 26.6.2, `/usr/share/firmlinks` puts seven directories under `/System/Library` on the
+  data volume, and sealed symlinks such as `/usr/lib/cron` lead to it too.
+- `@rpath/` names, names with no leading `/` or `@`, and any other `@` name are refused: dyld finds
+  them by searching.
+
+Any `LC_RPATH` is refused, because dyld also searches it for a leaf name passed to `dlopen`. So is
+`LC_DYLD_ENVIRONMENT`, a dynamic linker other than `/usr/lib/dyld`, and a load command whose
+`LC_REQ_DYLD` bit says dyld must understand it but whose kind the audit does not know. A listed
+library that nothing names is allowed. The evidence records each resolution, each system name
+relied on, and `kern.osversion` and `kern.osproductversion`, which name the OS build. Off macOS
+the audit refuses `Unsupported`.
+
+The volume check judges where a name's symlinks lead at the time of the audit, not each step on
+the way. A name can pass whose path goes through a directory someone can write and comes back to
+the sealed volume, and whoever can write that directory can change where it leads afterwards. For
+example, `/usr/lib/cron` leads to `/private/var/at`, owned by `daemon` with mode 0755, so a process
+running as `daemon` could make `/private/var/at/x` a link to a sealed file, let `/usr/lib/cron/x`
+pass, and then replace it. Measured on macOS 26.6.2 (25G83), no step of such a chain is writable
+by the supervisor's user: of the 11,459 symlinks under `/usr/lib` and `/System/Library`, 64 live
+ones end off the sealed volume, which with the seven firmlinked directories makes 71 entry points,
+and none of the 5,740 directories under them, nor any of their ancestors, is writable by that
+user. A tighter check would cost little. Of the 3,649 install names in that Mac's shared cache,
+3,599 pass the volume check today. Refusing any symlink on the way would refuse 19 more, all
+under the private `TextToSpeechKonaSupport.framework`; requiring every existing step of a name to
+be on the sealed volume would refuse none of the 3,599. The whole audit passes 3,113 of them,
+because the other 486 are under `/System/iOSSupport/`, outside both system prefixes. The audit
+keeps this limit for now, and plasmosome-0xun owns the tighter check.
+
+The audit does not look everywhere dyld does. When an absolute name is not on disk, dyld also
+tries `/System/Volumes/Preboot/Cryptexes/OS` followed by the name. All but four names in the
+shared cache, such as `/usr/lib/libSystem.B.dylib`, are not on disk; the four on disk are
+`/usr/lib/dyld` and three libraries under `/usr/lib/system/`. The shared cache itself lives in
+that cryptex. That tree is on the Preboot volume, which is read-write and not sealed. `OS/usr/lib` and
+`OS/System/Library` are owned by root with the `restricted` flag, as are all but one of the
+directories under them (`OS/System/Library/Extensions` has only `sunlnk`). Their parent
+`/System/Volumes/Preboot/Cryptexes` is mode 0777 with no flags and no sticky bit, and
+`Cryptexes/OS` is owned by root, mode 0755, with `sunlnk`. So against the supervisor's own user
+the prefix relies on root ownership, and on `sunlnk` stopping a rename of `OS`, not on SIP alone.
+Refusing that path would refuse every system library, so the audit does not check it. Whether
+dyld would take a file at the cryptex path over the shared cache is not measured, nor whether
+`kern.osversion` changes when only the cryptex is updated.
+
+The audit sees load commands only. It does not see the images the running helper loads
+(`ImageInventory::NotIndependentlyObserved`, owner gate O-5 of `plasmosome-qep`), nor a name that
+code passes to `dlopen` (`RuntimeLoads::NotAudited`). The pinned libkrun's `krun_create_ctx` loads
+`libkrunfw.5.dylib` that way on every context. Measured on macOS 26.6.2 on 2026-10-21, with the
+working directory `/` and an empty environment, dyld looked for that leaf name relative to the
+working directory, then at `/System/Volumes/Preboot/Cryptexes/OS` followed by the name, then in
+each `LC_RPATH` entry with and without that prefix, then in `/usr/lib`. The qualified libkrun's
+`LC_RPATH` makes the audit refuse it today; `plasmosome-jab` plans the bundle that deletes it.
 
 ## The runtime's listeners and diagnostics
 
