@@ -4,9 +4,9 @@
 
 The client logic of the `plasmosome` command line, as a library the binary calls, so tests drive
 it without spawning a process. Decision 009 named the trigger for this crate and spec 025 §1
-pulled it. Today it holds spec 025's JSON scanner and writers, its envelopes, its client codes,
-its command table and the order the command line is read in. It is `publish = false` and never
-ships on its own.
+pulled it. Today it holds spec 025's JSON scanner and writers, its reply reader and reply rules,
+its envelopes, its client codes, its command table and the order the command line is read in. It
+is `publish = false` and never ships on its own.
 
 ## Hard rules
 
@@ -30,7 +30,12 @@ ships on its own.
   human form is about 66 times the reply's size.
 - **The client codes are a closed list.** A new code lands in spec 025 first, then in
   `ClientCode::ALL`. The table test reads spec 025's table.
-- **Spec 026 §5 lists `scan`.** A change to its bound or its depth handling updates that row.
+- **Spec 026 §5 lists `scan` and `read_reply`.** A change to either's bound, or to the scan's
+  depth handling, updates that row.
+- **`read_reply` takes only its line.** It consumes the line and its newline from a `BufRead`
+  and nothing more. Through `take`, it reads and keeps at most `MAX_REPLY_BYTES` plus one byte. A
+  reader that reads until the newline and then checks the length is the unbounded read spec 026
+  refuses. It has no clock, so its caller bounds each read by the time left.
 - **The command table is spec 025's.** `COMMANDS` holds every command of spec 025 §2, and the
   table test reads spec 025's table. A command is marked served in the task that serves its verb,
   and never earlier, so `--help` stays true.
