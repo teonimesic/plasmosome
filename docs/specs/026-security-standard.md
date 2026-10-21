@@ -239,8 +239,20 @@ a secret or a write permission, or runs on a self-hosted runner, executes no pul
 and no `workflow_run` or `issue_comment` job checks one out (spec 030). The one exception is
 CodeQL's default setup, which runs on pull request code with `security-events: write` and
 `build-mode: none`, and takes the head's `rust-toolchain.toml` as its toolchain; spec 030 Q6
-holds it. These are reviewer items. Q7 asks the owner whether to enforce the action pin as a
-repository setting.
+holds it. Only a push to `main` saves a cache. Every `Swatinem/rust-cache` step sets
+`save-if: ${{ github.event_name == 'push' }}`, and each workflow that has one has a `push` trigger
+for `main` and no other branch. A pull request's run still restores main's cache. Its build scripts
+and tests run before anyone has read them, and the cache action saves `target/` and parts of
+`$CARGO_HOME`, `bin` included. Saved under the pull request's ref, those would be restored by its
+later runs, `gates` included, so a later head that reads clean could pass on a binary an earlier
+head left. With nothing saved, what `macos` and `bench` build from a commit the git-only step has
+not read stays in that run. A pull request that edits a workflow runs its own copy and can save
+under its own ref, and its later heads restore what it saved, a head that reverts the edit included.
+"Read before running" already says the editing head's CI result does not count, and no later head's
+counts either. Amended on 2026-10-21: this rule is new, and plasmosome-ofaf brings `ci.yml` and
+`audit.yml` to it. Until then every job that missed its key and succeeded saved an entry, and on
+2026-10-21 pull request entries held 6.8 GB of the repository's 10.6 GB of caches. These are
+reviewer items. Q7 asks the owner whether to enforce the action pin as a repository setting.
 
 ### 2. `unsafe` code
 
@@ -468,6 +480,7 @@ when Q1 is answered. It never names a route nobody receives.
 | An ignore without a date or link, or past its date | Reviewer; the weekly run flags it | Judgement |
 | An advisory against code already on main; unmaintained crates; fuzz crashes; a newer stable Rust | Nothing refuses. The `security` issue, then Main | A rule about who does what. Refusing every PR for advisories is Q9. |
 | The toolchain rules; Dependabot configuration and tasks; CI pins and permissions; any workflow change, read as code | Reviewer | Revertible by the next commit |
+| A `Swatinem/rust-cache` step without `save-if: ${{ github.event_name == 'push' }}` | Reviewer | Revertible by the next commit. An entry already saved stays under that pull request's ref until it is deleted or GitHub evicts it. That pull request's later runs restore it; no run on main does. Amended on 2026-10-21: this row is new. |
 | A parser without its bound, row or fuzz target | Reviewer | A design, revertible |
 | A fixed crash that returns | The corpus replay test | An ordinary regression test |
 | A guest syscall route left open | Spec 024's acceptance | Owned there |
@@ -701,7 +714,9 @@ Each line names the broken implementation it catches.
     Dependabot path that bypasses the records.
 20. No workflow installs a tool without a version and `--locked`. No `uses:` names a tag. Every
     workflow keeps least-privilege `permissions:` and `persist-credentials: false`. Catches a
-    floating `cargo install cargo-deny`.
+    floating `cargo install cargo-deny`. Every `Swatinem/rust-cache` step saves on a push to main
+    and on nothing else. Catches a pull request run that misses its key and saves a cache under its
+    own ref, and a line that stops main saving too.
 
 **Bytes from a less-trusted side**
 

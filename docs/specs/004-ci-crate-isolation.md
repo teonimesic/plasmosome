@@ -142,13 +142,30 @@ output with `2>&1 | tee -a` into one file, so each test's line follows the `Runn
 names its test executable. Two crates can hold test files of one name, as `tests/daemon_cli.rs`
 in `plasmosome-core` and `plasmosome-membrane`, so the report maps each executable to its package
 with `cargo test --no-run --message-format=json` over the same packages; a doctest's crate is on
-its `Doc-tests` line. The report step runs with `if: always()`. It reads the harness's
+its `Doc-tests` line. The report step runs with `if: ${{ !cancelled() }}`, so it runs after a
+failed step but not in a cancelled run. It reads the harness's
 `test <name> ... ignored, <reason>` lines and writes each ignored test's crate, name and reason
 to the step summary; an ignored doctest carries no reason and is listed with `no reason given`.
 When every test step succeeded and nothing was ignored, it says so. When a test step did not
 succeed or never ran, as after a red clippy step, it names that step and says the list covers
 only what ran; it never then says that none was ignored. A test compiled out by `cfg` for the
 other OS is not a skip; the other OS's job runs it.
+
+A cancelled run has no report. On a push each commit has its own concurrency group, so no newer run
+cancels a run on main. A pull request's run is cancelled when a newer push to that pull request
+starts another, and review reads the newer run. `if: always()`, which this spec named until the
+amendment below, differs from `!cancelled()` only in a cancelled run. There the report still ran
+`cargo test --no-run` for each test step that had started, so a run cancelled while a test step
+compiled finished that build for a summary of a head nobody merges, on a runner the newer run may be
+waiting for. GitHub also cancels a job that reaches its `timeout-minutes`. The report is not
+promised there either, and the test step's own log shows where it stopped. `ci.yml`'s attribution
+read ([spec 029](029-the-contribution-record.md)) and `audit.yml`'s issue job use the same
+condition, which GitHub's documentation recommends for a step that runs whatever the earlier steps'
+results were.
+
+Amended on 2026-10-21: this said `if: always()`, and plasmosome-ofaf moves both report steps in
+`ci.yml` off it. Run 39579409827, cancelled on 2026-10-21 by a newer push, ran both report steps and
+skipped the attribution read.
 
 ### The rustdoc step
 
@@ -268,8 +285,9 @@ in plasmosome-36oc's notes.
   only for the other OS.
 - A test that needs a prerequisite asserts it; one a CI runner cannot supply is
   `#[ignore = "needs <prerequisite>"]`, and a bare `#[ignore]` fails clippy in every member.
-  `gates` and `macos` each name every ignored test with its crate and reason, say none was only
-  when every test step succeeded, and otherwise say the list covers only what ran.
+  In every run that is not cancelled, `gates` and `macos` each name every ignored test with its
+  crate and reason, say none was only when every test step succeeded, and otherwise say the list
+  covers only what ran.
 - `coverage` turns red only on a failing test or tool run, never on a percentage. It adds no
   permission beyond the workflow's `contents: read` and pins `cargo-llvm-cov` to an exact version.
 - The guard's name states its clause, e.g. `ci_matrix_matches_workspace_members`.
@@ -278,7 +296,8 @@ in plasmosome-36oc's notes.
 
 Each item names the task that delivers it: plasmosome-005 the matrix, `msrv` and the guard;
 plasmosome-6ja `macos` and the ignored-test report; plasmosome-52e `coverage`; plasmosome-36oc
-the rustdoc step and the root gate's command; "first" means whichever of 6ja and 52e lands first.
+the rustdoc step and the root gate's command; plasmosome-ofaf the report step's condition;
+"first" means whichever of 6ja and 52e lands first.
 
 - (005) `ci.yml` has the `crate` matrix job covering every workspace member at merge time, two
   steps per entry, one command per step.
@@ -325,5 +344,9 @@ the rustdoc step and the root gate's command; "first" means whichever of 6ja and
   the `macos` log names the first and third and not the second. On a Mac the root gate's command
   fails on that commit too.
 - (36oc) The root gate in `AGENTS.md` carries the command named above.
+- (ofaf) Both report steps run under `if: ${{ !cancelled() }}`, and no workflow uses `always()`.
+  In one pull request run that a newer push cancels while a test step runs, both report steps
+  are skipped and run no cargo command. In one run where a test fails, both run and name the
+  failed step.
 - (each) Every new job is green on the PR that introduces it, and the gate in the root
   `AGENTS.md` is green.
