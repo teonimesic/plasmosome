@@ -21,7 +21,7 @@ static WARM_UP: LazyLock<Result<(), String>> =
 /// run, so every test run pays that cost. The first call in a test process
 /// runs membraned once with no arguments, so the cost is spent before any test
 /// deadline starts. A run still going after 60 seconds is killed and reaped.
-/// Every call panics unless that run exited with the usage status 2, and every
+/// Every call panics unless that run exited with the usage status 64, and every
 /// call reports a failure with the same message, which names the cause and up
 /// to 4096 bytes of the run's stderr.
 pub fn membraned() -> Command {
@@ -45,9 +45,9 @@ fn run_once(daemon: &str, mut command: Command, bound: Duration) -> Result<(), S
     let outcome = exit_within(&mut child, bound);
     let said = first_bytes(&mut stderr);
     match outcome {
-        Ok(Some(status)) if status.code() == Some(2) => Ok(()),
+        Ok(Some(status)) if status.code() == Some(64) => Ok(()),
         Ok(Some(status)) => Err(format!(
-            "warm-up of {daemon} exits with its usage status 2, not {status}; its stderr: {said:?}"
+            "warm-up of {daemon} exits with its usage status 64, not {status}; its stderr: {said:?}"
         )),
         Ok(None) => Err(format!(
             "warm-up of {daemon} did not exit within {bound:?}; its stderr: {said:?}"
@@ -118,7 +118,18 @@ fn shell(script: &str) -> Command {
 
 #[test]
 fn the_usage_exit_passes_the_warm_up() {
-    assert_eq!(run_once("membraned", shell("exit 2"), BOUND), Ok(()));
+    assert_eq!(run_once("membraned", shell("exit 64"), BOUND), Ok(()));
+}
+
+#[test]
+fn the_old_usage_exit_fails_the_warm_up() {
+    assert_eq!(
+        run_once("membraned", shell("exit 2"), BOUND),
+        Err(
+            "warm-up of membraned exits with its usage status 64, not exit status: 2; its stderr: \"\""
+                .to_string()
+        )
+    );
 }
 
 #[test]
@@ -161,7 +172,7 @@ fn a_warm_up_that_exits_with_another_code_fails_setup() {
     assert_eq!(
         run_once("membraned", shell("exit 3"), BOUND),
         Err(
-            "warm-up of membraned exits with its usage status 2, not exit status: 3; its stderr: \"\""
+            "warm-up of membraned exits with its usage status 64, not exit status: 3; its stderr: \"\""
                 .to_string()
         )
     );
@@ -173,7 +184,7 @@ fn a_warm_up_killed_by_a_signal_fails_setup() {
         .expect_err("a death by signal fails the warm-up");
 
     assert!(
-        failure.starts_with("warm-up of membraned exits with its usage status 2, not signal: 9"),
+        failure.starts_with("warm-up of membraned exits with its usage status 64, not signal: 9"),
         "{failure}"
     );
 }

@@ -328,3 +328,16 @@ pub fn mountinfo_from(text: &str) -> Value {
         }
     }
 }
+
+/// The device and inode of each file-backed line in a `/proc/<pid>/maps` text, the device as
+/// the kernel prints it, such as `00:17`. Anonymous mappings, whose inode is 0, are left out.
+pub fn map_identities(text: &str) -> Vec<(String, u64)> {
+    text.lines()
+        .filter_map(|row| {
+            let fields: Vec<&str> = row.split_whitespace().collect();
+            let device = fields.get(3).filter(|device| device.contains(':'))?;
+            let inode: u64 = fields.get(4)?.parse().ok()?;
+            (inode != 0).then(|| (device.to_string(), inode))
+        })
+        .collect()
+}
