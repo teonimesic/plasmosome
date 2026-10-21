@@ -212,16 +212,20 @@ artifacts by path. `runtime::artifacts::verify_artifact` checks one artifact tha
 `verify_recipe_artifacts` checks all of a recipe's in field order, stopping at the first refusal.
 
 The path is walked from `/` with core's no-follow walk, `plasmosome_core::nofollow`. No component
-may be a symlink. Every directory on the way must be owned by root or the effective uid and
-writable by neither group nor other, with no sticky-bit exception and, on macOS, no ACL allow entry
-that grants a right to replace its entries, whoever the entry names. The file must be a regular
-file owned by root or the effective uid, with no write bit, no set-id bit and no ACL entry granting
-write, and on macOS `uchg` or `schg` must be set. Off macOS immutability cannot be shown, so every
-artifact that passes the other rules is refused with `ImmutabilityUnverifiable`. Only then are the
-bytes hashed, through the same descriptor with positioned reads, and compared with the pin. The
-hash reads at most one byte past the size the file was checked at, so a file that keeps growing
-cannot keep it running. The file's size, modification time and change time must be the same after
-the hash as before it, or it is refused as `ChangedWhileHashing`.
+may be a symlink. Every directory on the way must be owned by root or the effective uid and writable
+by neither group nor other, with no sticky-bit exception and, on macOS, no ACL allow entry that
+grants a right to replace its entries, whoever the entry names. On macOS no directory may sit on a
+volume mounted with ownership ignored (`noowners`), where owner and mode keep no one out. The file
+must be a regular file owned by root or the effective uid, with no write bit, no set-id bit and no
+ACL entry granting write, and on macOS `uchg` or `schg` must be set. Off macOS immutability cannot
+be shown, so every artifact that passes the other rules is refused with `ImmutabilityUnverifiable`.
+Only then are the bytes hashed, through the same descriptor with positioned reads, and compared with
+the pin. The hash reads at most one byte past the size the file was checked at. Nothing bounds that
+size: a process that opened the file for writing before it was locked can extend it first, and in a
+review probe on macOS 26.6.2, in the dev profile, a writer that kept extending a 64 MiB file made
+its verification take 43 to 340 s, against 3.9 to 5.5 s alone. The file's size, modification time
+and change time must be the same after the hash as before it, or it is refused as
+`ChangedWhileHashing`.
 
 On macOS pass the canonical path: `/var` is a symlink, so `/var/folders/...` is refused at `/var`.
 Measured on macOS 26.6.2 on 2026-10-21, the qualified bundle's kernel is refused at
@@ -236,6 +240,15 @@ and change a file, or replace a directory they own; that is owner gate O-4. A pr
 the file for writing before it was locked can still write it too, because the mode and `uchg`
 refuse only new opens. Measured on macOS 26.6.2, such a write moves the file's times, so
 `reconfirm()` refuses a change made before it runs, but not one made after.
+
+`reconfirm()` sees a change to the file's bytes only if the change moves the device, inode, size,
+modification time or change time. A write through a shared writable mapping that existed before the
+file was locked moves none of them, so neither `reconfirm()` nor verification sees it. Measured on
+macOS 26.6.2 on APFS on 2026-10-21, such a write changes what `pread` and a fresh open read at once,
+while the size and times stay as they were until `msync` or `munmap`. A writable shared mapping made
+after the lock fails with `EPERM`, so only a mapping made before it can do this. Hashing again in
+`reconfirm()` would only narrow the window, because the mapping can write after any hash, so it does
+not.
 
 ## Launching the VMM helper
 

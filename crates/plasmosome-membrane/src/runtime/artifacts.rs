@@ -70,10 +70,15 @@ impl VerifiedArtifact {
     }
 
     /// Opens the path again from the same "/" descriptor, applies every check except the hash,
-    /// and requires the same device and inode, size, modification time and change time. A path
-    /// that now names another file, even one with the same bytes, is `Replaced`. A file changed
-    /// in place since it was verified, such as through a descriptor opened for writing before
-    /// it was locked, is `ChangedSinceVerification`.
+    /// and compares the device, inode, size, modification time and change time with the
+    /// verified ones. A path that now names another file, even one with the same bytes, is
+    /// `Replaced`. A change in place that moved the size or a time, such as a write through a
+    /// descriptor opened for writing before the file was locked, is `ChangedSinceVerification`.
+    ///
+    /// It sees a change to the file's bytes only if the change moves the device, inode, size,
+    /// modification time or change time. A write through a shared writable mapping that existed
+    /// before the file was locked moves none of them, so neither this nor [`verify_artifact`]
+    /// sees it. Nor does it see a change made after it returns.
     pub fn reconfirm(&self) -> Result<(), ArtifactRefusal> {
         let refuse = |fault| ArtifactRefusal {
             role: self.role,
@@ -119,9 +124,12 @@ pub struct ArtifactRefusal {
 /// The first rule an artifact broke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactFault {
-    /// The no-follow walk from "/" refused. Its path field names the component where it
-    /// stopped: a symlink, a missing name, a directory another principal can replace entries
-    /// in, a component that is not a directory, or one it could not open.
+    /// The no-follow walk from "/" refused. Its path field names where it stopped: a path that
+    /// is not absolute and normal, a symlink, a missing name, a component that is not a
+    /// directory, a directory owned by neither root nor the effective UID, one group or other
+    /// can write, one with any ACL allow entry granting write (add_file, add_subdirectory,
+    /// delete_child, delete, writesecurity or chown) whoever the entry names, one on a volume
+    /// mounted with ownership ignored, or one it could not open.
     Walk(WalkRefusal),
     /// The artifact is not a regular file.
     NotRegular { kind: Kind },
@@ -227,19 +235,24 @@ fn kind_name(kind: Kind) -> &'static str {
 /// Walks `artifact.path()` from "/" one component at a time without following a symlink; every
 /// directory on the way must be owned by root or the effective UID and writable by neither group
 /// nor other, with no sticky-bit exception, and on macOS carry no ACL allow entry, whoever it
-/// names, that grants a right to replace its entries. The last name is opened without blocking
-/// and must be a regular file owned by root or the effective UID, with no write bit, no set-id
-/// bit, no ACL entry granting write, and `uchg` or `schg` set. Only then are its bytes hashed
-/// through that descriptor, reading at most one byte past the size it was checked at, and
-/// compared with `artifact.sha256()`. Its size, modification time and change time must not move
-/// while it is hashed. A file that breaks a rule is refused, never trusted after hashing. Off
-/// macOS, every artifact that passes the other rules is refused `ImmutabilityUnverifiable`.
+/// names, that grants a right to replace its entries, and sit on no volume mounted with
+/// ownership ignored. The last name is opened without blocking and must be a regular file owned
+/// by root or the effective UID, with no write bit, no set-id bit, no ACL entry granting write,
+/// and `uchg` or `schg` set. Only then are its bytes hashed through that descriptor, reading at
+/// most one byte past the size it was checked at, and compared with `artifact.sha256()`. Its
+/// size, modification time and change time must not move while it is hashed. A file that breaks
+/// a rule is refused, never trusted after hashing. Off macOS, every artifact that passes the
+/// other rules is refused `ImmutabilityUnverifiable`.
 ///
 /// On macOS pass the canonical path, `/private/var/...` rather than `/var/...`: a symlink
 /// anywhere on the path is refused. Root and the effective UID can still change an artifact
-/// after it passes. So can a process that opened it for writing before it was locked, because
-/// the mode and `uchg` refuse only new opens, and this process cannot see another process's
-/// descriptors. [`VerifiedArtifact::reconfirm`] refuses such a change made before it runs.
+/// after it passes. So can a process that opened it for writing, or mapped it shared and
+/// writable, before it was locked: the mode and `uchg` refuse only new opens and new writable
+/// mappings, and this process cannot see another process's descriptors or mappings. Such a
+/// writer can also extend the file before the check, and the hash reads up to the checked size,
+/// so it can make verification slow. [`VerifiedArtifact::reconfirm`] refuses a change made before
+/// it runs if the change moved the size or a time. A write through a shared writable mapping
+/// moves neither, so neither this check nor `reconfirm` sees it.
 pub fn verify_artifact(
     role: ArtifactRole,
     artifact: &Artifact,
