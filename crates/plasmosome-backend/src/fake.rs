@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::{
-    BackendError, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry, RevokePolicy,
+    BackendError, DrainSpec, EnforcementBackend, GrantKind, Handle, LedgerEntry, RevokePolicy,
 };
-use crate::universe::{CellOwner, GrantId, OsObject, OsState, UniverseOp, UniverseRemoval};
+use crate::universe::{CellOwner, OsObject, OsState, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Default)]
 pub struct FakeBackend {
@@ -11,9 +11,8 @@ pub struct FakeBackend {
     grants: BTreeMap<Handle, LedgerEntry>,
     stuck_handles: BTreeSet<Handle>,
     stalled_owners: BTreeSet<CellOwner>,
-    grants_issued: Vec<Grant>,
     revocations: Vec<Handle>,
-    apply_fault: Option<(CellOwner, String)>,
+    refused_owners: BTreeMap<CellOwner, String>,
 }
 
 impl FakeBackend {
@@ -28,10 +27,11 @@ impl FakeBackend {
             .ok_or(BackendError::UnknownHandle { handle })
     }
 
-    /// Makes every later `apply` of an operation owned by exactly `owner` fail with
-    /// `BackendError::Fault(cause)` before any change. The same plugin in another cell applies.
-    pub fn fail_apply_for_owner(&mut self, owner: CellOwner, cause: &str) {
-        self.apply_fault = Some((owner, cause.to_string()));
+    /// Makes every later `grant` and `apply` of a valid operation owned by exactly `owner` fail
+    /// with `BackendError::Fault(cause)` before any change. The same plugin in another cell, and
+    /// every withdrawal, are not affected. An invalid operation still returns `InvalidOperation`.
+    pub fn fail_before_effect_for_owner(&mut self, owner: CellOwner, cause: &str) {
+        self.refused_owners.insert(owner, cause.to_string());
     }
 
     /// Makes every graceful withdrawal of the holding at this exact address time out, through
@@ -51,45 +51,33 @@ impl FakeBackend {
         self.plant(object)
     }
 
-    pub fn grants_issued(&self) -> &[Grant] {
-        &self.grants_issued
-    }
-
     pub fn revocations(&self) -> &[Handle] {
         &self.revocations
     }
 
-    fn mint_with(&self, grant: &Grant, mut next_id: impl FnMut() -> GrantId) -> LedgerEntry {
-        loop {
-            let id = next_id();
-            if !self.state.contains_id(id) {
-                return LedgerEntry {
-                    handle: Handle {
-                        class: grant.capability.class(),
-                        id,
-                    },
-                    owner: grant.owner.clone(),
-                    capability: grant.capability.clone(),
-                    kind: grant.kind,
-                };
-            }
+    fn refusal_before_effect(&self, owner: &CellOwner) -> Result<(), BackendError> {
+        match self.refused_owners.get(owner) {
+            Some(cause) => Err(BackendError::Fault(cause.clone())),
+            None => Ok(()),
         }
-    }
-
-    fn grant_with(&mut self, grant: Grant, next_id: impl FnMut() -> GrantId) -> LedgerEntry {
-        let entry = self.mint_with(&grant, next_id);
-        self.state
-            .insert(entry.object())
-            .expect("a freshly checked grant identity cannot conflict");
-        self.grants.insert(entry.handle, entry.clone());
-        self.grants_issued.push(grant);
-        entry
     }
 }
 
 impl EnforcementBackend for FakeBackend {
-    fn grant(&mut self, grant: Grant) -> LedgerEntry {
-        self.grant_with(grant, GrantId::new)
+    fn grant(
+        &mut self,
+        operation: UniverseOp,
+        kind: GrantKind,
+    ) -> Result<LedgerEntry, BackendError> {
+        let entry = LedgerEntry {
+            handle: operation.handle(),
+            owner: operation.owner().clone(),
+            capability: operation.capability(),
+            kind,
+        };
+        let _ = self.state.insert(operation.object());
+        self.grants.insert(entry.handle, entry.clone());
+        Ok(entry)
     }
 
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
@@ -110,11 +98,7 @@ impl EnforcementBackend for FakeBackend {
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
         let object = op.object();
         checked(&object)?;
-        if let Some((owner, cause)) = &self.apply_fault
-            && object.owner == *owner
-        {
-            return Err(BackendError::Fault(cause.clone()));
-        }
+        self.refusal_before_effect(&object.owner)?;
         self.state.insert(object).map(|_| ())
     }
 

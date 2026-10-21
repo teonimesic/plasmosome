@@ -1,6 +1,4 @@
-use crate::backend::{
-    BackendError, Capability, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry,
-};
+use crate::backend::{BackendError, DrainSpec, EnforcementBackend, GrantKind, Handle, LedgerEntry};
 use crate::universe::{CellOwner, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +30,6 @@ impl CompositeBackend {
         })
     }
 
-    fn leaf_for(&mut self, capability: &Capability) -> &mut dyn EnforcementBackend {
-        self.leaf_for_class(capability.class())
-    }
-
     fn leaf_for_class(&mut self, class: UniverseClass) -> &mut dyn EnforcementBackend {
         match class {
             UniverseClass::ProxyMap | UniverseClass::UdsPath => self.network.as_mut(),
@@ -54,8 +48,13 @@ impl CompositeBackend {
 }
 
 impl EnforcementBackend for CompositeBackend {
-    fn grant(&mut self, grant: Grant) -> LedgerEntry {
-        self.leaf_for(&grant.capability).grant(grant)
+    fn grant(
+        &mut self,
+        operation: UniverseOp,
+        kind: GrantKind,
+    ) -> Result<LedgerEntry, BackendError> {
+        self.leaf_for_class(operation.class())
+            .grant(operation, kind)
     }
 
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
