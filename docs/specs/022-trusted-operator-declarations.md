@@ -153,8 +153,9 @@ sources for its cell.
   trailing `/`. `/` alone is not one. A path that is not canonical is refused, never rewritten. This
   is the rule spec 017's `Capability::validate`, as implemented, applies to a Mount's `source` and
   `target`, and rule 1's walk opens no declaration path with an empty, `.` or `..` component.
-  Amended on 2026-10-21: this asked only that `declaration`, `target` and `source` be absolute and
-  NUL-free. A file could then list a Mount `source` such as `/Users/operator/src/project/`, which
+  Amended on 2026-10-21: this asked only that `declaration` be absolute
+  and that `target` and `source` be absolute and NUL-free. A file could
+  then list a Mount `source` such as `/Users/operator/src/project/`, which
   `Capability::validate` refuses after resolution, or a `declaration` with a `..` component, which
   failed only when §5 opened it, as `path` rather than this file's `content`.
 - Within one plasmid's entry, two ProxyMap entries with the same `host`, `port` and `transport`
@@ -645,8 +646,9 @@ ProxyMap (O-11) or Mount (O-7).
    - a FIFO, refused within one second (`not_regular`);
    - over 1 MiB (`size`);
    - non-UTF-8, a duplicate key, an unknown field, `version: 2` (`content`);
-   - a `declaration` with a `.` component, a Mount `source` with a trailing `/`, a Mount `target`
-     with a `..` component and one with an empty component, and a Mount `source` of `/` (`content`);
+   - a relative `declaration`, a `declaration` of `/` and one with a `.` component, a Mount `source`
+     with a trailing `/` and one with a NUL, a Mount `target` with a `..` component and one with an
+     empty component, and a Mount `source` of `/` (`content`);
    - `/private/etc/hosts` (`parent`), and with O-8 a second UID's file in a directory the
      controller's UID owns (`owner`).
 
