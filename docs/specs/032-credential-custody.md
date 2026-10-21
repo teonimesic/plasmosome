@@ -459,7 +459,10 @@ requests. The relay therefore terminates TLS only for the flows of an attachment
 - A flow's target is its host, port and transport, as spec 001 §4.2 selects it. The relay
   intercepts a TCP flow only when its selected grant is the holding of an `inject` binding whose
   gate admits. A flow of an attachment that holds no binding there stays a relayed stream that the
-  relay never reads.
+  relay never reads. Spec 001 §4.2 picks each flow's grant, so when two attachments hold one
+  target, a flow served from the one with no binding is not intercepted, and its surrogate reaches
+  the host unchanged. That fails closed; an operator who wants the harness's flows bound gives the
+  target to one attachment.
 - On an intercepted flow, the relay presents a leaf certificate for the flow's host, the host its
   synthetic address is bound to, whatever name the client sent. The instance authority signs it
   (C4, G14). The operator adds the authority's certificate to the root image's system trust store.
