@@ -65,6 +65,14 @@ fn emitted_stderr(error: ErrorBody) -> serde_json::Value {
     serde_json::from_slice(&stderr).expect("the envelope is JSON")
 }
 
+fn read_through_the_buffer(reader: &mut impl BufRead, out: &mut [u8]) -> io::Result<usize> {
+    let available = reader.fill_buf()?;
+    let count = available.len().min(out.len());
+    out[..count].copy_from_slice(&available[..count]);
+    reader.consume(count);
+    Ok(count)
+}
+
 enum Step {
     Bytes(Vec<u8>),
     Fail(io::Error),
@@ -97,11 +105,7 @@ impl Script {
 
 impl Read for Script {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        let available = self.fill_buf()?;
-        let count = available.len().min(out.len());
-        out[..count].copy_from_slice(&available[..count]);
-        self.consume(count);
-        Ok(count)
+        read_through_the_buffer(self, out)
     }
 }
 
@@ -136,11 +140,7 @@ struct Chunked {
 
 impl Read for Chunked {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        let available = self.fill_buf()?;
-        let count = available.len().min(out.len());
-        out[..count].copy_from_slice(&available[..count]);
-        self.consume(count);
-        Ok(count)
+        read_through_the_buffer(self, out)
     }
 }
 
@@ -163,11 +163,7 @@ struct Endless {
 
 impl Read for Endless {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        let available = self.fill_buf()?;
-        let count = available.len().min(out.len());
-        out[..count].copy_from_slice(&available[..count]);
-        self.consume(count);
-        Ok(count)
+        read_through_the_buffer(self, out)
     }
 }
 
