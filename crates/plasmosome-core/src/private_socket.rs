@@ -130,20 +130,44 @@ struct BoundEntry {
     dir: PrivateDir,
     name: CString,
     entry: SocketEntry,
+    removed: bool,
+}
+
+impl BoundEntry {
+    #[allow(unsafe_code)]
+    fn remove(&mut self) -> RemoveOutcome {
+        self.removed = true;
+        let facts = match stat_at(&self.dir.dir, &self.name) {
+            Ok(facts) => facts,
+            Err(errno) => return gone_or_failed(errno),
+        };
+        if facts.kind != Kind::Socket || facts.dev != self.entry.dev || facts.ino != self.entry.ino
+        {
+            return RemoveOutcome::LeftReplacement;
+        }
+        // SAFETY: `self.name` is a CString this entry owns, and `self.dir` keeps the directory
+        // descriptor open for the call. unlinkat keeps no pointer to the name.
+        if unsafe { libc::unlinkat(self.dir.dir.as_raw_fd(), self.name.as_ptr(), 0) } == 0 {
+            RemoveOutcome::Removed
+        } else {
+            gone_or_failed(last_errno())
+        }
+    }
 }
 
 impl Drop for BoundEntry {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
-        if let Ok(facts) = stat_at(&self.dir.dir, &self.name)
-            && facts.kind == Kind::Socket
-            && facts.dev == self.entry.dev
-            && facts.ino == self.entry.ino
-        {
-            // SAFETY: `self.name` is a CString this entry owns, and `self.dir` keeps the directory
-            // descriptor open for the call. unlinkat keeps no pointer to the name.
-            unsafe { libc::unlinkat(self.dir.dir.as_raw_fd(), self.name.as_ptr(), 0) };
+        if !self.removed {
+            let _ = self.remove();
         }
+    }
+}
+
+fn gone_or_failed(errno: i32) -> RemoveOutcome {
+    if errno == libc::ENOENT {
+        RemoveOutcome::AlreadyGone
+    } else {
+        RemoveOutcome::Failed { errno }
     }
 }
 
@@ -199,7 +223,13 @@ impl PrivateListener {
     /// in the held directory is still the same socket by device and inode, and says what it
     /// found there. Dropping the listener does the same and discards the outcome.
     pub fn close(self) -> RemoveOutcome {
-        todo!()
+        let PrivateListener {
+            listener,
+            mut bound,
+            ..
+        } = self;
+        drop(listener);
+        bound.remove()
     }
 
     /// Accepts one pending connection without blocking. `Ok(None)`: nothing pending. A peer
@@ -236,7 +266,7 @@ impl PrivateListener {
 impl AsFd for PrivateListener {
     /// The listening descriptor, as [`PrivateListener::as_raw_fd`] gives it.
     fn as_fd(&self) -> BorrowedFd<'_> {
-        todo!()
+        self.listener.as_fd()
     }
 }
 
@@ -716,6 +746,7 @@ fn prepare_as(
             dev: created.dev,
             ino: created.ino,
         },
+        removed: false,
     };
     recheck?;
     restrict_to_owner(&bound)?;
