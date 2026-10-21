@@ -582,6 +582,7 @@ impl VmmChild {
     }
 
     fn report_drop(&self, error: SupervisionError, later: Option<SupervisionError>) {
+        note_drop_report();
         let signalling_forbidden = matches!(
             self.lifecycle,
             Lifecycle::Finished {
@@ -626,6 +627,24 @@ fn note_interrupted_wait() {}
 #[cfg(test)]
 fn interrupted_reaps() -> usize {
     INTERRUPTED_REAPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DROP_REPORTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_drop_report() {
+    DROP_REPORTS.set(DROP_REPORTS.get() + 1);
+}
+
+#[cfg(not(test))]
+fn note_drop_report() {}
+
+#[cfg(test)]
+fn drop_reports() -> usize {
+    DROP_REPORTS.get()
 }
 
 #[cfg(test)]
@@ -1850,11 +1869,17 @@ mod signal_pressure {
             let signals_before = DELIVERED.load(Ordering::Relaxed);
             let interruptions_before = interrupted_reaps();
             reset_reap_record();
+            let reports_before = drop_reports();
             let unhandled = interrupter.drop_interrupted(child, &release);
+            let reports = drop_reports() - reports_before;
             let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
             let interruptions = interrupted_reaps() - interruptions_before;
             assert_reaped_by_drop(pid, interruptions);
             assert_reaped_by_handle(pid);
+            assert_eq!(
+                reports, 0,
+                "child {child_number}: the drop reported a cleanup error"
+            );
             if let Some(signal) = unhandled {
                 panic!(
                     "child {child_number}: SIGUSR1 number {signal} was not handled by the reaping thread within {YIELDS_PER_SIGNAL} yields, so the interrupter released the leader early; something in the drop kept the signal blocked or ignored"
