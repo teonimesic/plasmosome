@@ -1559,6 +1559,7 @@ mod tests {
 #[cfg(test)]
 mod signal_pressure {
     use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -1596,41 +1597,53 @@ mod signal_pressure {
     }
 
     struct Release {
-        read: libc::c_int,
-        write: libc::c_int,
+        read: Option<OwnedFd>,
+        write: OwnedFd,
     }
 
     impl Release {
-        #[allow(unsafe_code)]
         fn open() -> Release {
-            let mut fds = [0; 2];
-            // SAFETY: `fds` is a local array of two c_int, the size pipe writes.
-            let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
-            assert_eq!(opened, 0, "a release pipe opens");
+            let [read, write] = crate::spawn_lock::with_each_descriptor_held(close_on_exec_pipe)
+                .expect("a close-on-exec release pipe opens");
             Release {
-                read: fds[0],
-                write: fds[1],
+                read: Some(read),
+                write,
             }
         }
 
-        #[allow(unsafe_code)]
+        fn read_end(&self) -> libc::c_int {
+            self.read
+                .as_ref()
+                .expect("the read end is open until the leader is forked")
+                .as_raw_fd()
+        }
+
+        fn write_end(&self) -> libc::c_int {
+            self.write.as_raw_fd()
+        }
+
         fn close_read(&mut self) {
-            if self.read >= 0 {
-                // SAFETY: `self.read` is a descriptor this Release owns. It is set to -1 below, so
-                // it is closed once.
-                unsafe { libc::close(self.read) };
-                self.read = -1;
-            }
+            self.read = None;
         }
     }
 
-    impl Drop for Release {
-        #[allow(unsafe_code)]
-        fn drop(&mut self) {
-            self.close_read();
-            // SAFETY: `self.write` is a descriptor this Release owns, and nothing else closes it.
-            unsafe { libc::close(self.write) };
+    #[allow(unsafe_code)]
+    fn close_on_exec_pipe(
+        _held: &crate::spawn_lock::DescriptorsHeld,
+    ) -> std::io::Result<[OwnedFd; 2]> {
+        let mut fds = [0; 2];
+        // SAFETY: `fds` is a local array of two c_int, the size pipe writes.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
         }
+        // SAFETY: pipe returned 0, so both entries are new descriptors, and nothing else owns them.
+        let ends = fds.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+        for end in &ends {
+            // SAFETY: fcntl with F_SETFD takes integers only, and `end` keeps its descriptor open
+            // for the call. with_each_descriptor_held checks the flag afterwards.
+            unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        Ok(ends)
     }
 
     struct WithheldLeaderSignal;
@@ -1741,7 +1754,7 @@ mod signal_pressure {
                 .as_ref()
                 .expect("the interrupter takes aims until it is dropped")
                 .send(Aim {
-                    release: release.write,
+                    release: release.write_end(),
                     dropped: Arc::clone(&dropped),
                 })
                 .expect("the interrupter thread is running");
@@ -1828,8 +1841,8 @@ mod signal_pressure {
         for child_number in 1..=CHILDREN {
             let mut release = Release::open();
             let child = VmmChild::spawn(ExitOnRelease {
-                read: release.read,
-                write: release.write,
+                read: release.read_end(),
+                write: release.write_end(),
             })
             .expect("fork succeeds");
             release.close_read();
