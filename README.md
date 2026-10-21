@@ -573,6 +573,77 @@ If rustup cannot download it then, because you are offline or `RUSTUP_AUTO_INSTA
 `rustup toolchain install` in the checkout first, while online. macOS (Apple Silicon) is the first
 target; Linux follows.
 
+## Root image
+
+Every cell boots the same root image: a raw, unpartitioned ext4 file that the guest sees as
+`/dev/vda`. `tools/root-image` builds it from `debian:bookworm-slim`, pinned by digest, and adds
+spec 024's `workload` account. It needs Docker and python3. The tool never pulls an image, so
+`docker pull` is your own step, and its containers run with `--network none`.
+
+```shell
+BASE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+docker pull "$BASE"
+mkdir -p "$HOME/.cache/plasmosome"
+tools/root-image build --base "$BASE" --source-date-epoch 1792454400 \
+  --work-root "$HOME/.cache/plasmosome/root-image-$(date -u +%Y%m%d%H%M%S)" \
+  --images-root /usr/local/var/plasmosome/runtime/images
+```
+
+The images root must exist and be writable by you. The work root must not exist yet, and it must
+sit where Docker Desktop shares files with its VM, such as under your home directory. Docker
+Desktop does not share `/usr/local` by default, so a work root there reaches the container empty
+and the tool refuses. Intermediate files stay in the work root, so you can read them after a
+failure. After the build container runs, the tool reads only two things it left there:
+`rootfs.raw`, which is opened without following a link and must be exactly `--size-mib` MiB, and
+the read-back in `check/`, which must still be a directory and is read through a bound.
+
+The images root above is the lab location, next to the runtime bundles. It is gated. Spec 001
+refuses an artifact with a replaceable parent (001:990), and `/usr/local/var` is admin-writable,
+so product verification cannot accept an image from there. Owner gate O-1 (spec 027) is about the
+instance root, not the image, so answering O-1 alone does not admit an image there.
+
+The tool prints one JSON line: `image_dir`, `image_id16`, `manifest_sha256`, `rootfs_sha256`,
+`content_sha256` and `kind`. The image directory is `<images-root>/<image_id16>`, the first 16 hex
+digits of the manifest's sha256. It holds `rootfs.raw`, `content.jsonl` (one line per file in the
+image), `SHA256SUMS` and `manifest.json`, all read-only and `uchg`. `rootfs.raw` keeps the zero
+runs of the filesystem as holes, so a 1024 MiB image takes about 95 MiB on disk. An existing
+directory is never replaced. Pin an image by `manifest_sha256`. The manifest's `tool_sha256` is the
+sha256 of the tool that built the image, so images from different versions of the tool can be told
+apart. You may run the tool through a symlink; `tool_sha256` is then the sha256 of the file the link
+resolves to.
+
+`uchg` guards against accidents, not against the user who owns the directory. To remove a placed
+image, run these three commands. The directory is 0555 and its files 0444, so `rm` fails without
+the `chmod`. Whether an image stays is the owner's decision.
+
+```shell
+chflags -R nouchg <image_dir>
+chmod -R u+w <image_dir>
+rm -r <image_dir>
+```
+
+The image is the base with these changes: the `workload` account (uid and gid 1000, home
+`/home/workload` with mode 0700 and the skel files), `/tmp` with mode 01777, empty `/dev`, `/proc`
+and `/sys`, and fixed `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`. The tool refuses a base
+with anything under `/opt` or `/usr/local/bin`, or with a path that names plasmosome or plasmid
+(spec 027). It also refuses a base whose account files already name `workload` or use id 1000. It
+reads those files as glibc does, so a name or member with leading blanks still counts. A NUL byte
+in one of them is refused, because glibc ends a line there.
+`--add SRC:DEST:MODE` adds a root-owned file and makes the kind `test`, never `product`. Two builds
+with the same base and `--source-date-epoch` give the same `content_sha256`. The ext4 bytes can
+differ, so compare rebuilds by `content_sha256`.
+
+The base's own setuid and setgid programs, such as `su`, `passwd` and `mount`, keep their modes.
+They give the workload nothing, because it runs with no-new-privs (spec 024 §4). `--add` refuses
+those modes.
+
+The checks have limits. The base checks itself: its own `tar` and `sh` unpack the stage, and its
+`mke2fs`, `e2fsck`, `dumpe2fs` and `debugfs` make and read back the filesystem, so the read-back
+reports only what that base chooses to report. A
+separate, pinned builder image is a planner question, not something the tool does. `content.jsonl`
+lists the stage tar the image was made from. It is not a listing read back from `rootfs.raw`. The
+manifest's `limits` say the same.
+
 ## Development work
 
 Tasks live entirely in shared native Beads: their descriptions, plans, acceptance, notes, status
