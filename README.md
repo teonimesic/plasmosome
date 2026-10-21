@@ -41,7 +41,7 @@ states what the tree serves now.
 | --- | --- |
 | `plasmosomed <config.json>` | Runs a foreground controller and serves only `plasmosome.status` on its configured Unix socket. |
 | `membraned <config.json>` | Runs a foreground empty/broker supervisor and serves only `membrane.status` on its configured Unix socket. |
-| `plasmid new <name>` | Writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. |
+| `plasmid <command>` | `plasmid new <name>` writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. `plasmid list`, `add`, `remove`, `reload` and `renew` are listed in `plasmid --help` and exit 2 with a `not_served` envelope. A wrong command line exits 64 with an `invalid` envelope, and `plasmid --version` prints `plasmid 0.0.0`. |
 
 There is no `plasmosome` executable or `plasmosome start` command today. The accepted future
 controller methods — `plasmosome.start/list/status/stop`, `cell.new/list/status/kill/exec`,
@@ -553,7 +553,7 @@ that its complete runtime role is delivered.
 | `plasmosome-ledger` | Typed reversibility: effects and their inverses; spec 020's registry IDs and release references |
 | `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
 | `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes and client codes; never shipped |
-| `plasmid` | Plasmid-author command line; today `plasmid new` writes a declaration |
+| `plasmid` | Plasmid-author command line; today `plasmid new` writes a declaration, and the other plasmid commands answer `not_served` |
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
 | `plasmosome-guards` | Repository policy checks |
 | `plasmosome-testkit` | Test support; never shipped |

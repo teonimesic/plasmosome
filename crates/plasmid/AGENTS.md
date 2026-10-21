@@ -22,12 +22,21 @@ on it.
   id, the version and an empty description, and grants no capability. It writes no component, and
   exits 2 for that refusal, until the plasmid interface is frozen.
 
+## The envelopes
+
+The binary writes spec 025's two envelopes, `not_served` and `invalid`, with its own writer in
+`src/envelope.rs`. It does not use `plasmosome-cli`'s writer: `plasmosome-cli` is not published,
+and a normal dependency on an unpublished package stops this crate from packaging, which spec 010
+requires it to keep doing. Whether plasmid moves onto `plasmosome-cli` later is an open question
+(plasmosome-4t24). Both writers escape the terminal controls spec 025 section 3 names.
+
 ## Testing
 
 `cargo test -p plasmid`. The verbs are exercised by running the built binary through
 `CARGO_BIN_EXE_plasmid` and reading its exit status, because the exit status is the contract.
 
-The tests parse what `plasmid new` writes with `plasmosome-core`'s parser, so a printed section
-that drifts from the refusals the parser gives fails a test. `plasmosome-core` is a path-only
-dev-dependency, which `cargo package` drops. As a normal dependency it would stop this crate from
-packaging, because `plasmosome-core` is not published.
+The tests read the envelopes with `serde_json`, which is a dev-dependency only, through the
+helpers in `tests/support/mod.rs`. They parse what `plasmid new` writes with `plasmosome-core`'s
+parser, so a printed section that drifts from the refusals the parser gives fails a test.
+`plasmosome-core` is a path-only dev-dependency, which `cargo package` drops. As a normal
+dependency it would stop this crate from packaging, because `plasmosome-core` is not published.
