@@ -578,8 +578,12 @@ never punishes detachment). `--now` is the authority-class immediate removal.
 
 ```json
 {"id": 13, "result": {"cell": "cell-1", "plasmid": "github-pr", "state": "removed", "drained": true,
-  "replayed": 2, "delayed_discarded": 1, "residue": "empty"}}
+  "replayed": 2, "delayed_discarded": 1, "residue": "empty", "held": []}}
 ```
+
+`held` lists each reference into the plasmid's software, or a reload's replaced tree, that the
+guest's scan saw once its names were gone, as `{path, pid, comm, exec_id}` (spec 027). It is not
+residue, so `residue` stays `"empty"`.
 
 Outstanding external effects refuse the safe removal with code `105` carrying the assertion
 list; force requires the operator/reason pair exactly as `plasmosome.stop`. A removal that would
@@ -599,7 +603,8 @@ the plasmid's mock mode, and a `mock` that differs from it refuses with 104 (spe
 ```
 
 ```json
-{"id": 14, "result": {"cell": "cell-1", "plasmid": "github-pr", "mock": "capture", "generation": 5, "state": "active"}}
+{"id": 14, "result": {"cell": "cell-1", "plasmid": "github-pr", "mock": "capture", "generation": 5,
+  "state": "active", "held": []}}
 ```
 
 Reload preserves the attachment's spec008 AttachmentSource. A registry source reuses the exact
@@ -1439,7 +1444,7 @@ acknowledgement nor a guest claim replaces independent resource cleanup observat
 `GuestObservation` is the strict record
 `{boot:String, policy:String, fs_mounts:[GuestProjection], fs_handles:[GuestProjection],
 socket_listeners:[GuestProjection], socket_streams:[SocketStreamProjection],
-network:GuestNetworkObservation}`. Every field and nested
+network:GuestNetworkObservation, software:SoftwareObservation}`. Every field and nested
 array is required even when independently observed empty; omission of an otherwise-empty kind refuses
 the entire observation. The nonempty boot token identifies this original supervisor/guest
 association and is never reused or reconstructed from journal contents. Policy is the SHA256 of
@@ -1448,7 +1453,14 @@ GuestProjection is `{id:String, bindings:[GuestBinding]}`; its containing array 
 GuestNetworkObservation is the strict record `{dns_listeners:[GuestProjection],
 tuns:[GuestProjection], routes:[GuestProjection], proxy_rules:[GuestProjection],
 tcp_flows:[GuestProjection], udp_flows:[GuestProjection]}`. All six arrays are required, including
-empty arrays; coverage of one network kind cannot stand in for another. DNS listeners appear
+empty arrays; coverage of one network kind cannot stand in for another. SoftwareObservation is
+the strict record `{trees:[SoftwareTree], held:[TreeReference]}` (spec 027). SoftwareTree names
+one tree visible in the workload namespace, with its digest and every name placed for it; its
+field names follow spec 027's journal record. TreeReference is `{path:String, pid:u64,
+comm:String, exec_id:String|null}`, one per reference into a detached tree that the guest's scan
+sees. Both arrays are required even when empty. A tree or name with no committed or pending
+journal effect, or a committed effect with no tree or name, fails observation. A `held` row is
+not a binding or residue, and never makes a removal incomplete. DNS listeners appear
 only in network, not again in socket_listeners; the latter contains UdsSocket/Broker data
 listeners. Network infrastructure first created by install and shared by several grants carries
 each actual binding; it cannot persist with an empty binding list after last removal.
