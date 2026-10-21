@@ -332,9 +332,11 @@ impl InstanceRoot {
     /// tries the next number: the larger of the new listing's and one above the number that was
     /// taken. After 64 attempts it is `Contended`. When no number up to `cell-9999999999` is left
     /// it is `Exhausted`, naming the directory that holds the largest one. A failure from
-    /// `create_cell_dir` is `Create`, which carries the ID it was creating: when its source is an
-    /// `Io` error naming `cells`, an entry with that name exists, the new directory unsynced or
-    /// one another process made first. The new directory has no `supervisor.lock` yet.
+    /// `create_cell_dir` is `Create`, which carries the ID it was creating. Its source alone does
+    /// not tell whether a directory with that name exists. If the sync of `cells` failed after
+    /// the `mkdir`, it does; but an `Io` error naming `cells` also comes from making or opening
+    /// `cells` itself, and then no cell directory was made. A caller that must know opens it
+    /// with [`InstanceRoot::cell_dir`]. The new directory has no `supervisor.lock` yet.
     pub fn allocate_cell(&self, lock: &WriterLock) -> Result<CellDir, AllocateError> {
         if lock.root != self.identity {
             return Err(AllocateError::ForeignLock {
@@ -874,9 +876,9 @@ impl CellDir {
     /// held from the moment it has its name. The file is created as `supervisor.lock.tmp`,
     /// exclusively, without following a symlink, with mode 0600 whatever the umask, and
     /// close-on-exec. `flock(LOCK_EX | LOCK_NB)` is taken on it, it is renamed to
-    /// `supervisor.lock` without replacing anything, and this directory is synced. A probe sees
-    /// no entry and then a held lock, never a free one. The returned [`SupervisorLock`] holds the
-    /// lock. On Linux the rename needs a filesystem with `RENAME_NOREPLACE`; on one without it the
+    /// `supervisor.lock` without replacing anything, and this directory is synced. With one call
+    /// at a time, a probe sees no entry and then a held lock, never a free one. The returned
+    /// [`SupervisorLock`] holds the lock. On Linux the rename needs a filesystem with `RENAME_NOREPLACE`; on one without it the
     /// call is an `Io` error.
     ///
     /// Any `supervisor.lock.tmp` left by an earlier call is removed first; a symlink there is
@@ -886,8 +888,19 @@ impl CellDir {
     /// fails, the error is `Io` and the lock file stays in place: a retry is `AlreadyExists`, and
     /// once nothing else holds it [`CellDir::probe_supervisor_lock`] reports it `Free`.
     ///
-    /// The caller must be the only creator of this cell's `supervisor.lock`, as the controller
-    /// is; this call does not check it. A second creator can remove the first one's temporary.
+    /// Two calls for one cell at once can get in each other's way: the second call's first step
+    /// removes the first call's temporary as a leftover, and the first call's rename then moves
+    /// the second call's file into place. So after the rename the call reads the entry named
+    /// `supervisor.lock`, without following a symlink, and returns the lock only when that entry
+    /// is the file it holds. Otherwise it is `LockNotNamed`, naming `supervisor.lock` in this
+    /// cell, no lock is returned, and the entry is left as it is. `Ok` therefore always means
+    /// that `supervisor.lock` names the held file. When calls race, any of them can fail, and a
+    /// file no call returned can be left at `supervisor.lock`; a probe reads it `Free` once
+    /// nothing holds it.
+    ///
+    /// A directory at `supervisor.lock.tmp` cannot be unlinked, so every call is then an `Io`
+    /// error naming it, while a probe reads `Missing`. Only a writer under the root can plant
+    /// one, and such a writer can already plant one at `supervisor.lock`.
     pub fn create_supervisor_lock(&self) -> Result<SupervisorLock, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOCK_FILE);
         self.remove_if_present(SUPERVISOR_LOCK_TEMPORARY)?;
@@ -898,8 +911,21 @@ impl CellDir {
                 return Err(error);
             }
         };
+        self.check_lock_named(&file, &path)?;
         self.sync_dir()?;
         Ok(SupervisorLock { file, path })
+    }
+
+    fn check_lock_named(&self, file: &File, path: &Path) -> Result<(), CellDirError> {
+        let named = stat_at(self.dir.as_fd(), SUPERVISOR_LOCK_FILE).map_err(cell_dir_io(path))?;
+        let held = stat_of(file.as_fd()).map_err(cell_dir_io(path))?;
+        if (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino) {
+            Ok(())
+        } else {
+            Err(CellDirError::LockNotNamed {
+                path: path.to_path_buf(),
+            })
+        }
     }
 
     fn lock_and_name_supervisor_lock(&self, path: &Path) -> Result<File, CellDirError> {
@@ -1295,6 +1321,7 @@ pub enum CellDirError {
     ForeignLock { path: PathBuf },
     NotARegularFile { path: PathBuf },
     MarkerUnreadable { path: PathBuf, fault: MarkerFault },
+    LockNotNamed { path: PathBuf },
 }
 
 /// Why an instance root could not be opened.
@@ -1414,6 +1441,11 @@ impl fmt::Display for CellDirError {
             CellDirError::MarkerUnreadable { path, fault } => {
                 write!(f, "{} cannot be read: {fault}", path.display())
             }
+            CellDirError::LockNotNamed { path } => write!(
+                f,
+                "{} names a file other than the one this call locked, so no lock was returned",
+                path.display()
+            ),
         }
     }
 }
@@ -1430,7 +1462,8 @@ impl std::error::Error for CellDirError {
             | CellDirError::NotADirectory { .. }
             | CellDirError::AlreadyExists { .. }
             | CellDirError::ForeignLock { .. }
-            | CellDirError::NotARegularFile { .. } => None,
+            | CellDirError::NotARegularFile { .. }
+            | CellDirError::LockNotNamed { .. } => None,
         }
     }
 }
