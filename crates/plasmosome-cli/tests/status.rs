@@ -500,3 +500,63 @@ fn a_socket_nobody_listens_on_stays() {
         (&json!("not_running"), &json!(text(&absent)))
     );
 }
+
+const MAX_REQUEST_BYTES: usize = 1_048_576;
+
+const QUOTES: usize = 1_000;
+
+fn name_for_a_line_of(bytes: usize) -> String {
+    let empty = "{\"id\":1,\"method\":\"plasmosome.status\",\"params\":{\"name\":\"\"}}".len();
+    let plain = bytes - empty - 2 * QUOTES;
+    format!("{}{}", "\"".repeat(QUOTES), "a".repeat(plain))
+}
+
+#[test]
+fn a_request_line_of_the_bound_is_sent() {
+    let root = private_root();
+    let socket = socket_in(root.path());
+    let fake = FakeDaemon::start(&socket, vec![reply(json!({"id":1,"result":{}}))]);
+    let name = name_for_a_line_of(MAX_REQUEST_BYTES);
+    let ran = run(line(&socket, &["--kernel", &name]));
+    assert_eq!(
+        ran.exit,
+        Exit::Done,
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let sent = fake.ended(1).remove(0);
+    assert_eq!(sent.len(), MAX_REQUEST_BYTES + 1);
+    assert_eq!(sent.last(), Some(&b'\n'));
+    let request: Value = serde_json::from_slice(&sent).expect("the request is JSON");
+    assert_eq!(request["params"]["name"], name.as_str());
+}
+
+#[test]
+fn a_request_line_over_the_bound_is_refused_before_connecting() {
+    let root = private_root();
+    let socket = socket_in(root.path());
+    let listener = UnixListener::bind(&socket).expect("a socket");
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+        .expect("the socket is 0600");
+    listener
+        .set_nonblocking(true)
+        .expect("the listener does not block");
+    let name = name_for_a_line_of(MAX_REQUEST_BYTES + 1);
+    assert!(name.len() < MAX_REQUEST_BYTES);
+    let ran = run(line(&socket, &["--kernel", &name, "--deadline-ms", "2000"]));
+    assert_eq!(ran.exit, Exit::Usage);
+    let envelope = failure(&ran);
+    assert_eq!(envelope["command"], "invalid");
+    assert_eq!(envelope["error"]["code"], "invalid_argument");
+    assert_eq!(envelope["error"]["argument"], name.as_str());
+    assert!(
+        envelope.get("instance").is_none(),
+        "{}",
+        envelope["instance"]
+    );
+    let accepted = listener.accept().map(|_| ());
+    assert!(
+        matches!(&accepted, Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+        "the listener saw {accepted:?}"
+    );
+}
