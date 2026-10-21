@@ -59,10 +59,12 @@ impl OwnsDescriptor for PrivateListener {
 /// platform needs two calls for that. `create` receives the `DescriptorsHeld`
 /// proof, so a function that takes one cannot be called outside. `create`
 /// returns the value that owns the descriptor, and only that descriptor is
-/// checked: if it is not close-on-exec when `create` returns, it is closed
-/// before the lock is released, and an error is returned instead. A
-/// descriptor created inside `create` and kept anywhere else is not checked,
-/// so the caller must make it close-on-exec before `create` returns.
+/// checked: if it is not close-on-exec when `create` returns, the value is
+/// dropped before the lock is released, and an error is returned instead.
+/// That drop closes the descriptor only because the value owns it, which is
+/// the rule every `OwnsDescriptor` type must keep. A descriptor created inside
+/// `create` and kept anywhere else is not checked, so the caller must make it
+/// close-on-exec before `create` returns.
 ///
 /// Never hold it across a blocking call such as `accept`: every
 /// `VmmChild::spawn` in the process waits until `create` returns. A spawn on

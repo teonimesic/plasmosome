@@ -131,8 +131,12 @@ impl RuntimeListener {
     /// side of the spawn lock. Core checks the peer's kernel uid and closes a
     /// refused peer's stream unread. A trusted stream is made nonblocking, and
     /// the process id [`peer_pid`] reports for its peer is read right after
-    /// the accept. Returns `None` when no connection is pending, and an error
-    /// only when the listener's own accept fails.
+    /// the accept. Returns `None` when no connection is pending.
+    ///
+    /// It returns an error in three cases: the listener's accept fails, core
+    /// cannot put a trusted stream back into blocking mode, or the spawn lock
+    /// finds the accepted stream not close-on-exec. In the last two a
+    /// connection was taken, and its stream is closed.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
@@ -175,7 +179,9 @@ impl RuntimeListener {
     /// Closes the listener, then removes its socket file only while the entry
     /// at that name in the held directory is still the socket it bound, and
     /// says what it found. Dropping the listener does the same and discards
-    /// the outcome.
+    /// the outcome. A child that another thread is spawning holds a copy of
+    /// the listener until its exec, so the socket can take connections until
+    /// then.
     pub fn close(self) -> RemoveOutcome {
         self.listener.close()
     }

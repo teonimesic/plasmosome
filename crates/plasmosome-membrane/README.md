@@ -194,10 +194,11 @@ same way, and so does `RuntimeListener` for its socket and each connection it ac
 waits while any of them is created; on Linux all are close-on-exec from the start, so the wait
 matters only on Darwin. Creation under the write side returns the values that
 own its descriptors, and only those descriptors are checked: if any is not already close-on-exec,
-all of them are closed before the lock is released and creation fails. A descriptor created under
-the lock and kept anywhere else is not checked, so the code that creates it must mark it
-close-on-exec before the lock is released. A spawn from the thread that holds the write side returns
-`SpawnError::DescriptorLockHeld` instead of waiting on itself.
+all of them are closed before the lock is released and creation fails. A value lends the lock its
+descriptor through `OwnsDescriptor`, as a raw descriptor, so making a copy of it needs `unsafe`.
+A descriptor created under the lock and kept anywhere else is not checked, so the code that
+creates it must mark it close-on-exec before the lock is released. A spawn from the thread that
+holds the write side returns `SpawnError::DescriptorLockHeld` instead of waiting on itself.
 
 The lock covers only those paths. Forks that do not go through `VmmChild::spawn`, such as
 `std::process::Command`, do not take it, and neither do the standard library's `bind` in
@@ -260,8 +261,10 @@ connection lands while the umask's mode holds. A path too long for a socket addr
 the rule broken and the component that broke it. The bind holds the spawn lock's write side,
 because on Darwin core makes the socket close-on-exec in a second call. Closing the listener closes
 it, then removes the socket file only while the entry at that name in the held directory is still
-that socket, and says what it found as a `RemoveOutcome`. Dropping it does the same. The cell,
-plasmosome-7em, which is not built yet, is to create that private directory.
+that socket, and says what it found as a `RemoveOutcome`. Dropping it does the same. A child that
+another thread is spawning holds a copy of the listener until its exec, so the socket can take
+connections until then. The cell, plasmosome-7em, which is not built yet, is to create that
+private directory.
 
 `accept_ready` takes one pending connection without blocking, holding the same write side. Core
 reads the peer's effective uid from the kernel and closes a peer of another uid unread: that is
@@ -276,9 +279,11 @@ child sent first does not match.
 
 When the peer's credentials or pid cannot be read, the connection is `Refused` with
 `PeerCredentials` and closed. On Darwin a peer that connected and exited before the accept is that
-case, with `ENOTCONN`; on Linux the same peer is `Identified` with the pid it had. `accept_ready`
-returns an error only when the listener's own accept fails, so a process that connects and leaves
-cannot make the listener look broken.
+case, with `ENOTCONN`; on Linux the same peer is `Identified` with the pid it had. So a process
+that connects and leaves gets a result of its own and cannot make the listener look broken.
+`accept_ready` returns an error when the listener's accept fails, and in two cases after it took a
+connection: core cannot put a trusted stream back into blocking mode, or the spawn lock finds the
+accepted stream not close-on-exec. That stream is then closed.
 
 `DiagnosticTranscript` reads the read end of the diagnostic pipe that `HelperExec::prepare` returns,
 on a thread of its own, so a helper that writes a lot never blocks on descriptor 2. Start it before

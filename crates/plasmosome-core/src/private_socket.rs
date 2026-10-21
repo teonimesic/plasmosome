@@ -230,14 +230,17 @@ impl PrivateListener {
         &self.bound.entry
     }
 
-    /// The listening descriptor, for polling. The caller must not close it or accept on it.
+    /// The listening descriptor, for polling. The caller must not close it, accept on it,
+    /// change its flags or keep a copy of it.
     pub fn as_raw_fd(&self) -> RawFd {
         self.listener.as_raw_fd()
     }
 
     /// Closes the socket, then removes the entry it created only while the entry at that name
     /// in the held directory is still the same socket by device and inode, and says what it
-    /// found there. Dropping the listener does the same and discards the outcome.
+    /// found there. Dropping the listener does the same and discards the outcome. A child that
+    /// another thread is spawning holds a copy of every descriptor until its exec, so the socket
+    /// can take connections until that exec.
     pub fn close(self) -> RemoveOutcome {
         let PrivateListener {
             listener,

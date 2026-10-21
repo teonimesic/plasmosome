@@ -379,9 +379,15 @@ socket through it too, as [Socket ownership](#socket-ownership) says, and so do
   - `close` closes the socket, then removes only the socket it created, matched by device and
     inode, through the held directory, and says what it found as a `RemoveOutcome`: `Removed`,
     `AlreadyGone`, `LeftReplacement` or `Failed` with the errno. Dropping it does the same and
-    discards the outcome.
-  - It implements `AsFd`, so `plasmosome-membrane` can bind it under its spawn lock, which checks
-    that the listening descriptor is close-on-exec.
+    discards the outcome. A child that another thread is spawning holds a copy of every
+    descriptor until its exec, so the socket can take connections until then. On macOS 26.6.2,
+    with another thread spawning `/usr/bin/true` in a loop, 10 of 150 closed listeners still took
+    a connection right after the close. Beside another test whose teardown spawns `/bin/chmod`,
+    the longest such window in 25 runs was 4.5 ms.
+  - It lends its descriptor only through `as_raw_fd`, for polling, and does not implement `AsFd`.
+    Safe code therefore cannot copy it. A copy could accept a peer the UID check refuses, clear
+    `O_NONBLOCK` so that `accept` blocks, or keep the socket listening after `close`.
+    `plasmosome-membrane` reads its close-on-exec flag through `as_raw_fd` under its spawn lock.
 - `PrivateListener::accept` reads the peer's effective UID from the kernel: `getpeereid` on
   macOS, `SO_PEERCRED` on Linux. It closes an untrusted peer before reading a byte.
 - A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`
