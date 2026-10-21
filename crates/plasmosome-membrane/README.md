@@ -20,7 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. Nothing here touches an artifact or launches a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. Nothing here verifies an artifact or boots a cell yet |
 
 ## Use
 
@@ -170,19 +170,59 @@ or keep forking. `mem::forget` leaks an unfinished handle.
 Darwin cannot create a pipe, a socket or an accepted connection already close-on-exec, so each one
 exists for a moment before `FD_CLOEXEC` is set, and a fork in that moment hands it to the child.
 `VmmChild::spawn` forks holding the read side of one process-wide lock. The readiness probe
-creates its socket holding the write side, so a spawn waits while a probe socket is created; on
-Linux that socket is close-on-exec from the start, so the wait matters only on Darwin. Creation
-under the write side returns the value that owns its descriptor, and only that descriptor is
-checked: if it is not already close-on-exec, it is closed before the lock is released and creation
-fails. A descriptor created under the lock and kept anywhere else is not checked, so the code that
-creates it must mark it close-on-exec before the lock is released. A spawn from the thread that
-holds the write side returns `SpawnError::DescriptorLockHeld` instead of waiting on itself.
+creates its socket holding the write side, and `HelperExec::prepare` creates the helper's two pipes
+the same way, so a spawn waits while either is created; on Linux both are close-on-exec from the
+start, so the wait matters only on Darwin. Creation under the write side returns the values that
+own its descriptors, and only those descriptors are checked: if any is not already close-on-exec,
+all of them are closed before the lock is released and creation fails. A descriptor created under
+the lock and kept anywhere else is not checked, so the code that creates it must mark it
+close-on-exec before the lock is released. A spawn from the thread that holds the write side returns
+`SpawnError::DescriptorLockHeld` instead of waiting on itself.
 
-The lock covers only those two paths. Forks that do not go through `VmmChild::spawn`, such as
+The lock covers only those three paths. Forks that do not go through `VmmChild::spawn`, such as
 `std::process::Command`, do not take it, and neither do the standard library's `bind` in
 `daemon.rs` and `accept` in `control.rs`. Those two are safe only because `membraned` binds its
 control socket, spawns its brokers and serves requests on one thread, so none of them can overlap
 a fork. Code that creates descriptors or forks on a second thread must take the lock first.
+
+## Launching the VMM helper
+
+`runtime::launch::HelperExec` runs the pinned VMM helper the way spec 001 §4.2 says: argv is
+exactly `[helper.path, "--runtime-fd=3"]`, the environment is empty, descriptors 0 and 1 are
+`/dev/null`, 2 is a diagnostic pipe whose read end the caller keeps, 3 is a pipe holding the
+recipe's one ndjson line and then end of file, and no other descriptor survives the exec.
+`HelperExec::prepare` does every allocation and every call that can fail in the parent. The child
+`VmmChild::spawn` forks then calls only async-signal-safe functions: it resets every signal to its
+default action, copies the four descriptors into place, closes every descriptor above 3, sets umask
+077 and the working directory `/`, unblocks every signal last and calls `execve`.
+It exits 125 when that setup fails and 127 when `execve` returns. On Linux, 127 can also come from
+glibc's dynamic loader, after `execve` succeeded, when a library the helper needs is missing, so
+there it is a hint rather than proof. The pinned libkrun's implicit init uses the same codes: it
+exits 125, 126 or 127 when it fails after `krun_start_enter` (`include/libkrun.h` at v1.19.4,
+lines 1377 to 1380). Spec 001 §4.2 has the helper call `krun_disable_implicit_init`, so a helper
+that follows the spec never exits with them that way.
+
+Closing every descriptor above 3 is one `close_range` call on Linux; `prepare` refuses when the
+kernel does not offer it. Darwin has no such call, so the child closes each number below the larger
+of `getdtablesize()` and `kern.maxfilesperproc`. `getdtablesize()` is the smaller of the soft
+`RLIMIT_NOFILE` and `kern.maxfilesperproc`, so the loop always runs to `kern.maxfilesperproc`, and a
+soft limit lowered below a descriptor the process still holds does not let that descriptor through;
+a test holds one above a soft limit lowered to 1,024. `prepare` reads `kern.maxfilesperproc` and the
+child closes up to that value later, so only a descriptor at or above the value `prepare` read can
+survive: one made before root lowered the sysctl, or one made after root raised it once `prepare`
+had run. Those two cases are reasoned, not measured, because measuring them means changing the
+sysctl. What was measured, on an Apple Silicon Mac with `kern.maxfilesperproc` at 245,760 on
+2026-10-20, is that the sysctl, not the soft limit, bounds the descriptor numbers: under soft limits
+of 345,760, 1,048,576 and unlimited, `dup2` onto 245,759 succeeded and onto 245,760 failed with
+`EBADF`. A test holds the last descriptor the table allows. On that Mac the loop took about 31 ms
+with the machine lightly loaded and up to about 680 ms under heavy load.
+
+An empty environment and the working directory `/` mean no `DYLD_*` or `LD_*` variable and no
+relative path can add to where the helper's loader looks for libraries. They do not remove a search
+path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
+names in the qualified libkrun. The launch checks no artifact either, and nothing in this crate
+verifies one yet: the cell, plasmosome-7em, which is not built yet, must verify the helper and its
+libraries before it prepares the launch.
 
 ## Control-socket ownership
 
