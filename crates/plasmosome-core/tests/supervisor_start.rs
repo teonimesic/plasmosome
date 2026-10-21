@@ -5,7 +5,7 @@ use plasmosome_core::runtime::supervisor_config::SupervisorConfig;
 use plasmosome_core::supervisor_start::{StartError, StartStep, SupervisorStart, start_supervisor};
 use plasmosome_core::{CellDir, FileIdentity, InstanceRoot, LockProbe, SupervisorLock, WriterLock};
 use serde_json::{Value, json};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -1153,7 +1153,7 @@ fn executable_of(pid: libc::pid_t) -> Option<PathBuf> {
     let length = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
     let length = usize::try_from(length).ok().filter(|length| *length > 0)?;
     Some(PathBuf::from(
-        <OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path.get(..length)?),
+        <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path.get(..length)?),
     ))
 }
 
