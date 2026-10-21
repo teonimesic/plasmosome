@@ -724,3 +724,228 @@ impl fmt::Display for StartStep {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::InstanceRoot;
+    use std::error::Error;
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    const STEPS: [StartStep; 5] = [
+        StartStep::Fork,
+        StartStep::Session,
+        StartStep::Descriptors,
+        StartStep::Signals,
+        StartStep::Exec,
+    ];
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(10)
+    }
+
+    fn report_with_code(code: i32, errno: i32) -> [u8; 8] {
+        let [a, b, c, d] = code.to_ne_bytes();
+        let [e, f, g, h] = errno.to_ne_bytes();
+        [a, b, c, d, e, f, g, h]
+    }
+
+    fn held_lock() -> (tempfile::TempDir, SupervisorLock) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir
+            .path()
+            .canonicalize()
+            .expect("the temporary directory has a canonical path");
+        let root = InstanceRoot::open(&path).expect("the instance root opens");
+        let writer = root.lock().expect("the writer lock is free");
+        let lock = root
+            .create_cell_dir(&writer, &CellId::from("cell-1"))
+            .expect("the cell directory is created")
+            .create_supervisor_lock()
+            .expect("the supervisor lock is created");
+        (dir, lock)
+    }
+
+    #[test]
+    fn every_step_and_errno_survive_the_report() {
+        for step in STEPS {
+            for errno in [0, 1, libc::ENOENT, libc::EMFILE, -1, i32::MAX, i32::MIN] {
+                assert_eq!(decode_report(encode_report(step, errno)), (step, errno));
+            }
+        }
+    }
+
+    #[test]
+    fn a_report_naming_no_step_reads_as_exec_with_eproto() {
+        for code in [0, 6, -1, i32::MAX, i32::MIN] {
+            assert_eq!(
+                decode_report(report_with_code(code, libc::ENOENT)),
+                (StartStep::Exec, libc::EPROTO),
+                "code {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_pipe_closed_without_a_byte_means_the_exec_succeeded() {
+        let (reader, writer) = io::pipe().expect("a pipe");
+        drop(writer);
+        assert_eq!(read_report(reader.as_fd()), None);
+    }
+
+    #[test]
+    fn a_report_split_across_writes_is_read_whole() {
+        let (reader, mut writer) = io::pipe().expect("a pipe");
+        let report = encode_report(StartStep::Descriptors, libc::EBADF);
+        let late = std::thread::spawn(move || {
+            writer
+                .write_all(&report[..3])
+                .expect("the first bytes are written");
+            std::thread::sleep(Duration::from_millis(50));
+            writer.write_all(&report[3..]).expect("the rest is written");
+        });
+        assert_eq!(
+            read_report(reader.as_fd()),
+            Some((StartStep::Descriptors, libc::EBADF))
+        );
+        late.join().expect("the writer finishes");
+    }
+
+    #[test]
+    fn a_short_report_reads_as_exec_with_eproto() {
+        let (reader, mut writer) = io::pipe().expect("a pipe");
+        writer
+            .write_all(&encode_report(StartStep::Session, libc::EPERM)[..5])
+            .expect("five bytes are written");
+        drop(writer);
+        assert_eq!(
+            read_report(reader.as_fd()),
+            Some((StartStep::Exec, libc::EPROTO))
+        );
+    }
+
+    #[test]
+    fn a_report_that_cannot_be_read_reads_as_exec_with_the_read_errno() {
+        let write_only = File::options()
+            .write(true)
+            .open("/dev/null")
+            .expect("/dev/null opens for writing");
+        assert_eq!(
+            read_report(write_only.as_fd()),
+            Some((StartStep::Exec, libc::EBADF))
+        );
+    }
+
+    #[test]
+    fn a_record_larger_than_the_pipe_is_written_whole_as_the_reader_reads() {
+        let (mut reader, writer) = io::pipe().expect("a pipe");
+        let writer = OwnedFd::from(writer);
+        set_nonblocking(writer.as_fd()).expect("the write end is nonblocking");
+        let record: Vec<u8> = (0..1_048_576u32).map(|at| (at % 251) as u8).collect();
+        let slow = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                std::thread::sleep(Duration::from_micros(200));
+                match reader.read(&mut chunk).expect("the reader reads") {
+                    0 => return got,
+                    count => got.extend_from_slice(&chunk[..count]),
+                }
+            }
+        });
+        let outcome = write_record(&writer, &record, soon());
+        drop(writer);
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(slow.join().expect("the reader finishes") == record);
+    }
+
+    #[test]
+    fn a_record_whose_reader_is_gone_is_supervisor_closed_pipe() {
+        let (reader, writer) = io::pipe().expect("a pipe");
+        drop(reader);
+        let outcome = write_record(&OwnedFd::from(writer), b"{}\n", soon());
+        assert!(
+            matches!(outcome, Err(StartError::SupervisorClosedPipe)),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_is_write_with_its_errno() {
+        let read_only = File::open("/dev/null").expect("/dev/null opens");
+        match write_record(&OwnedFd::from(read_only), b"{}\n", soon()) {
+            Err(StartError::Write(error)) => assert_eq!(error.raw_os_error(), Some(libc::EBADF)),
+            other => panic!("a write to a read-only descriptor is Write, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_step_names_its_call() {
+        let names: Vec<String> = STEPS.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            names,
+            [
+                "fork",
+                "setsid",
+                "descriptor setup",
+                "signal reset",
+                "execve"
+            ]
+        );
+    }
+
+    #[test]
+    fn each_start_error_says_what_failed_and_only_io_failures_have_a_source() {
+        let (_first, first) = held_lock();
+        let (_second, second) = held_lock();
+        let laid_out = io::Error::from_raw_os_error(libc::EMFILE);
+        let written = io::Error::from_raw_os_error(libc::EIO);
+        let cases = [
+            (
+                StartError::Prepare {
+                    lock: first,
+                    source: io::Error::from_raw_os_error(libc::EMFILE),
+                },
+                format!("the supervisor's start could not be laid out: {laid_out}"),
+                Some(libc::EMFILE),
+            ),
+            (
+                StartError::Exec {
+                    lock: second,
+                    step: StartStep::Exec,
+                    errno: libc::ENOENT,
+                },
+                format!(
+                    "starting the supervisor failed at execve: errno {}",
+                    libc::ENOENT
+                ),
+                None,
+            ),
+            (
+                StartError::SupervisorClosedPipe,
+                "the supervisor closed its config pipe before reading the whole record".to_owned(),
+                None,
+            ),
+            (
+                StartError::RecordNotTaken,
+                "the supervisor had not read its whole config record by the deadline".to_owned(),
+                None,
+            ),
+            (
+                StartError::Write(io::Error::from_raw_os_error(libc::EIO)),
+                format!("the supervisor's config record could not be written: {written}"),
+                Some(libc::EIO),
+            ),
+        ];
+        for (error, message, source) in cases {
+            assert_eq!(error.to_string(), message);
+            let found = error.source().map(|source| {
+                source
+                    .downcast_ref::<io::Error>()
+                    .and_then(io::Error::raw_os_error)
+            });
+            assert_eq!(found, source.map(Some), "{error:?}");
+        }
+    }
+}
