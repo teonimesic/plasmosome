@@ -89,6 +89,8 @@ enum Defect {
     ChecksTheAddressBeforeValidating(Call),
     AnInvalidGrantKeepsARecord,
     AConflictingGrantKeepsARecord,
+    LeaksAnInvalidOperationOf(UniverseClass, Call),
+    RefusalRollsBackTheAddressOf(UniverseClass, Call),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +220,18 @@ impl DefectiveBackend {
                 Err(refusal)
             }
             Defect::RefusalRollsBackItsAddress(rollback) if rollback == call => {
+                self.drop_address(operation.handle());
+                Err(refusal)
+            }
+            Defect::LeaksAnInvalidOperationOf(class, late)
+                if class == operation.class() && late == call =>
+            {
+                let _ = self.state.insert(operation.object());
+                Err(refusal)
+            }
+            Defect::RefusalRollsBackTheAddressOf(class, rollback)
+                if class == operation.class() && rollback == call =>
+            {
                 self.drop_address(operation.handle());
                 Err(refusal)
             }
@@ -2190,6 +2204,66 @@ fn an_occupied_address_defect_changes_only_its_own_call() {
                 }
                 assert_eq!(backend.snapshot_os_state(), expected, "{defect:?} {call:?}");
                 assert_eq!(backend.ledger.get(&entry.handle), Some(&entry));
+            }
+        }
+    }
+}
+
+#[test]
+fn the_snapshot_clause_rejects_a_leak_or_a_rollback_of_any_one_class() {
+    for class in CLASSES {
+        for call in CALLS {
+            for defect in [
+                Defect::LeaksAnInvalidOperationOf(class, call),
+                Defect::RefusalRollsBackTheAddressOf(class, call),
+            ] {
+                assert_rejected(|| conformance::snapshot_never_invents_objects(carrying(defect)));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_one_class_leak_or_rollback_changes_only_its_own_class_through_its_own_call() {
+    let owner = conformance::conformance_owner;
+    for class in CLASSES {
+        for defective in CALLS {
+            for capability in conformance::sample_capabilities() {
+                let invalid = conformance::invalid_capability(&capability);
+                for call in CALLS {
+                    let own = capability.class() == class && call == defective;
+                    let mut leaking = DefectiveBackend::carrying(
+                        Defect::LeaksAnInvalidOperationOf(class, defective),
+                    );
+                    let fresh = conformance::op_for(GrantId::new(), owner(), invalid.clone());
+                    assert_eq!(
+                        call_with(&mut leaking, call, &fresh),
+                        Err(conformance::invalid_refusal(&fresh))
+                    );
+                    assert_eq!(
+                        !leaking.snapshot_os_state().is_empty(),
+                        own,
+                        "{class:?} {defective:?} {call:?} {capability:?}"
+                    );
+                    let mut clearing = DefectiveBackend::carrying(
+                        Defect::RefusalRollsBackTheAddressOf(class, defective),
+                    );
+                    let standing = conformance::hot_grant(owner(), &capability);
+                    clearing
+                        .grant(standing.operation.clone(), standing.kind)
+                        .unwrap();
+                    let occupied =
+                        conformance::op_for(standing.operation.id(), owner(), invalid.clone());
+                    assert_eq!(
+                        call_with(&mut clearing, call, &occupied),
+                        Err(conformance::invalid_refusal(&occupied))
+                    );
+                    assert_eq!(
+                        clearing.snapshot_os_state().is_empty(),
+                        own,
+                        "{class:?} {defective:?} {call:?} {capability:?}"
+                    );
+                }
             }
         }
     }
