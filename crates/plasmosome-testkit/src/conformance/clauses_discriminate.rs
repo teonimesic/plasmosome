@@ -1166,16 +1166,35 @@ fn factory_panics() -> DefectiveBackend {
     std::panic::panic_any(InfrastructureFailure::Factory)
 }
 
-fn assert_rejected(run: impl FnOnce()) {
+fn assert_rejected(reason: &str, run: impl FnOnce()) {
     conformance::take_contract_failure();
     let result = catch_unwind(AssertUnwindSafe(run));
     let contract_failed = conformance::take_contract_failure();
     match (result, contract_failed) {
-        (Err(_), true) => {}
+        (Err(payload), true) => {
+            let message = panic_text(payload.as_ref());
+            let first = message.lines().next().unwrap_or_default();
+            assert!(
+                first.contains(reason),
+                "the defective backend was rejected for another reason: expected `{reason}`, got `{first}`"
+            );
+        }
         (Err(payload), false) => resume_unwind(payload),
         (Ok(()), false) => panic!("the defective backend passed the clause that should reject it"),
         (Ok(()), true) => panic!("a conformance failure was recorded without a panic"),
     }
+}
+
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_string())
+        })
+        .unwrap_or_default()
 }
 
 const CLASSES: [UniverseClass; 5] = [
@@ -1215,7 +1234,9 @@ fn mirror_oracle_passes_every_clause_without_proving_os_enforcement() {
 #[test]
 fn infrastructure_and_fixture_panics_cannot_satisfy_clause_witnesses() {
     let factory = catch_unwind(AssertUnwindSafe(|| {
-        assert_rejected(|| conformance::snapshot_never_invents_objects(factory_panics))
+        assert_rejected("the snapshot lost or invented", || {
+            conformance::snapshot_never_invents_objects(factory_panics)
+        })
     }))
     .expect_err("a factory panic must escape the clause witness");
     assert_eq!(
@@ -1224,7 +1245,9 @@ fn infrastructure_and_fixture_panics_cannot_satisfy_clause_witnesses() {
     );
 
     let grant = catch_unwind(AssertUnwindSafe(|| {
-        assert_rejected(|| conformance::grant_is_replayable(carrying(Defect::GrantPanics)))
+        assert_rejected("return the entry the grant issued", || {
+            conformance::grant_is_replayable(carrying(Defect::GrantPanics))
+        })
     }))
     .expect_err("a backend panic must escape the clause witness");
     assert_eq!(
@@ -1233,7 +1256,7 @@ fn infrastructure_and_fixture_panics_cannot_satisfy_clause_witnesses() {
     );
 
     let snapshot = catch_unwind(AssertUnwindSafe(|| {
-        assert_rejected(|| {
+        assert_rejected("the snapshot lost or invented", || {
             conformance::snapshot_never_invents_objects(carrying(
                 Defect::SnapshotPanicsLikeAssertion,
             ))
@@ -1246,7 +1269,7 @@ fn infrastructure_and_fixture_panics_cannot_satisfy_clause_witnesses() {
     );
 
     let fixture = catch_unwind(AssertUnwindSafe(|| {
-        assert_rejected(|| {
+        assert_rejected("applied operations must coexist", || {
             conformance::apply_and_removal_reach_the_universe_with(carrying(Defect::None), || {
                 std::panic::panic_any(98_u64)
             })
@@ -1257,47 +1280,62 @@ fn infrastructure_and_fixture_panics_cannot_satisfy_clause_witnesses() {
 }
 
 #[test]
+fn a_witness_refuses_a_rejection_for_another_reason() {
+    let refused = catch_unwind(AssertUnwindSafe(|| {
+        assert_rejected("a check this clause never reaches", || {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::SnapshotOmitsIssuedRecords,
+            ))
+        })
+    }))
+    .expect_err("a rejection for another reason must fail the witness");
+    assert!(panic_text(refused.as_ref()).starts_with(
+        "the defective backend was rejected for another reason: expected `a check this clause never reaches`, got `"
+    ));
+}
+
+#[test]
 fn established_clauses_reject_their_distinct_faults() {
     for class in CLASSES {
-        assert_rejected(|| {
+        assert_rejected("return the entry the grant issued", || {
             conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAStranger(class)))
         });
     }
-    assert_rejected(|| {
+    assert_rejected("`Result::unwrap_err()` on an `Ok` value", || {
         conformance::revoke_unknown_handle_is_error(carrying(Defect::UnknownHandleReportsSuccess))
     });
-    assert_rejected(|| {
+    assert_rejected("drained revoke left", || {
         conformance::drained_revoke_removes_object(carrying(Defect::RevokeKeepsTheObject))
     });
-    assert_rejected(|| {
+    assert_rejected("removed the unrelated", || {
         conformance::planted_residue_survives_unrelated_revoke(carrying(
             Defect::RevokeTidiesTheWholeUniverse,
         ))
     });
-    assert_rejected(|| {
+    assert_rejected("the snapshot lost or invented", || {
         conformance::snapshot_never_invents_objects(carrying(Defect::GrantMaterializesAShadow))
     });
-    assert_rejected(|| {
+    assert_rejected("a live grant is already holding", || {
         conformance::live_grants_hold_distinct_handles(carrying(Defect::OneHandleForEveryLiveGrant))
     });
-    assert_rejected(|| {
+    assert_rejected("took the applied", || {
         conformance::apply_and_removal_reach_the_universe(carrying(Defect::RemovalIsANoOp))
     });
-    assert_rejected(|| {
+    assert_rejected("`Result::unwrap_err()` on an `Ok` value", || {
         conformance::revoke_of_a_revoked_handle_is_error(carrying(
             Defect::ARevokedHandleRevokesAgain,
         ))
     });
-    assert_rejected(|| {
+    assert_rejected("forced revoke left", || {
         conformance::drained_revoke_removes_object(carrying(Defect::ForcedRevokeIsALie))
     });
-    assert_rejected(|| {
+    assert_rejected("a revoke must withdraw its own exact object", || {
         conformance::live_grants_hold_distinct_handles(carrying(Defect::ALedgerKeyedByClass))
     });
-    assert_rejected(|| {
+    assert_rejected("`Result::unwrap_err()` on an `Ok` value", || {
         conformance::revoke_of_a_revoked_handle_is_error(carrying(Defect::ARevokedHandleIsReissued))
     });
-    assert_rejected(|| {
+    assert_rejected("a revoke must withdraw its own exact object", || {
         conformance::live_grants_hold_distinct_handles(carrying(
             Defect::RevokeTakesAnotherResourceOfClass,
         ))
@@ -1306,7 +1344,7 @@ fn established_clauses_reject_their_distinct_faults() {
 
 #[test]
 fn snapshot_clause_rejects_returned_owner_substitution() {
-    assert_rejected(|| {
+    assert_rejected("a grant must retain its requested owner", || {
         conformance::snapshot_never_invents_objects(carrying(
             Defect::GrantSubstitutesRequestedOwner,
         ))
@@ -1316,7 +1354,7 @@ fn snapshot_clause_rejects_returned_owner_substitution() {
 #[test]
 fn snapshot_clause_rejects_returned_capability_substitution() {
     for class in CLASSES {
-        assert_rejected(|| {
+        assert_rejected("retain its complete requested capability", || {
             conformance::snapshot_never_invents_objects(carrying(
                 Defect::GrantSubstitutesRequestedCapability(class),
             ))
@@ -1354,7 +1392,7 @@ fn a_substitute_and_a_stranger_stand_in_only_for_their_own_class() {
 #[test]
 fn snapshot_clause_rejects_a_grant_that_substitutes_a_recipe_in_any_class() {
     for class in CLASSES {
-        assert_rejected(|| {
+        assert_rejected("retain its complete requested capability", || {
             conformance::snapshot_never_invents_objects(carrying(Defect::GrantSubstitutesRecipe(
                 class,
             )))
@@ -1365,7 +1403,7 @@ fn snapshot_clause_rejects_a_grant_that_substitutes_a_recipe_in_any_class() {
 #[test]
 fn snapshot_clause_rejects_an_entry_that_returns_another_recipe_in_any_class() {
     for class in CLASSES {
-        assert_rejected(|| {
+        assert_rejected("retain its complete requested capability", || {
             conformance::snapshot_never_invents_objects(carrying(
                 Defect::GrantReturnsAnotherRecipe(class),
             ))
@@ -1376,7 +1414,7 @@ fn snapshot_clause_rejects_an_entry_that_returns_another_recipe_in_any_class() {
 #[test]
 fn snapshot_clause_rejects_an_object_recorded_with_another_recipe_in_any_class() {
     for class in CLASSES {
-        assert_rejected(|| {
+        assert_rejected("the snapshot lost or invented", || {
             conformance::snapshot_never_invents_objects(carrying(
                 Defect::GrantRecordsAnotherRecipe(class),
             ))
@@ -1387,7 +1425,7 @@ fn snapshot_clause_rejects_an_object_recorded_with_another_recipe_in_any_class()
 #[test]
 fn replay_clause_rejects_a_revoke_that_returns_another_recipe_in_any_class() {
     for class in CLASSES {
-        assert_rejected(|| {
+        assert_rejected("return the entry the grant issued", || {
             conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAnotherRecipe(class)))
         });
     }
@@ -1502,34 +1540,34 @@ fn selection_of(capability: &Capability) -> (UniverseClass, Vec<&str>) {
 
 #[test]
 fn revoke_order_witnesses_are_independent() {
-    assert_rejected(|| {
+    assert_rejected("the live grant did not revoke through", || {
         conformance::live_grants_hold_distinct_handles(carrying(Defect::RevokesOnlyInGrantOrder))
     });
-    assert_rejected(|| {
+    assert_rejected("the live grant did not revoke through", || {
         conformance::live_grants_hold_distinct_handles(carrying(
             Defect::RevokesOnlyInReversePushOrder,
         ))
     });
-    assert_rejected(|| {
+    assert_rejected("did not revoke its owner's object", || {
         conformance::revoke_takes_its_owners_object(carrying(Defect::RevokesOnlyInGrantOrder))
     });
-    assert_rejected(|| {
+    assert_rejected("did not revoke its owner's object", || {
         conformance::revoke_takes_its_owners_object(carrying(Defect::RevokesOnlyInReversePushOrder))
     });
-    assert_rejected(|| {
+    assert_rejected("repeated grant did not revoke on the", || {
         conformance::repeated_grants_are_independently_removable(carrying(
             Defect::RevokesOnlyInGrantOrder,
         ))
     });
-    assert_rejected(|| {
+    assert_rejected("repeated grant did not revoke on the", || {
         conformance::repeated_grants_are_independently_removable(carrying(
             Defect::RevokesOnlyInReversePushOrder,
         ))
     });
-    assert_rejected(|| {
+    assert_rejected("the earlier instance could not", || {
         conformance::fresh_backends_share_no_authority(carrying(Defect::RevokesOnlyInGrantOrder))
     });
-    assert_rejected(|| {
+    assert_rejected("the earlier instance could not", || {
         conformance::fresh_backends_share_no_authority(carrying(
             Defect::RevokesOnlyInReversePushOrder,
         ))
@@ -1538,7 +1576,7 @@ fn revoke_order_witnesses_are_independent() {
 
 #[test]
 fn applied_removal_preserves_cross_class_survivors() {
-    assert_rejected(|| {
+    assert_rejected("applied removal selected the wrong instance", || {
         conformance::apply_and_removal_reach_the_universe(carrying(
             Defect::ApplyRemovalDeletesOtherClasses,
         ))
@@ -1547,10 +1585,10 @@ fn applied_removal_preserves_cross_class_survivors() {
 
 #[test]
 fn owner_and_instance_clauses_reject_exact_selection_faults() {
-    assert_rejected(|| {
+    assert_rejected("took another owner's object", || {
         conformance::revoke_takes_its_owners_object(carrying(Defect::RevokeTakesWrongOwner))
     });
-    assert_rejected(|| {
+    assert_rejected("a grant must retain its requested owner", || {
         conformance::revoke_takes_its_owners_object(carrying(Defect::GrantSubstitutesLiveOwner))
     });
     for defect in [
@@ -1558,16 +1596,16 @@ fn owner_and_instance_clauses_reject_exact_selection_faults() {
         Defect::GrantSubstitutesProxyRoute,
         Defect::GrantSubstitutesBrokerLaunch,
     ] {
-        assert_rejected(|| {
+        assert_rejected("retain its complete requested capability", || {
             conformance::repeated_grants_are_independently_removable(carrying(defect))
         });
     }
-    assert_rejected(|| {
+    assert_rejected("two requested holdings must coexist", || {
         conformance::repeated_grants_are_independently_removable(carrying(
             Defect::IdenticalGrantsCollapse,
         ))
     });
-    assert_rejected(|| {
+    assert_rejected("revoke selected the wrong instance", || {
         conformance::repeated_grants_are_independently_removable(carrying(
             Defect::RevokeTakesWrongInstance,
         ))
@@ -1576,12 +1614,12 @@ fn owner_and_instance_clauses_reject_exact_selection_faults() {
 
 #[test]
 fn applied_removal_order_witnesses_are_independent() {
-    assert_rejected(|| {
+    assert_rejected("removal of the applied", || {
         conformance::apply_and_removal_reach_the_universe(carrying(
             Defect::AppliedRemovalsOnlyInGrantOrder,
         ))
     });
-    assert_rejected(|| {
+    assert_rejected("removal of the applied", || {
         conformance::apply_and_removal_reach_the_universe(carrying(
             Defect::AppliedRemovalsOnlyInReverseOrder,
         ))
@@ -1590,7 +1628,7 @@ fn applied_removal_order_witnesses_are_independent() {
 
 #[test]
 fn owner_clause_rejects_revoking_the_same_plugin_in_another_cell() {
-    assert_rejected(|| {
+    assert_rejected("took another owner's object", || {
         conformance::revoke_takes_its_owners_object(carrying(
             Defect::RevokeTakesTheSamePluginInAnotherCell,
         ))
@@ -1599,7 +1637,7 @@ fn owner_clause_rejects_revoking_the_same_plugin_in_another_cell() {
 
 #[test]
 fn applied_removal_clause_rejects_a_plugin_only_owner_comparison() {
-    assert_rejected(|| {
+    assert_rejected("took the applied", || {
         conformance::apply_and_removal_reach_the_universe(carrying(
             Defect::RemovalComparesOnlyThePlugin,
         ))
@@ -1608,7 +1646,7 @@ fn applied_removal_clause_rejects_a_plugin_only_owner_comparison() {
 
 #[test]
 fn graceful_timeout_clause_rejects_an_ignored_timeout() {
-    assert_rejected(|| {
+    assert_rejected("the stalled grant must time out", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::IgnoresDrainTimeouts,
         ))
@@ -1617,7 +1655,7 @@ fn graceful_timeout_clause_rejects_an_ignored_timeout() {
 
 #[test]
 fn graceful_timeout_clause_rejects_a_release_before_the_refusal() {
-    assert_rejected(|| {
+    assert_rejected("timed-out apply_removal of a grant must keep", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::TimeoutReleasesBeforeRefusing,
         ))
@@ -1626,7 +1664,7 @@ fn graceful_timeout_clause_rejects_a_release_before_the_refusal() {
 
 #[test]
 fn stalled_first_pass_rejects_force_refused_while_a_peer_stands() {
-    assert_rejected(|| {
+    assert_rejected("forced failed on the revoke stalled-first", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ForceRefusedWhilePeerStands,
         ))
@@ -1635,7 +1673,7 @@ fn stalled_first_pass_rejects_force_refused_while_a_peer_stands() {
 
 #[test]
 fn peer_first_pass_rejects_a_stall_that_blocks_equal_peers() {
-    assert_rejected(|| {
+    assert_rejected("drained failed on the revoke peer-first", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::StallBlocksEqualPeers,
         ))
@@ -1644,7 +1682,7 @@ fn peer_first_pass_rejects_a_stall_that_blocks_equal_peers() {
 
 #[test]
 fn revoke_leg_rejects_a_revoke_that_ignores_the_drain() {
-    assert_rejected(|| {
+    assert_rejected("50ms deadline must time out", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::RevokeIgnoresDrain,
         ))
@@ -1653,7 +1691,7 @@ fn revoke_leg_rejects_a_revoke_that_ignores_the_drain() {
 
 #[test]
 fn apply_removal_leg_rejects_an_apply_removal_that_ignores_the_drain() {
-    assert_rejected(|| {
+    assert_rejected("50ms deadline must time out", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ApplyRemovalIgnoresDrain,
         ))
@@ -1662,7 +1700,7 @@ fn apply_removal_leg_rejects_an_apply_removal_that_ignores_the_drain() {
 
 #[test]
 fn wrong_owner_step_rejects_draining_the_holder_before_resolving() {
-    assert_rejected(|| {
+    assert_rejected("must be refused before any drain", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::DrainsBeforeResolving,
         ))
@@ -1671,7 +1709,7 @@ fn wrong_owner_step_rejects_draining_the_holder_before_resolving() {
 
 #[test]
 fn stalled_owner_step_rejects_draining_the_named_owner_before_resolving() {
-    assert_rejected(|| {
+    assert_rejected("must be refused before any drain", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::DrainsBeforeResolvingTheNamedOwner,
         ))
@@ -1680,7 +1718,7 @@ fn stalled_owner_step_rejects_draining_the_named_owner_before_resolving() {
 
 #[test]
 fn applied_removal_clause_rejects_a_cell_only_owner_comparison() {
-    assert_rejected(|| {
+    assert_rejected("took the applied", || {
         conformance::apply_and_removal_reach_the_universe(carrying(
             Defect::RemovalComparesOnlyTheCell,
         ))
@@ -1689,7 +1727,7 @@ fn applied_removal_clause_rejects_a_cell_only_owner_comparison() {
 
 #[test]
 fn other_cell_step_rejects_a_stall_keyed_by_plugin() {
-    assert_rejected(|| {
+    assert_rejected("drained failed on the revoke peer-first", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::StallKeyedByPlugin,
         ))
@@ -1698,7 +1736,7 @@ fn other_cell_step_rejects_a_stall_keyed_by_plugin() {
 
 #[test]
 fn zero_deadline_step_rejects_a_zero_deadline_that_forces() {
-    assert_rejected(|| {
+    assert_rejected("0ns deadline must time out", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ZeroDeadlineForces,
         ))
@@ -1707,7 +1745,7 @@ fn zero_deadline_step_rejects_a_zero_deadline_that_forces() {
 
 #[test]
 fn timeout_step_rejects_a_timeout_that_misreports_its_deadline() {
-    assert_rejected(|| {
+    assert_rejected("50ms deadline must time out", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::TimeoutReportsAZeroDeadline,
         ))
@@ -1716,7 +1754,7 @@ fn timeout_step_rejects_a_timeout_that_misreports_its_deadline() {
 
 #[test]
 fn neighbour_step_rejects_a_stall_keyed_by_cell() {
-    assert_rejected(|| {
+    assert_rejected("drained failed on the revoke peer-first", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::StallKeyedByCell,
         ))
@@ -1725,7 +1763,7 @@ fn neighbour_step_rejects_a_stall_keyed_by_cell() {
 
 #[test]
 fn zero_release_step_rejects_a_zero_deadline_that_never_releases() {
-    assert_rejected(|| {
+    assert_rejected("drained failed on the revoke stalled-first", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ZeroDeadlineNeverReleases,
         ))
@@ -1734,7 +1772,7 @@ fn zero_release_step_rejects_a_zero_deadline_that_never_releases() {
 
 #[test]
 fn granted_removal_timeout_step_rejects_dropping_the_record() {
-    assert_rejected(|| {
+    assert_rejected("timed-out apply_removal of a grant must keep", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ApplyRemovalDropsTheRecordOnTimeout,
         ))
@@ -1743,7 +1781,7 @@ fn granted_removal_timeout_step_rejects_dropping_the_record() {
 
 #[test]
 fn granted_removal_step_rejects_a_stale_handle() {
-    assert_rejected(|| {
+    assert_rejected("successful apply_removal of a granted", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ApplyRemovalLeavesAStaleHandle,
         ))
@@ -1752,7 +1790,7 @@ fn granted_removal_step_rejects_a_stale_handle() {
 
 #[test]
 fn above_zero_other_cell_step_rejects_a_plugin_keyed_stall_above_zero() {
-    assert_rejected(|| {
+    assert_rejected("drained failed on the revoke stalled-first", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::StallKeyedByPluginAboveZero,
         ))
@@ -1761,7 +1799,7 @@ fn above_zero_other_cell_step_rejects_a_plugin_keyed_stall_above_zero() {
 
 #[test]
 fn forced_granted_removal_step_rejects_a_stale_handle() {
-    assert_rejected(|| {
+    assert_rejected("successful forced apply_removal", || {
         conformance::repeated_grants_are_independently_removable(carrying(
             Defect::ForcedApplyRemovalLeavesAStaleHandle,
         ))
@@ -1770,7 +1808,7 @@ fn forced_granted_removal_step_rejects_a_stale_handle() {
 
 #[test]
 fn peer_removal_step_rejects_a_graceful_stale_handle() {
-    assert_rejected(|| {
+    assert_rejected("successful apply_removal of a granted", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::GracefulApplyRemovalLeavesAStaleHandle,
         ))
@@ -1779,7 +1817,7 @@ fn peer_removal_step_rejects_a_graceful_stale_handle() {
 
 #[test]
 fn graceful_granted_removal_step_rejects_a_stale_handle() {
-    assert_rejected(|| {
+    assert_rejected("successful drained apply_removal", || {
         conformance::repeated_grants_are_independently_removable(carrying(
             Defect::GracefulApplyRemovalLeavesAStaleHandle,
         ))
@@ -1820,7 +1858,7 @@ fn forced_stale_handle_defect_spares_a_graceful_removal() {
 
 #[test]
 fn neighbour_after_the_force_rejects_force_refused_while_a_neighbour_stands() {
-    assert_rejected(|| {
+    assert_rejected("forced failed on the revoke stalled-first", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ForceRefusedWhileANeighbourStands,
         ))
@@ -1829,7 +1867,7 @@ fn neighbour_after_the_force_rejects_force_refused_while_a_neighbour_stands() {
 
 #[test]
 fn other_cell_after_the_force_rejects_force_refused_while_the_plugin_stands_elsewhere() {
-    assert_rejected(|| {
+    assert_rejected("forced failed on the revoke stalled-first", || {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ForceRefusedWhileThePluginStandsElsewhere,
         ))
@@ -1875,15 +1913,17 @@ fn the_class_loops_run_every_universe_class() {
 
 #[test]
 fn the_replay_clause_rejects_a_grant_that_ignores_its_supplied_address() {
-    assert_rejected(|| conformance::grant_is_replayable(carrying(Defect::GrantMintsItsOwnId)));
-    assert_rejected(|| {
+    assert_rejected("exactly the address its caller prepared", || {
+        conformance::grant_is_replayable(carrying(Defect::GrantMintsItsOwnId))
+    });
+    assert_rejected("exactly the address its caller prepared", || {
         conformance::grant_is_replayable(carrying(Defect::ARevokedHandleIsReissued))
     });
 }
 
 #[test]
 fn the_retry_clause_rejects_a_rewritten_record() {
-    assert_rejected(|| {
+    assert_rejected("at an issued address must conflict", || {
         conformance::grant_retry_returns_the_original_entry(carrying(
             Defect::RetryRewritesTheIssuedRecord,
         ))
@@ -1896,7 +1936,9 @@ fn the_retry_clause_rejects_a_grant_that_promotes_an_applied_or_planted_object()
         Defect::DirectApplyPromotesToGrant,
         Defect::PlantedResiduePromotesToGrant,
     ] {
-        assert_rejected(|| conformance::grant_retry_returns_the_original_entry(carrying(defect)));
+        assert_rejected("a grant of the identical payload at an", || {
+            conformance::grant_retry_returns_the_original_entry(carrying(defect))
+        });
     }
 }
 
@@ -1909,7 +1951,7 @@ fn the_retry_clause_rejects_a_grant_that_replaces_an_applied_or_planted_object()
             Defect::GrantReplacesAnAppliedObject(change),
             Defect::GrantReplacesAPlantedObject(change),
         ] {
-            assert_rejected(|| {
+            assert_rejected("address must conflict", || {
                 conformance::grant_retry_returns_the_original_entry(carrying(defect))
             });
         }
@@ -1987,7 +2029,7 @@ fn a_replacing_grant_takes_over_only_its_own_change_to_an_object_of_its_own_orig
 
 #[test]
 fn the_retry_clause_rejects_a_conflicting_grant_that_keeps_a_record() {
-    assert_rejected(|| {
+    assert_rejected("refused grant at a standing address", || {
         conformance::grant_retry_returns_the_original_entry(carrying(
             Defect::AConflictingGrantKeepsARecord,
         ))
@@ -1996,7 +2038,7 @@ fn the_retry_clause_rejects_a_conflicting_grant_that_keeps_a_record() {
 
 #[test]
 fn the_retry_clause_rejects_a_conflict_that_withdraws_the_live_grant_of_its_key() {
-    assert_rejected(|| {
+    assert_rejected("refused grant at a standing address", || {
         conformance::grant_retry_returns_the_original_entry(carrying(
             Defect::ConflictWithdrawsTheLiveGrantOfItsKey,
         ))
@@ -2056,7 +2098,7 @@ fn a_conflict_that_withdraws_a_live_grant_keeps_its_record_and_a_later_apply_hid
 
 #[test]
 fn the_snapshot_clause_rejects_an_unknown_revoke_that_tidies_residue() {
-    assert_rejected(|| {
+    assert_rejected("grant's handle changed the account", || {
         conformance::snapshot_never_invents_objects(carrying(Defect::UnknownRevokeTidiesResidue))
     });
 }
@@ -2091,7 +2133,7 @@ fn an_unknown_revoke_at_an_empty_address_tidies_only_residue_and_still_refuses()
 
 #[test]
 fn the_snapshot_clause_rejects_an_invalid_grant_that_keeps_a_record() {
-    assert_rejected(|| {
+    assert_rejected("grant must issue no record", || {
         conformance::snapshot_never_invents_objects(carrying(Defect::AnInvalidGrantKeepsARecord))
     });
 }
@@ -2125,11 +2167,11 @@ fn a_refused_grant_that_keeps_a_record_changes_no_state_and_returns_the_refusal(
 
 #[test]
 fn the_retry_clause_rejects_a_refused_retry_and_a_retry_that_ignores_any_field() {
-    assert_rejected(|| {
+    assert_rejected("grant must return the original entry", || {
         conformance::grant_retry_returns_the_original_entry(carrying(Defect::RetryIsRefused))
     });
     for field in [Field::Kind, Field::Plugin, Field::Cell, Field::Recipe] {
-        assert_rejected(|| {
+        assert_rejected("at an issued address must conflict", || {
             conformance::grant_retry_returns_the_original_entry(carrying(Defect::RetryIgnores(
                 field,
             )))
@@ -2140,7 +2182,7 @@ fn the_retry_clause_rejects_a_refused_retry_and_a_retry_that_ignores_any_field()
 #[test]
 fn the_retry_clause_rejects_an_apply_or_plant_that_drops_a_live_grants_record() {
     for call in [Call::Apply, Call::Plant] {
-        assert_rejected(|| {
+        assert_rejected("own object must change nothing", || {
             conformance::grant_retry_returns_the_original_entry(carrying(
                 Defect::LiveGrantLosesItsRecordTo(call),
             ))
@@ -2219,8 +2261,12 @@ fn a_retry_defect_relaxes_only_its_own_field() {
 
 #[test]
 fn both_fresh_instance_checks_reject_a_backend_that_recovers_from_its_own_log() {
-    assert_rejected(|| conformance::fresh_backends_share_no_authority(carrying_a_shared_log()));
-    assert_rejected(|| conformance::snapshot_never_invents_objects(carrying_a_shared_log()));
+    assert_rejected("fresh from the factory must observe nothing", || {
+        conformance::fresh_backends_share_no_authority(carrying_a_shared_log())
+    });
+    assert_rejected("fresh from the factory must observe nothing", || {
+        conformance::snapshot_never_invents_objects(carrying_a_shared_log())
+    });
 }
 
 #[test]
@@ -2247,12 +2293,20 @@ fn a_recovery_log_carries_grants_and_revokes_into_the_next_instance() {
 #[test]
 fn the_snapshot_clause_rejects_any_call_that_mishandles_an_invalid_operation() {
     for call in CALLS {
-        for defect in [
-            Defect::AcceptsInvalidOperations(call),
-            Defect::SwallowsInvalidOperations(call),
-            Defect::ValidatesAfterTheEffect(call),
+        for (defect, reason) in [
+            (
+                Defect::AcceptsInvalidOperations(call),
+                "refused before any change",
+            ),
+            (
+                Defect::SwallowsInvalidOperations(call),
+                "refused before any change",
+            ),
+            (Defect::ValidatesAfterTheEffect(call), "changed the account"),
         ] {
-            assert_rejected(|| conformance::snapshot_never_invents_objects(carrying(defect)));
+            assert_rejected(reason, || {
+                conformance::snapshot_never_invents_objects(carrying(defect))
+            });
         }
     }
 }
@@ -2308,7 +2362,7 @@ fn the_invalid_fixtures_cover_every_class_and_each_one_fails_validation() {
 fn the_snapshot_clause_rejects_an_invalid_operation_accepted_for_any_one_class() {
     for class in CLASSES {
         for call in CALLS {
-            assert_rejected(|| {
+            assert_rejected("refused before any change", || {
                 conformance::snapshot_never_invents_objects(carrying(
                     Defect::AcceptsInvalidOperationsOf(class, call),
                 ))
@@ -2359,11 +2413,19 @@ fn a_composite_of_clean_defective_leaves_passes_the_snapshot_clause() {
 #[test]
 fn the_snapshot_clause_rejects_a_refusal_that_clears_its_address_or_checks_it_first() {
     for call in CALLS {
-        for defect in [
-            Defect::RefusalRollsBackItsAddress(call),
-            Defect::ChecksTheAddressBeforeValidating(call),
+        for (defect, reason) in [
+            (
+                Defect::RefusalRollsBackItsAddress(call),
+                "changed the account",
+            ),
+            (
+                Defect::ChecksTheAddressBeforeValidating(call),
+                "refused before any change",
+            ),
         ] {
-            assert_rejected(|| conformance::snapshot_never_invents_objects(carrying(defect)));
+            assert_rejected(reason, || {
+                conformance::snapshot_never_invents_objects(carrying(defect))
+            });
         }
     }
 }
@@ -2418,7 +2480,9 @@ fn the_snapshot_clause_rejects_a_leak_or_a_rollback_of_any_one_class() {
                 Defect::LeaksAnInvalidOperationOf(class, call),
                 Defect::RefusalRollsBackTheAddressOf(class, call),
             ] {
-                assert_rejected(|| conformance::snapshot_never_invents_objects(carrying(defect)));
+                assert_rejected("changed the account", || {
+                    conformance::snapshot_never_invents_objects(carrying(defect))
+                });
             }
         }
     }
@@ -2473,7 +2537,7 @@ fn a_one_class_leak_or_rollback_changes_only_its_own_class_through_its_own_call(
 #[test]
 fn the_snapshot_clause_rejects_a_refusal_that_swaps_the_object_at_its_address() {
     for call in CALLS {
-        assert_rejected(|| {
+        assert_rejected("changed the account", || {
             conformance::snapshot_never_invents_objects(carrying(Defect::RefusalSwapsItsAddress(
                 call,
             )))
@@ -2655,7 +2719,7 @@ fn a_changed_writable_mount_keeps_its_key_and_becomes_read_only() {
 #[test]
 fn the_snapshot_clause_rejects_a_refusal_whose_effect_lands_after_it_returns() {
     for call in CALLS {
-        assert_rejected(|| {
+        assert_rejected("changed after a refused call returned", || {
             conformance::snapshot_never_invents_objects(carrying(Defect::RefusedEffectLandsLate(
                 call,
             )))
@@ -2687,7 +2751,7 @@ fn a_late_effect_shows_from_the_second_read_after_its_own_call() {
 
 #[test]
 fn the_snapshot_clause_rejects_a_refused_grant_whose_issued_record_drops_after_it_returns() {
-    assert_rejected(|| {
+    assert_rejected("changed after a refused call returned", || {
         conformance::snapshot_never_invents_objects(carrying(
             Defect::RefusedGrantDropsTheIssuedRecordLate,
         ))
@@ -2721,14 +2785,14 @@ fn a_late_record_drop_shows_from_the_second_read_after_its_refused_grant() {
 
 #[test]
 fn the_snapshot_clause_rejects_a_snapshot_that_omits_issued_records() {
-    assert_rejected(|| {
+    assert_rejected("the snapshot lost or invented", || {
         conformance::snapshot_never_invents_objects(carrying(Defect::SnapshotOmitsIssuedRecords))
     });
 }
 
 #[test]
 fn the_applied_removal_clause_rejects_a_snapshot_that_rebuilds_records_from_objects() {
-    assert_rejected(|| {
+    assert_rejected("applied operations must coexist", || {
         conformance::apply_and_removal_reach_the_universe(carrying(
             Defect::SnapshotReconstructsGrantsFromObjects,
         ))
