@@ -400,6 +400,12 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   and only its author can choose it. So following the fix deletes the binding with its tools, and an
   author who meant them writes the key instead. Spec 008 refuses a blank provided key when the
   journal is read, so no attach records one. Amended on 2026-10-21: this had no rule for such a key.
+- **A tool name in a `[provides]` binding is not empty or only whitespace.** A blank name is refused
+  naming the tool by its field path, such as `provides."a:tools".tools.""`, with `fix` exactly
+  `remove this entry`, before its description is checked, so no fix writes the blank name back. No
+  name is guessed for it, because a caller picks a tool by its name and only its author can choose
+  that name. So following the fix deletes the tool with its description, and an author who meant it
+  writes the name instead. Amended on 2026-10-21: this had no rule for such a name.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the
@@ -528,6 +534,15 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   refused at `provides.""` with `remove this entry`. Catches: a parser that keeps a blank key, one
   that drops it and its tools in silence, one that refuses only the empty key, a fix that writes the
   blank key back, and a check inside the binding first. Amended on 2026-10-21: this item is new.
+- `[provides."a:tools".tools]` with tools `"a.read"`, `""`, `" "`, `"\t"` and `"\u3000"` (a tab and
+  an ideographic space), each with a sentence, is refused at one blank name, such as
+  `provides."a:tools".tools.""`, with `fix` `remove this entry`. Each time the refused tool is
+  removed, the next blank name is refused the same way at its own path, and then the declaration
+  parses with only `a.read`. `"" = 42` and `"" = ""` are each refused at
+  `provides."a:tools".tools.""` with `remove this entry`. Catches: a parser that keeps a blank name,
+  one that drops it in silence, one that refuses only the empty name or trims only spaces, one that
+  knows only ASCII whitespace, a fix that writes the blank name back, and a description check first.
+  Amended on 2026-10-21: this item is new.
 - A `[workspace]` whose `mount` writes `backend = "virtiofs"`, and one that writes
   `backend = "fuse"`, each parse to the same declaration as the same file without `backend`. A
   `mount` with no `dst` parses with `dst` `/workspace`. Catches: a parser that gives an absent

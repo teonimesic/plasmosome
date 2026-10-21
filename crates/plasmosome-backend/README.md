@@ -133,11 +133,12 @@ on by a normal or build dependency, for any target. A `--workspace` build merges
 every member it selects, so one crate's edge would turn the fixture on for product code too, and
 every gate builds that way. No crate needs the fixture yet. A crate that does must add, in the
 same change, a `cargo check -p` for each product crate, and change the guard.
-Core maps a `Conflict` to code 102 and a `PinRefusal` to code 108. The 102 does not carry spec
-027's `fix` yet, and neither does the 108 for `CommandNotInTree`, because the declaration field
-they would name does not exist. plasmosome-tbru adds both. No product path reaches
-`CommandNotInTree` today, since no product tree declares a command. The other 108s are faults in
-the files, not in a declaration, so under spec 001 they carry no `fix`.
+Core maps a `Conflict` to code 102 and a `PinRefusal` to code 108. No 102 carries a `fix`. Spec 027
+§3 item 1 says so for a name another plasmid or the image holds; no spec names the 102 for two
+commands of one tree. The 108 for `CommandNotInTree` has no `fix` yet, because the declaration field
+it would name does not exist. plasmosome-tbru adds that `fix`, and none on the 102. No product path
+reaches `CommandNotInTree` today, since no product tree declares a command. The other 108s are
+faults in the files, not in a declaration, so under spec 001 they carry no `fix`.
 
 Every holding is owned by a `CellOwner { cell, plugin }`: the same plugin attached to two cells is
 two owners, and no comparison looks at the plugin alone. It decodes only from a JSON object with
