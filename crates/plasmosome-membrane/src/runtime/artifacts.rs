@@ -521,12 +521,26 @@ mod tests {
     }
 
     #[test]
-    fn the_hash_reads_at_most_one_byte_past_the_checked_size() {
+    fn the_hash_stops_one_byte_past_the_size_the_check_stamped_after_the_file_grows() {
         let tree = ArtifactTree::new();
-        let path = tree.file("kernel", b"kernel and more", 0o444);
+        let path = tree.file("kernel", b"kernel", 0o644);
         let file = File::open(&path).expect("the file opens");
-        assert_eq!(hash(&file, 6), Ok(Digest::of(b"kernel ")));
-        assert_eq!(hash(&file, 15), Ok(Digest::of(b"kernel and more")));
+        let metadata = stat(&file).expect("fstat");
+        let checked = Checked {
+            file,
+            identity: FileIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            },
+            stamp: stamp(&metadata),
+        };
+        assert_eq!(hash(&checked), Ok(Digest::of(b"kernel")));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut writer| io::Write::write_all(&mut writer, b" and more"))
+            .expect("the file grows");
+        assert_eq!(hash(&checked), Ok(Digest::of(b"kernel ")));
     }
 
     #[test]
