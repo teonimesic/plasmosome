@@ -22,7 +22,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
 
 ## Use
 
@@ -277,6 +277,42 @@ moved. A mapping made from a descriptor opened read-only cannot gain write (`mpr
 `EACCES`), and neither can a mapping made after the lock: `mmap` with `PROT_WRITE` fails with
 `EPERM`, and adding write with `mprotect` fails with `EACCES`. Hashing again in `reconfirm()` would
 only narrow the window, because the mapping can write after any hash, so it does not.
+
+## Checking the initramfs binding
+
+Spec 001 §4.2 boots the guest from the pinned initramfs: an uncompressed Linux newc archive whose
+protected regular entries `init` and `plasmosome/guest-policy` become `/init` and
+`/plasmosome/guest-policy`, the second holding exactly the guest policy's bytes. Before launch the
+supervisor checks that binding and refuses duplicate, escaping, symlinked or mismatching entries.
+`runtime::initramfs::verify_initramfs` does that check. Pass it the verified initramfs and the
+verified guest policy. It returns an `InitramfsBinding`: the size and SHA-256 of `init`, the
+policy's SHA-256 and the number of entries. Otherwise it returns an `InitramfsRefusal` naming the
+first rule the archive broke.
+
+It reads the archive through the verified descriptor, never by path, and at most 256 MiB
+(`MAX_INITRAMFS_BYTES`). A larger file is refused before any read, and so is a read that gets more
+than the bound. Every entry must start with the magic `070701` and have 13 header fields of 8
+hexadecimal digits in either case, a check field of 0, and zero bytes as padding. A name must end
+in its only NUL, be UTF-8, be at most 4,096 bytes with that NUL, and be one plain relative
+spelling: not absolute, with no empty, `.` or `..` part and no trailing `/`. Each name appears
+once, after an earlier directory entry for its parent. Only regular files with one link and
+directories pass; a symlink, a device, a FIFO, a socket or an unknown type is refused. `init` must
+have an execute bit and some bytes. `TRAILER!!!` ends the archive, and only zero bytes may follow
+it, so the kernel finds no second archive to unpack over the first.
+
+Some rules follow how Linux unpacks the archive (`init/initramfs.c`). The kernel reads an entry's
+name only when the entry is a regular file or has no body, so a directory or a trailer with a body
+is refused: the kernel would skip it unread, and a `TRAILER!!!` it skips does not end the archive.
+The kernel also skips an entry whose name is over 4,096 bytes, and it keeps the last of two
+entries with one name. It skips zero bytes between entries; the audit refuses them, and the
+qualified archive has none.
+
+It reads the bytes the descriptor holds now and does not hash them again, so the limit stated for
+`reconfirm()` above holds here too: a write through a shared writable mapping made before the file
+was locked can change them unseen. Bytes appended after verification are read and refused as data
+after the trailer. The cell, plasmosome-7em, which is not built yet, must call `reconfirm()` after
+this check, just before the launch that opens the initramfs by path. Off macOS no artifact
+verifies, so there only the archive audit runs, in tests.
 
 ## Launching the VMM helper
 
