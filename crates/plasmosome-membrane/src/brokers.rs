@@ -460,14 +460,9 @@ mod tests {
         }
 
         fn now(&self) -> impl Fn() -> Instant + '_ {
-            let ms = Rc::clone(&self.ms);
-            let base = self.base;
-            let tick = self.tick;
             move || {
-                let next = ms.get() + tick;
-                ms.set(next);
-                base.checked_add(Duration::from_millis(next))
-                    .expect("the test clock stays in range")
+                self.ms.set(self.ms.get() + self.tick);
+                self.reading()
             }
         }
 
