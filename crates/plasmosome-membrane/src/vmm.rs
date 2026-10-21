@@ -1753,7 +1753,9 @@ mod signal_pressure {
             let (releases, released) = mpsc::channel();
             let thread = std::thread::spawn(move || {
                 for aim in aimed {
-                    let unhandled = interrupt_then_release(target, &aim);
+                    let release = ReleaseOnDrop(aim.release);
+                    let unhandled = interrupt(target, &aim);
+                    drop(release);
                     if releases.send(unhandled).is_err() {
                         return;
                     }
@@ -1798,8 +1800,22 @@ mod signal_pressure {
         }
     }
 
+    struct ReleaseOnDrop(libc::c_int);
+
+    impl Drop for ReleaseOnDrop {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            let byte = b'x';
+            // SAFETY: `byte` is a local and the length 1 matches it. The descriptor stays open
+            // while this guard lives, because the Release it belongs to outlives the test
+            // thread's wait for this aim's report, and that report or the end of this thread
+            // comes only after the guard is dropped.
+            unsafe { libc::write(self.0, &byte as *const u8 as *const libc::c_void, 1) };
+        }
+    }
+
     #[allow(unsafe_code)]
-    fn interrupt_then_release(target: usize, aim: &Aim) -> Option<usize> {
+    fn interrupt(target: usize, aim: &Aim) -> Option<usize> {
         let interruptions_before = interrupted_reaps();
         let mut signals = 0;
         let mut unhandled = None;
@@ -1828,10 +1844,6 @@ mod signal_pressure {
                 yields += 1;
             }
         }
-        let byte = b'x';
-        // SAFETY: `byte` is a local and the length 1 matches it. `aim.release` stays open until
-        // this thread reports the release, because the Release it belongs to outlives that report.
-        unsafe { libc::write(aim.release, &byte as *const u8 as *const libc::c_void, 1) };
         unhandled
     }
 
