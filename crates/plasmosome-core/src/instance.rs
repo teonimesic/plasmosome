@@ -2027,7 +2027,7 @@ fn rename_at(dir: BorrowedFd<'_>, from: &CStr, to: &CStr) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn rename_no_replace(
+pub(crate) fn rename_no_replace(
     from: BorrowedFd<'_>,
     from_name: &CStr,
     to: BorrowedFd<'_>,
@@ -2053,7 +2053,7 @@ fn rename_no_replace(
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
-fn rename_no_replace(
+pub(crate) fn rename_no_replace(
     from: BorrowedFd<'_>,
     from_name: &CStr,
     to: BorrowedFd<'_>,

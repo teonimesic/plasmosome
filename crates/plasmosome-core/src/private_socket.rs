@@ -1,12 +1,14 @@
 use std::ffi::{CString, OsStr};
 use std::fmt;
+use std::hash::{BuildHasher, Hasher, RandomState};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::instance::DirectoryStream;
+use crate::instance::{DirectoryStream, rename_no_replace};
 #[cfg(target_os = "macos")]
 use crate::nofollow::darwin_acl;
 pub use crate::nofollow::{DirIdentity, effective_uid};
@@ -208,27 +210,14 @@ impl PrivateListener {
     /// no part. The listener is nonblocking. A caller that forks from another thread must hold
     /// its descriptor lock around this call, because on macOS the socket is created before it
     /// is marked close-on-exec.
-    #[allow(unsafe_code)]
     pub fn bind(
         dir: PrivateDir,
         name: &str,
         trusted_uid: u32,
     ) -> Result<PrivateListener, PrivateSocketError> {
         let (socket, bound) = prepare(dir, name)?;
-        // SAFETY: listen takes no pointer, and `socket` keeps its descriptor open for the call.
-        if unsafe { libc::listen(socket.as_raw_fd(), LISTEN_BACKLOG) } != 0 {
-            return Err(io_failure(
-                "listen",
-                &bound.entry.path,
-                &io::Error::last_os_error(),
-            ));
-        }
-        let listener = UnixListener::from(socket);
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| io_failure("fcntl", &bound.entry.path, &error))?;
         Ok(PrivateListener {
-            listener,
+            listener: UnixListener::from(socket),
             bound,
             trusted_uid,
         })
@@ -701,6 +690,27 @@ fn judge_peer(trusted: u32, found: u32) -> Result<(), PrivateSocketError> {
     }
 }
 
+const TEMPORARY_LENGTH: usize = 16;
+
+const TEMPORARY_CHARACTERS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
+#[cfg(target_os = "macos")]
+const RENAME_OP: &str = "renameatx_np";
+#[cfg(target_os = "linux")]
+const RENAME_OP: &str = "renameat2";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Bound,
+    Restricted,
+    Listening,
+}
+
+struct Seam<'a> {
+    draw: &'a mut dyn FnMut(usize) -> String,
+    observe: &'a mut dyn FnMut(Step),
+}
+
 fn prepare(dir: PrivateDir, name: &str) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
     prepare_with(dir, name, || {})
 }
@@ -713,16 +723,37 @@ fn prepare_with(
     prepare_as(dir, name, effective_uid(), after_bind)
 }
 
-#[allow(unsafe_code)]
 fn prepare_as(
     dir: PrivateDir,
     name: &str,
     owner: u32,
     after_bind: impl FnOnce(),
 ) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
+    let mut after_bind = Some(after_bind);
+    let mut observe = |step| {
+        if step == Step::Bound
+            && let Some(after_bind) = after_bind.take()
+        {
+            after_bind();
+        }
+    };
+    let seam = Seam {
+        draw: &mut random_temporary,
+        observe: &mut observe,
+    };
+    publish(dir, name, owner, seam)
+}
+
+#[allow(unsafe_code)]
+fn publish(
+    dir: PrivateDir,
+    name: &str,
+    owner: u32,
+    seam: Seam<'_>,
+) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
     let c_name = entry_name(name)?;
     let path = dir.path.join(name);
-    let (address, length) = address_for(&path)?;
+    address_for(&path)?;
     dir.reconfirm()?;
     match stat_at(&dir.dir, &c_name) {
         Ok(_) => return Err(PrivateSocketError::AddressInUse { path }),
@@ -736,34 +767,26 @@ fn prepare_as(
         }
     }
     let socket = unix_socket().map_err(|error| io_failure("socket", &path, &error))?;
-    // SAFETY: address_for filled `address`, and `length` covers only its used part, so bind reads
-    // initialized bytes of a live local.
-    let outcome = unsafe {
-        libc::bind(
-            socket.as_raw_fd(),
-            (&address as *const libc::sockaddr_un).cast(),
-            length,
-        )
-    };
-    if outcome != 0 {
-        let error = io::Error::last_os_error();
-        return Err(if error.raw_os_error() == Some(libc::EADDRINUSE) {
-            PrivateSocketError::AddressInUse { path }
-        } else {
-            io_failure("bind", &path, &error)
-        });
-    }
-    after_bind();
+    let temporary = choose_temporary(
+        &dir.path,
+        name,
+        temporary_room(&dir.path),
+        seam.draw,
+        |at| bind_path(&socket, at),
+    )?;
+    let c_temporary = entry_name(&temporary)?;
+    let temporary = dir.path.join(temporary);
+    (seam.observe)(Step::Bound);
     let recheck = dir.reconfirm();
-    let created = match stat_at(&dir.dir, &c_name) {
+    let created = match stat_at(&dir.dir, &c_temporary) {
         Ok(facts) if facts.kind == Kind::Socket && facts.uid == owner => facts,
-        _ => return Err(PrivateSocketError::BindEscaped { path }),
+        _ => return Err(PrivateSocketError::BindEscaped { path: temporary }),
     };
-    let bound = BoundEntry {
+    let mut bound = BoundEntry {
         dir,
-        name: c_name,
+        name: c_temporary,
         entry: SocketEntry {
-            path,
+            path: temporary,
             dev: created.dev,
             ino: created.ino,
         },
@@ -779,7 +802,86 @@ fn prepare_as(
         });
     }
     judge_socket(&facts, owner, &bound.entry.path)?;
-    Ok((socket, bound))
+    (seam.observe)(Step::Restricted);
+    // SAFETY: listen takes no pointer, and `socket` keeps its descriptor open for the call.
+    if unsafe { libc::listen(socket.as_raw_fd(), LISTEN_BACKLOG) } != 0 {
+        return Err(io_failure(
+            "listen",
+            &bound.entry.path,
+            &io::Error::last_os_error(),
+        ));
+    }
+    let listener = UnixListener::from(socket);
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| io_failure("fcntl", &bound.entry.path, &error))?;
+    (seam.observe)(Step::Listening);
+    let held = bound.dir.dir.as_fd();
+    match rename_no_replace(held, &bound.name, held, &c_name) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+            return Err(PrivateSocketError::AddressInUse { path });
+        }
+        Err(error) => return Err(io_failure(RENAME_OP, &bound.entry.path, &error)),
+    }
+    bound.name = c_name;
+    bound.entry.path = path;
+    Ok((OwnedFd::from(listener), bound))
+}
+
+fn choose_temporary(
+    dir: &Path,
+    _name: &str,
+    room: usize,
+    draw: &mut dyn FnMut(usize) -> String,
+    mut bind_at: impl FnMut(&Path) -> Result<(), PrivateSocketError>,
+) -> Result<String, PrivateSocketError> {
+    let candidate = draw(room);
+    bind_at(&dir.join(&candidate))?;
+    Ok(candidate)
+}
+
+#[allow(unsafe_code)]
+fn bind_path(socket: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
+    let (address, length) = address_for(at)?;
+    // SAFETY: address_for filled `address`, and `length` covers only its used part, so bind reads
+    // initialized bytes of a live local.
+    let outcome = unsafe {
+        libc::bind(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            length,
+        )
+    };
+    if outcome == 0 {
+        Ok(())
+    } else {
+        Err(io_failure("bind", at, &io::Error::last_os_error()))
+    }
+}
+
+fn temporary_room(dir: &Path) -> usize {
+    let usable = std::mem::size_of::<libc::sockaddr_un>()
+        - std::mem::offset_of!(libc::sockaddr_un, sun_path)
+        - 1;
+    usable.saturating_sub(dir.as_os_str().len() + 1)
+}
+
+fn random_temporary(room: usize) -> String {
+    static DRAWN: AtomicU64 = AtomicU64::new(0);
+    let length = room.min(TEMPORARY_LENGTH);
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(DRAWN.fetch_add(1, Ordering::Relaxed));
+    let mut characters = String::with_capacity(length);
+    if length >= 2 {
+        characters.push('.');
+    }
+    while characters.len() < length {
+        hasher.write_usize(characters.len());
+        let index = (hasher.finish() % TEMPORARY_CHARACTERS.len() as u64) as usize;
+        characters.push(char::from(TEMPORARY_CHARACTERS[index]));
+    }
+    characters
 }
 
 #[allow(unsafe_code)]
