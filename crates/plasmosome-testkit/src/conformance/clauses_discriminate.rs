@@ -39,6 +39,9 @@ enum Defect {
     GrantSubstitutesBrokerLaunch,
     GrantSubstitutesRequestedOwner,
     GrantSubstitutesRequestedCapability,
+    GrantSubstitutesRecipe(UniverseClass),
+    GrantReturnsAnotherRecipe(UniverseClass),
+    GrantRecordsAnotherRecipe(UniverseClass),
     GrantPanics,
     SnapshotPanicsLikeAssertion,
     RevokeTakesTheSamePluginInAnotherCell,
@@ -844,6 +847,102 @@ fn snapshot_clause_rejects_returned_capability_substitution() {
     });
 }
 
+const CLASSES: [UniverseClass; 5] = [
+    UniverseClass::SessionFile,
+    UniverseClass::UdsPath,
+    UniverseClass::ProxyMap,
+    UniverseClass::BrokerPid,
+    UniverseClass::Mount,
+];
+
+#[test]
+fn snapshot_clause_rejects_a_grant_that_substitutes_a_recipe_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(Defect::GrantSubstitutesRecipe(
+                class,
+            )))
+        });
+    }
+}
+
+#[test]
+fn snapshot_clause_rejects_an_entry_that_returns_another_recipe_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::GrantReturnsAnotherRecipe(class),
+            ))
+        });
+    }
+}
+
+#[test]
+fn snapshot_clause_rejects_an_object_recorded_with_another_recipe_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::GrantRecordsAnotherRecipe(class),
+            ))
+        });
+    }
+}
+
+#[test]
+fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
+    for class in CLASSES {
+        for (defect, returns_another, records_another) in [
+            (Defect::GrantSubstitutesRecipe(class), true, true),
+            (Defect::GrantReturnsAnotherRecipe(class), true, false),
+            (Defect::GrantRecordsAnotherRecipe(class), false, true),
+        ] {
+            let mut backend = DefectiveBackend::carrying(defect);
+            for capability in conformance::sample_capabilities() {
+                let entry = backend.grant(Grant {
+                    owner: conformance::conformance_owner(),
+                    capability: capability.clone(),
+                    kind: GrantKind::Hot,
+                });
+                let snapshot = backend.snapshot_os_state();
+                let object = snapshot
+                    .objects()
+                    .find(|held| held.id == entry.handle.id)
+                    .expect("the grant must stand");
+                let targeted = capability.class() == class;
+                for (changed, observed) in [
+                    (targeted && returns_another, &entry.capability),
+                    (targeted && records_another, &object.capability),
+                ] {
+                    assert_eq!(
+                        *observed != capability,
+                        changed,
+                        "{defect:?} on {capability:?}"
+                    );
+                    assert_eq!(
+                        selection_of(observed),
+                        selection_of(&capability),
+                        "{defect:?}"
+                    );
+                    assert_eq!(observed.validate(), Ok(()), "{defect:?}");
+                }
+            }
+        }
+    }
+}
+
+fn selection_of(capability: &Capability) -> (UniverseClass, Vec<&str>) {
+    let fields = match capability {
+        Capability::SessionFile { path, .. } | Capability::UdsSocket { path, .. } => vec![path],
+        Capability::ProxyMap { host, route, .. } => vec![host, route],
+        Capability::Broker { name, .. } => vec![name],
+        Capability::Mount { source, target, .. } => vec![source, target],
+    };
+    (
+        capability.class(),
+        fields.into_iter().map(String::as_str).collect(),
+    )
+}
+
 #[test]
 fn revoke_order_witnesses_are_independent() {
     assert_rejected(|| {
@@ -1182,13 +1281,7 @@ fn a_substitute_and_a_stranger_keep_the_class_they_stand_in_for() {
         assert_eq!(substituted.class(), capability.class(), "{capability:?}");
         assert_ne!(substituted, capability);
     }
-    for class in [
-        UniverseClass::SessionFile,
-        UniverseClass::UdsPath,
-        UniverseClass::ProxyMap,
-        UniverseClass::BrokerPid,
-        UniverseClass::Mount,
-    ] {
+    for class in CLASSES {
         let handle = Handle {
             class,
             id: GrantId::new(),
