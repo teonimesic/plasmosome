@@ -567,9 +567,9 @@ Each has a default. The first consumer's PR settles it, by editing this spec.
 These are proposed text. The PR that adds this spec edits no other document. Each change is
 applied by a later reviewed change to the document it amends, before any task that relies on it,
 and none starts while this spec is a draft. Each item quotes the words it replaces with their lines
-at main `c090b79b20744b5ff49f0f58e5fc426bb4ad9da0`, and each spec's block names that commit.
+at main `423f01a48f781682b7e3ef938e5164809f5fd340`, and each spec's block names that commit.
 
-**Spec 022** (words read at main `c090b79b`).
+**Spec 022** (words read at main `423f01a4`).
 
 - Behavior: replace "Broker, UdsSocket, SessionFile and credentials are owner questions."
   (`022:35`) with "Broker, UdsSocket and SessionFile are owner questions. Credentials are spec
@@ -624,7 +624,7 @@ at main `c090b79b20744b5ff49f0f58e5fc426bb4ad9da0`, and each spec's block names 
 - Out of scope: replace "Credential custody, command subjects and attestation." (`022:739`) with
   "Command subjects and attestation. Credential custody is spec 032."
 
-**Spec 026** (words read at main `c090b79b`).
+**Spec 026** (words read at main `423f01a4`).
 
 - Not covered yet: replace "**Credential custody for a foreign harness.** A harness that makes
   its own TLS connections needs the real credential in the guest, or an intercepting proxy on the
@@ -640,7 +640,7 @@ at main `c090b79b20744b5ff49f0f58e5fc426bb4ad9da0`, and each spec's block names 
   writers, and their rows land with their tasks, as "A new parser lands in the same PR as its row
   below and its bound." (`026:414`) requires.
 
-**Spec 028** (words read at main `c090b79b`).
+**Spec 028** (words read at main `423f01a4`).
 
 - §5: after "These references are not residue, hold nothing unfinished, and leave readiness
   alone." (`028:207-208`), add "**Credential bindings** (spec 032) hold no value in the cell, so
@@ -656,7 +656,7 @@ at main `c090b79b20744b5ff49f0f58e5fc426bb4ad9da0`, and each spec's block names 
   credential's own expiry. Spec 032 realizes no mint; when one lands, its value expires at its
   issuer no later than the attachment's bound B (spec 032 §7)."
 
-**Spec 001** (words read at main `c090b79b`).
+**Spec 001** (words read at main `423f01a4`).
 
 - §3.6: after "Each object in `plasmids` carries `lifetime`, always present, as spec 028 section 9
   defines it." (`001:494`), add "- Each object in `plasmids` also carries credentials, always
@@ -685,7 +685,7 @@ at main `c090b79b20744b5ff49f0f58e5fc426bb4ad9da0`, and each spec's block names 
   terminates the flow's TLS and attaches the value as spec 032 §5 says; every other flow stays a
   relayed stream."
 
-**Spec 008** (words read at main `c090b79b`).
+**Spec 008** (words read at main `423f01a4`).
 
 - Journal records: in "`"provides": [STRING, ...], "effects": [RecordedEffect, ...] }`"
   (`008:103`), add `"credentials": [RecordedCredential, ...]` after `"provides": [STRING, ...]`.
@@ -701,7 +701,7 @@ at main `c090b79b20744b5ff49f0f58e5fc426bb4ad9da0`, and each spec's block names 
   "requirements with their providers, provided keys," (`008:455`), add "credential bindings with
   their surrogates,".
 
-**Spec 017** (words read at main `c090b79b`).
+**Spec 017** (words read at main `423f01a4`).
 
 - Keep "Credential material must not be placed in contents, arguments or recipes."
   (`017:130-131`), and replace "Existing credential references and core custody remain
