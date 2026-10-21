@@ -278,16 +278,16 @@ calls them yet.
   mode 0600 and close-on-exec, takes `flock(LOCK_EX | LOCK_NB)` on it, renames it to
   `supervisor.lock` without replacing anything and syncs the cell directory. With one creator at
   a time, the lock is held from the moment the name exists, so a probe sees no lock file and
-  then a held one. A leftover
-  temporary is removed first, and every failure before the rename removes it. An entry already at
-  `supervisor.lock` is left as it is and reported as what it is: `Symlink`, `NotARegularFile` or,
-  for a file, `AlreadyExists`. Two creators of one cell's lock at once can move each other's
-  file into place, so after the rename the call checks, without following a symlink, that
-  `supervisor.lock` names the file it holds. If not, it is `LockNotNamed` and returns no lock, so
-  `Ok` always means the name holds the returned lock. A directory at `supervisor.lock.tmp`
-  cannot be unlinked, so every create is then an `Io` error naming it; only a writer under the
-  root can plant one. The returned `SupervisorLock` holds the lock. `into_owned_fd` gives up its
-  descriptor, still locked, to become `membraned`'s descriptor 4.
+  then a held one. A leftover temporary is removed first, and every failure before the rename
+  removes it. An entry already at `supervisor.lock` is left as it is and reported as what it is:
+  `Symlink`, `NotARegularFile` or, for a file, `AlreadyExists`. Two creators of one cell's lock at
+  once can move each other's file into place, so after the rename the call checks, without following
+  a symlink, that `supervisor.lock` names the file it holds. If not, it is `LockNotNamed` and
+  returns no lock, so `Ok` always means the name holds the returned lock. If the name is gone by
+  then, the error is `Io` naming `supervisor.lock`. A directory at `supervisor.lock.tmp` cannot be
+  unlinked, so every create is then an `Io` error naming it; only a writer under the root can plant
+  one. The returned `SupervisorLock` holds the lock. `into_owned_fd` gives up its descriptor, still
+  locked, to become `membraned`'s descriptor 4.
 - `CellDir::probe_supervisor_lock` tries the lock on a fresh read-only descriptor. `Held` means
   another open of the file holds it, even one in this process. `Free` keeps the lock it took
   until the returned `SupervisorLock` is dropped. `Missing` means no entry is there, and nothing
@@ -436,7 +436,8 @@ reads its replies can hold the daemon open past shutdown.
 It refuses every peer whose kernel-reported effective UID is not the trusted one. It also keeps
 other UIDs from reaching the socket path. That second property has not yet been shown with a
 second UID: the distinct-UID test waits on owner decision O-8. `plasmosomed` binds its control
-socket through it too, as [Socket ownership](#socket-ownership) says.
+socket through it too, as [Socket ownership](#socket-ownership) says, and so do
+`plasmosome-membrane`'s runtime listeners.
 
 - `PrivateDir::open` walks the socket's parent directory from `/`, without following symlinks.
   The path must be absolute and normal: no `.` or `..` component, no empty component and no
@@ -471,8 +472,18 @@ socket through it too, as [Socket ownership](#socket-ownership) says.
     glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
     `EOPNOTSUPP` without it. The socket is then matched by device and inode and set with
     `fchmodat` without that flag.
-  - On drop, it removes only the socket it created, matched by device and inode, through the
-    held directory.
+  - `close` closes the socket, then removes only the socket it created, matched by device and
+    inode, through the held directory, and says what it found as a `RemoveOutcome`: `Removed`,
+    `AlreadyGone`, `LeftReplacement` or `Failed` with the errno. Dropping it does the same and
+    discards the outcome. A child that another thread is spawning holds a copy of every
+    descriptor until its exec, so the socket can take connections until then. On macOS 26.6.2,
+    with another thread spawning `/usr/bin/true` in a loop, 10 of 150 closed listeners still took
+    a connection right after the close. Beside another test whose teardown spawns `/bin/chmod`,
+    the longest such window in 25 runs was 4.5 ms.
+  - It lends its descriptor only through `as_raw_fd`, for polling, and does not implement `AsFd`.
+    Safe code therefore cannot copy it. A copy could accept a peer the UID check refuses, clear
+    `O_NONBLOCK` so that `accept` blocks, or keep the socket listening after `close`.
+    `plasmosome-membrane` reads its close-on-exec flag through `as_raw_fd` under its spawn lock.
 - `PrivateListener::accept` reads the peer's effective UID from the kernel: `getpeereid` on
   macOS, `SO_PEERCRED` on Linux. It closes an untrusted peer before reading a byte.
 - A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`
