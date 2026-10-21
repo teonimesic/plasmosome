@@ -1,6 +1,6 @@
 use plasmosome_backend::CellId;
 use plasmosome_core::runtime::path::RecipePath;
-use plasmosome_core::runtime::recipe::{PlatformLimits, RuntimeRecipe};
+use plasmosome_core::runtime::recipe::{Architecture, PlatformLimits, RuntimeRecipe};
 use plasmosome_core::runtime::supervisor_config::SupervisorConfig;
 use plasmosome_core::supervisor_start::{StartError, StartStep, SupervisorStart, start_supervisor};
 use plasmosome_core::{CellDir, FileIdentity, InstanceRoot, LockProbe, SupervisorLock, WriterLock};
@@ -731,7 +731,10 @@ fn recipe(limits: &PlatformLimits) -> RuntimeRecipe {
         "vcpus": 1,
         "memory_mib": 512,
         "kernel": artifact("/opt/cell/kernel", '1'),
-        "kernel_format": "raw",
+        "kernel_format": match limits.architecture() {
+            Architecture::X86_64 => "elf",
+            Architecture::Aarch64 => "raw",
+        },
         "initramfs": artifact("/opt/cell/initramfs", '2'),
         "root_image": artifact("/opt/cell/root.raw", '3'),
         "writable_root": "/var/cell/c1/root.raw",
