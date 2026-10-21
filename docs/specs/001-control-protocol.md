@@ -351,6 +351,70 @@ Spec017 gives each residue object an exact grant ID and complete capability; spe
 its owner to `{cell, plugin}`. These embedded wire changes do not change the residue variants
 or authorize removing a different holding with an equal resource description.
 
+**Parameters.** `name` is optional, as for `plasmosome.status`: a different name is 101 with
+`target` `plasmosome <name>`, and nothing stops. `force` is optional. `operator` and `reason` are
+nonblank strings, required when `force` is true and refused with `-32602` when `force` is not
+true. `deadline_ms` is an optional positive integer that bounds the whole stop from the request's
+arrival; its default is `cell_runtime.stop_deadline_ms`, or 30,000 without `cell_runtime`.
+
+**Order.** From the moment a stop is admitted until it replies, every other request that would
+change state is refused at once with 105 `{from: "stopping", to: "running"}`, a second
+`plasmosome.stop` included. `cell.exec` is refused the same way. This 105 carries no `cell`, at
+admission or at a mutation's turn: it concerns the instance, not a cell. Reads are answered. The
+stop then takes the cells one at a time, in byte order of the cell ID (so `cell-10` comes before
+`cell-9`), each in its place in that cell's arrival order behind the mutations admitted before it
+(spec 023 §6). A cell is `draining` while the stop works on it.
+
+**Drain.** A cell's drain is spec 023 §7's step 2: a committed but unfinished transaction of the
+cell is resumed first, then every attachment is withdrawn in one removal transaction under spec
+008, `Graceful`, or `Force` when `force` is true, with the `force` event spec 008 requires before
+the first forced withdrawal. Under `force` too, a resumed transaction that does not finish in time
+is 106: the stop never takes step 2's `now` path, which goes on to stop the guest. No
+`membrane.workload.stop` and no `membrane.cell.kill` is sent. The cell keeps running with no
+attachment after the controller exits, and a later startup adopts it (spec 008). This is spec 023
+open question 5's default; that question stays open.
+
+**Residue.** After its drain, each cell's `membrane.residue.snapshot` is diffed against its
+settled DesiredCell. `residue` is `empty` only when the diff of every cell in `drained` and `forced`
+is empty; otherwise `residue_items` holds the named leaked, lost and asserted objects of every
+cell's report, cell by cell in that order. Residue `items` does not keep the controller running: the
+cells that hold it keep running, and the next startup observes them.
+
+`drained` lists, in the order above, each cell whose removal ran `Graceful` or that had nothing
+to withdraw. `forced` lists each cell whose removal ran under `Force`. So a graceful stop always
+has `forced: []`.
+
+**Refusals.** A cell that spec 023's check set aside, or that spec 008 quarantined, cannot be
+drained, so the stop refuses before draining anything, `force` included, with 105 `{from:
+"set_aside" | "quarantined", to: "stopped", cell}` naming the first such cell in the order above;
+`plasmosome.recovery` names the rest. A cell set aside or quarantined after the stop was admitted
+refuses it the same way at its turn, after the cells before it have drained. A cell retired before
+its turn, by a `cell.kill` admitted earlier, is skipped and is in neither `drained` nor `forced`. A
+drain or publication that does not settle within the deadline is 106 `{handle, deadline_ms}`, with
+`handle` the cell's ID and `deadline_ms` the stop's deadline. So is a residue snapshot that fails or
+does not answer in time, since the stop cannot then say what the cell holds. So is a `force` event
+that cannot be appended; nothing is forced on that cell (spec 008). Outstanding external effects
+without `force` are §3.11's 105, with `cell`, found for every cell before draining anything, and
+again at each cell's turn. A request that changes state checks the gate again once it has its turn
+on a cell, so a mutation admitted just before the stop cannot run on a cell the stop has drained. A
+`cell.new` checks the gate again under spec 023 §2's allocation mutex, before it creates a cell
+directory, and the stop reads its list of cells under that mutex once the gate is closed, so no cell
+is created that the stop does not take. After any refusal the controller keeps serving: cells
+already drained stay drained, a cell whose drain or snapshot ended in 106 stays `draining` for a
+later `plasmosome.stop` or `cell.kill`, every other cell is in the state it had before the stop, and
+mutations are admitted again.
+
+**After the reply.** Once the reply is written, the controller accepts no new connection, reads
+no further request on any connection, removes its socket as §1 says, releases `controller.lock`
+and exits 0. The instance's directory stays, with no socket entry, which spec 025 §5 reads as a
+stopped instance. A reply that does not reach the client does not undo the stop. SIGTERM or
+SIGINT ends the controller without draining, as today: its cells keep their attachments, and the
+next startup recovers them.
+
+Amended on 2026-10-21: this section gave the request and the result but no deadline, no order
+against other mutations, no refusal, and no account of what the controller does after it
+replies.
+
 ### 3.5 `plasmosome.cell.new` — wire method `cell.new`
 
 ```json
