@@ -65,11 +65,15 @@ judge only their own flags: `frobnicate --version` names `--version`, and
    the command does not take is at fault where the flag stands, so
    `--kernel ../x registry search` names `--kernel`. A group with no command is at fault at its
    last word, so `cell --kernel ../x` names `cell`. With no fault before `--`, a line with no
-   command words names an argument after `--` that is not UTF-8, or else asks for a command. A
-   line with a command refuses `--` itself, since no served command takes anything after it:
-   `status --` and `status -- a<0xff>` both name `--`. A clean line gives an `Invocation`.
+   command words names `--` when it has one, so bare `--`, `-- --version`, `-- --help` and `--`
+   followed by an argument that is not UTF-8 all name `--`. With no `--` either, it asks for a
+   command and names no argument. A line with a command refuses `--` itself, since no served
+   command takes anything after it: `status --` and `status -- a<0xff>` both name `--`. A clean
+   line gives an `Invocation`.
 
-A word is an argument before `--` that does not begin with `-` and is not a value. `--kernel`,
+A flag is any argument before `--` that begins with `-`, `-` alone and `-5` included, unless it
+stands where a flag's value does. A known flag matches its name exactly, so `--kernel=work` is an
+unknown flag. A word is an argument before `--` that is neither a flag nor a value. `--kernel`,
 `--socket` and `--deadline-ms` take the next argument before `--` as their value, even one that
 begins with `-`, and a value is never read as a flag. So `cell list --kernel --human` keeps the
 JSON form, and `status --kernel --socket /x/control.uds` names the instance `--socket` and refuses
@@ -78,8 +82,10 @@ spec 025 looks for them anywhere before `--`, a value's place included. `--` is 
 `status --kernel -- x` is refused because `--kernel` has none. A usage error is `invalid_argument`
 under `command: "invalid"`, exit 64, with `argument` holding the argument at fault, made UTF-8
 with replacement characters when it was not. Its message names the argument too, so the human
-form shows it, each terminal control as `<U+XXXX>`. The human form is used when `--human` is
-given once and `--json` is not, usage errors included.
+form shows it, each terminal control as `<U+XXXX>`. The human form is used when the arguments
+before `--`, a flag's value aside, hold `--human` once and `--json` not at all, usage errors
+included. So `cell exec --human -- tool --human` answers in the human form: what follows `--` is a
+workload's argv, and its `--human` is not this client's.
 
 `handle` reads a line and writes the outcome. A failure to write help or the version to stdout is
 `local_io`, exit 1, with `errno` when the system gave one, under `command` `--help` or
