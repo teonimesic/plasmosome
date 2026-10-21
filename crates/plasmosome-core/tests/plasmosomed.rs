@@ -204,10 +204,11 @@ fn addressable_within(
         if exited.is_some() || Instant::now() >= deadline {
             let _ = daemon.child.kill();
             let status = daemon.child.wait().expect("the daemon is reaped");
-            let mut stderr = String::new();
+            let mut stderr = Vec::new();
             if let Some(mut pipe) = daemon.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
+                let _ = pipe.read_to_end(&mut stderr);
             }
+            let stderr = String::from_utf8_lossy(&stderr);
             panic!(
                 "plasmosomed is addressable on {} within {budget:?}; it ended with {status}, and \
                  its stderr was:\n{stderr}",
