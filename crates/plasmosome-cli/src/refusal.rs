@@ -4,6 +4,7 @@ use plasmosome_core::private_socket::PrivateSocketError;
 
 use crate::codes::ClientCode;
 use crate::envelope::ClientError;
+use crate::json::{Json, Number};
 
 /// Where the checked path came from. Spec 025 section 5 maps `BadPath` by it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +29,90 @@ pub fn map_refusal(
     origin: PathOrigin,
     trusted_uid: u32,
 ) -> ClientError {
-    let _ = (checked, origin, trusted_uid);
-    ClientError::new(ClientCode::Internal, error.to_string(), Vec::new())
-        .expect("no field can repeat or be reserved")
+    let (code, fields) = match error {
+        PrivateSocketError::BadPath { .. } => match origin {
+            PathOrigin::SocketFlag => (
+                ClientCode::InvalidArgument,
+                vec![("argument", text("--socket"))],
+            ),
+            PathOrigin::Home => (ClientCode::InvalidHome, Vec::new()),
+        },
+        PrivateSocketError::SymlinkInPath { path } => unsafe_socket(path, "symlink"),
+        PrivateSocketError::NoDirectory { path } => (ClientCode::NoInstance, vec![at(path)]),
+        PrivateSocketError::NoSocket { path } => (ClientCode::NotRunning, vec![at(path)]),
+        PrivateSocketError::NotDirectory { path } => unsafe_socket(path, "not_directory"),
+        PrivateSocketError::ForeignOwner { path, .. } => unsafe_socket(path, "owner"),
+        PrivateSocketError::Replaceable { path, .. } => unsafe_socket(path, "mode"),
+        PrivateSocketError::ReplaceableByAcl { path } => unsafe_socket(path, "acl"),
+        PrivateSocketError::OwnershipIgnored { path } => unsafe_socket(path, "owner"),
+        PrivateSocketError::NotPrivate { path, .. } => {
+            let (code, mut fields) = unsafe_socket(path, "mode");
+            fields.push(("fix", text(&chmod_700(path))));
+            (code, fields)
+        }
+        PrivateSocketError::AclPresent { path } => unsafe_socket(path, "acl"),
+        PrivateSocketError::Replaced { .. } => (ClientCode::Internal, Vec::new()),
+        PrivateSocketError::BadName { .. } => unsafe_socket(checked, "name"),
+        PrivateSocketError::PathTooLong { path, max } => (
+            ClientCode::SocketPathTooLong,
+            vec![at(path), ("max_bytes", number(max))],
+        ),
+        PrivateSocketError::AddressInUse { .. } => (ClientCode::Internal, Vec::new()),
+        PrivateSocketError::NotASocket { path } => unsafe_socket(path, "not_socket"),
+        PrivateSocketError::SocketOwner { path, .. } => unsafe_socket(path, "owner"),
+        PrivateSocketError::SocketMode { path, .. } => unsafe_socket(path, "mode"),
+        PrivateSocketError::BindEscaped { .. } => (ClientCode::Internal, Vec::new()),
+        PrivateSocketError::PeerCredentials { .. } => (
+            ClientCode::PeerMismatch,
+            vec![at(checked), ("uid", number(trusted_uid))],
+        ),
+        PrivateSocketError::PeerMismatch { found, .. } => (
+            ClientCode::PeerMismatch,
+            vec![
+                at(checked),
+                ("uid", number(trusted_uid)),
+                ("peer_uid", number(found)),
+            ],
+        ),
+        PrivateSocketError::Io { path, errno, .. } => (
+            ClientCode::LocalIo,
+            vec![at(path), ("errno", number(errno))],
+        ),
+    };
+    let message = match code {
+        ClientCode::InvalidArgument => format!("--socket: {error}"),
+        ClientCode::InvalidHome => format!("the path built from $HOME is refused: {error}"),
+        ClientCode::Internal => format!("the client failed: {error}"),
+        _ => error.to_string(),
+    };
+    let fields = fields
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
+    ClientError::new(code, message, fields)
+        .expect("each arm names distinct fields, none of them domain, code or message")
+}
+
+fn unsafe_socket(path: &Path, rule: &str) -> (ClientCode, Vec<(&'static str, Json)>) {
+    (
+        ClientCode::UnsafeSocket,
+        vec![at(path), ("rule", text(rule))],
+    )
+}
+
+fn at(path: &Path) -> (&'static str, Json) {
+    ("path", text(&path.to_string_lossy()))
+}
+
+fn text(value: &str) -> Json {
+    Json::String(value.to_string())
+}
+
+fn number(value: impl ToString) -> Json {
+    Json::Number(Number::new(value.to_string()).expect("a decimal integer is a JSON number"))
+}
+
+fn chmod_700(directory: &Path) -> String {
+    let quoted = directory.to_string_lossy().replace('\'', r#"'"'"'"#);
+    format!("chmod 700 '{quoted}'")
 }
