@@ -1,4 +1,5 @@
 use crate::backend::{BackendError, DrainSpec, EnforcementBackend, GrantKind, Handle, LedgerEntry};
+use crate::snapshot::EnforcementSnapshot;
 use crate::universe::{CellOwner, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,9 +21,12 @@ impl CompositeBackend {
         filesystem: Box<dyn EnforcementBackend>,
         broker: Box<dyn EnforcementBackend>,
     ) -> Result<CompositeBackend, BackendError> {
-        validate_leaf(Leaf::Network, network.as_ref())?;
-        validate_leaf(Leaf::Filesystem, filesystem.as_ref())?;
-        validate_leaf(Leaf::Broker, broker.as_ref())?;
+        let mut network = network;
+        let mut filesystem = filesystem;
+        let mut broker = broker;
+        validate_leaf(Leaf::Network, network.as_mut())?;
+        validate_leaf(Leaf::Filesystem, filesystem.as_mut())?;
+        validate_leaf(Leaf::Broker, broker.as_mut())?;
         Ok(CompositeBackend {
             network,
             filesystem,
@@ -38,7 +42,7 @@ impl CompositeBackend {
         }
     }
 
-    pub fn leaf_snapshot(&self, leaf: Leaf) -> OsState {
+    pub fn leaf_snapshot(&mut self, leaf: Leaf) -> Result<EnforcementSnapshot, BackendError> {
         match leaf {
             Leaf::Network => self.network.snapshot_os_state(),
             Leaf::Filesystem => self.filesystem.snapshot_os_state(),
@@ -61,19 +65,19 @@ impl EnforcementBackend for CompositeBackend {
         self.leaf_for_class(handle.class).revoke(handle, drain)
     }
 
-    fn snapshot_os_state(&self) -> OsState {
-        let mut union = self.network.snapshot_os_state();
-        for object in self.filesystem.snapshot_os_state().objects() {
+    fn snapshot_os_state(&mut self) -> Result<EnforcementSnapshot, BackendError> {
+        let mut union: OsState = self.network.snapshot_os_state()?.state().clone();
+        for object in self.filesystem.snapshot_os_state()?.state().objects() {
             union
                 .insert(object.clone())
                 .expect("validated class ownership keeps leaf addresses disjoint");
         }
-        for object in self.broker.snapshot_os_state().objects() {
+        for object in self.broker.snapshot_os_state()?.state().objects() {
             union
                 .insert(object.clone())
                 .expect("validated class ownership keeps leaf addresses disjoint");
         }
-        union
+        EnforcementSnapshot::new(union, Vec::new(), Vec::new())
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
@@ -95,8 +99,8 @@ impl EnforcementBackend for CompositeBackend {
     }
 }
 
-fn validate_leaf(leaf: Leaf, backend: &dyn EnforcementBackend) -> Result<(), BackendError> {
-    for object in backend.snapshot_os_state().objects() {
+fn validate_leaf(leaf: Leaf, backend: &mut dyn EnforcementBackend) -> Result<(), BackendError> {
+    for object in backend.snapshot_os_state()?.state().objects() {
         if !class_belongs_to(leaf, object.class()) {
             return Err(BackendError::Fault(format!(
                 "{leaf:?} leaf observes out-of-class {}",

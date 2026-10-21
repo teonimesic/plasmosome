@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend::{
     BackendError, DrainSpec, EnforcementBackend, GrantKind, Handle, LedgerEntry, RevokePolicy,
 };
+use crate::snapshot::EnforcementSnapshot;
 use crate::universe::{CellOwner, OsObject, OsState, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Default)]
@@ -46,6 +47,10 @@ impl FakeBackend {
     pub fn stall_graceful_drains_for_owner(&mut self, owner: CellOwner) {
         self.stalled_owners.insert(owner);
     }
+
+    /// Makes the next `snapshot_os_state` return `BackendError::Fault(cause)`, once, with no
+    /// other effect. The snapshot after it observes normally.
+    pub fn fail_next_observation(&mut self, _cause: &str) {}
 
     pub fn plant_residue(&mut self, object: OsObject) -> Result<(), BackendError> {
         self.plant(object)
@@ -107,8 +112,12 @@ impl EnforcementBackend for FakeBackend {
         Ok(entry)
     }
 
-    fn snapshot_os_state(&self) -> OsState {
-        self.state.clone()
+    fn snapshot_os_state(&mut self) -> Result<EnforcementSnapshot, BackendError> {
+        EnforcementSnapshot::new(
+            self.state.clone(),
+            self.grants.values().cloned().collect(),
+            Vec::new(),
+        )
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
