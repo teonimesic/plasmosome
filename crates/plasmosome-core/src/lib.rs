@@ -50,9 +50,10 @@ pub use daemon::{
 };
 pub use gatekeeper::Gatekeeper;
 pub use instance::{
-    CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
-    InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LaunchedMarker, LockError,
-    MarkerFault, MarkerRead, NotACell, RetireError, WriterLock,
+    AllocateError, CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass,
+    FileIdentity, InstanceRoot, InstanceRootError, JournalAppend, JournalOpen, JournalRefusal,
+    LaunchedMarker, LockError, LockProbe, MarkerFault, MarkerRead, NotACell, RetireError,
+    SupervisorLock, WriterLock,
 };
 pub use kill_budget::{
     GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, WorkloadStop,
