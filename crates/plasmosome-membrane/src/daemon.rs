@@ -3,11 +3,9 @@ use crate::control;
 use crate::control::ListenerFailed;
 use crate::exec::{ExecCommand, ExecError};
 use crate::readiness::ControlSocketProbe;
-use crate::socket::OwnedSocketPath;
 use crate::vmm::{SpawnError, VmmChild};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-#[cfg(test)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -281,14 +279,43 @@ fn required_words(
 
 #[derive(Debug)]
 struct BoundSocket {
-    _owned: OwnedSocketPath,
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
 }
 
 impl BoundSocket {
     fn capture(path: PathBuf) -> Result<Self, DaemonError> {
-        match OwnedSocketPath::capture(path.clone()) {
-            Ok(owned) => Ok(Self { _owned: owned }),
-            Err(source) => Err(DaemonError::SocketIdentity { path, source }),
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|source| DaemonError::SocketIdentity {
+                path: path.clone(),
+                source,
+            })?;
+        if !metadata.file_type().is_socket() {
+            return Err(DaemonError::SocketIdentity {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the entry at the pathname is not a socket",
+                ),
+            });
+        }
+        Ok(Self {
+            path,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+}
+
+impl Drop for BoundSocket {
+    fn drop(&mut self) {
+        if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
+            && metadata.file_type().is_socket()
+            && metadata.dev() == self.dev
+            && metadata.ino() == self.ino
+        {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }

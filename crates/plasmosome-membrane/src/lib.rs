@@ -15,6 +15,5 @@ pub mod readiness;
 /// listeners, and the transcript of the helper's diagnostics. The paths and the recipe are
 /// `plasmosome-core`'s, re-exported here.
 pub mod runtime;
-mod socket;
 mod spawn_lock;
 pub mod vmm;
