@@ -20,7 +20,7 @@ declared.
 
 This is the sibling spec 011 leaves open: "Freezing the world is its sibling spec, and it is the
 larger of the two." (`011:671-672`). Spec 001 defers the same interface: "The plasmid WIT world
-(SDK surface) — deferred by design" (`001:1642`). Spec 011 promises that "A plasmid is reported
+(SDK surface) — deferred by design" (`001:1651`). Spec 011 promises that "A plasmid is reported
 active only when every tool its declaration names resolves." (`011:471`), and spec 020's use
 witness is to "attach it to a real cell and call its declared tool" (`020:508`). Neither can be
 met while nothing runs a component. It serves four intents. Intent 010: anyone may write a
@@ -54,7 +54,7 @@ seccomp, and this spec makes no claim about it.
 
 The component runs **on the host**, in one component host process per attachment. The cell's
 `membraned` launches it as its own child, as spec 001 says of brokers: "the membrane owns the VMM
-child, shim, and brokers as **its** children" (`001:830-831`). It is a spec 017 Broker holding, so
+child, shim, and brokers as **its** children" (`001:839-840`). It is a spec 017 Broker holding, so
 spec 017's Broker rules apply: "use the original owned child and answered private control
 readiness" (`017:412`), and "The first equal holding may launch; the last shuts down/reaps the
 original owned child" (`017:415-416`).
@@ -69,8 +69,8 @@ Why the host and not the guest:
   prepare, answered readiness, a per-grant relay that can be withdrawn alone, and reaping by the
   last holding. Spec 024 already says what the workload sees when a Broker stream is refused.
 - The credential grammar pairs a component with a handle: "`consumer` pairs with it
-  (`handle⇔wasm`" (`001:634-635`). The credential proxy is on the host: "The credential vsock
-  proxy remains RESERVED: port4041 terminates at the membrane" (`001:845`). So a credential
+  (`handle⇔wasm`" (`001:643-644`). The credential proxy is on the host: "The credential vsock
+  proxy remains RESERVED: port4041 terminates at the membrane" (`001:854`). So a credential
   never has to enter the guest, or the component host: the egress relay attaches it (W7).
 - The guest's trusted code does not grow.
 
@@ -180,11 +180,11 @@ component that escapes the sandbox runs as the component host process, under G3'
   descriptor `membraned` made and passed to it. It opens no path, and creates, binds or connects no
   socket. `membraned` starts it as spec 023 starts every process: "Every other descriptor is closed
   in the new process before exec, by `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`"
-  (`023:169-170`). So, as for the VMM helper, "No other descriptor survives." (`001:1155`), and
+  (`023:169-170`). So, as for the VMM helper, "No other descriptor survives." (`001:1164`), and
   descriptors 0 to 2 are `/dev/null`. Before readiness and at every observation, `membraned` checks
   the policy bytes against `component_runtime.policy`'s SHA-256 and checks confinement, as spec 001
   asks of the VMM helper: "Before readiness and during every recovery observation, verify that
-  retained binding" (`001:1178-1179`). The check is the membrane's confinement observation. It
+  retained binding" (`001:1187-1188`). The check is the membrane's confinement observation. It
   shows that the required operations answer denied, not which profile is installed (owner gate O-3
   on task plasmosome-qep), and it cannot judge Unix connects: "The qualified host policy allows
   outbound connections to Unix sockets and answers `network-outbound` denied."
@@ -251,9 +251,9 @@ component that escapes the sandbox runs as the component host process, under G3'
   in the workload's mount namespace, at `/run/tools/<plasmid>.sock`. The path is provisional (Q3).
   It is the guest side of the plasmid's Broker holding, at the target whose key is the Broker's
   name: "key is respectively the recorded guest_path, guest_path, host, host, name or target"
-  (`001:1482-1483`). The Broker's name is the plasmid ID.
+  (`001:1491-1492`). The Broker's name is the plasmid ID.
 - **The path is recorded, not derived.** Today spec 001 says "Broker data is exposed at the
-  reserved guest Unix path" (`001:1298-1299`), a path under `/.plasmosome/` built from the name. A
+  reserved guest Unix path" (`001:1307-1308`), a path under `/.plasmosome/` built from the name. A
   name with `plasmosome` in it is a hint under spec 027. So the Broker capability records its
   guest path, as UdsSocket's recipe does, and nothing derives it. That is spec 017's rule for
   launch paths too: "Paths and arguments are exact payload, not a recipe to be guessed from a
@@ -267,13 +267,13 @@ component that escapes the sandbox runs as the component host process, under G3'
   there. Spec 027 counts file names under `/run` as hints too, so its reference lanes make the same
   directory and serve the same socket (the proposed spec 027 change).
 - **The listener stays while any holding is at it.** As "The shared resolver/TUN/route persist
-  while peer bindings exist" (`001:1439`), the socket at a target stays while any Broker holding
+  while peer bindings exist" (`001:1448`), the socket at a target stays while any Broker holding
   is at it, so a reload's two generations hand over without a moment with no socket.
 - **An ID that cannot be a path.** A component plasmid's ID must be one path component, not `.`
   or `..`, and at most 91 bytes, so that `/run/tools/<id>.sock` fits Linux's 108-byte `sun_path`
   with its terminating NUL. Spec 001 refuses such a name only in the membrane's preflight:
   "Unrepresentable names/paths and cross-class projection collisions refuse in preflight"
-  (`001:1300-1301`). This spec refuses it before prepare, with 108 at field `id` and a `fix` that
+  (`001:1309-1310`). This spec refuses it before prepare, with 108 at field `id` and a `fix` that
   is the line `id = "<name>"`. The name is the ID with each `/` and NUL replaced by `-`, cut to 91
   bytes at a character boundary, and given the prefix `plasmid-` if the result is `.` or `..`
   (the proposed spec 011 change).
@@ -352,7 +352,7 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   frame limit" (`017:111-112`). It is the contract spec 017 asks for: "Additional launch inputs
   require an accepted contract" (`017:493-494`). The field names are provisional.
 - **How it reaches the process.** `membraned` starts the component host as G3 says, by direct exec:
-  "The membrane uses direct exec, not a shell" (`001:1151`), with an empty environment. Its
+  "The membrane uses direct exec, not a shell" (`001:1160`), with an empty environment. Its
   descriptors, besides 0 to 2, are exactly these: the policy bytes, the launch record, the
   component bytes from a file opened without following a link, the control and data listeners
   `membraned` bound at the holding's endpoints, the egress channel and the lifeline pipe. Before it
@@ -380,7 +380,7 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   drops their calls, and the withdrawal goes on. The component host's exit, its reaping and the
   guest's removal of the socket run in the reserve, so the withdrawal ends by D. For a release
   that does not, spec 001's rule stands: "A deadline after partial release is incomplete_effect"
-  (`001:1018`). So a call never makes the drain time out, and a graceful `plasmid.remove`
+  (`001:1027`). So a call never makes the drain time out, and a graceful `plasmid.remove`
   never answers 106 because of a call (the proposed spec 017 change). Without this, spec 017's
   "Before destructive release, timeout restores that holding's admission" (`017:429-430`) would let
   a running call make a detach fail.
@@ -409,8 +409,8 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
 - **A component host that dies.** It is reaped and never restarted. Its plasmid's `state` becomes
   `failed`, its socket closes every new connection at once, and `plasmid.remove` or
   `plasmid.reload` clears it. Until then the cell's `membrane.status` is not ready, since a
-  membrane is ready only when "every broker answers ready" (`001:741`), and it names the holder:
-  "`broker` — the one that held the set back" (`001:745`). A trap inside a call is not a death:
+  membrane is ready only when "every broker answers ready" (`001:750`), and it names the holder:
+  "`broker` — the one that held the set back" (`001:754`). A trap inside a call is not a death:
   the instance is dropped and the host keeps serving.
 - **An orphan.** The component host holds the read end of a lifeline pipe whose only write end
   `membraned` holds, and a native thread outside WebAssembly exits the host when the lifeline
@@ -448,7 +448,7 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
 
 After prepare, a failed launch check aborts the transaction, and the reply is 108. Spec 001 says
 "a mid-commit failure rolls the prefix back and replies `CommitFailed`-shaped code `103`/`109`"
-(`001:630-631`); this is the case it gains.
+(`001:639-640`); this is the case it gains.
 
 - a declared tool the component lacks: 108 at field `provides."<key>".tools."<name>"`, with `fix`
   exactly `remove this entry`;
@@ -966,7 +966,7 @@ target.
     build of the component host that skips its policy never reaches readiness, and the attach
     aborts and leaves nothing. Policy bytes whose SHA-256 differs from `component_runtime.policy`'s
     refuse the launch before exec, as for the helper: "a different generic deny-default policy is
-    not equivalent" (`001:1176`). Catches: a `membraned` that trusts the component host's own
+    not equivalent" (`001:1185`). Catches: a `membraned` that trusts the component host's own
     report; a policy checked by path, not by bytes.
 11. **The component host sends only HTTP (host; G2, G4).** With a fake relay, a call reaching the
     declared host gets the fixture's answer, and the fake relay receives an HTTP request over the

@@ -407,13 +407,17 @@ spec. Registry commands keep spec 020's client codes, with amendment C's exits.
 | `local_io` | 1 | A local failure, as above. | `path` when one applies, `errno` |
 | `no_reply` | 1 | A request that changes no state got no complete reply. | `cause`: `closed`, `deadline` or `transport` |
 | `outcome_unknown` | 3 | A request that changes state was written, and its answer did not reach the caller. | `cause`: `closed`, `deadline`, `transport`, `local_io` or `reply_too_large` |
-| `ambiguous_instance` | 2 | Default selection found more than one candidate. | `candidates`, sorted names; `unreachable`, the names among them that refused |
+| `ambiguous_instance` | 2 | Default selection found more than one candidate. | `candidates`, sorted names; `unreachable`, the names among them whose connect failed |
 | `unsafe_socket` | 2 | A path check failed (section 5). | `path`, `rule`; `fix` where section 5 gives one |
 | `peer_mismatch` | 2 | The peer runs as another user, or its UID cannot be read. | `path`, `uid`, `peer_uid` when read |
 | `socket_path_too_long` | 2 | Section 5. | `path`, `max_bytes` |
 | `reply_too_large` | 2 | A reply passed the client's bound on a command that changes no state. | `max_bytes` |
 | `bad_reply` | 70 | Above. | `detail` |
 | `internal` | 70 | The client failed. | none |
+
+Amended on 2026-10-21: `ambiguous_instance`'s `unreachable` said "the names among them that
+refused". A connect that fails for any other reason keeps a candidate too, since section 5 makes
+more than one candidate ambiguous, reachable or not.
 
 **Deadline.** `--deadline-ms N` bounds the whole command, from its start to the last byte of the
 reply, on one monotonic clock. N is an integer from 1 to 3,600,000. The default is 10,000, except
@@ -485,8 +489,12 @@ cannot change its target.
 is spec 001 §4.1's path boundary for private sockets. It refuses a symbolic link in any
 component, an ancestor that another user could replace, a socket directory that is not the
 caller's own `0700` directory without an ACL, and a socket entry that is not the caller's socket
-with mode `0600`. The client maps #124's errors, as merged (`1f07313`), as below. Its only checks of
-its own run first: that a path is normal, and that it fits `sun_path`.
+with mode `0600`. The client maps #124's errors, as merged (`1f07313`), as below. For `--socket`
+and a named instance, its only checks of its own run first: that a path is normal, and that it
+fits `sun_path`. In default selection, the `sun_path` check runs after the path check, and only on
+an entry that holds a socket, because a stopped instance is not a candidate. Amended on
+2026-10-21: this said "Its only checks of its own run first: that a path is normal, and that it
+fits `sun_path`."
 
 | #124 error | Client code | `rule` | Exit |
 | --- | --- | --- | --- |

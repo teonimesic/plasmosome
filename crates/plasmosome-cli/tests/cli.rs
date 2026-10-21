@@ -5,8 +5,8 @@ use std::os::unix::ffi::OsStringExt;
 
 use plasmosome_cli::json::Json;
 use plasmosome_cli::{
-    COMMANDS, ClientCode, Command, Context, Exit, Form, Invocation, Reading, SystemClock, handle,
-    read,
+    COMMANDS, ClientCode, Command, Context, Env, Exit, Form, Invocation, Reading, SystemClock,
+    handle, read,
 };
 
 const SPEC_025: &str = concat!(
@@ -51,12 +51,25 @@ fn named_in_an_envelope(argument: &str) -> String {
     }
 }
 
+struct Unread;
+
+impl Env for Unread {
+    fn home(&self) -> Option<OsString> {
+        panic!("HOME was read")
+    }
+
+    fn kernel(&self) -> Option<OsString> {
+        panic!("PLASMOSOME_KERNEL was read")
+    }
+}
+
 fn context(commands: &[Command]) -> Context<'_> {
     Context {
         version: "0.0.0",
         commands,
         trusted_uid: 0,
         clock: &SystemClock,
+        env: &Unread,
     }
 }
 
@@ -1017,19 +1030,21 @@ fn help_text(line: &[&str], commands: &[Command]) -> String {
 }
 
 #[test]
-fn help_says_how_this_build_reaches_an_instance() {
+fn help_says_how_a_command_finds_its_instance() {
     let help = help_text(&["--help"], COMMANDS);
-    assert!(
-        help.contains("This build reaches an instance only through --socket."),
-        "{help}"
-    );
-    assert!(
-        help.contains(
-            "Beside it, --kernel only names the instance; PLASMOSOME_KERNEL and HOME are not read \
-             yet."
-        ),
-        "{help}"
-    );
+    let flowing = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    for sentence in [
+        "A command finds its socket by the first of these that is given: --socket, --kernel, \
+         PLASMOSOME_KERNEL.",
+        "With none, it takes the one instance under $HOME/.plasmosome/instances/, and refuses when \
+         there are several.",
+        "Beside --socket, --kernel only names the instance.",
+    ] {
+        assert!(flowing.contains(sentence), "{sentence:?} is not in {help}");
+    }
+    for stale in ["only through --socket", "not read yet"] {
+        assert!(!help.contains(stale), "{stale:?} is still in {help}");
+    }
 }
 
 #[test]
