@@ -1,7 +1,7 @@
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,13 @@ impl PrivateDir {
     /// The device and inode of the directory held open.
     pub fn identity(&self) -> DirIdentity {
         self.identity
+    }
+
+    /// The directory held open, for calls made relative to it such as `openat`, `fstatat` and
+    /// `unlinkat`. They reach this directory even after its path is renamed or names another
+    /// one. The caller must not close it or change its flags.
+    pub fn as_fd(&self) -> BorrowedFd<'_> {
+        todo!()
     }
 
     /// Walks the path again and requires the same judgments and the same directory identity.
