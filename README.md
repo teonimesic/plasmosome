@@ -581,6 +581,7 @@ that its complete runtime role is delivered.
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 cargo fmt --all -- --check
 ```
 

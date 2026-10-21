@@ -251,7 +251,8 @@ namespace, on purpose: a started process sees PID1 as pid 1 and sees other guest
 
 **The image contract.** The workload root image must provide a passwd entry `workload` with uid
 and gid 1000 and home `/home/workload`, that directory owned by 1000 with mode 0700, a group entry
-for gid 1000, and a writable `/tmp` with mode 1777. PID1 checks these before hello. A root image
+for gid 1000, and a writable `/tmp` with mode 1777, and, under spec 027's default layout, nothing
+under `/opt` or `/usr/local/bin`. PID1 checks these before hello. A root image
 without them refuses the boot as a launch failure, and the cell never reaches ready.
 The image must also hold `/proc` and `/dev` as directories, not symbolic links, for the mounts
 above; a root image without them refuses the boot the same way. The product image leaves both
@@ -259,10 +260,10 @@ empty. Amended on 2026-10-21: this did not list `/proc` and `/dev`, which those 
 
 ### 6. The workload control group
 
-Before hello, PID1 creates one cgroup v2 group for the workload. Every started process is created in
-it (§4); PID1 stays outside it and runs no helper process. The guest kernel must provide the pids
-and memory controllers; PID1 checks them before hello and refuses the boot without them. The pinned
-kernel's configuration has both.
+Before hello, PID1 creates one cgroup v2 group for the workload. Its path names nothing about
+Plasmosome (spec 027). Every started process is created in it (§4); PID1 stays outside it and runs
+no helper process. The guest kernel must provide the pids and memory controllers; PID1 checks them
+before hello and refuses the boot without them. The pinned kernel's configuration has both.
 The group is `/workload` below the cgroup v2 root, so `/proc/self/cgroup` in a started process
 reads `0::/workload`. Amended on 2026-10-21: this gave the group no path.
 
@@ -364,7 +365,7 @@ removal has completed, the binding is exempt only from host-authority associatio
 drift and readiness: no host authority remains to match it, and it never blocks readiness or a
 later attach at the same target. The host side is checked against the supervisor's own inventory
 keyed by GrantId (gates, source roots, handles, listeners and flows), as spec 001 §4.2's absence
-check requires (`001:1366-1367`). It must hold nothing for that grant; a holding found there has
+check requires (`001:1361-1362`). It must hold nothing for that grant; a holding found there has
 no journal record and is an unknown holding (`008:501-502`). The amendments to spec 001 and spec 008
 below say the same.
 
@@ -380,7 +381,7 @@ the pinned runtime and records it here, as for Mount above.
 | --- | --- | --- |
 | Mount | An operation through a reference bound to the grant: `ENOTCONN`, as above. A fresh lookup when the only grant at the target is refused: `ENOENT`. | Each operation, a fresh lookup included, fails at once with `ENOTCONN`, so a file that still stands never looks deleted. A failed operation destroys nothing, so after a restore new operations succeed. |
 | UdsSocket or Broker stream | The stream is closed: a read returns end-of-file, and a write fails with `EPIPE`. A new connection is closed the same way as soon as it is accepted. | Nothing is closed, since the pause may be undone. Data waits, and a blocked read or write returns when the pause is restored, or gets the outcome on the left when the removal goes ahead. |
-| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED` when no other eligible grant covers its host, port and transport, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN when no grant of that host, on any port or transport, is eligible (`001:1396-1398`). Corrected on 2026-10-20: this refused every new connect and DNS lookup, even one that another eligible grant still serves under spec 001 §4.2. | As for a stream. |
+| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED` when no other eligible grant covers its host, port and transport, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN when no grant of that host, on any port or transport, is eligible (`001:1391-1393`). Corrected on 2026-10-20: this refused every new connect and DNS lookup, even one that another eligible grant still serves under spec 001 §4.2. | As for a stream. |
 
 Two outcomes have kernel caveats. A Unix stream read can fail with `ECONNRESET` instead of
 returning end-of-file, when PID1 closes its end while the workload's bytes sit unread. An
@@ -400,7 +401,7 @@ within a bound:
 - one that starts after the gate closed fails at once, except on a paused stream or flow;
 - one on a paused stream or flow waits, and returns by the pause's deadline at the latest, when
   the pause is restored or the removal goes ahead. A pause expires at its original host deadline
-  (`001:1297-1299`), so the guest needs no deadline of its own;
+  (`001:1292-1294`), so the guest needs no deadline of its own;
 - one already in progress when its grant is revoked or refused returns by that removal's
   deadline.
 
@@ -411,7 +412,8 @@ and the workload's call does not wait for it.
 
 It is not one of spec 017's five classes. It has no `GrantId`, no journal record and no row in
 `GuestObservation`, and residue snapshots do not list it. Removing a plasmid does not stop it;
-a detach takes away only what that plasmid made visible. Spec 008's recovery does not reconstruct
+a detach takes away only what that plasmid made visible. A started process holding a file of a
+detached software tree keeps it (spec 027 §4). Spec 008's recovery does not reconstruct
 it, and the controller keeps no record of it. After a controller restart, `exec.status` answers
 from PID1 when recovery re-adopts the cell. A quarantined or set-aside cell is 101 to every
 verb, so its processes cannot be queried until it is adopted.
@@ -733,10 +735,10 @@ needs a hook.
 - Signalling one started process, and environment variables or image entries beyond §4 and §5;
   a later spec may add them.
 - Subject spawns and attestation.
-- How attached software becomes visible inside a cell (`011:666-670`). It is bound by two rules
-  here: `PATH` is fixed to three directories, and spec 017 forbids executing a managed file. So a
-  plasmid's software can be found by name only if it lands, as files that are not managed files, in
-  one of those directories.
+- How attached software becomes visible inside a cell, which spec 027 specifies. It is bound by two
+  rules here: `PATH` is fixed to three directories, and spec 017 forbids executing a managed file.
+  So a plasmid's software can be found by name only if it lands, as files that are not managed
+  files, in one of those directories.
 - SessionFile handles held across a removal (§9).
 - How the cell and its supervisor start and end, and how `cell.kill` divides its deadline. That
   is spec 023.
