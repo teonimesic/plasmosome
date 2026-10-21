@@ -44,8 +44,8 @@ TLS connection a component's request needs. The **workload path** is `inject` fo
 `process` consumer, and its first consumer is a harness's model key. There the relay terminates
 TLS for the targets that carry a credential, and presents a certificate from an **instance
 authority** that the guest image trusts. A client that does not trust it fails its handshake and
-never gets the value. The component path rests on spec 031, which is a draft, so that path binds
-only once spec 031 is accepted.
+never gets the value. The component path rests on spec 031, which is a draft, so its rules take
+effect only once spec 031 is accepted.
 
 **Levels.** Each acceptance item names the lowest level that proves it: the **model**
 (controller, journal, fake backend, injected clock), the **membrane** (`membraned`'s relay on
@@ -297,14 +297,17 @@ None carries a `fix`, as spec 022 says: "These are not author errors, so they ca
 prepared or journaled. When several apply, which one is returned is not part of the contract, as
 in spec 022 §7.
 
-**Reload.** "A reload never widens." (`022:372`). It refuses with 109 `widening_forbidden` before
-prepare when the re-resolved bindings hold, against what the plasmid holds: a binding for a
-reference it did not bind; a held reference bound at a host, port or transport it did not serve,
-or at a mode it did not have; or a `path_scope` entry the held binding did not have. A changed
-source, header or scheme proceeds, and the replacement reads the value again at apply. A binding
-the reload keeps, the same reference at the same target, keeps its surrogate. A dropped binding
-narrows, and proceeds. So a rotated value reaches a running cell through a reload, and the running
-harness keeps its surrogate.
+**Reload.** "A reload never widens." (`022:372`). Before prepare, it compares the re-resolved
+bindings with what the plasmid holds. It refuses with 109 `widening_forbidden` on any of these:
+
+- a binding for a reference it did not bind;
+- a held reference at a host, port or transport it did not serve, or at a mode it did not have;
+- a `path_scope` entry the held binding did not have.
+
+A changed source, header or scheme proceeds, and the replacement reads the value again at apply.
+A binding the reload keeps, the same reference at the same target, keeps its surrogate. A dropped
+binding narrows, and proceeds. So a rotated value reaches a running cell through a reload, and the
+running harness keeps its surrogate.
 
 **Recovery.** Recovery replays the journal and never opens the operator file or a secret file, as
 spec 022 says: "Recovery never reads the operator file: it replays the recipes the journal
