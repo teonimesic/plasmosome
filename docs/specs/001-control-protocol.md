@@ -124,10 +124,12 @@ the field's parents are tables, not inline tables: a section such as
 `[commands.commands.git.network]` cannot be added to a command written as
 `git = { exec = ["git"], network = 443 }`, and TOML refuses the result.
 
-Exactly two refusals an author can cause name no declaration field and carry no `fix`:
+Exactly three refusals an author can cause name no declaration field and carry no `fix`:
 
 1. a TOML syntax error, which the parser reports by line and column;
-2. a declaration over 1 MiB, the maximum accepted size spec 020 §2 gives each declaration.
+2. a declaration over 1 MiB, the maximum accepted size spec 020 §2 gives each declaration;
+3. a declaration nested more than 32 levels deep, counted as spec 011 says. Amended on
+   2026-10-20: this list had two items before the manifest's depth bound.
 
 An unknown key is not one of them. Every other refusal an author can cause carries a field and a
 `fix`. A 108 the author did not cause carries no `fix` either: a file that cannot be read, or a

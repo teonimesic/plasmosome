@@ -242,7 +242,7 @@ attached are not resolved again.
 covers a port that is not an integer from 1 to 65535, a repeated port, hosts with no ports, a host
 that is not a lower-case DNS name, a repeated host, a CIDR that does not parse or has host bits set,
 a `[workspace]` with no `mount`, and a `dst` that is relative, has a trailing slash, contains `.`,
-`..` or NUL, or is `/`. Port faults follow spec 011 (`011:247-249`) and name the entry by its index
+`..` or NUL, or is `/`. Port faults follow spec 011 (`011:248-250`) and name the entry by its index
 in its own section, such as `network.ports[i]`. A repeated port is the repeat, with `fix` exactly
 `remove this entry`. An entry that is not an integer from 1 to 65535 has `fix` the port the entry
 evidently means when the list does not already declare it, and otherwise `remove this entry`. Hosts
