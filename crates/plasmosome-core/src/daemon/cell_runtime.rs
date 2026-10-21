@@ -256,13 +256,13 @@ impl std::error::Error for CellRuntimeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::{ConfigError, DaemonConfig, read_config};
+    use crate::daemon::{ConfigError, DaemonConfig, parse_config, read_config};
     use crate::runtime::cell_id::{MAX_CELL_NUMBER, format_cell_id};
     use crate::runtime::fixtures::{LIMITS, artifact, digest, valid_recipe};
     use crate::runtime::path::{PathError, RecipePath};
     use crate::runtime::recipe::{
-        Artifact, ArtifactRole, PathRole, RecipeRefusal, RuntimeRecipe, RuntimeTemplate,
-        TemplateRefusal,
+        Architecture, Artifact, ArtifactRole, PathRole, PlatformLimits, RecipeRefusal,
+        RuntimeRecipe, RuntimeTemplate, TemplateRefusal,
     };
     use crate::runtime::supervisor_config::{
         ConfigRecordRefusal, MAX_RECORD_BYTES, SupervisorConfig,
@@ -272,6 +272,8 @@ mod tests {
     use std::time::Duration;
 
     const ROOT: &str = "/srv/roots/r7";
+    const WIDER_SOCKETS: PlatformLimits =
+        PlatformLimits::new(Architecture::Aarch64, 8, 16_384, 107);
     const LONGEST: &str = "cell-9999999999";
     const MEMBRANED: &str = "/opt/plasmosome/membraned";
     const TEMPLATE_KEYS: [&str; 12] = [
@@ -737,39 +739,100 @@ mod tests {
     }
 
     #[test]
-    fn each_socket_path_of_the_longest_cell_id_must_fit_in_the_hosts_socket_bound() {
+    fn each_socket_path_of_the_longest_cell_id_must_fit_in_103_bytes_whatever_the_hosts_bound() {
         assert_eq!(LIMITS.max_socket_path_bytes(), 103);
-        for name in ["membrane.uds", "runtime/data.uds", "runtime/control.uds"] {
-            let suffix = format!("/cells/{LONGEST}/{name}").len();
-            let over = root_of(104 - suffix);
-            let path = format!("{over}/cells/{LONGEST}/{name}");
-            let refusal = refused_under(&over, &runtime());
-            assert_eq!(
-                refusal,
-                CellRuntimeError::SocketPathTooLong {
-                    path: path.clone(),
-                    bytes: 104,
-                    max: 103,
-                },
-                "{name}"
-            );
-            assert_names(&refusal, &path);
+        for limits in [LIMITS, WIDER_SOCKETS] {
+            let host = limits.max_socket_path_bytes();
+            let read_under = |root: &str| {
+                read_config(&config_text(root, Some(&runtime().to_string())), || {
+                    Ok(limits)
+                })
+            };
+            for name in ["membrane.uds", "runtime/data.uds", "runtime/control.uds"] {
+                let suffix = format!("/cells/{LONGEST}/{name}").len();
+                let over = root_of(104 - suffix);
+                let path = format!("{over}/cells/{LONGEST}/{name}");
+                match read_under(&over) {
+                    Err(ConfigError::CellRuntime(refusal)) => {
+                        assert_eq!(
+                            refusal,
+                            CellRuntimeError::SocketPathTooLong {
+                                path: path.clone(),
+                                bytes: 104,
+                                max: 103,
+                            },
+                            "{name}, on a host that holds {host}"
+                        );
+                        assert_names(&refusal, &path);
+                    }
+                    other => panic!("{over} is refused for {name}, got {other:?}"),
+                }
 
-            let fits = root_of(103 - suffix);
-            let fitting = format!("{fits}/cells/{LONGEST}/{name}");
-            match read_under(&fits, &runtime()) {
-                Ok(_) => {}
-                Err(ConfigError::CellRuntime(CellRuntimeError::SocketPathTooLong {
-                    path, ..
-                })) => assert_ne!(path, fitting, "a {name} of 103 bytes fits"),
-                Err(other) => panic!("{fits} gives only socket refusals: {other:?}"),
+                let fits = root_of(103 - suffix);
+                let fitting = format!("{fits}/cells/{LONGEST}/{name}");
+                match read_under(&fits) {
+                    Ok(_) => {}
+                    Err(ConfigError::CellRuntime(CellRuntimeError::SocketPathTooLong {
+                        path,
+                        ..
+                    })) => assert_ne!(path, fitting, "a {name} of 103 bytes fits"),
+                    Err(other) => panic!("{fits} gives only socket refusals: {other:?}"),
+                }
             }
+            let fits = root_of(103 - format!("/cells/{LONGEST}/runtime/control.uds").len());
+            assert!(
+                read_under(&fits).is_ok(),
+                "a root whose longest socket path is 103 bytes is accepted on a host that holds \
+                 {host}"
+            );
         }
-        let fits = root_of(103 - format!("/cells/{LONGEST}/runtime/control.uds").len());
-        assert!(
-            read_under(&fits, &runtime()).is_ok(),
-            "a root whose longest socket path is 103 bytes is accepted"
-        );
+    }
+
+    #[test]
+    fn parse_config_checks_a_cell_runtime_against_this_hosts_limits_and_103_byte_sockets() {
+        let host = PlatformLimits::host().expect("this host reports its limits");
+        let text = |root: &str, memory_mib: u32| {
+            let value = with_template(|fields| {
+                fields.insert("architecture".into(), json!(host.architecture().as_str()));
+                fields.insert("kernel_format".into(), json!("elf"));
+                fields.insert("vcpus".into(), json!(1));
+                fields.insert("memory_mib".into(), json!(memory_mib));
+            });
+            config_text(root, Some(&value.to_string()))
+        };
+        let parsed = parse_config(&text(ROOT, 1))
+            .unwrap_or_else(|error| panic!("a template for this host starts the daemon: {error}"));
+        assert!(parsed.cell_runtime.is_some());
+
+        let limit = host.max_memory_mib();
+        let over = limit
+            .checked_add(1)
+            .expect("this host reports less than u32::MAX MiB");
+        match parse_config(&text(ROOT, over)) {
+            Err(ConfigError::CellRuntime(refusal)) => {
+                assert_eq!(
+                    refusal,
+                    CellRuntimeError::Template(TemplateRefusal::Recipe(
+                        RecipeRefusal::MemoryAboveLimit {
+                            requested: over,
+                            limit,
+                        }
+                    ))
+                );
+                assert_names(&refusal, &limit.to_string());
+            }
+            other => panic!("{over} MiB is above this host's {limit}, got {other:?}"),
+        }
+
+        let root = root_of(104 - format!("/cells/{LONGEST}/runtime/control.uds").len());
+        match parse_config(&text(&root, 1)) {
+            Err(ConfigError::CellRuntime(CellRuntimeError::SocketPathTooLong {
+                bytes,
+                max,
+                ..
+            })) => assert_eq!((bytes, max), (104, 103)),
+            other => panic!("a 104-byte control.uds is refused on every host, got {other:?}"),
+        }
     }
 
     #[test]

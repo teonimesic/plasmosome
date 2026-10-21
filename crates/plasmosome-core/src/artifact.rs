@@ -223,64 +223,94 @@ mod tests {
         )
     }
 
+    fn stranger() -> u32 {
+        if effective_uid() == 4242 { 4243 } else { 4242 }
+    }
+
     #[test]
-    fn a_file_with_its_digest_under_owned_unwritable_directories_is_verified() {
-        for mode in [0o644, 0o755, 0o600, 0o400] {
-            let root = with_file(mode);
+    fn the_judge_accepts_a_regular_file_of_root_or_the_effective_uid_with_no_write_or_set_id_bit() {
+        let path = PathBuf::from("/opt/membraned");
+        let euid = effective_uid();
+        for (uid, mode) in [
+            (0, 0o555),
+            (0, 0o444),
+            (euid, 0o444),
+            (euid, 0o400),
+            (euid, 0o000),
+            (euid, 0o1555),
+        ] {
             assert_eq!(
-                verify_in(&root, "lib/membraned", BYTES),
+                reached(&path, Kind::Regular, uid, mode),
                 Ok(()),
-                "mode {mode:04o}"
+                "uid {uid}, mode {mode:04o}"
             );
         }
     }
 
     #[test]
-    fn verify_artifact_walks_the_artifact_path_from_the_root() {
-        let root = TestRoot::walkable_from_root();
-        write_file(&root.join("membraned"), BYTES, 0o644);
-        assert_eq!(
-            verify_artifact(&pinned(&root.join("membraned"), BYTES)),
-            Ok(())
-        );
-        let refusal = verify_artifact(&pinned(&root.join("membraned"), b"other bytes"))
-            .expect_err("a wrong digest is refused");
-        assert_eq!(
-            refusal.reason,
-            ArtifactFault::Digest {
-                found: Digest::of(BYTES)
-            }
-        );
+    fn the_judge_refuses_another_kind_then_a_foreign_owner_then_a_write_bit_then_a_set_id_bit() {
+        use ArtifactFault::{ForeignOwner, NotRegular, SetIdBits, Writable};
+        let path = PathBuf::from("/opt/membraned");
+        let euid = effective_uid();
+        let stranger = stranger();
+        for kind in [Kind::Symlink, Kind::Other, Kind::Directory, Kind::Socket] {
+            assert_eq!(
+                reached(&path, kind, stranger, 0o6777),
+                Err(NotRegular { kind }),
+                "{kind:?}"
+            );
+        }
+        for (uid, mode, fault) in [
+            (stranger, 0o444, ForeignOwner { uid: stranger }),
+            (stranger, 0o6777, ForeignOwner { uid: stranger }),
+            (euid, 0o644, Writable { mode: 0o644 }),
+            (euid, 0o755, Writable { mode: 0o755 }),
+            (euid, 0o600, Writable { mode: 0o600 }),
+            (euid, 0o200, Writable { mode: 0o200 }),
+            (0, 0o464, Writable { mode: 0o464 }),
+            (0, 0o446, Writable { mode: 0o446 }),
+            (euid, 0o4755, Writable { mode: 0o4755 }),
+            (euid, 0o4555, SetIdBits { mode: 0o4555 }),
+            (0, 0o2555, SetIdBits { mode: 0o2555 }),
+            (euid, 0o6444, SetIdBits { mode: 0o6444 }),
+        ] {
+            assert_eq!(
+                reached(&path, Kind::Regular, uid, mode),
+                Err(fault),
+                "uid {uid}, mode {mode:04o}"
+            );
+        }
     }
 
     #[test]
-    fn a_wrong_digest_is_refused_with_the_digest_found() {
-        let root = with_file(0o644);
-        assert_eq!(
-            fault_in(&root, "lib/membraned", b"the bytes that were pinned"),
-            ArtifactFault::Digest {
-                found: Digest::of(BYTES)
-            }
-        );
-    }
-
-    #[test]
-    fn a_group_or_other_writable_file_is_refused_whatever_its_digest() {
-        for mode in [0o664, 0o646, 0o666, 0o620, 0o602] {
+    fn a_file_with_a_write_bit_or_a_set_id_bit_is_refused_whatever_its_digest() {
+        use ArtifactFault::{SetIdBits, Writable};
+        for (mode, fault) in [
+            (0o644, Writable { mode: 0o644 }),
+            (0o755, Writable { mode: 0o755 }),
+            (0o600, Writable { mode: 0o600 }),
+            (0o664, Writable { mode: 0o664 }),
+            (0o646, Writable { mode: 0o646 }),
+            (0o620, Writable { mode: 0o620 }),
+            (0o602, Writable { mode: 0o602 }),
+            (0o4555, SetIdBits { mode: 0o4555 }),
+        ] {
             let root = with_file(mode);
             for pinned_bytes in [BYTES, b"other bytes".as_slice()] {
+                let found = fault_in(&root, "lib/membraned", pinned_bytes);
                 assert_eq!(
-                    fault_in(&root, "lib/membraned", pinned_bytes),
-                    ArtifactFault::Writable { mode },
+                    found, fault,
                     "mode {mode:04o}: nothing is trusted after hashing"
                 );
+                let shown = found.to_string();
+                assert!(shown.contains(&format!("mode {mode:04o}")), "{shown}");
             }
         }
     }
 
     #[test]
     fn a_group_writable_directory_anywhere_above_the_file_is_refused() {
-        let root = with_file(0o644);
+        let root = with_file(0o444);
         let lib = root.join("lib");
         crate::nofollow::fixtures::set_mode(&lib, 0o775);
         assert_eq!(
@@ -294,7 +324,7 @@ mod tests {
         let root = TestRoot::new();
         make_dir(&root.join("a"), 0o757);
         make_dir(&root.join("a/b"), 0o755);
-        write_file(&root.join("a/b/membraned"), BYTES, 0o644);
+        write_file(&root.join("a/b/membraned"), BYTES, 0o444);
         assert_eq!(
             fault_in(&root, "a/b/membraned", BYTES),
             ArtifactFault::Walk(WalkRefusal::Replaceable {
@@ -305,11 +335,10 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_directory_or_a_final_symlink_is_refused_even_when_its_target_verifies() {
-        let root = with_file(0o644);
+    fn a_symlinked_directory_or_a_final_symlink_is_refused_at_the_symlink() {
+        let root = with_file(0o444);
         symlink(root.join("lib"), root.join("link")).expect("symlink");
         symlink(root.join("lib/membraned"), root.join("alias")).expect("symlink");
-        assert_eq!(verify_in(&root, "lib/membraned", BYTES), Ok(()));
         assert_eq!(
             fault_in(&root, "link/membraned", BYTES),
             ArtifactFault::Walk(WalkRefusal::Symlink {
@@ -326,7 +355,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_refused_naming_it() {
-        let root = with_file(0o644);
+        let root = with_file(0o444);
         assert_eq!(
             fault_in(&root, "lib/absent", BYTES),
             ArtifactFault::Walk(WalkRefusal::Missing {
@@ -337,7 +366,7 @@ mod tests {
 
     #[test]
     fn a_fifo_at_the_path_is_refused_within_a_second() {
-        let root = with_file(0o644);
+        let root = with_file(0o444);
         let fifo = root.join("lib/fifo");
         make_fifo(&fifo);
         let walk = root.walk("lib/fifo");
@@ -352,8 +381,8 @@ mod tests {
 
     #[test]
     fn a_directory_or_a_socket_at_the_path_is_not_a_regular_file() {
-        let root = with_file(0o644);
-        make_dir(&root.join("lib/dir"), 0o755);
+        let root = with_file(0o444);
+        make_dir(&root.join("lib/dir"), 0o555);
         let _listener = UnixListener::bind(root.join("lib/sock")).expect("bind");
         assert_eq!(
             fault_in(&root, "lib/dir", BYTES),
@@ -367,46 +396,23 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn the_file_must_be_regular_then_owned_by_root_or_the_effective_uid_then_unwritable() {
-        let path = PathBuf::from("/opt/membraned");
-        let euid = effective_uid();
-        let stranger = if euid == 4242 { 4243 } else { 4242 };
-        assert_eq!(reached(&path, Kind::Regular, 0, 0o755), Ok(()));
-        assert_eq!(reached(&path, Kind::Regular, euid, 0o644), Ok(()));
-        assert_eq!(
-            reached(&path, Kind::Regular, stranger, 0o644),
-            Err(ArtifactFault::ForeignOwner { uid: stranger })
-        );
-        assert_eq!(
-            reached(&path, Kind::Regular, stranger, 0o666),
-            Err(ArtifactFault::ForeignOwner { uid: stranger })
-        );
-        assert_eq!(
-            reached(&path, Kind::Regular, 0, 0o664),
-            Err(ArtifactFault::Writable { mode: 0o664 })
-        );
-        for kind in [Kind::Symlink, Kind::Other, Kind::Directory, Kind::Socket] {
-            assert_eq!(
-                reached(&path, kind, stranger, 0o666),
-                Err(ArtifactFault::NotRegular { kind }),
-                "{kind:?}"
-            );
+    fn off_macos_a_read_only_file_with_its_digest_is_refused_as_immutability_unverifiable() {
+        let root = TestRoot::walkable_from_root();
+        for (name, mode) in [("membraned", 0o444), ("helper", 0o555)] {
+            let path = root.join(name);
+            write_file(&path, BYTES, mode);
+            for pinned_bytes in [BYTES, b"other bytes".as_slice()] {
+                let refusal = verify_artifact(&pinned(&path, pinned_bytes))
+                    .expect_err("off macOS no artifact is trusted");
+                assert_eq!(
+                    refusal.reason,
+                    ArtifactFault::ImmutabilityUnverifiable,
+                    "mode {mode:04o}"
+                );
+            }
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_file_whose_acl_lets_anyone_write_it_is_refused() {
-        use crate::nofollow::fixtures::add_acl;
-        let root = with_file(0o644);
-        add_acl(&root.join("lib/membraned"), "everyone deny write");
-        assert_eq!(verify_in(&root, "lib/membraned", BYTES), Ok(()));
-        add_acl(&root.join("lib/membraned"), "everyone allow write");
-        assert_eq!(
-            fault_in(&root, "lib/membraned", BYTES),
-            ArtifactFault::WriteAcl
-        );
     }
 
     #[test]
@@ -432,20 +438,23 @@ mod tests {
         let refusal = verify_in(&root, "lib/membraned", BYTES).expect_err("refused");
         let path = root.join("lib/membraned");
         let shown = path.to_str().expect("UTF-8");
+        let reason = refusal.reason.to_string();
         assert_eq!(
             refusal.to_string(),
-            format!("{shown} is not a trusted artifact: {}", refusal.reason)
+            format!("{shown} is not a trusted artifact: {reason}")
         );
         let wire = refusal.wire();
         assert_eq!(wire.code(), ErrorCode::ManifestInvalid);
         let value = serde_json::to_value(&wire).expect("a wire error serializes");
         assert_eq!(value["code"], Value::from(108), "{value}");
         assert_eq!(value["path"], Value::from(shown), "{value}");
+        assert_eq!(value["detail"], Value::from(reason.as_str()), "{value}");
         assert_eq!(
-            value["detail"],
-            Value::from(refusal.reason.to_string()),
+            value["message"],
+            Value::from(format!("`{shown}` is not a trusted artifact: {reason}")),
             "{value}"
         );
+        assert_eq!(value.get("fix"), None, "{value}");
     }
 
     #[test]
@@ -461,12 +470,24 @@ mod tests {
                 format!("it is owned by uid 4242, neither root nor the controller's uid {euid}"),
             ),
             (
-                ArtifactFault::Writable { mode: 0o664 },
-                "it has mode 0664: group or other can write it".to_owned(),
+                ArtifactFault::Writable { mode: 0o644 },
+                "it has mode 0644, with a write bit".to_owned(),
+            ),
+            (
+                ArtifactFault::SetIdBits { mode: 0o4555 },
+                "it has mode 4555, with a set-user-ID or set-group-ID bit".to_owned(),
             ),
             (
                 ArtifactFault::WriteAcl,
                 "it carries an ACL allow entry that grants write".to_owned(),
+            ),
+            (
+                ArtifactFault::NotImmutable,
+                "it has neither uchg nor schg set".to_owned(),
+            ),
+            (
+                ArtifactFault::ImmutabilityUnverifiable,
+                "this build can verify immutability only on macOS, through uchg or schg".to_owned(),
             ),
             (
                 ArtifactFault::Digest {
@@ -485,6 +506,152 @@ mod tests {
             ),
         ] {
             assert_eq!(fault.to_string(), text);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use super::*;
+        use crate::nofollow::fixtures::{add_acl, set_flags, set_mode};
+        use std::fs::{self, OpenOptions};
+        use std::io::Write;
+
+        fn with_immutable_file(mode: u32) -> TestRoot {
+            let root = with_file(mode);
+            set_flags(&root.join("lib/membraned"), libc::UF_IMMUTABLE);
+            root
+        }
+
+        #[test]
+        fn uchg_or_schg_marks_a_file_immutable_and_no_other_flag_does() {
+            for (flags, immutable) in [
+                (0, false),
+                (libc::UF_IMMUTABLE, true),
+                (libc::SF_IMMUTABLE, true),
+                (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE, true),
+                (libc::UF_NODUMP | libc::UF_IMMUTABLE, true),
+                (libc::UF_NODUMP, false),
+                (libc::UF_APPEND, false),
+                (libc::SF_APPEND, false),
+                (libc::UF_HIDDEN, false),
+            ] {
+                assert_eq!(is_immutable(flags), immutable, "flags {flags:#x}");
+            }
+        }
+
+        #[test]
+        fn a_read_only_file_with_uchg_and_its_digest_is_verified() {
+            for mode in [0o444, 0o555, 0o400] {
+                let root = with_immutable_file(mode);
+                assert_eq!(
+                    verify_in(&root, "lib/membraned", BYTES),
+                    Ok(()),
+                    "mode {mode:04o}"
+                );
+            }
+        }
+
+        #[test]
+        fn verify_artifact_walks_the_artifact_path_from_the_root() {
+            let root = TestRoot::walkable_from_root();
+            let path = root.join("membraned");
+            write_file(&path, BYTES, 0o444);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            assert_eq!(verify_artifact(&pinned(&path, BYTES)), Ok(()));
+            let refusal = verify_artifact(&pinned(&path, b"other bytes"))
+                .expect_err("a wrong digest is refused");
+            assert_eq!(
+                refusal.reason,
+                ArtifactFault::Digest {
+                    found: Digest::of(BYTES)
+                }
+            );
+        }
+
+        #[test]
+        fn a_wrong_digest_is_refused_with_the_digest_found() {
+            let root = with_immutable_file(0o444);
+            assert_eq!(
+                fault_in(&root, "lib/membraned", b"the bytes that were pinned"),
+                ArtifactFault::Digest {
+                    found: Digest::of(BYTES)
+                }
+            );
+        }
+
+        #[test]
+        fn a_read_only_file_without_uchg_is_refused_whatever_its_digest() {
+            for mode in [0o444, 0o555] {
+                let root = with_file(mode);
+                for pinned_bytes in [BYTES, b"other bytes".as_slice()] {
+                    let found = fault_in(&root, "lib/membraned", pinned_bytes);
+                    assert_eq!(found, ArtifactFault::NotImmutable, "mode {mode:04o}");
+                    assert!(found.to_string().contains("uchg"), "{found}");
+                }
+            }
+        }
+
+        #[test]
+        fn uchg_does_not_excuse_a_write_bit_or_a_set_id_bit() {
+            for (mode, fault) in [
+                (0o644, ArtifactFault::Writable { mode: 0o644 }),
+                (0o755, ArtifactFault::Writable { mode: 0o755 }),
+                (0o4555, ArtifactFault::SetIdBits { mode: 0o4555 }),
+            ] {
+                let root = with_immutable_file(mode);
+                assert_eq!(
+                    fault_in(&root, "lib/membraned", BYTES),
+                    fault,
+                    "mode {mode:04o}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_write_acl_is_refused_before_immutability_and_before_the_digest() {
+            let root = with_file(0o444);
+            let path = root.join("lib/membraned");
+            add_acl(&path, "everyone deny write");
+            set_flags(&path, libc::UF_IMMUTABLE);
+            assert_eq!(verify_in(&root, "lib/membraned", BYTES), Ok(()));
+            set_flags(&path, 0);
+            add_acl(&path, "everyone allow write");
+            assert_eq!(
+                fault_in(&root, "lib/membraned", BYTES),
+                ArtifactFault::WriteAcl,
+                "without uchg"
+            );
+            set_flags(&path, libc::UF_IMMUTABLE);
+            for pinned_bytes in [BYTES, b"other bytes".as_slice()] {
+                assert_eq!(
+                    fault_in(&root, "lib/membraned", pinned_bytes),
+                    ArtifactFault::WriteAcl,
+                    "nothing is hashed before the ACL is checked"
+                );
+            }
+        }
+
+        #[test]
+        fn the_hash_reads_the_checked_descriptor_and_stops_one_byte_past_the_checked_size() {
+            let root = with_immutable_file(0o444);
+            let path = root.join("lib/membraned");
+            let checked =
+                open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
+            set_flags(&path, 0);
+            set_mode(&path, 0o644);
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(b"XY"))
+                .expect("the file grows by two bytes");
+            write_file(&root.join("lib/other"), b"another file", 0o444);
+            fs::rename(root.join("lib/other"), &path).expect("another file takes the path");
+            assert_eq!(
+                hash_checked(checked, &path, &Digest::of(BYTES)),
+                Err(ArtifactFault::Digest {
+                    found: Digest::of(&[BYTES, b"X"].concat())
+                })
+            );
         }
     }
 }
