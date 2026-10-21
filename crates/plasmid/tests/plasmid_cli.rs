@@ -103,6 +103,8 @@ fn version_is_the_sole_argument() {
         &["new", "demo", "--version"],
         &["add", "x", "--version"],
         &["--version", "--json"],
+        &["--version", "--", "x"],
+        &["--kernel", "--version"],
     ] {
         let error = usage_error(&run(arguments));
         assert_eq!(error["argument"], "--version", "{arguments:?}");
@@ -215,6 +217,40 @@ fn a_command_help_says_whether_it_is_served() {
     assert_eq!(error["argument"], "y");
 }
 
+fn command_help(command: &str) -> String {
+    let output = run(&[command, "--help"]);
+    assert_eq!(output.status.code(), Some(0), "{command}: {output:?}");
+    text(&output.stdout)
+}
+
+#[test]
+fn help_is_read_from_a_value_and_up_to_a_flag_it_does_not_know() {
+    let binary = binary_help();
+    for (arguments, expected) in [
+        (&["--kernel", "--help"][..], binary.clone()),
+        (&["--socket", "-h"], binary),
+        (
+            &["add", "my-thing", "--cell", "c1", "--help"],
+            command_help("add"),
+        ),
+        (&["list", "--cell", "c1", "--help"], command_help("list")),
+    ] {
+        let output = run(arguments);
+        assert_eq!(output.status.code(), Some(0), "{arguments:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+        assert_eq!(text(&output.stdout), expected, "{arguments:?}");
+    }
+}
+
+#[test]
+fn help_after_dashes_is_not_read() {
+    for flag in ["--help", "-h"] {
+        assert_not_served(&run(&["add", "x", "--", flag]), "plasmid.add");
+        let error = usage_error(&run(&["--", flag]));
+        assert_eq!(error["argument"], "--", "{flag}");
+    }
+}
+
 #[test]
 fn unserved_commands_refuse_with_not_served() {
     for (command, positionals, method) in UNSERVED {
@@ -231,6 +267,10 @@ fn unserved_commands_refuse_with_not_served() {
         &["--frob", "add", "x"],
         &["add", "x", "--deadline-ms", "0"],
         &["add", "x", "--json"],
+        &["--deadline-ms", "5", "add", "x"],
+        &["--socket", "/x", "add", "x"],
+        &["add", "x", "--kernel", "a", "--kernel", "b"],
+        &["add", "x", "--kernel"],
     ] {
         assert_not_served(&run(arguments), "plasmid.add");
     }
@@ -238,11 +278,9 @@ fn unserved_commands_refuse_with_not_served() {
     let output = run(&["add", "x", "--human"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
-    let stderr = text(&output.stderr);
-    assert!(stderr.ends_with("(client not_served)\n"), "{stderr:?}");
-    assert!(
-        serde_json::from_str::<serde_json::Value>(&stderr).is_err(),
-        "{stderr:?}"
+    assert_eq!(
+        text(&output.stderr),
+        "plasmid add is not served by this build\n(client not_served)\n"
     );
 
     for (arguments, named) in [
@@ -250,6 +288,9 @@ fn unserved_commands_refuse_with_not_served() {
         (&["add", "x", "--human", "--json"], "--json"),
         (&["add", "x", "--human", "--human"], "--human"),
         (&["add", "x", "--json", "--json"], "--json"),
+        (&["add", "x", "--json", "--human", "--json"], "--human"),
+        (&["add", "x", "--human", "--json", "--human"], "--json"),
+        (&["add", "x", "--json", "--json", "--human"], "--json"),
     ] {
         let error = usage_error(&run(arguments));
         assert_eq!(error["argument"], named, "{arguments:?}");
@@ -285,19 +326,55 @@ fn usage_errors_are_invalid_envelopes() {
 #[test]
 fn the_full_parse_names_the_first_fault_on_the_line() {
     for (arguments, argument) in [
-        (&["frobnicate", "--", "x"][..], "--"),
+        (&["frobnicate", "--", "x"][..], "frobnicate"),
+        (&["--", "frobnicate"], "--"),
+        (&["frobnicate", "--frob"], "frobnicate"),
+        (&["--frob", "frobnicate"], "--frob"),
+        (&["frobnicate", "--json", "--json"], "frobnicate"),
+        (&["--json", "--json", "frobnicate"], "--json"),
+        (&["frobnicate", "--json", "--human"], "frobnicate"),
+        (&["--json", "--human", "frobnicate"], "--human"),
+        (&["frobnicate", "--kernel"], "frobnicate"),
+        (&["--kernel", "--", "frobnicate"], "--kernel"),
+        (&["x", "--kernel", "--", "y"], "x"),
         (&["--kernel", "a", "--kernel", "b"], "--kernel"),
         (&["--json", "--json"], "--json"),
-        (&["frobnicate", "--kernel"], "--kernel"),
         (&["--socket"], "--socket"),
+        (&["--kernel", "--"], "--kernel"),
         (&["--json", "--human"], "--human"),
         (&["--human", "--json"], "--json"),
-        (&["frobnicate", "--json", "--human"], "--human"),
+        (&["--json", "--json", "--frob"], "--json"),
+        (&["--frob", "--json", "--json"], "--frob"),
+        (&["--json", "--human", "--frob"], "--human"),
+        (&["--frob", "--json", "--human"], "--frob"),
+        (&["--json", "--human", "--json"], "--human"),
+        (&["--human", "--json", "--human"], "--json"),
+        (&["--json", "--json", "--human"], "--json"),
+        (
+            &["--kernel", "a", "--json", "--human", "--kernel", "b"],
+            "--human",
+        ),
+        (
+            &["--kernel", "a", "--kernel", "b", "--json", "--human"],
+            "--kernel",
+        ),
+        (&["--json", "--human", "--kernel"], "--human"),
+        (&["--json", "--json", "--", "x"], "--json"),
+        (&["--", "--json", "--json"], "--"),
+        (&["--json", "--human", "--"], "--human"),
+        (&["--", "--json", "--human"], "--"),
         (&["list", "a", "--help"], "a"),
     ] {
         let error = usage_error(&run(arguments));
         assert_eq!(error["argument"], argument, "{arguments:?}");
     }
+}
+
+#[test]
+fn a_form_flag_in_a_value_position_is_the_value() {
+    assert_not_served(&run(&["add", "x", "--kernel", "--human"]), "plasmid.add");
+    let error = usage_error(&run(&["frobnicate", "--kernel", "--human"]));
+    assert_eq!(error["argument"], "frobnicate");
 }
 
 #[cfg(unix)]
@@ -311,58 +388,150 @@ fn an_argument_that_is_not_utf8_is_a_usage_error_naming_its_lossy_form() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn an_argument_that_is_not_utf8_is_a_fault_where_it_stands() {
+    use std::os::unix::ffi::OsStrExt;
+    let rows: [(&[&[u8]], &[u8]); 11] = [
+        (&[b"frobnicate", b"a\xff"], b"frobnicate"),
+        (&[b"a\xff", b"frobnicate"], b"a\xff"),
+        (&[b"--frob", b"\xff"], b"--frob"),
+        (&[b"\xff", b"--frob"], b"\xff"),
+        (&[b"--frob", b"--", b"\xff"], b"--frob"),
+        (&[b"--", b"\xff"], b"--"),
+        (&[b"\xff", b"--"], b"\xff"),
+        (&[b"--kernel", b"\xff", b"--frob"], b"\xff"),
+        (&[b"new", b"demo", b"--", b"\xff"], b"--"),
+        (&[b"new", b"Demo", b"x\xff"], b"Demo"),
+        (&[b"new", b"x\xff", b"Demo"], b"x\xff"),
+    ];
+    for (arguments, argument) in rows {
+        let arguments: Vec<&OsStr> = arguments
+            .iter()
+            .map(|argument| OsStr::from_bytes(argument))
+            .collect();
+        let error = usage_error(&run(&arguments));
+        assert_eq!(
+            error["argument"],
+            String::from_utf8_lossy(argument).as_ref(),
+            "{arguments:?}"
+        );
+    }
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
 }
 
+fn terminal_controls() -> Vec<char> {
+    [0x01..=0x1f, 0x7f..=0x9f, 0x202a..=0x202e, 0x2066..=0x2069]
+        .into_iter()
+        .flatten()
+        .map(|code| char::from_u32(code).expect("a character"))
+        .collect()
+}
+
+fn assert_no_raw_control(stderr: &[u8], lines: usize) {
+    let shown = String::from_utf8_lossy(stderr);
+    let pieces: Vec<&[u8]> = stderr.split(|byte| *byte == b'\n').collect();
+    assert_eq!(pieces.len(), lines + 1, "{lines} lines: {shown:?}");
+    assert!(pieces[lines].is_empty(), "a final newline: {shown:?}");
+    for control in terminal_controls() {
+        let mut encoded = [0; 4];
+        let bytes = control.encode_utf8(&mut encoded).as_bytes();
+        for piece in &pieces {
+            assert!(
+                !contains(piece, bytes),
+                "U+{:04X} is raw: {shown:?}",
+                u32::from(control)
+            );
+        }
+    }
+}
+
 #[test]
 fn a_refused_argument_round_trips_and_never_prints_a_control() {
-    let controls: [u32; 5] = [0x1b, 0x9b, 0x7f, 0x202e, 0x0a];
+    let controls = terminal_controls();
+    assert_eq!(controls.len(), 73);
     let backslash = char::from(0x5c_u8);
-    let mut argument = format!("fr{}o{backslash}b", '"');
-    argument.extend(controls.map(|code| char::from_u32(code).expect("a character")));
-    let raw: [&[u8]; 4] = [&[0x1b], &[0x7f], &[0xc2, 0x9b], &[0xe2, 0x80, 0xae]];
+    let neighbours: String = [
+        0x20, 0x7e, 0xa0, 0x2028, 0x2029, 0x202f, 0x2065, 0x206a, 0xfeff,
+    ]
+    .into_iter()
+    .map(|code| char::from_u32(code).expect("a character"))
+    .collect();
+    let prefix = format!("fr{}o{backslash}b", '"');
+    let argument = format!("{prefix}{}{neighbours}", String::from_iter(&controls));
 
     let output = run(&[argument.as_str()]);
-    for bytes in raw {
-        assert!(!contains(&output.stderr, bytes), "{bytes:x?}: {output:?}");
+    assert_no_raw_control(&output.stderr, 1);
+    let stderr = text(&output.stderr);
+    let mut escaped = format!("fr{backslash}{}o{backslash}{backslash}b", '"');
+    for control in &controls {
+        let escape = format!("{backslash}u{:04x}", u32::from(*control));
+        assert!(stderr.contains(&escape), "{escape}: {stderr:?}");
+        escaped.push_str(&escape);
     }
+    escaped.push_str(&neighbours);
+    assert!(stderr.contains(&escaped), "{stderr:?}");
     let error = usage_error(&output);
     assert_eq!(error["argument"], argument.as_str());
 
     let output = run(&[argument.as_str(), "--human"]);
     assert_eq!(output.status.code(), Some(64), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
-    for bytes in raw {
-        assert!(!contains(&output.stderr, bytes), "{bytes:x?}: {output:?}");
-    }
+    assert_no_raw_control(&output.stderr, 2);
     let stderr = text(&output.stderr);
-    for shown in ["<U+001B>", "<U+009B>", "<U+007F>", "<U+202E>", "<U+000A>"] {
-        assert!(stderr.contains(shown), "{shown}: {stderr:?}");
+    let mut shown = prefix;
+    for control in &controls {
+        let show = format!("<U+{:04X}>", u32::from(*control));
+        assert!(stderr.contains(&show), "{show}: {stderr:?}");
+        shown.push_str(&show);
     }
+    shown.push_str(&neighbours);
+    assert!(stderr.contains(&shown), "{stderr:?}");
     assert!(
-        stderr.contains(&format!("fr{}o{backslash}b<U+001B>", '"')),
+        stderr.ends_with("\n(client invalid_argument)\n"),
         "{stderr:?}"
     );
-    let lines: Vec<&str> = stderr.lines().collect();
-    assert!(stderr.ends_with('\n'), "{stderr:?}");
-    assert_eq!(lines.len(), 2, "{stderr:?}");
-    assert_eq!(lines[1], "(client invalid_argument)", "{stderr:?}");
+}
+
+fn closed_stdout(arguments: &[&str]) -> Output {
+    let mut command = plasmid();
+    command.stdout(closed_pipe());
+    run_with(command, arguments)
 }
 
 #[test]
 fn help_and_version_to_a_closed_stdout_exit_1() {
-    for arguments in [&["--help"][..], &["--version"], &["add", "--help"]] {
-        let mut command = plasmid();
-        command.stdout(closed_pipe());
-        let output = run_with(command, arguments);
+    for (arguments, written) in [
+        (&["--help"][..], "--help"),
+        (&["-h"], "--help"),
+        (&["add", "--help"], "--help"),
+        (&["new", "--help"], "--help"),
+        (&["--version"], "--version"),
+    ] {
+        let output = closed_stdout(arguments);
         assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!stderr.is_empty(), "{arguments:?}");
-        assert!(!stderr.contains("panicked"), "{arguments:?}: {stderr}");
+        let (command, error) = envelope(&output);
+        assert_eq!(command, written, "{arguments:?}");
+        assert_eq!(error["code"], "local_io", "{arguments:?}");
+        assert_eq!(error["errno"], 32, "{arguments:?}");
+        assert_eq!(
+            keys(&error),
+            ["code", "domain", "errno", "message"],
+            "{arguments:?}"
+        );
     }
+    let output = closed_stdout(&["--help", "--human"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = text(&output.stderr);
+    let lines: Vec<&str> = stderr.split('\n').collect();
+    assert_eq!(lines.len(), 3, "{stderr:?}");
+    assert!(lines[0].contains("stdout"), "{stderr:?}");
+    assert_eq!(lines[1..], ["(client local_io)", ""], "{stderr:?}");
 }
 
 #[test]

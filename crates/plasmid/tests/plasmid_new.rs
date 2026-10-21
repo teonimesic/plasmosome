@@ -437,6 +437,8 @@ fn plasmid_new_refuses_what_does_not_apply_to_it() {
         (&["new", "demo", "--json"], "--json"),
         (&["new", "demo", "--frob"], "--frob"),
         (&["new", "demo", "--"], "--"),
+        (&["new", "--json", "demo"], "--json"),
+        (&["new", "demo", "--kernel", "a", "--json"], "--kernel"),
     ] {
         let (scratch, work) = working_directory();
         let error = usage_error(&plasmid_in(&work, arguments));
@@ -454,6 +456,43 @@ fn plasmid_new_refuses_what_does_not_apply_to_it() {
         "{stderr:?}"
     );
     assert_eq!(entries(&work), Vec::<String>::new());
+
+    let output = plasmid_in(&work, &["new", "demo", "--kernel", "a", "--human"]);
+    assert_eq!(output.status.code(), Some(64), "{output:?}");
+    let stderr = text(&output.stderr);
+    let (message, _) = stderr.split_once('\n').expect("two lines");
+    assert!(
+        message.contains("--kernel") && !message.contains("--human"),
+        "{stderr:?}"
+    );
+    assert_eq!(entries(&work), Vec::<String>::new());
+}
+
+#[test]
+fn plasmid_new_names_the_first_fault_on_its_line() {
+    for (arguments, argument) in [
+        (&["new", "Demo", "--json"][..], "Demo"),
+        (&["new", "--json", "Demo"], "--json"),
+        (&["new", "Demo", "--frob"], "Demo"),
+        (&["new", "--frob", "Demo"], "--frob"),
+        (&["new", "Demo", "--"], "Demo"),
+        (&["new", "--", "Demo"], "--"),
+        (&["new", "Demo", "--kernel", "a"], "Demo"),
+        (&["new", "--kernel", "a", "Demo"], "--kernel"),
+        (&["--kernel", "a", "new", "Demo"], "--kernel"),
+        (&["new", "a", "b", "--json"], "b"),
+        (&["new", "a", "--json", "b"], "--json"),
+        (&["new", "a", "b", "--"], "b"),
+        (&["new", "a", "--", "b"], "--"),
+        (&["new", "Demo", "b"], "Demo"),
+        (&["new", "a", "B"], "B"),
+    ] {
+        let (scratch, work) = working_directory();
+        let error = usage_error(&plasmid_in(&work, arguments));
+        assert_eq!(error["argument"], argument, "{arguments:?}");
+        assert_eq!(entries(&work), Vec::<String>::new(), "{arguments:?}");
+        assert_eq!(entries(scratch.path()), ["work"], "{arguments:?}");
+    }
 }
 
 #[test]
