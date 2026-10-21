@@ -82,8 +82,8 @@ enum Defect {
     SwallowsInvalidOperations(Call),
     ValidatesAfterTheEffect(Call),
     RefusesAnotherLaunchAtAnOccupiedEndpoint,
-    GrantReplacesAnAppliedObject,
-    GrantReplacesAPlantedObject,
+    GrantReplacesAnAppliedObject(Change),
+    GrantReplacesAPlantedObject(Change),
     AcceptsInvalidOperationsOf(UniverseClass, Call),
     RefusalRollsBackItsAddress(Call),
     ChecksTheAddressBeforeValidating(Call),
@@ -94,6 +94,13 @@ enum Field {
     Kind,
     Plugin,
     Cell,
+    Recipe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    Owner,
+    Key,
     Recipe,
 }
 
@@ -642,11 +649,19 @@ impl EnforcementBackend for DefectiveBackend {
                 Defect::PlantedResiduePromotesToGrant => !applied,
                 _ => false,
             } && identical;
+            let change = observed
+                .objects()
+                .find(|held| held.class() == handle.class && held.id == handle.id)
+                .and_then(|held| change_between(held, &entry.object()));
             let replaces = match self.defect {
-                Defect::GrantReplacesAnAppliedObject => applied,
-                Defect::GrantReplacesAPlantedObject => !applied,
+                Defect::GrantReplacesAnAppliedObject(replaced) => {
+                    applied && change == Some(replaced)
+                }
+                Defect::GrantReplacesAPlantedObject(replaced) => {
+                    !applied && change == Some(replaced)
+                }
                 _ => false,
-            } && !identical;
+            };
             if replaces {
                 self.drop_address(handle);
                 self.state.insert(entry.object())?;
@@ -873,6 +888,20 @@ fn same_ignoring(issued: &LedgerEntry, retried: &LedgerEntry, field: Field) -> b
         }
     }
     relaxed == *issued
+}
+
+fn change_between(standing: &OsObject, requested: &OsObject) -> Option<Change> {
+    if standing == requested {
+        None
+    } else if standing.capability == requested.capability {
+        Some(Change::Owner)
+    } else if standing.owner != requested.owner {
+        None
+    } else if standing.capability.key() != requested.capability.key() {
+        Some(Change::Key)
+    } else {
+        Some(Change::Recipe)
+    }
 }
 
 fn identity_conflict(handle: Handle) -> BackendError {
@@ -1730,54 +1759,87 @@ fn the_retry_clause_rejects_a_grant_that_promotes_an_applied_or_planted_object()
     }
 }
 
+const CHANGES: [Change; 3] = [Change::Owner, Change::Key, Change::Recipe];
+
 #[test]
 fn the_retry_clause_rejects_a_grant_that_replaces_an_applied_or_planted_object() {
-    for defect in [
-        Defect::GrantReplacesAnAppliedObject,
-        Defect::GrantReplacesAPlantedObject,
-    ] {
-        assert_rejected(|| conformance::grant_retry_returns_the_original_entry(carrying(defect)));
+    for change in CHANGES {
+        for defect in [
+            Defect::GrantReplacesAnAppliedObject(change),
+            Defect::GrantReplacesAPlantedObject(change),
+        ] {
+            assert_rejected(|| {
+                conformance::grant_retry_returns_the_original_entry(carrying(defect))
+            });
+        }
     }
 }
 
 #[test]
-fn a_replacing_grant_takes_over_only_a_changed_object_of_its_own_origin() {
-    for (defect, replaced) in [
-        (Defect::GrantReplacesAnAppliedObject, Call::Apply),
-        (Defect::GrantReplacesAPlantedObject, Call::Plant),
-    ] {
-        for origin in [Call::Apply, Call::Plant] {
-            let standing = conformance::op_for(
-                GrantId::new(),
-                conformance::conformance_owner(),
-                mount("/src", "/work"),
-            );
-            let changed = conformance::op_for(
-                standing.id(),
-                conformance::second_owner(),
-                mount("/src", "/work"),
-            );
-            let mut backend = DefectiveBackend::carrying(defect);
-            call_with(&mut backend, origin, &standing).unwrap();
-            assert_eq!(
-                backend.grant(standing.clone(), GrantKind::Hot),
-                Err(identity_conflict(standing.handle())),
-                "{defect:?} must not promote an identical {origin:?} object"
-            );
-            let outcome = backend.grant(changed.clone(), GrantKind::Hot);
-            let mut expected = OsState::new();
-            if origin == replaced {
-                assert_eq!(outcome.map(|entry| entry.handle), Ok(changed.handle()));
-                expected.insert(changed.object()).unwrap();
-            } else {
-                assert_eq!(outcome, Err(identity_conflict(changed.handle())));
-                expected.insert(standing.object()).unwrap();
+fn a_replacing_grant_takes_over_only_its_own_change_to_an_object_of_its_own_origin() {
+    let capability = session_file("/var/lib/plasmosome/conformance/skills/pr.md");
+    let [key_changed, recipe_changed] = conformance::changed_capabilities(&capability);
+    for change in CHANGES {
+        for (defect, replaced) in [
+            (Defect::GrantReplacesAnAppliedObject(change), Call::Apply),
+            (Defect::GrantReplacesAPlantedObject(change), Call::Plant),
+        ] {
+            for origin in [Call::Apply, Call::Plant] {
+                let standing = conformance::op_for(
+                    GrantId::new(),
+                    conformance::conformance_owner(),
+                    capability.clone(),
+                );
+                let requests = [
+                    (
+                        Change::Owner,
+                        conformance::op_for(
+                            standing.id(),
+                            conformance::second_owner(),
+                            capability.clone(),
+                        ),
+                    ),
+                    (
+                        Change::Key,
+                        conformance::op_for(
+                            standing.id(),
+                            conformance::conformance_owner(),
+                            key_changed.clone(),
+                        ),
+                    ),
+                    (
+                        Change::Recipe,
+                        conformance::op_for(
+                            standing.id(),
+                            conformance::conformance_owner(),
+                            recipe_changed.clone(),
+                        ),
+                    ),
+                ];
+                for (requested, changed) in requests {
+                    let mut backend = DefectiveBackend::carrying(defect);
+                    call_with(&mut backend, origin, &standing).unwrap();
+                    assert_eq!(
+                        backend.grant(standing.clone(), GrantKind::Hot),
+                        Err(identity_conflict(standing.handle())),
+                        "{defect:?} must not promote an identical {origin:?} object"
+                    );
+                    let outcome = backend.grant(changed.clone(), GrantKind::Hot);
+                    let mut expected = OsState::new();
+                    if origin == replaced && requested == change {
+                        assert_eq!(outcome.map(|entry| entry.handle), Ok(changed.handle()));
+                        expected.insert(changed.object()).unwrap();
+                    } else {
+                        assert_eq!(outcome, Err(identity_conflict(changed.handle())));
+                        expected.insert(standing.object()).unwrap();
+                    }
+                    assert_eq!(
+                        backend.snapshot_os_state(),
+                        expected,
+                        "{defect:?} {origin:?} {requested:?}"
+                    );
+                }
             }
-            assert_eq!(
-                backend.snapshot_os_state(),
-                expected,
-                "{defect:?} {origin:?}"
-            );
         }
     }
 }
