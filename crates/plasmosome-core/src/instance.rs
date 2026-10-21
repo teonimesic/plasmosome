@@ -1703,6 +1703,7 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
@@ -2322,7 +2323,7 @@ mod tests {
         static BEFORE_NEXT_FILE_SYNC: RefCell<Option<BeforeSync>> = const { RefCell::new(None) };
     }
 
-    const WATCHED: [&CStr; 8] = [
+    const WATCHED: [&CStr; 9] = [
         c"launched",
         c"launched.tmp",
         c"created",
@@ -2331,6 +2332,7 @@ mod tests {
         c"retired",
         c"cells",
         c"controller.lock",
+        c"supervisor.lock",
     ];
 
     #[derive(Debug, Clone)]
@@ -4608,5 +4610,735 @@ mod tests {
                 assert!(text.contains(&source), "{text:?} omits its cause");
             }
         }
+    }
+
+    type ScanHook = Box<dyn FnMut()>;
+
+    thread_local! {
+        static AFTER_SCAN: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn after_scan() {
+        AFTER_SCAN.with(|slot| {
+            if let Some(work) = slot.borrow_mut().as_mut() {
+                work();
+            }
+        });
+    }
+
+    fn on_every_scan(work: impl FnMut() + 'static) {
+        AFTER_SCAN.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
+    }
+
+    fn on_first_scan(work: impl FnOnce() + 'static) {
+        let mut work = Some(work);
+        on_every_scan(move || {
+            if let Some(work) = work.take() {
+                work();
+            }
+        });
+    }
+
+    fn allocated(instance: &InstanceRoot, lock: &WriterLock) -> CellId {
+        instance
+            .allocate_cell(lock)
+            .expect("a cell is allocated")
+            .cell()
+            .clone()
+    }
+
+    fn entries(root: &Path, place: &str, names: &[&str]) {
+        for name in names {
+            fs::create_dir_all(root.join(place).join(name)).expect("the entry is made");
+        }
+    }
+
+    fn names_under(path: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(path)
+            .expect("the directory lists")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_first_cell_is_cell_1_whatever_is_missing() {
+        for made in [
+            &[][..],
+            &["cells"][..],
+            &["retired"][..],
+            &["cells", "retired"][..],
+        ] {
+            let (_dir, root) = temp_root();
+            for name in made {
+                fs::create_dir(root.join(name)).expect("the directory is made");
+            }
+            let (instance, lock) = locked(&root);
+            let dir = instance.allocate_cell(&lock).expect("a cell is allocated");
+            assert_eq!(dir.cell(), &cell("cell-1"), "{made:?}");
+            assert_eq!(
+                dir.journal_path(),
+                root.join("cells/cell-1/ledger.ndjson"),
+                "{made:?}"
+            );
+            assert_eq!(mode_of(&root.join("cells/cell-1")), 0o700, "{made:?}");
+            assert_eq!(names_under(&root.join("cells")), ["cell-1"], "{made:?}");
+        }
+    }
+
+    #[test]
+    fn the_next_cell_is_one_above_the_largest_number_in_cells_or_retired() {
+        for (cells, retired, next) in [
+            (&["cell-2"][..], &["cell-7"][..], "cell-8"),
+            (&["cell-12", "cell-3"][..], &["cell-9"][..], "cell-13"),
+            (&["cell-1"][..], &[][..], "cell-2"),
+        ] {
+            let (_dir, root) = temp_root();
+            entries(&root, "cells", cells);
+            entries(&root, "retired", retired);
+            let (instance, lock) = locked(&root);
+            assert_eq!(
+                allocated(&instance, &lock),
+                cell(next),
+                "{cells:?} {retired:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_that_are_not_cell_ids_do_not_count() {
+        let (_dir, root) = temp_root();
+        entries(
+            &root,
+            "cells",
+            &["cell-2", "cell-07", "cell-x", "cell-0", "Cell-9", "cell-"],
+        );
+        entries(
+            &root,
+            "retired",
+            &["cell-10000000000", "cell-99999999999", "notes", "cell-5 "],
+        );
+        fs::write(root.join("cells/cell-30.tmp"), b"").expect("the file is made");
+        let (instance, lock) = locked(&root);
+        assert_eq!(allocated(&instance, &lock), cell("cell-3"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_does_not_count() {
+        let (_dir, root) = temp_root();
+        entries(&root, "retired", &["cell-2"]);
+        fs::create_dir(root.join("retired").join(OsStr::from_bytes(b"cell-9\xff")))
+            .expect("the entry is made");
+        let (instance, lock) = locked(&root);
+        assert_eq!(allocated(&instance, &lock), cell("cell-3"));
+    }
+
+    #[test]
+    fn a_retired_id_is_never_allocated_again() {
+        let (_dir, root) = temp_root();
+        entries(&root, "retired", &["cell-3"]);
+        let (instance, lock) = locked(&root);
+        let dir = instance.allocate_cell(&lock).expect("a cell is allocated");
+        assert_eq!(dir.cell(), &cell("cell-4"));
+        instance.retire(&lock, dir).expect("the cell retires");
+        assert!(names_under(&root.join("cells")).is_empty());
+        assert_eq!(allocated(&instance, &lock), cell("cell-5"));
+    }
+
+    #[test]
+    fn every_entry_counts_by_its_name_and_none_is_followed() {
+        let (_dir, root) = temp_root();
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir(&elsewhere).expect("the link target is made");
+        for place in ["cells", "retired"] {
+            fs::create_dir(root.join(place)).expect("the directory is made");
+        }
+        fs::write(root.join("retired/cell-5"), b"").expect("the file is made");
+        symlink(&elsewhere, root.join("cells/cell-6")).expect("the link is made");
+        symlink(root.join("nowhere"), root.join("retired/cell-4")).expect("the link is made");
+        make_fifo(&root.join("cells/cell-2"));
+        let (instance, lock) = locked(&root);
+        assert_eq!(allocated(&instance, &lock), cell("cell-7"));
+        assert!(names_under(&elsewhere).is_empty());
+        assert!(!exists(&root.join("nowhere")));
+    }
+
+    #[test]
+    fn a_name_taken_after_the_scan_makes_the_allocation_scan_again() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        let scans = Rc::new(Cell::new(0));
+        let (counted, cells) = (Rc::clone(&scans), root.join("cells"));
+        on_every_scan(move || {
+            counted.set(counted.get() + 1);
+            if counted.get() == 1 {
+                for name in ["cell-1", "cell-4"] {
+                    fs::create_dir_all(cells.join(name)).expect("the racing cell is made");
+                }
+            }
+        });
+        assert_eq!(allocated(&instance, &lock), cell("cell-5"));
+        assert_eq!(scans.get(), 2);
+        assert_eq!(
+            names_under(&root.join("cells")),
+            ["cell-1", "cell-4", "cell-5"]
+        );
+    }
+
+    #[test]
+    fn sixteen_allocations_at_once_get_distinct_contiguous_ids() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        let mut numbers: Vec<u64> = thread::scope(|scope| {
+            let workers: Vec<_> = (0..16)
+                .map(|_| scope.spawn(|| allocated(&instance, &lock)))
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("an allocation thread"))
+                .map(|id| parse_cell_id(id.as_str()).expect("a cell ID"))
+                .collect()
+        });
+        numbers.sort_unstable();
+        assert_eq!(numbers, (1..=16).collect::<Vec<_>>());
+        assert_eq!(names_under(&root.join("cells")).len(), 16);
+    }
+
+    #[test]
+    fn an_allocation_waits_for_the_one_in_progress_and_never_takes_its_id() {
+        for through_another_open in [false, true] {
+            let (_dir, root) = temp_root();
+            let instance = Arc::new(open_root(&root));
+            let lock = Arc::new(instance.lock().expect("the writer lock is taken"));
+            let second = if through_another_open {
+                Arc::new(open_root(&root))
+            } else {
+                Arc::clone(&instance)
+            };
+            let (sender, receiver) = mpsc::channel();
+            let receiver = Rc::new(receiver);
+            let early = Rc::new(RefCell::new(None));
+            let (waiting, recorded) = (Rc::clone(&receiver), Rc::clone(&early));
+            let (second_lock, hook_root) = (Arc::clone(&lock), root.clone());
+            on_first_scan(move || {
+                thread::spawn(move || {
+                    let _ = sender.send(allocated(&second, &second_lock));
+                });
+                if let Ok(taken) = waiting.recv_timeout(Duration::from_millis(500)) {
+                    fs::create_dir_all(hook_root.join("retired")).expect("retired is made");
+                    fs::rename(
+                        hook_root.join("cells").join(taken.as_str()),
+                        hook_root.join("retired").join(taken.as_str()),
+                    )
+                    .expect("the early cell is retired");
+                    *recorded.borrow_mut() = Some(taken);
+                }
+            });
+            let first = allocated(&instance, &lock);
+            let taken = early.borrow_mut().take().unwrap_or_else(|| {
+                receiver
+                    .recv_timeout(DEADLINE)
+                    .expect("the waiting allocation finishes")
+            });
+            assert_eq!(
+                (first, taken),
+                (cell("cell-1"), cell("cell-2")),
+                "through another open: {through_another_open}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_panic_during_an_allocation_does_not_stop_the_next() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        on_first_scan(|| panic!("an allocation panics after its scan"));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            instance.allocate_cell(&lock)
+        }));
+        assert!(panicked.is_err(), "the injected panic was not raised");
+        assert_eq!(allocated(&instance, &lock), cell("cell-1"));
+    }
+
+    #[test]
+    fn the_largest_cell_id_is_allocated_once_and_then_none_is_left() {
+        for place in ["cells", "retired"] {
+            let (_dir, root) = temp_root();
+            entries(&root, place, &["cell-9999999998"]);
+            let (instance, lock) = locked(&root);
+            assert_eq!(
+                allocated(&instance, &lock),
+                cell("cell-9999999999"),
+                "{place}"
+            );
+            let before = names_under(&root.join("cells"));
+            expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Exhausted) => ());
+            assert_eq!(names_under(&root.join("cells")), before, "{place}");
+        }
+    }
+
+    #[test]
+    fn a_symlinked_or_non_directory_cells_or_retired_refuses_and_follows_nothing() {
+        for place in ["cells", "retired"] {
+            for planted in ["a symlink", "a regular file"] {
+                let (_dir, root) = temp_root();
+                let elsewhere = root.join("elsewhere");
+                entries(&root, "elsewhere", &["cell-3"]);
+                set_mode(&elsewhere, 0o755);
+                if planted == "a symlink" {
+                    symlink(&elsewhere, root.join(place)).expect("the link is made");
+                } else {
+                    fs::write(root.join(place), b"").expect("the file is made");
+                }
+                let (instance, lock) = locked(&root);
+                expect_match!(instance.allocate_cell(&lock), Err(AllocateError::NotADirectory { path }) => {
+                    assert_eq!(path, root.join(place), "{place}: {planted}")
+                });
+                assert_eq!(names_under(&elsewhere), ["cell-3"], "{place}: {planted}");
+                assert_eq!(mode_of(&elsewhere), 0o755, "{place}: {planted}");
+                let other = if place == "cells" { "retired" } else { "cells" };
+                assert!(!exists(&root.join(other)), "{place}: {planted}");
+            }
+        }
+    }
+
+    #[test]
+    fn cells_swapped_for_a_symlink_after_the_scan_is_refused_and_not_followed() {
+        let (_dir, root) = temp_root();
+        entries(&root, "cells", &["cell-1"]);
+        let (instance, lock) = locked(&root);
+        let hook_root = root.clone();
+        on_first_scan(move || {
+            fs::rename(hook_root.join("cells"), hook_root.join("aside"))
+                .expect("cells is moved aside");
+            symlink(hook_root.join("aside"), hook_root.join("cells")).expect("the link is made");
+        });
+        expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Create(CellDirError::Symlink { path })) => {
+            assert_eq!(path, root.join("cells"))
+        });
+        assert_eq!(names_under(&root.join("aside")), ["cell-1"]);
+    }
+
+    #[test]
+    fn a_cells_or_retired_the_umask_left_unreadable_is_made_private_and_counted() {
+        assert_not_root();
+        for place in ["cells", "retired"] {
+            let (_dir, root) = temp_root();
+            entries(&root, place, &["cell-5"]);
+            let _restore = restrict(&root.join(place), 0o300);
+            let (instance, lock) = locked(&root);
+            assert_eq!(allocated(&instance, &lock), cell("cell-6"), "{place}");
+            assert_eq!(mode_of(&root.join(place)), 0o700, "{place}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_retired_it_can_neither_read_nor_make_private_is_a_listing_error() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        let retired = root.join("retired");
+        fs::create_dir(&retired).expect("retired is made");
+        let _restore = restrict(&retired, 0o000);
+        set_file_flags(&retired, libc::UF_IMMUTABLE).expect("the owner sets the immutable flag");
+        let clear = ClearFlags(retired.clone());
+        let (instance, lock) = locked(&root);
+        let result = instance.allocate_cell(&lock);
+        drop(clear);
+        expect_match!(result, Err(AllocateError::Listing { path, source }) => {
+            assert_eq!(path, retired);
+            assert_eq!(source.raw_os_error(), Some(libc::EPERM), "{source}");
+        });
+        assert!(!exists(&root.join("cells")));
+    }
+
+    #[test]
+    fn a_foreign_lock_allocates_nothing() {
+        let (_first_dir, first) = temp_root();
+        let (_second_dir, second) = temp_root();
+        let (_first, foreign) = locked(&first);
+        let instance = open_root(&second);
+        expect_match!(instance.allocate_cell(&foreign), Err(AllocateError::ForeignLock { path }) => {
+            assert_eq!(path, first.join("controller.lock"))
+        });
+        assert!(!exists(&second.join("cells")));
+    }
+
+    #[test]
+    fn an_allocation_that_loses_every_race_gives_up_after_64_scans() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        let scans = Rc::new(Cell::new(0));
+        let (counted, cells) = (Rc::clone(&scans), root.join("cells"));
+        on_every_scan(move || {
+            counted.set(counted.get() + 1);
+            assert!(counted.get() <= 100, "the allocation never gives up");
+            fs::create_dir_all(cells.join(format!("cell-{}", counted.get())))
+                .expect("the racing cell is made");
+        });
+        expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Contended { path }) => {
+            assert_eq!(path, root.join("cells"))
+        });
+        assert_eq!(scans.get(), 64);
+        assert_eq!(names_under(&root.join("cells")).len(), 64);
+    }
+
+    fn lock_path(root: &Path) -> PathBuf {
+        root.join("cells/cell-1/supervisor.lock")
+    }
+
+    fn log_path(root: &Path) -> PathBuf {
+        root.join("cells/cell-1/membraned.log")
+    }
+
+    #[allow(unsafe_code)]
+    fn descriptor_flags(fd: BorrowedFd<'_>, command: libc::c_int) -> libc::c_int {
+        // SAFETY: fcntl with F_GETFD or F_GETFL takes no pointer, and the BorrowedFd keeps `fd`
+        // open for the call.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), command) };
+        assert!(flags >= 0, "fcntl: {}", io::Error::last_os_error());
+        flags
+    }
+
+    fn assert_close_on_exec(fd: BorrowedFd<'_>, what: &str) {
+        assert_ne!(
+            descriptor_flags(fd, libc::F_GETFD) & libc::FD_CLOEXEC,
+            0,
+            "the {what} descriptor would leak into a spawned process"
+        );
+    }
+
+    #[test]
+    fn create_supervisor_lock_makes_a_private_close_on_exec_file_and_holds_it() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        let supervisor = dir
+            .create_supervisor_lock()
+            .expect("the supervisor lock is created");
+        let metadata = fs::symlink_metadata(&path).expect("the lock file exists");
+        assert!(metadata.is_file(), "{metadata:?}");
+        assert_eq!(metadata.mode() & 0o7777, 0o600);
+        assert_close_on_exec(supervisor.as_fd(), "supervisor lock");
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
+        assert!(
+            !a_separate_open_can_lock(&path),
+            "the lock is held while the SupervisorLock lives"
+        );
+        expect_match!(dir.create_supervisor_lock(), Err(CellDirError::AlreadyExists { path: refused }) => {
+            assert_eq!(refused, path)
+        });
+        assert!(
+            format!("{supervisor:?}").contains("supervisor.lock"),
+            "{supervisor:?}"
+        );
+    }
+
+    #[test]
+    fn create_supervisor_lock_syncs_the_cell_directory_after_it_names_the_lock() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let _supervisor = dir
+            .create_supervisor_lock()
+            .expect("the supervisor lock is created");
+        let cell_path = root.join("cells/cell-1");
+        assert_eq!(syncs_of(&cell_path), 1);
+        assert_eq!(
+            last_seen(&cell_path).named(c"supervisor.lock"),
+            Some(identity_at(&lock_path(&root))),
+            "the cell directory was synced before it named supervisor.lock"
+        );
+    }
+
+    #[test]
+    fn a_failed_sync_after_create_supervisor_lock_leaves_a_free_lock_file() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let cell_path = root.join("cells/cell-1");
+        fail_next_sync_of(&cell_path);
+        expect_match!(dir.create_supervisor_lock(), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, cell_path);
+            assert_injected(&source);
+        });
+        assert!(
+            fs::symlink_metadata(lock_path(&root))
+                .expect("the lock file is in place")
+                .is_file()
+        );
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(_)) => ());
+        expect_match!(dir.create_supervisor_lock(), Err(CellDirError::AlreadyExists { .. }) => ());
+    }
+
+    #[test]
+    fn a_dropped_lock_probes_free_and_the_probe_keeps_it() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        drop(
+            dir.create_supervisor_lock()
+                .expect("the supervisor lock is created"),
+        );
+        let kept = expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(kept)) => kept);
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
+        assert!(
+            !a_separate_open_can_lock(&path),
+            "a Free probe keeps the lock"
+        );
+        assert_close_on_exec(kept.as_fd(), "probed lock");
+        drop(kept);
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(_)) => ());
+    }
+
+    #[test]
+    fn with_no_lock_file_the_probe_is_missing_and_creates_nothing() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Missing) => ());
+        expect_match!(dir.supervisor_lock_identity(), Err(CellDirError::Missing { path }) => {
+            assert_eq!(path, lock_path(&root))
+        });
+        assert!(!exists(&lock_path(&root)));
+    }
+
+    #[test]
+    fn the_lock_is_held_while_any_copy_of_its_open_file_lives() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let supervisor = dir
+            .create_supervisor_lock()
+            .expect("the supervisor lock is created");
+        let copy = supervisor
+            .as_fd()
+            .try_clone_to_owned()
+            .expect("the descriptor is copied");
+        drop(supervisor);
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
+        drop(copy);
+        let kept = expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(kept)) => kept);
+        let handed = kept.into_owned_fd();
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
+        drop(handed);
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(_)) => ());
+    }
+
+    #[test]
+    fn a_symlink_named_supervisor_lock_is_refused_and_never_followed() {
+        for target_exists in [true, false] {
+            let (_dir, root) = temp_root();
+            let dir = opened(&root, "cell-1");
+            let target = root.join("elsewhere.lock");
+            if target_exists {
+                fs::write(&target, b"").expect("the link target is made");
+            }
+            symlink(&target, lock_path(&root)).expect("the link is made");
+            expect_match!(dir.create_supervisor_lock(), Err(CellDirError::AlreadyExists { .. }) => ());
+            expect_match!(dir.probe_supervisor_lock(), Err(CellDirError::Symlink { path }) => {
+                assert_eq!(path, lock_path(&root), "target exists: {target_exists}")
+            });
+            expect_match!(dir.supervisor_lock_identity(), Err(CellDirError::Symlink { .. }) => ());
+            assert_eq!(exists(&target), target_exists);
+        }
+    }
+
+    #[test]
+    fn a_symlink_named_membraned_log_is_refused_and_never_followed() {
+        for target_exists in [true, false] {
+            let (_dir, root) = temp_root();
+            let dir = opened(&root, "cell-1");
+            let target = root.join("elsewhere.log");
+            if target_exists {
+                fs::write(&target, b"kept\n").expect("the link target is made");
+                set_mode(&target, 0o644);
+            }
+            symlink(&target, log_path(&root)).expect("the link is made");
+            expect_match!(dir.open_supervisor_log(), Err(CellDirError::Symlink { path }) => {
+                assert_eq!(path, log_path(&root), "target exists: {target_exists}")
+            });
+            if target_exists {
+                assert_eq!(fs::read(&target).expect("the target reads"), b"kept\n");
+                assert_eq!(mode_of(&target), 0o644);
+            } else {
+                assert!(!exists(&target), "the log was created through the link");
+            }
+        }
+    }
+
+    #[test]
+    fn a_directory_fifo_or_socket_named_supervisor_lock_or_membraned_log_is_refused_without_blocking()
+     {
+        for planted in ["a directory", "a FIFO", "a socket"] {
+            for name in ["supervisor.lock", "membraned.log"] {
+                let (_dir, root) = temp_root();
+                let dir = opened(&root, "cell-1");
+                let path = root.join("cells/cell-1").join(name);
+                let _socket = match planted {
+                    "a directory" => {
+                        fs::create_dir(&path).expect("the directory is made");
+                        None
+                    }
+                    "a FIFO" => {
+                        make_fifo(&path);
+                        None
+                    }
+                    _ => Some(UnixListener::bind(&path).expect("the socket binds")),
+                };
+                let outcomes = within(&format!("opening {planted} as {name}"), move || {
+                    if name == "supervisor.lock" {
+                        vec![
+                            dir.probe_supervisor_lock().map(drop),
+                            dir.supervisor_lock_identity().map(drop),
+                        ]
+                    } else {
+                        vec![dir.open_supervisor_log().map(drop)]
+                    }
+                });
+                for outcome in outcomes {
+                    expect_match!(outcome, Err(CellDirError::NotARegularFile { path: refused }) => {
+                        assert_eq!(refused, path, "{planted} as {name}")
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn supervisor_lock_identity_names_the_file_the_lock_holds() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        let supervisor = dir
+            .create_supervisor_lock()
+            .expect("the supervisor lock is created");
+        let held = supervisor.identity().expect("the held lock's identity");
+        let (dev, ino) = identity_at(&path);
+        assert_eq!(held, FileIdentity { dev, ino });
+        assert_eq!(
+            dir.supervisor_lock_identity()
+                .expect("the named lock's identity"),
+            held
+        );
+        fs::rename(&path, root.join("cells/cell-1/aside.lock")).expect("the lock is moved aside");
+        fs::write(&path, b"").expect("another file takes its name");
+        assert_ne!(
+            dir.supervisor_lock_identity()
+                .expect("the new file's identity"),
+            held
+        );
+        assert_eq!(
+            supervisor.identity().expect("the held lock's identity"),
+            held
+        );
+    }
+
+    #[test]
+    fn open_supervisor_log_creates_a_private_log_and_appends_to_it() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = log_path(&root);
+        dir.open_supervisor_log()
+            .expect("the log is created")
+            .write_all(b"first\n")
+            .expect("the log is written");
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("the log exists")
+                .is_file()
+        );
+        assert_eq!(mode_of(&path), 0o600);
+        set_mode(&path, 0o644);
+        let mut log = dir.open_supervisor_log().expect("the log opens again");
+        assert_eq!(mode_of(&path), 0o600, "an existing log is made private");
+        let flags = descriptor_flags(log.as_fd(), libc::F_GETFL);
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_WRONLY);
+        assert_ne!(
+            flags & libc::O_APPEND,
+            0,
+            "the log is not opened for append"
+        );
+        assert_eq!(flags & libc::O_NONBLOCK, 0, "O_NONBLOCK was left set");
+        assert_close_on_exec(log.as_fd(), "log");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("another writer opens the log")
+            .write_all(b"other\n")
+            .expect("another writer appends");
+        log.write_all(b"second\n").expect("the log is written");
+        assert_eq!(
+            fs::read(&path).expect("the log reads"),
+            b"first\nother\nsecond\n"
+        );
+    }
+
+    #[test]
+    fn a_lock_or_log_it_cannot_open_is_an_io_error_naming_it() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        drop(
+            dir.create_supervisor_lock()
+                .expect("the supervisor lock is created"),
+        );
+        fs::write(log_path(&root), b"").expect("the log is made");
+        set_mode(&lock_path(&root), 0o000);
+        set_mode(&log_path(&root), 0o400);
+        for (what, refused, path) in [
+            (
+                "probe",
+                dir.probe_supervisor_lock().map(drop),
+                lock_path(&root),
+            ),
+            (
+                "identity",
+                dir.supervisor_lock_identity().map(drop),
+                lock_path(&root),
+            ),
+            ("log", dir.open_supervisor_log().map(drop), log_path(&root)),
+        ] {
+            expect_match!(refused, Err(CellDirError::Io { path: named, source }) => {
+                assert_eq!(named, path, "{what}");
+                assert_eq!(source.raw_os_error(), Some(libc::EACCES), "{what}: {source}");
+            });
+        }
+    }
+
+    #[test]
+    fn every_allocation_error_names_what_it_refused_and_keeps_its_cause() {
+        let cause = Some(eio().to_string());
+        let created = || CellDirError::Symlink {
+            path: PathBuf::from("/inst/cells"),
+        };
+        let rows: Vec<(Box<dyn Error>, &str, Option<String>)> = vec![
+            (refused_at!(AllocateError::ForeignLock), "/inst/x", None),
+            (refused_at!(AllocateError::NotADirectory), "/inst/x", None),
+            (refused_at!(AllocateError::Contended), "/inst/x", None),
+            (failed_at!(AllocateError::Listing), "/inst/x", cause),
+            (Box::new(AllocateError::Exhausted), "cell-9999999999", None),
+            (
+                Box::new(AllocateError::Create(created())),
+                "/inst/cells",
+                Some(created().to_string()),
+            ),
+        ];
+        for (error, names, source) in rows {
+            let text = error.to_string();
+            assert!(text.contains(names), "{text:?} does not name {names:?}");
+            assert_eq!(error.source().map(ToString::to_string), source, "{text}");
+            if let Some(source) = source {
+                assert!(text.contains(&source), "{text:?} omits its cause");
+            }
+        }
+        let contended = AllocateError::Contended {
+            path: PathBuf::from("/inst/cells"),
+        };
+        assert!(contended.to_string().contains("64"), "{contended}");
     }
 }
