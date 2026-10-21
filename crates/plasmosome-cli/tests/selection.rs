@@ -1,3 +1,4 @@
+#[allow(dead_code, reason = "this file uses part of the shared support")]
 mod support;
 
 use std::ffi::{OsStr, OsString};
