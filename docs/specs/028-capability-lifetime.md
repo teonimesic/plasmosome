@@ -61,6 +61,8 @@ the lifetime first moves B earlier. D, the drain budget, is the declaration's `d
 `Lifetime` as `drain_ms`, because a withdrawal never re-reads the plasmid's own declaration,
 where `[lifecycle]` names it. **H = B + 2 s + D** bounds grant references. Amended on
 2026-10-20: this did not say where D is kept after prepare.
+Once section 4's removal transaction takes the attachment, H uses the transaction's D. Amended on
+2026-10-21: this did not say so.
 
 ### 2. Who declares it, and the default
 
@@ -150,6 +152,21 @@ replacement for the plasmid and every attachment section 2 takes with it; exact 
 recorded effect, LIFO, with a graceful `DrainSpec` of D; a finish only after fresh observation
 proves them absent. It enters spec 023's one-at-a-time order as a mutation that arrived at B, and
 withdraws only this attachment's holdings; spec 017 keeps every equal peer.
+The transaction uses one graceful `DrainSpec` for every withdrawal it makes, whether it takes one
+attachment or several. Its D is the largest `drain_ms` recorded in the `Lifetime` of any attachment
+the transaction takes; with one attachment, that is its own D. Every withdrawal is sent that same
+`DrainSpec`, and each drain counts from its own call (spec 001 §4.1). So n withdrawals can take up
+to n times D, and an expiry still unfinished past H shows in status (section 6). Every later pass
+of the transaction sends the same `DrainSpec`: a retry, a resume at startup, or a `cell.kill` that
+resumes it before its own withdrawal. Each attachment's own D still caps the admitted work at B + D
+on each of its gates. For an attachment the transaction takes, H in sections 5 and 6 is B + 2 s
+plus the transaction's D. When `plasmid.remove` runs the transaction, a drain timeout answers 106
+with `deadline_ms` set to that D. An expiry replies to no one, and its event records `timed_out`
+with that D. A `cell.kill` that resumes the transaction waits for it only within the kill's own
+deadline (spec 023 §7; with `now`, step 2's share of it), and answers with the kill's own 106. A
+`cell.kill`'s own removal of the whole cell is not this transaction. Amended on 2026-10-21,
+from #205's round 2 review (2026-10-20T19:26:22Z): this did not say which D the withdrawals, H and
+a `timed_out` outcome use when the transaction takes several attachments, each recording its own.
 
 **Escalation (question 2).** By default a bound forces nothing. A holding whose graceful withdrawal
 returned `DrainTimedOut` keeps its fence and stays standing, named `timed_out` (section 6); the
@@ -165,7 +182,7 @@ effects.
 **What is recorded.** The journal records the transaction as for `plasmid.remove`. The session log
 gets one `expiry` event per attachment: cell, plugin, generation, cause (`lease`, `idle`, `exec` or
 `provider`), both readings of the bound, when the fence was first observed and removal started, and
-each `GrantId`'s outcome (`drained`, `timed_out` with its deadline, or `incomplete` with its
+each `GrantId`'s outcome (`drained`, `timed_out` with the transaction's D, or `incomplete` with its
 detail), never a count. The event stays after the finish, when the plasmid leaves the list.
 
 ### 5. Held references, and their bound
