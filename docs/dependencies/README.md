@@ -370,8 +370,10 @@ as `otool -D`, `codesign -dv`, `nm -a` and `otool -l`.
   `os_identity` and `build_tools`, or from the plasmosome-itt notes that recorded the build. The
   kernel names its own compiler and linker in its version banner, which
   `strings <bundle>/<file> | grep 'Linux version'` prints. A Debian package's version is the first
-  line of `usr/share/doc/<package>/changelog.Debian.gz` in the sysroot. A fact with no source is
-  left out.
+  line of `usr/share/doc/<package>/changelog.Debian.gz` in the sysroot. Where that file cannot be
+  read, a record may name another source for the version and say why, as libkrun's does for
+  `libgcc-12-dev`: its doc folder links to a package the sysroot lacks, so its version is the GCC
+  identification in its `crtbeginT.o`. A fact with no source is left out.
 - `limits`: `otool -l <bundle>/<file>` prints each `LC_RPATH`, and the list must equal
   `LIBKRUN_RPATHS` in `crates/plasmosome-lanes/src/dyld.rs`. The kernel's options are read from the
   built config, the `.config` that `make olddefconfig` made from the config used, and that
