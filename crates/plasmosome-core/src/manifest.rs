@@ -1297,7 +1297,6 @@ mod tests {
             ("both'\"quotes", "\"both'\\\"quotes\""),
             ("tab\tname", "\"tab\\tname\""),
             ("back\\slash", "\"back\\\\slash\""),
-            ("", "\"\""),
         ] {
             for (declaration, expected_path, replacement) in [
                 (
@@ -1373,6 +1372,13 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_empty_tool_key_is_quoted_in_its_path() {
+        let source = "id = \"github-pr\"\ndescription = \"Read pull requests.\"\n\
+                      impl.wasm = \"pr.wasm\"\n[provides.\"a:tools\".tools]\n\"\" = 42";
+        field_fix(source, "provides.\"a:tools\".tools.\"\"");
     }
 
     #[test]
