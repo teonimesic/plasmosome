@@ -7,7 +7,7 @@ hosts = ["api.github.com"]
 ports = [443]
 
 [secrets]
-refs = ["model-provider/key"]
+refs = [{ id = "model-provider:key", consumer = "wasm", delivery = ["handle"] }]
 
 [mock]
 hosts = ["api.github.com"]
