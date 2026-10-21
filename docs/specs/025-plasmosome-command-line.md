@@ -343,9 +343,16 @@ still run: today's `plasmosomed` serves one connection at a time, and reads a qu
 after its client has exited 3 and closed. So a request may take effect after the command exits,
 and an observation made afterwards is evidence, not proof. The client never retries. A caller
 observes before acting again, and repeats only where the verb deduplicates by a client request
-ID. Repeating `cell new` creates a second cell, and repeating `cell exec` runs the program again,
-so `cell exec` is served only while its verb deduplicates by a request ID (`request_key` in
-spec 024). The task that serves each later command states how to observe it after exit 3.
+ID. `cell.new` and `cell.exec` deduplicate by a request ID, `request_key` (spec 001 §3.5, spec
+024 §1), which their commands pass as `--request-key`. Without one, repeating `cell new`
+creates a second cell, and repeating `cell exec` runs the program again. `cell exec` is served
+only while its verb deduplicates. A repeated `cell new` whose cell is still starting, ending or
+`dead` exits 2 with 105 detail `repeat`, naming that cell. That is not a cell a failed start left
+behind: observe it, or repeat later. The task that serves each later command states how to
+observe it after exit 3. Amended on 2026-10-21: `cell.new` had no request ID, so this read
+"Repeating `cell new` creates a second cell, and repeating `cell exec` runs the program again, so
+`cell exec` is served only while its verb deduplicates by a request ID (`request_key` in spec
+024)."
 
 **Kernel errors** map by code:
 
@@ -937,15 +944,13 @@ logic goes when its trigger fires. Spec 011: `plasmid new` keeps its exit 2. Spe
 
 ## Requests to specs 022, 023 and 024
 
-This spec made four requests while those specs were drafts. Three are granted, and one is
-deferred:
+This spec made four requests while those specs were drafts. All four are granted:
 
 - Spec 022 (#125): name `cell` in the plasmid verbs' results, which serving the plasmid
   commands needs (section 2). Granted: spec 001 §2 says the results of `plasmid.list`,
   `plasmid.add`, `plasmid.remove` and `plasmid.reload` carry `cell`.
 - Spec 023 (#126): a client request ID on `cell.new`, so that a repeat after exit 3 does not
-  create a second cell. Deferred to plasmosome-bnkf: spec 023 leaves it out of scope, so a
-  repeated `cell new` still creates a second cell (section 4).
+  create a second cell. Granted: `request_key` (spec 001 §3.5, spec 023 §4).
 - Spec 024 (#127): name `cell` in the `cell.exec`, `exec.status` and `exec.output` results,
   which serving the exec commands needs (section 2). Granted: every result names `cell`, and
   `cell.exec` deduplicates by `request_key` (spec 024 §1).
@@ -954,7 +959,10 @@ deferred:
   Granted: `wait` (spec 024 §1).
 
 Amended on 2026-10-20: this section was "Requests to draft specs", and listed the four requests
-as open.
+as open. Amended on 2026-10-21: the spec 023 request was deferred to plasmosome-bnkf. This read
+"Three are granted, and one is deferred:", and the request ended "Deferred to plasmosome-bnkf:
+spec 023 leaves it out of scope, so a repeated `cell new` still creates a second cell (section
+4)."
 
 ## Out of scope
 
