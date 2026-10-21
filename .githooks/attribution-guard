@@ -5,10 +5,11 @@
 # `Signed-off-by` naming one certifies what a tool cannot.
 #
 # A trailer credits a model when its address is a listed tool address, or a GitHub noreply address
-# whose login is a listed login, such as `coderabbitai[bot]`. A name never makes a value a model's,
-# and neither does a vendor's domain, so `Claude Monet <claude.monet@corp.locale.io>` and
-# `Jane Doe <jane@anthropic.com>` are people. There is no rule for bots: one the list does not
-# name, such as Dependabot, is cleared (spec 029 section 5).
+# whose login is a listed login, such as `coderabbitai[bot]`. When a value has an address, its name
+# never makes it a model's, and neither does a vendor's domain, so
+# `Claude Monet <claude.monet@corp.locale.io>` and `Jane Doe <jane@anthropic.com>` are people.
+# There is no rule for bots: one the list does not name, such as Dependabot, is cleared (spec 029
+# section 5).
 #
 # It also refuses either trailer when it names somebody no reader can trace: a value with no
 # address, or an address on a domain no account can sit on, such as `.local`, which is what git
@@ -74,9 +75,9 @@ alternatives() {
 tool_address="^($(alternatives "${tool_addresses[@]}"))\$"
 tool_login="^([0-9]+\\+)?($(alternatives "${tool_logins[@]}"))@users\\.noreply\\.github\\.com\$"
 
-# Vendor words. They decide only what the refusal of an identity with no address says: a model is
-# known by its address, never by these words. `devin` and `sonnet` are left out, because a person
-# may carry either as a name.
+# Vendor words. They decide only what the refusal of an identity with no address says. When a value
+# has an address, these words never make it a model's. `devin` and `sonnet` are left out, because a
+# person may carry either as a name.
 vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral|cursor|cognition\.ai|grok|x\.ai'
 
 # The same words, each only as a whole word, so `Claudette Roe <>` is untraceable, not a model. A
