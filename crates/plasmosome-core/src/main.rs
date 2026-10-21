@@ -19,6 +19,8 @@ instance_root and recovery_deadline_ms are required. instance_root,
 recovery_deadline_ms and an optional absolute registry_root are checked
 for shape only: this build does not open the roots, read registry_root or
 recover cells yet.
+An optional cell_runtime is checked at startup against this host's
+limits; this build starts no cells and opens none of its artifacts.
 The configured Unix socket currently serves only plasmosome.status.
 SIGINT or SIGTERM requests a clean shutdown.
 See the repository README for a bounded status-only demonstration.
