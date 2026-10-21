@@ -279,17 +279,17 @@ calls them yet.
   mode 0600 and close-on-exec, takes `flock(LOCK_EX | LOCK_NB)` on it, renames it to
   `supervisor.lock` without replacing anything and syncs the cell directory. With one creator at
   a time, the lock is held from the moment the name exists, so a probe sees no lock file and
-  then a held one. A leftover
-  temporary is removed first, and every failure before the rename removes it. An entry already at
-  `supervisor.lock` is left as it is and reported as what it is: `Symlink`, `NotARegularFile` or,
-  for a file, `AlreadyExists`. Two creators of one cell's lock at once can move each other's
-  file into place, so after the rename the call checks, without following a symlink, that
-  `supervisor.lock` names the file it holds. If not, it is `LockNotNamed` and returns no lock, so
-  `Ok` always means the name holds the returned lock. A directory at `supervisor.lock.tmp`
-  cannot be unlinked, so every create is then an `Io` error naming it; only a writer under the
-  root can plant one. The returned `SupervisorLock` holds the lock. `into_owned_fd` gives up its
-  descriptor, still locked. `start_supervisor` takes the `SupervisorLock` itself instead, and hands
-  `membraned` a copy of its descriptor as descriptor 4.
+  then a held one. A leftover temporary is removed first, and every failure before the rename
+  removes it. An entry already at `supervisor.lock` is left as it is and reported as what it is:
+  `Symlink`, `NotARegularFile` or, for a file, `AlreadyExists`. Two creators of one cell's lock at
+  once can move each other's file into place, so after the rename the call checks, without following
+  a symlink, that `supervisor.lock` names the file it holds. If not, it is `LockNotNamed` and
+  returns no lock, so `Ok` always means the name holds the returned lock. If the name is gone by
+  then, the error is `Io` naming `supervisor.lock`. A directory at `supervisor.lock.tmp` cannot be
+  unlinked, so every create is then an `Io` error naming it; only a writer under the root can plant
+  one. The returned `SupervisorLock` holds the lock. `into_owned_fd` gives up its descriptor, still
+  locked. `start_supervisor` takes the `SupervisorLock` itself instead, and hands `membraned` a
+  copy of its descriptor as descriptor 4.
 - `CellDir::probe_supervisor_lock` tries the lock on a fresh read-only descriptor. `Held` means
   another open of the file holds it, even one in this process. `Free` keeps the lock it took
   until the returned `SupervisorLock` is dropped. `Missing` means no entry is there, and nothing

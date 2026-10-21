@@ -490,19 +490,21 @@ Each has the default this spec uses until the owner answers.
    drain timed out, so a controller fault cannot make it a general Force. Status shows those
    holdings `escalated`, a failed audit is `failed` (a prepare without commit, which startup aborts
    and section 7 expires again), and items 6 and 7 test the forced path. It needs three amendments.
-   In spec 008 (`008:96-97`), after "`force` is required and is either null or `{ "operator":
+   In spec 008 (`008:99-100`), after "`force` is required and is either null or `{ "operator":
    STRING, "reason": STRING }`, both nonblank.", add "For a spec 028 expiry it may instead be `{
    "expiry": { "plugin": PluginId, "cause": STRING, "bound": Bound } }`, naming the expiry's cause
    and both readings of its bound; it authorizes Force only for holdings whose drain timed out." In
-   spec 017 (`017:274-275`), "Spec008 requires its durable operator assertion before forced cell
+   spec 017 (`017:292-293`), "Spec008 requires its durable operator assertion before forced cell
    cleanup" gains "or, for a holding whose drain timed out after its lifetime's bound, the recorded
-   expiry authority (spec 028)". In spec 001 §4.2 (`001:1017`), after "Force authority is
+   expiry authority (spec 028)". In spec 001 §4.2 (`001:1344`), after "Force authority is
    checked/durably recorded by the host under spec008.", add "It accepts an expiry authority only
    for a grant whose gate holds a lifetime fence and whose drain timed out (spec 028)." (b) As (a),
    and a bound also discharges external assertions: also add "or, at a lifetime's bound, the
    recorded expiry authority (spec 028)" after spec 001 §3.11's "force requires the operator/reason
-   pair exactly as `plasmosome.stop`" (`001:451`) and spec 011's "force requires the operator/reason
-   pair" (`011:354-355`), and "and its external assertions" to (a)'s 017 sentence.
+   pair exactly as `plasmosome.stop`" (`001:662`) and spec 011's "force requires the operator/reason
+   pair" (`011:469`), and "and its external assertions" to (a)'s 017 sentence. Amended on
+   2026-10-21: this item's five line cites gave the lines from when this spec was accepted, and the
+   quoted words had since moved.
 3. **Who renews.** Default: any control-socket caller with an operator and reason, each renewal
    capped at the attach ceiling. A host agent running the command line on cell output can then
    renew again and again, since repeated renewal has no total limit.

@@ -71,9 +71,13 @@ to say **what the plasmid is for**, and nowhere to say **what a tool does** — 
 like `pr.read`, and the intended consumer of that list is a model, which cannot choose from a bare
 name. Both fields are required rather than optional, because an optional purpose field is one
 nobody fills in and a registry of blanks is worse than none. The third gap is named and left:
-a requirement is a capability name with no version range, while the kernel underneath already
-selects a version across competing providers. How an author writes a range, and how a conflict is
-explained to them, is its own spec.
+a requirement is a capability name with no version range, and nothing selects a version across
+competing providers. A local plasmid's requirement is met by an attached provider or by exactly one
+listed candidate (spec 022 §5), and spec 020 binds a registry plasmid's required keys to pinned
+provider releases. How an author writes a range, and how a conflict is explained to them, is its own
+spec. Amended on 2026-10-21: this said the kernel underneath already selects a version across
+competing providers. `plasmosome-core` has a `select_version` function that would pick one, but
+nothing calls it outside its own tests.
 
 ### What the author never writes
 
@@ -327,6 +331,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   workspace path, which tools. Spec 022's trusted operator declarations decide only where each
   declared need leads on this host (the real destination, the host directory and its access), and
   can leave a need unmet, never add one.
+- **`[workspace].mount.backend` is optional, has no default and selects nothing.** A
+  declaration may write it or leave it out, and either way parses to the same declaration.
+  Every Mount is realized through the mediated guest filesystem (spec 017), and spec 001 §4.2
+  forbids a virtiofs export, so no value of `backend` says how a workspace reaches the cell.
+  `dst` and its default are spec 022 §6's. Amended on 2026-10-21: before this, no text here
+  stated the `[workspace]` grammar, and the parser gave an absent `backend` the value
+  `"virtiofs"`.
 - **The declaration carries a required `description`** — one or two plain sentences saying what
   the plasmid is for. A declaration without one does not parse, and the error names the field.
 - **Every declared tool carries a required description.** The `[provides]` binding's `tools` is a
@@ -536,6 +547,14 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   one that drops it in silence, one that refuses only the empty name or trims only spaces, one that
   knows only ASCII whitespace, a fix that writes the blank name back, and a description check first.
   Amended on 2026-10-21: this item is new.
+- A `[workspace]` whose `mount` writes `backend = "virtiofs"`, and one that writes
+  `backend = "fuse"`, each parse to the same declaration as the same file without `backend`,
+  both when the `mount` writes `dst` and when it does not. The parsed mount holds its `dst` and
+  nothing else. A `mount` with no `dst` parses with `dst` `/workspace`. Catches: a parser that
+  gives an absent `backend` a default, `"virtiofs"` or any other, including one that gives every
+  mount the same value whatever is written; one that keeps a written `backend` in what it parses;
+  one whose `dst` default depends on `backend`; and one that refuses it. Amended on 2026-10-21:
+  this item is new.
 - A plasmid granted two hosts and denied a third produces a report naming the denied host and the
   hosts field, in which neither granted host appears anywhere.
 - The denial report reaches the session log and the plasmid's status, and the calling code inside
@@ -643,13 +662,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **The delivery modes, the consumer set and the pairing rules.** Unchanged. What this spec
   changes about the credential grammar is one thing only — that `delivery` may be omitted — and
   that change is named as an amendment above rather than claimed as untouched.
-- **Capability requirement and version selection between plasmids.** The kernel already selects a
-  version across providers; how an author writes a version range and how a conflict is explained
-  to them is its own question and its own spec.
+- **Capability requirement and version selection between plasmids.** Nothing selects a version
+  across providers yet (Behavior); how an author writes a version range and how a conflict is
+  explained to them is its own question and its own spec. Amended on 2026-10-21: this said the
+  kernel already selects a version across providers.
 - **The `[commands]` section's shape.** Reserved in spec 001; an author declaring a command still
   writes it as it stands today.
 - **How attached software becomes visible inside a cell.** A plasmid's software is not copied
   into a running cell: attach makes it visible, detach stops making it visible, and the layout
   that gives a later attach somewhere to land is prepared when the cell is created. All of that
-  is the kernel's, none of it is the author's to write, and its spec belongs to the isolation
-  work under intent 011.
+  is the kernel's, none of it is the author's to write, and spec 027 specifies it.
