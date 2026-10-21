@@ -126,6 +126,8 @@ jobs:
         if: github.event_name == 'pull_request'
         run: python3 tools/cargo-deny-check licenses --changed-since HEAD^1
 
+      # `macos` runs this step too, and the four from pipeline review usage to quickstart.
+      # Change both jobs.
       - name: ignored tests regression
         run: python3 tools/ignored-tests-regression.py
 
@@ -171,6 +173,7 @@ jobs:
           RANGE: ${{ github.base_ref && format('origin/{0}..HEAD', github.base_ref) || (github.event.before == '0000000000000000000000000000000000000000' && github.sha || format('{0}..{1}', github.event.before, github.sha)) }}
         run: ./.githooks/attribution-guard "$RANGE"
 
+      # `macos` runs these four steps too, and ignored tests regression. Change both jobs.
       - name: pipeline review usage regression
         run: python3 tools/pipeline-review-usage-regression.py
 
@@ -259,7 +262,8 @@ jobs:
         with:
           save-if: ${{ github.event_name == 'push' }}
 
-      # `macos` runs the suites whose tools run on a Mac.
+      # `macos` runs the suites whose tools run on a Mac. These five steps match five in `gates`.
+      # Change both jobs.
       - name: ignored tests regression
         run: python3 tools/ignored-tests-regression.py
 
