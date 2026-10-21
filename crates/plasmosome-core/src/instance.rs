@@ -1074,8 +1074,8 @@ impl SupervisorLock {
         file_identity(&self.file)
     }
 
-    /// Gives up this value for its descriptor, which still holds the lock: spec 023 §4 hands it
-    /// to `membraned` as descriptor 4.
+    /// Gives up this value for its descriptor, which holds the lock until it and every copy of it
+    /// are closed.
     pub fn into_owned_fd(self) -> OwnedFd {
         OwnedFd::from(self.file)
     }
