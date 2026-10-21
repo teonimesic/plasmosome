@@ -317,10 +317,7 @@ fn ambiguous(instances: &str, candidates: &[String], trusted_uid: u32) -> Client
                     return map_refusal(&error, socket, PathOrigin::Home, trusted_uid);
                 }
             }
-            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
-                unreachable.push(name.clone());
-            }
-            Err(error) => return unconnected(socket, &error),
+            Err(_) => unreachable.push(name.clone()),
         }
     }
     let mut fields = vec![("candidates", names(candidates))];
