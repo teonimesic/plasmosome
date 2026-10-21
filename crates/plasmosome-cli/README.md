@@ -96,6 +96,38 @@ and the domain and code in parentheses, such as `(kernel 101)`. `emit` writes in
 64 KiB and then flushes, so it never holds the whole text. A failed write or flush returns the
 stream it failed on; the caller picks the exit.
 
+## Mapping a socket refusal
+
+`map_refusal` turns a refusal from `plasmosome-core`'s private-socket checks into the client error
+that spec 025 §5's table gives it. It has one match arm for each of `PrivateSocketError`'s 22
+variants, and clippy refuses a catch-all arm there (`wildcard_enum_match_arm` is denied on that
+match). So a variant added to `plasmosome-core` stops this crate's build until the map names it.
+The refusal test has its own match over every variant, so the test build stops too until the test
+lists the variant, and the test then fails until spec 025's table has its row.
+
+The caller passes the refusal, the path it passed to the check, where that path came from, and the
+trusted UID it passed to the check. The path is the socket path for `check_private_path` and
+`check_peer_uid`, and `instances/` for `list_trusted_dir`. `PathOrigin::SocketFlag` says the path
+is `--socket`'s value, and `PathOrigin::Home` says it was built from `$HOME`. Only `BadPath` reads
+the origin: from `--socket` it is `invalid_argument`, exit 64, with `argument` `--socket`; from
+`$HOME` it is `invalid_home`, exit 2.
+
+Each code carries only the fields spec 025's client-code table lists for it. `path` is the
+component the check reports. `BadName`, `PeerCredentials` and `PeerMismatch` report none, so their
+`path` is the path passed to the check. `unsafe_socket` adds `rule`, and `NotPrivate` adds a `fix`:
+`chmod 700` with the directory in single quotes, each single quote in it written as `'"'"'`, so a
+POSIX shell runs the text as it stands. `peer_mismatch`'s `uid` is the trusted UID passed in: the
+map never reads the effective UID, nor `PeerMismatch`'s own `trusted`. Its `peer_uid` is the UID
+the kernel reported, absent when it could not be read. `Replaced`, `AddressInUse` and
+`BindEscaped` come only from `PrivateListener::bind` and `PrivateDir::reconfirm`, which the client
+never calls, so each is `internal`, exit 70.
+
+Every path is written by lossy UTF-8 conversion, so the caller passes only UTF-8 paths, as spec
+025 §5 requires. A path that is not UTF-8 would be shown with U+FFFD, and `NotPrivate`'s `fix`
+would then name another path. `list_trusted_dir`'s `Io` refusal for an entry it cannot `fstatat`
+joins `instances/` with the entry's raw name, so on Linux its `path` can hold U+FFFD whatever the
+caller passed.
+
 ## What's inside
 
 | Item | Meaning |
@@ -114,6 +146,7 @@ stream it failed on; the caller picks the exit.
 | `Envelope`, `Instance` | Spec 025's success and failure envelopes |
 | `ErrorBody`, `ClientError`, `KernelError` | The `error` object: the client's own, or the daemon's relayed with `domain` added |
 | `emit` | Writes an envelope to stdout or stderr, never both |
+| `map_refusal`, `PathOrigin` | A private-socket refusal to spec 025 §5's client error, by where the checked path came from |
 | `ClientCode`, `Exit` | The 18 client codes of spec 025 §4 and the six exit statuses they map to |
 
 Tests: `cargo test -p plasmosome-cli`

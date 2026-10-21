@@ -461,6 +461,7 @@ dependencies = [
 name = "plasmosome-cli"
 version = "0.1.0"
 dependencies = [
+ "plasmosome-core",
  "serde_json",
 ]
 
