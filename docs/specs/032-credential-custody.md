@@ -926,12 +926,12 @@ percent-encoded and hex forms, and its SHA-256 in hex, so a copy in another enco
    (`size`); a CR, an inner LF, a NUL, a byte above 0x7E and an empty file (`content`); a file
    inside a held Mount source (`inside_mount_source`). Where the test host can make them, a parent
    directory and a file that another user (uid N) owns are `parent` and `owner`; otherwise those
-   rows are reported not run. With a binding standing, a later plasmid whose Mount source is the
-   secrets directory, and one whose source is an ancestor of it, attached to another cell, are
-   each 108 with `path` the operator file, and nothing is prepared. The marker never appears in
-   any refusal. A value with one trailing LF is sent without it. Catches: a readable secret
-   trusted; header injection through CR or LF; secret bytes echoed in a refusal; a trailing
-   newline sent; a later Mount that puts a bound secret file in a guest.
+   rows are reported not run. With a binding standing, a later plasmid attached to another cell
+   is 108 with `path` the operator file, and nothing is prepared, when its Mount source is the
+   secrets directory, lies inside it (a subdirectory), or is an ancestor of it: one row each. The
+   marker never appears in any refusal. A value with one trailing LF is sent without it. Catches:
+   a readable secret trusted; header injection through CR or LF; secret bytes echoed in a refusal;
+   a trailing newline sent; a later Mount that puts a bound secret file in a guest.
 5. **Not keyed by ID alone (model; G13).** A registry member with the local entry's ID is 103
    `entry:credential:<ref>` when the entry has no `publishers`. It binds when the entry names its
    registry and publisher. It is 103 for another publisher, and for the same publisher name in
@@ -1022,19 +1022,22 @@ percent-encoded and hex forms, and its SHA-256 in hex, so a copy in another enco
     certificate from the instance authority: it sees the fixture's own chain. A leaf the relay
     presents for a bound target expires no later than the attachment's B. A key file that fails a
     §1 file check, rule 5 included, is 108 with `path` the key file. A later plasmid whose Mount
-    source is the key's directory, or an ancestor of it, attached to another cell, is 108.
-    Catches: an authority key in a record or the guest; interception of a flow with no binding; a
-    leaf that outlives its attachment; an unchecked key file; a Mount that exposes the key.
+    source is the key's directory, lies inside it (a subdirectory), or is an ancestor of it,
+    attached to another cell, is 108: one row each. Catches: an authority key in a record or the
+    guest; interception of a flow with no binding; a leaf that outlives its attachment; an
+    unchecked key file; a Mount that exposes the key.
 19. **What the controller sends `membraned` (model; G2, G3, G14).** The fake backend records every
     message the controller sends a `membraned`: each `membrane.effect.apply`'s params, the launch
     record, and the argv, environment and files of each launch. Neither marker, the value's or the
     key's, is in any of them, and the apply params name the secret file only by its path.
     Catches: a controller that reads the value and sends it in the apply params; a key sent at
     launch.
-20. **What `membraned` writes (membrane; G2).** After a substitution on each path, and after each
-    refusal of §5, `membraned.log`, every log `membraned` writes, and every reply on
-    `membrane.uds` hold neither marker. Catches: a relay that logs the request it sent, or a parse
-    error that quotes it.
+20. **What `membraned` writes (membrane; G2, G14).** Both markers are set: the value's in the
+    secret file, and the key's as the test authority's private key. After a substitution on each
+    path, after a leaf is issued with that key, and after each refusal of §5, `membraned.log`,
+    every log `membraned` writes, and every reply on `membrane.uds` hold neither marker. Catches:
+    a relay that logs the request it sent, or a parse error that quotes it; a relay that logs the
+    key when it signs a leaf.
 21. **No surrogate, no value (membrane; G6).** On an intercepted flow, a request without the
     binding's header, one whose header holds anything but this binding's surrogate, and one with
     the surrogate only in another field each reach the fixture with no value. Catches: a relay
