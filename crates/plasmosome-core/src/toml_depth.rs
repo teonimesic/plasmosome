@@ -388,6 +388,18 @@ mod tests {
     }
 
     #[test]
+    fn a_string_left_open_at_the_end_of_the_text_counts_nothing_more() {
+        for open in ["\"", "'", "\"\"\"", "'''"] {
+            for rest in ["[[[[", "[[[[\\", "[[[[\"\"", "[[[[''"] {
+                at_and_past(
+                    &format!("x = [[[[{open}{rest}"),
+                    &format!("x = [[[[[{open}{rest}"),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_comment_inside_a_multi_line_array_counts_nothing() {
         at_and_past(
             "x = [ # [[[[\n  [[[1]]],\n]",
