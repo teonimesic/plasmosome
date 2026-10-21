@@ -380,6 +380,15 @@ the new generation requires and serves: a key it now requires would have no reco
 provider it no longer requires would stay, §5 step 1 would never find a key it now provides, and a
 key it no longer provides would stay listed while its requirers lose that key's tools.
 
+**A reload may change the tools inside a kept binding.** No refusal is made for a tool added to or
+dropped from a binding whose key the reload keeps, even when an attached plasmid requires that key
+and uses that tool. The requirer's declaration names the key, never a tool, so its use of one is
+dependence no declaration states, which spec 011 says no refusal covers. Refusing would leave one
+way to drop a tool: remove the plasmid and add it again, and 105 refuses that removal while a
+requirer is attached, so dropping one tool would remove every requirer too. After the swap, a
+dropped tool no longer resolves for any caller. Amended on 2026-10-21: this did not say whether a
+reload may drop a tool that a requirer of its key uses.
+
 ## Changes proposed to accepted specs
 
 These are proposed text. The PR that accepts this spec edits no other accepted document. Each
@@ -688,6 +697,13 @@ ProxyMap (O-11) or Mount (O-7).
     case-insensitive volume, a source spelled in a different case from the instance root refuses,
     and so does a source with a symlink component. Catches: a string-prefix check, a
     case-sensitive comparison, and a following walk.
+18. Tools at reload. P is local and attached and provides `p` with tools `t1` and `t2`, and an
+    attached R requires `p`. A reload of P whose `p` binding declares only `t1` proceeds. After it,
+    `t1` resolves and `t2` does not, and P's `requires` and `provides` records are unchanged. A
+    reload whose `p` binding declares `t1`, `t2` and `t3` proceeds, and `t3` resolves. Catches: a
+    reload that refuses a dropped tool, one that requires the new tools to hold the old ones, and a
+    swap that leaves a dropped tool resolving or a new one unresolved. Amended on 2026-10-21: this
+    item is new.
 
 ## Out of scope
 

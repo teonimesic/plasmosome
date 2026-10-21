@@ -679,7 +679,7 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
 - Signalling one started process, and environment variables or image entries beyond §4 and §5;
   a later spec may add them.
 - Subject spawns and attestation.
-- How attached software becomes visible inside a cell (`011:572-576`). It is bound by two rules
+- How attached software becomes visible inside a cell (`011:586-590`). It is bound by two rules
   here: `PATH` is fixed to three directories, and spec 017 forbids executing a managed file. So a
   plasmid's software can be found by name only if it lands, as files that are not managed files, in
   one of those directories.
