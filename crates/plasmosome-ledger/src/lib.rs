@@ -1763,9 +1763,4 @@ mod tests {
             "every record refuses a positional array and an unknown field"
         );
     }
-
-    #[test]
-    fn throwaway_ofaf_fails() {
-        std::thread::sleep(std::time::Duration::from_secs(300));
-    }
 }
