@@ -252,7 +252,7 @@ pub fn verify_artifact(
     let walk =
         Walk::from_root(artifact.path().as_path()).map_err(|refusal| refuse(refusal.into()))?;
     let checked = open_checked(&walk).map_err(refuse)?;
-    let digest = hash(&checked.file, checked.stamp.size).map_err(refuse)?;
+    let digest = hash(&checked).map_err(refuse)?;
     let after = stamp(&stat(&checked.file).map_err(refuse)?);
     judge_unchanged(checked.stamp, after).map_err(refuse)?;
     if digest != *artifact.sha256() {
@@ -352,9 +352,13 @@ fn judge_immutability(_metadata: &Metadata) -> Result<(), ArtifactFault> {
     Err(ArtifactFault::ImmutabilityUnverifiable)
 }
 
-fn hash(file: &File, size: u64) -> Result<Digest, ArtifactFault> {
-    Digest::of_reader(Positioned { file, offset: 0 }.take(size.saturating_add(1)))
-        .map_err(|error| io_fault("pread", &error))
+fn hash(checked: &Checked) -> Result<Digest, ArtifactFault> {
+    let bounded = Positioned {
+        file: &checked.file,
+        offset: 0,
+    }
+    .take(checked.stamp.size.saturating_add(1));
+    Digest::of_reader(bounded).map_err(|error| io_fault("pread", &error))
 }
 
 struct Positioned<'a> {
