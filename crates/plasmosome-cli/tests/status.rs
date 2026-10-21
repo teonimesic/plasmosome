@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use plasmosome_cli::json::Json;
+use plasmosome_cli::reply::ReadFailure;
 use plasmosome_cli::{
     COMMANDS, ClientCode, Clock, Context, Deadline, Exit, SystemClock, Unreplied, exchange, handle,
 };
@@ -558,5 +559,59 @@ fn a_request_line_over_the_bound_is_refused_before_connecting() {
     assert!(
         matches!(&accepted, Err(error) if error.kind() == io::ErrorKind::WouldBlock),
         "the listener saw {accepted:?}"
+    );
+}
+
+fn send(stream: UnixStream, request: &str) -> Result<Vec<u8>, Unreplied> {
+    let deadline = Deadline::new(&SystemClock, SystemClock.now(), 10_000);
+    exchange(
+        stream,
+        Path::new("/x/control.uds"),
+        effective_uid(),
+        request,
+        &deadline,
+    )
+}
+
+#[test]
+fn a_write_refused_before_any_byte_is_a_transport_failure() {
+    let (ours, theirs) = UnixStream::pair().expect("a socket pair");
+    drop(theirs);
+    let Err(Unreplied::NotSent(error)) = send(ours, STATUS) else {
+        panic!("a request to a closed peer was not refused unsent");
+    };
+    assert_eq!(error.code(), ClientCode::Transport);
+    assert_eq!(number(field(error.fields(), "errno")), Some(EPIPE as u32));
+    assert_eq!(
+        field(error.fields(), "path"),
+        Some(&Json::String("/x/control.uds".to_string()))
+    );
+}
+
+#[test]
+fn a_request_the_deadline_cuts_off_is_unanswered() {
+    let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+    let (done, finished) = mpsc::channel::<()>();
+    let reader = thread::spawn(move || {
+        let mut first = [0_u8; 1];
+        theirs
+            .read_exact(&mut first)
+            .expect("the first byte arrives");
+        let _ = finished.recv_timeout(PATIENCE);
+    });
+    let request = format!("{}\n", "x".repeat(MAX_REQUEST_BYTES));
+    let deadline = Deadline::new(&SystemClock, SystemClock.now(), 300);
+    let outcome = exchange(
+        ours,
+        Path::new("/x/control.uds"),
+        effective_uid(),
+        &request,
+        &deadline,
+    );
+    let _ = done.send(());
+    reader.join().expect("the reader ends");
+    assert!(
+        matches!(outcome, Err(Unreplied::Unanswered(ReadFailure::TimedOut))),
+        "{outcome:?}"
     );
 }
