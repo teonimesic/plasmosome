@@ -143,6 +143,8 @@ fn read_thin(member: &[u8], base: usize, cpu: CpuType) -> Result<MachOImage, Clo
 fn read_command(command: &[u8], image: &mut MachOImage) -> Result<(), &'static str> {
     const DYLIB_FIELDS: usize = 24;
     const TEXT_FIELDS: usize = 12;
+    const LC_REQ_DYLD: u32 = 0x8000_0000;
+    const KNOWN_REQUIRED: [u32; 4] = [0x8000_0022, 0x8000_0028, 0x8000_0033, 0x8000_0034];
     match le_word(command, 0) {
         0x8000_001c => image.rpaths.push(name_in(command, TEXT_FIELDS)?),
         0xe => image.dylinkers.push(name_in(command, TEXT_FIELDS)?),
@@ -150,6 +152,8 @@ fn read_command(command: &[u8], image: &mut MachOImage) -> Result<(), &'static s
         cmd => {
             if let Some(kind) = load_kind(cmd) {
                 image.names.push((kind, name_in(command, DYLIB_FIELDS)?));
+            } else if cmd & LC_REQ_DYLD != 0 && !KNOWN_REQUIRED.contains(&cmd) {
+                image.required_unknown.push(cmd);
             }
         }
     }
@@ -212,11 +216,23 @@ pub(crate) fn resolve(
     listed: &[&RecipePath],
 ) -> Result<Resolution, ClosureFault> {
     let position = |text: &str| listed.iter().position(|path| path.as_str() == text);
-    let joined = if let Some(rest) = name.strip_prefix("@executable_path/") {
-        join(executable_dir, rest)
+    let (directory, rest) = if let Some(rest) = name.strip_prefix("@executable_path/") {
+        (Some(executable_dir), rest)
     } else if let Some(rest) = name.strip_prefix("@loader_path/") {
-        join(loader_dir, rest)
-    } else if name.starts_with('/') {
+        (Some(loader_dir), rest)
+    } else if let Some(rest) = name.strip_prefix('/') {
+        (None, rest)
+    } else {
+        return Err(ClosureFault::SearchedName {
+            name: name.to_owned(),
+        });
+    };
+    if climbs_named_directory(rest) {
+        return Err(ClosureFault::DotDotAfterNamedDirectory {
+            name: name.to_owned(),
+        });
+    }
+    let Some(directory) = directory else {
         return match position(name) {
             Some(index) => Ok(Resolution::Listed(index)),
             None if is_system_name(name) => Ok(Resolution::System(name.to_owned())),
@@ -225,17 +241,22 @@ pub(crate) fn resolve(
                 resolved: None,
             }),
         };
-    } else {
-        return Err(ClosureFault::SearchedName {
-            name: name.to_owned(),
-        });
     };
+    let joined = join(directory, rest);
     position(&joined)
         .map(Resolution::Listed)
         .ok_or(ClosureFault::UnlistedLibrary {
             name: name.to_owned(),
             resolved: Some(joined),
         })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn climbs_named_directory(rest: &str) -> bool {
+    rest.split('/')
+        .filter(|part| !matches!(*part, "" | "."))
+        .skip_while(|part| *part == "..")
+        .any(|part| part == "..")
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -278,14 +299,79 @@ pub(crate) struct VolumeFacts {
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn is_sealed_system_volume(facts: VolumeFacts) -> bool {
-    let _ = facts;
-    todo!()
+    facts.mounted_at_root && facts.read_only && facts.seal == Some(true)
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 pub(crate) fn volume_facts(path: &std::ffi::CStr) -> std::io::Result<VolumeFacts> {
-    let _ = path;
-    todo!()
+    // SAFETY: libc::statfs is a plain C struct, for which all zeroes is a valid value.
+    let mut facts: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated, and statfs writes only the local `facts`.
+    if unsafe { libc::statfs(path.as_ptr(), &mut facts) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mount: Vec<u8> = facts
+        .f_mntonname
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect();
+    let seal = std::ffi::CString::new(mount.as_slice())
+        .ok()
+        .and_then(|mount| volume_seal(&mount));
+    Ok(VolumeFacts {
+        mounted_at_root: mount == b"/",
+        read_only: facts.f_flags & libc::MNT_RDONLY as u32 != 0,
+        seal,
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn volume_seal(mount: &std::ffi::CStr) -> Option<bool> {
+    #[repr(C)]
+    struct Reply {
+        length: u32,
+        capabilities: libc::vol_capabilities_attr_t,
+    }
+    let mut request = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_CAPABILITIES,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut reply = Reply {
+        length: 0,
+        capabilities: libc::vol_capabilities_attr_t {
+            capabilities: [0; 4],
+            valid: [0; 4],
+        },
+    };
+    // SAFETY: `mount` is NUL-terminated. `request` asks for the volume's capabilities only, whose
+    // reply is a length and a vol_capabilities_attr_t, and getattrlist writes at most the size
+    // passed into the local `reply`.
+    let status = unsafe {
+        libc::getattrlist(
+            mount.as_ptr(),
+            (&mut request as *mut libc::attrlist).cast(),
+            (&mut reply as *mut Reply).cast(),
+            std::mem::size_of::<Reply>(),
+            libc::FSOPT_NOFOLLOW,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let format = libc::VOL_CAPABILITIES_FORMAT;
+    let (valid, set) = (
+        reply.capabilities.valid[format],
+        reply.capabilities.capabilities[format],
+    );
+    (valid & libc::VOL_CAP_FMT_SEALED != 0).then_some(set & libc::VOL_CAP_FMT_SEALED != 0)
 }
 
 #[cfg(target_os = "macos")]
@@ -304,28 +390,11 @@ pub(crate) fn on_sealed_volume(name: &str) -> Result<bool, ClosureFault> {
             op: "statfs",
             errno: libc::EINVAL,
         })?;
-    match on_read_only_root(&nearest) {
-        Ok(sealed) => Ok(sealed),
+    match volume_facts(&nearest) {
+        Ok(facts) => Ok(is_sealed_system_volume(facts)),
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(false),
         Err(error) => Err(io_fault("statfs", &error)),
     }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn on_read_only_root(path: &std::ffi::CStr) -> std::io::Result<bool> {
-    // SAFETY: libc::statfs is a plain C struct, for which all zeroes is a valid value.
-    let mut facts: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `path` is NUL-terminated, and statfs writes only the local `facts`.
-    if unsafe { libc::statfs(path.as_ptr(), &mut facts) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mount = facts
-        .f_mntonname
-        .iter()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| *byte as u8);
-    Ok(mount.eq(*b"/") && facts.f_flags & libc::MNT_RDONLY as u32 != 0)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -363,6 +432,7 @@ fn audit_with(
         resolved: Vec::new(),
         system_names: Vec::new(),
     };
+    let mut seen = std::collections::HashSet::new();
     for (role, (path, bytes)) in images {
         let refuse = |fault| ClosureRefusal { image: role, fault };
         let image = read_macho(bytes, cpu).map_err(refuse)?;
@@ -374,7 +444,7 @@ fn audit_with(
                         .resolved
                         .push((role, name.clone(), ArtifactRole::Library(index)));
                 }
-                Resolution::System(name) if audited.system_names.contains(&name) => {}
+                Resolution::System(name) if seen.contains(&name) => {}
                 Resolution::System(name) => {
                     if !sealed(&name).map_err(refuse)? {
                         return Err(refuse(ClosureFault::UnlistedLibrary {
@@ -382,6 +452,7 @@ fn audit_with(
                             resolved: None,
                         }));
                     }
+                    seen.insert(name.clone());
                     audited.system_names.push(name);
                 }
             }
@@ -398,8 +469,11 @@ fn image_rules(image: &MachOImage) -> Result<(), ClosureFault> {
     if image.has_dyld_environment {
         return Err(ClosureFault::DyldEnvironment);
     }
-    match image.dylinkers.iter().find(|name| *name != "/usr/lib/dyld") {
-        Some(name) => Err(ClosureFault::UnexpectedDylinker { name: name.clone() }),
+    if let Some(name) = image.dylinkers.iter().find(|name| *name != "/usr/lib/dyld") {
+        return Err(ClosureFault::UnexpectedDylinker { name: name.clone() });
+    }
+    match image.required_unknown.first() {
+        Some(cmd) => Err(ClosureFault::UnknownRequiredCommand { cmd: *cmd }),
         None => Ok(()),
     }
 }
@@ -606,14 +680,14 @@ impl fmt::Display for ClosureFault {
             ClosureFault::OsIdentity { name, errno } => {
                 write!(f, "reading sysctl {name} failed with errno {errno}")
             }
-            ClosureFault::DotDotAfterNamedDirectory { name } => {
-                let _ = name;
-                todo!()
-            }
-            ClosureFault::UnknownRequiredCommand { cmd } => {
-                let _ = cmd;
-                todo!()
-            }
+            ClosureFault::DotDotAfterNamedDirectory { name } => write!(
+                f,
+                "{name} has a .. after a directory the name writes, which nothing verified"
+            ),
+            ClosureFault::UnknownRequiredCommand { cmd } => write!(
+                f,
+                "load command {cmd:#x} is one dyld requires and this audit does not know"
+            ),
         }
     }
 }
