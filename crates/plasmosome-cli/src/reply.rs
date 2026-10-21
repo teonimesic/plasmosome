@@ -26,7 +26,7 @@ pub enum ReadFailure {
 /// unread. It holds at most [`MAX_REPLY_BYTES`] before the newline and looks at one byte more:
 /// when that byte is not the newline, it returns [`ReadFailure::TooLarge`] without reading
 /// further. An interrupted read is retried.
-pub fn read_reply(reader: &mut impl BufRead) -> Result<Vec<u8>, ReadFailure> {
+pub fn read_reply(reader: &mut dyn BufRead) -> Result<Vec<u8>, ReadFailure> {
     let mut line = Vec::new();
     loop {
         let available = match reader.fill_buf() {
@@ -78,7 +78,7 @@ pub enum Reply {
 /// for an error whose code is -32700 or -32600, which the daemon's connection loop sends. Other
 /// members are ignored. Anything else is `bad_reply`, whose `detail` names the first rule broken.
 pub fn judge_reply(line: &[u8]) -> Result<Reply, ClientError> {
-    let mut reply = json::scan(line).map_err(|error| bad_reply(error.to_string()))?;
+    let mut reply = json::scan(line).map_err(|error| bad_reply(&error.to_string()))?;
     let Json::Object(members) = &mut reply else {
         return Err(bad_reply("the reply is not an object"));
     };
@@ -146,11 +146,11 @@ fn code_of(code: Option<&Json>) -> Code {
     }
 }
 
-fn bad_reply(detail: impl Into<String>) -> ClientError {
+fn bad_reply(detail: &str) -> ClientError {
     ClientError::new(
         ClientCode::BadReply,
         "the daemon sent a reply this client cannot accept".to_string(),
-        vec![("detail".to_string(), Json::String(detail.into()))],
+        vec![("detail".to_string(), Json::String(detail.to_string()))],
     )
     .expect("a lone detail field neither repeats nor is reserved")
 }
