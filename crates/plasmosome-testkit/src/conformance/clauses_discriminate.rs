@@ -986,6 +986,9 @@ fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
             }
         }
     }
+    for access in [FileAccess::ReadOnly, FileAccess::ReadWrite] {
+        assert_ne!(flipped(access), access);
+    }
 }
 
 fn selection_of(capability: &Capability) -> (UniverseClass, Vec<&str>) {
