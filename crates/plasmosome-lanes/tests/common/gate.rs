@@ -279,7 +279,7 @@ pub fn commit_at(dir: &Path) -> String {
         .expect("git runs");
     let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
     let status = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--untracked-files=normal"])
         .current_dir(dir)
         .output()
         .expect("git runs");
