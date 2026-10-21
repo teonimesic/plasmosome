@@ -840,13 +840,44 @@ mod tests {
         let transcript = finished
             .recv_timeout(Duration::from_secs(1))
             .expect("finish returns within 1 s while the write end is open");
-        assert!(!transcript.eof, "a writer still holds the pipe");
-        assert!(
-            b"still running\n".starts_with(&transcript.bytes),
-            "{transcript:?}"
+        assert_eq!(
+            transcript,
+            Transcript {
+                bytes: b"still running\n".to_vec(),
+                dropped: 0,
+                eof: false,
+            },
+            "a writer still holds the pipe, and what it wrote is kept"
         );
-        assert_eq!(transcript.dropped, 0);
         drop(writer);
+    }
+
+    #[test]
+    fn finish_without_a_wait_keeps_what_the_pipe_already_holds() {
+        for writer_closed in [true, false] {
+            let [read_end, write_end] = pipe();
+            let mut writer = File::from(write_end);
+            writer.write_all(b"last words\n").unwrap();
+            let open_writer = if writer_closed {
+                drop(writer);
+                None
+            } else {
+                Some(writer)
+            };
+            let transcript = DiagnosticTranscript::start(read_end)
+                .expect("the thread starts")
+                .finish(Duration::ZERO);
+            assert_eq!(
+                transcript,
+                Transcript {
+                    bytes: b"last words\n".to_vec(),
+                    dropped: 0,
+                    eof: writer_closed,
+                },
+                "writer closed: {writer_closed}"
+            );
+            drop(open_writer);
+        }
     }
 
     #[test]
