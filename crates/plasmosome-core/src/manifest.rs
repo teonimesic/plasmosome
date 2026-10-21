@@ -1537,7 +1537,7 @@ mod tests {
 
     #[test]
     fn absent_or_empty_tools_do_not_invent_a_tool() {
-        let base = "id = \"github-pr\"\ndescription = \"Reach GitHub.\"\n[network]\nhosts = [\"api.github.com\"]\n";
+        let base = "id = \"github-pr\"\ndescription = \"Reach GitHub.\"\n[network]\nhosts = [\"api.github.com\"]\nports = [443]\n";
         for provides in ["", "[provides.\"github:tools\".tools]"] {
             let manifest = PlasmidManifest::parse(&format!("{base}{provides}")).unwrap();
             assert!(manifest.provides_tools.is_empty());
@@ -1866,7 +1866,7 @@ subject = "git"
         );
         assert_eq!(manifest.network.as_ref().unwrap().ports, vec![443]);
         assert_eq!(
-            manifest.network.as_ref().unwrap().pin_cidrs,
+            pins(manifest.network.as_ref().unwrap()),
             vec!["140.82.112.0/20".to_string()]
         );
         assert_eq!(manifest.secrets, Vec::new());
@@ -2001,7 +2001,7 @@ subject = "git"
     fn a_manifest_whose_whole_content_is_a_mock_is_refused() {
         assert_eq!(
             refused_at(MOCK_WITHOUT_NETWORK),
-            (Some("mock-github".into()), "network".into()),
+            (Some("mock-github".into()), "mock".into()),
             "a mock stands in for hosts a plasmid declares, so it is never a plasmid of its own"
         );
     }
@@ -2180,9 +2180,22 @@ subject = "git"
 
     fn repaired_ports(section: &str, ports: &str, entry: Option<usize>, fix: &str) -> Vec<u16> {
         let repaired = with_port_fix(&ports_declaration(section, ports), entry, fix);
-        PlasmidManifest::parse(&repaired)
-            .map(ports_of)
-            .unwrap_or_else(|error| panic!("{ports} with {fix:?} applied is refused: {error}"))
+        match PlasmidManifest::parse(&repaired) {
+            Ok(manifest) => ports_of(manifest),
+            Err(error) => {
+                assert!(
+                    section.starts_with("[network]"),
+                    "{ports} with {fix:?} applied is refused: {error}"
+                );
+                let (field, fix, _) = refusal_of(&repaired);
+                assert_eq!(
+                    (field.as_str(), fix.as_str()),
+                    ("network.hosts[0]", REMOVAL),
+                    "{ports}: only an emptied top-level list is refused, as hosts with no ports"
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn with_port_fix(declaration: &str, entry: Option<usize>, fix: &str) -> String {
@@ -2230,6 +2243,15 @@ subject = "git"
                 ("ports = []", vec![]),
                 ("", vec![]),
             ] {
+                if expected.is_empty() && section.starts_with("[network]") {
+                    let (field, fix, _) = port_refusal(section, ports);
+                    assert_eq!(
+                        (field.as_str(), fix.as_str()),
+                        ("network.hosts[0]", REMOVAL),
+                        "{section}{ports}: a top-level host with no port is refused"
+                    );
+                    continue;
+                }
                 assert_eq!(
                     parsed_ports(section, ports).unwrap(),
                     expected,
@@ -2420,6 +2442,7 @@ id = "mint-fallback"
 description = "Read GitHub with a minted fallback credential."
 [network]
 hosts = ["api.github.com"]
+ports = [443]
 [secrets]
 refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" }]
 "#;
@@ -2812,12 +2835,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "network.hosts",
                 "hosts = [\"api.example.com\"]",
             ),
-            (
-                declared("[network]\nhosts = []"),
-                github,
-                "network.hosts",
-                "hosts = [\"api.example.com\"]",
-            ),
+            (declared("[network]\nhosts = []"), github, "network", REMOVAL),
             (
                 declared("network = \"api.github.com\""),
                 github,
@@ -2849,73 +2867,75 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "hosts = [\"api.example.com\"]",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\", 443]"),
+                declared("[network]\nhosts = [\"api.github.com\", 443]\nports = [443]"),
                 github,
                 "network.hosts[1]",
                 REMOVAL,
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = \"140.82.112.0/20\""),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = \"140.82.112.0/20\""),
                 github,
                 "network.pin_cidrs",
                 "pin_cidrs = [\"140.82.112.0/20\"]",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = 20"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = 20"),
                 github,
                 "network.pin_cidrs",
                 "pin_cidrs = [\"192.0.2.0/24\"]",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [\"140.82.112.0/20\", 20]"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [\"140.82.112.0/20\", 20]"),
                 github,
                 "network.pin_cidrs[1]",
                 REMOVAL,
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20]"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [20]"),
                 github,
                 "network.pin_cidrs[0]",
                 "\"192.0.2.0/24\"",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, 24]"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [20, 24]"),
                 github,
                 "network.pin_cidrs[0]",
                 "\"192.0.2.0/24\"",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = 5"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = 5"),
                 github,
                 "mock.hosts",
                 REMOVAL,
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = \" \""),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = \" \""),
                 github,
                 "mock.hosts",
                 REMOVAL,
             ),
             (
-                declared("network = 443\n[mock]\nhosts = [\"api.github.com\"]"),
+                declared("impl.wasm = \"pr.wasm\"\nnetwork = 443\n[mock]\nhosts = [\"api.github.com\"]"),
                 github,
                 "network",
                 "[network]\nhosts = [\"api.github.com\"]",
             ),
             (
-                declared("network = [\"api.github.com\", \"uploads.github.com\"]"),
+                declared(
+                    "impl.wasm = \"pr.wasm\"\nnetwork = [\"api.github.com\", \"uploads.github.com\"]",
+                ),
                 github,
                 "network",
                 "[network]\nhosts = [\"api.github.com\", \"uploads.github.com\"]",
             ),
             (
-                declared("[network]\nhosts = 443\n[mock]\nhosts = [\"api.github.com\"]"),
+                declared("[network]\nhosts = 443\nports = [443]\n[mock]\nhosts = [\"api.github.com\"]"),
                 github,
                 "network.hosts",
                 "hosts = [\"api.github.com\"]",
             ),
             (
-                declared("[network]\nhosts = []\n[mock]\nhosts = [\"api.github.com\"]"),
+                declared("[network]\nhosts = []\nports = [443]\n[mock]\nhosts = [\"api.github.com\"]"),
                 github,
                 "network.hosts",
                 "hosts = [\"api.github.com\"]",
@@ -2953,7 +2973,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "[network]\nhosts = [\"a.example\"]",
             ),
             (
-                declared("[network]\nhosts = 443\n[mock]\nhosts = [\"a.example\", \"a.example\"]"),
+                declared("[network]\nhosts = 443\nports = [443]\n[mock]\nhosts = [\"a.example\", \"a.example\"]"),
                 github,
                 "network.hosts",
                 "hosts = [\"a.example\"]",
@@ -2961,17 +2981,17 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             (
                 declared("[mock]\nhosts = [\"a.example\", \"a.example\"]"),
                 github,
-                "network",
-                "[network]\nhosts = [\"a.example\"]",
+                "mock",
+                REMOVAL,
             ),
             (
-                declared("[network]\nhosts = []\n[mock]\nhosts = [\"a.example\", \"a.example\"]"),
+                declared("[network]\nhosts = []\nports = [443]\n[mock]\nhosts = [\"a.example\", \"a.example\"]"),
                 github,
                 "network.hosts",
                 "hosts = [\"a.example\"]",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, \"10.0.0.0/8\"]"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [20, \"10.0.0.0/8\"]"),
                 github,
                 "network.pin_cidrs[0]",
                 REMOVAL,
@@ -2997,8 +3017,8 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             (
                 declared("[mock]\nhosts = [\"a.example\", \"b.example\"]"),
                 github,
-                "network",
-                "[network]\nhosts = [\"a.example\", \"b.example\"]",
+                "mock",
+                REMOVAL,
             ),
             (
                 declared("[network]\nhosts = \"a\\\"b\\\\c\""),
@@ -3085,13 +3105,13 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "exec = [\"command-name\"]",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = \"api.github.com\""),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = \"api.github.com\""),
                 github,
                 "mock.hosts",
                 "hosts = [\"api.github.com\"]",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"api.github.com\", 443]"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = [\"api.github.com\", 443]"),
                 github,
                 "mock.hosts[1]",
                 REMOVAL,
@@ -3105,16 +3125,16 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             (
                 declared("[mock]\nhosts = [\"api.github.com\"]"),
                 github,
-                "network",
-                "[network]\nhosts = [\"api.github.com\"]",
+                "mock",
+                REMOVAL,
             ),
             (declared("[mock]\nhosts = []"), github, "mock", REMOVAL),
             (declared("mock = 5"), github, "mock", REMOVAL),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"b\\nc\"]"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = [\"b\\nc\"]"),
                 github,
-                "network.hosts",
-                "\"b\\nc\"",
+                "mock.hosts[0]",
+                REMOVAL,
             ),
             (
                 declared("[commands.commands.\"a\\nb\"]\nsubject = \"git\""),
@@ -3123,14 +3143,14 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "exec = [\"a\\nb\"]",
             ),
             (
-                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"api.github.example\"]"),
+                declared("[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = [\"api.github.example\"]"),
                 github,
                 "network.hosts",
                 "\"api.github.example\"",
             ),
             (
                 declared(
-                    "[network]\nhosts = [\"api.github.com\"]\n\
+                    "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
                      [mock]\nhosts = [\"api.github.com\", \"uploads.github.example\"]",
                 ),
                 github,
@@ -3254,18 +3274,277 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 rows.push((declared(&tail), github, field, fix));
             }
         }
+        for (tail, field, fix) in exact_value_refusals() {
+            rows.push((declared(tail), github, field.to_string(), fix.to_string()));
+        }
         rows
+    }
+
+    const WITH_HOST: &str = "[network]\nhosts = [\"api.github.com\"]\n";
+
+    fn exact_value_refusals() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            ("[network]", "network", REMOVAL),
+            ("[network]\nhosts = []\nports = []", "network", REMOVAL),
+            (
+                "[network]\nhosts = []\nports = []\npin_cidrs = [\"192.0.2.0/24\"]",
+                "network",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]",
+                "network.hosts[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = []",
+                "network.hosts[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"a.example\", \"b.example\"]\nports = []",
+                "network.hosts[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"API.github.com\"]\nports = []",
+                "network.hosts[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [70000]",
+                "network.ports[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [-1]",
+                "network.ports[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [0]",
+                "network.ports[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [65536]",
+                "network.ports[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [\"443\"]",
+                "network.ports[0]",
+                "443",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443.5]",
+                "network.ports[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443, 443]",
+                "network.ports[1]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443, 8080, 22, 8080, 443]",
+                "network.ports[3]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"API.github.com\"]\nports = [443]",
+                "network.hosts[0]",
+                "\"api.github.com\"",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\", \"Api.GitHub.com\"]\nports = [443]",
+                "network.hosts[1]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"API.GITHUB.COM.\"]\nports = [443]",
+                "network.hosts[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"192.0.2.1\"]\nports = [443]",
+                "network.hosts[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\", \"2001:db8::1\"]\nports = [443]",
+                "network.hosts[1]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"0x7f000001\"]\nports = [443]",
+                "network.hosts[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"a.example\", \"b.example\", \"a.example\"]\nports = [443]",
+                "network.hosts[2]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [\"nonsense\"]",
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                 pin_cidrs = [\"nonsense\", \"192.0.2.0/24\"]",
+                "network.pin_cidrs[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [\"192.0.2.1/24\"]",
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                 pin_cidrs = [\"192.0.2.0/24\", \"2001:db8::1/32\"]",
+                "network.pin_cidrs[1]",
+                "\"2001:db8::/32\"",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                 pin_cidrs = [\"192.0.2.0/24\", \"192.000.002.000/24\"]",
+                "network.pin_cidrs[1]",
+                REMOVAL,
+            ),
+            (
+                "[workspace]",
+                "workspace.mount",
+                "mount = { dst = \"/workspace\" }",
+            ),
+            (
+                "workspace = {}",
+                "workspace.mount",
+                "mount = { dst = \"/workspace\" }",
+            ),
+            (
+                "impl.wasm = \"pr.wasm\"\n[workspace]",
+                "workspace.mount",
+                "mount = { dst = \"/workspace\" }",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"workspace\" }",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"/workspace/\" }",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"srv/work//\" }",
+                "workspace.mount.dst",
+                "dst = \"/srv/work\"",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"/\" }",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"\" }",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"/a/../b\" }",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"/a/./b\" }",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"/a//b\" }",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace]\nmount = { dst = \"a//b/\" }",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace.mount]\ndst = 5",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[workspace.mount]\ndst = [\"/srv/work\"]",
+                "workspace.mount.dst",
+                "dst = \"/workspace\"",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"uploads.github.com\"]",
+                "mock",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = []\n[mock]\nhosts = [\"api.github.com\"]",
+                "mock",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                 [mock]\nhosts = [\"API.github.com\"]",
+                "mock.hosts[0]",
+                "\"api.github.com\"",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                 [mock]\nhosts = [\"api.github.com\", \"API.github.com\"]",
+                "mock.hosts[1]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                 [mock]\nhosts = [\"API.github.com\", \"api.github.com\"]",
+                "mock.hosts[0]",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                 [mock]\nhosts = [\"api.github.com\", \"192.0.2.1\"]",
+                "mock.hosts[1]",
+                REMOVAL,
+            ),
+        ]
     }
 
     #[test]
     fn every_author_refusal_names_its_exact_field_fix_and_plasmid() {
+        let mut wrong = Vec::new();
         for (declaration, plasmid, field, fix) in author_refusals() {
-            assert_eq!(
-                field_refusal(&declaration),
-                (plasmid.map(String::from), field, fix),
-                "{declaration}"
-            );
+            let expected = (plasmid.map(String::from), field, fix);
+            let actual = match PlasmidManifest::parse(&declaration) {
+                Err(ManifestError::Field { .. }) => Ok(field_refusal(&declaration)),
+                Err(error) => Err(error.to_string()),
+                Ok(_) => Err("parses".to_string()),
+            };
+            if actual.as_ref() != Ok(&expected) {
+                wrong.push(format!(
+                    "{declaration:?}
+  expected {expected:?}
+  got {actual:?}"
+                ));
+            }
         }
+        assert!(
+            wrong.is_empty(),
+            "{} rows differ:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
     }
 
     #[test]
@@ -3295,13 +3574,20 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
         for (start, ..) in author_refusals() {
             let mut declaration = start.clone();
             let mut followed: Vec<(String, String)> = Vec::new();
+            let mut written: Vec<String> = Vec::new();
             while let Err(error) = PlasmidManifest::parse(&declaration) {
                 let (_, field, fix) = field_refusal(&declaration);
                 assert!(
-                    followed.len() < 4 && !followed.contains(&(field.clone(), fix.clone())),
+                    followed.len() < 4,
                     "{start}\nafter {followed:?} is refused again: {error}"
                 );
                 declaration = with_fix(&declaration, &field, &fix);
+                assert!(
+                    !written.contains(&declaration),
+                    "{start}\n{field} with {fix:?} returns to a declaration already refused, \
+                     after {followed:?}"
+                );
+                written.push(declaration.clone());
                 followed.push((field, fix));
             }
         }
@@ -3310,7 +3596,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     #[test]
     fn a_mock_host_fix_adds_only_the_host_its_network_does_not_declare() {
         let declaration = declared(
-            "[network]\nhosts = [\"api.github.com\"]\n\
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
              [mock]\nhosts = [\"api.github.com\", \"uploads.github.example\"]",
         );
         let (_, field, fix) = field_refusal(&declaration);
@@ -3327,7 +3613,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     #[test]
     fn a_list_entry_that_is_not_a_string_is_removed_by_its_index_and_no_other_entry_is() {
         let declaration = declared(
-            "[network]\nhosts = [\"api.github.com\", 443, \"uploads.github.com\"]\n\
+            "[network]\nhosts = [\"api.github.com\", 443, \"uploads.github.com\"]\nports = [443]\n\
              pin_cidrs = [\"140.82.112.0/20\", true, \"192.30.252.0/22\"]",
         );
         let (_, field, fix) = field_refusal(&declaration);
@@ -3353,9 +3639,210 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             ]
         );
         assert_eq!(
-            network.pin_cidrs,
+            pins(&network),
             vec!["140.82.112.0/20".to_string(), "192.30.252.0/22".to_string()]
         );
+    }
+
+    fn pins(network: &NetworkSpec) -> Vec<String> {
+        network.pin_cidrs.iter().map(ToString::to_string).collect()
+    }
+
+    fn written_ports(declaration: &str) -> Vec<toml::Value> {
+        let document: toml::Value = toml::from_str(declaration).unwrap();
+        document
+            .get("network")
+            .and_then(|network| network.get("ports"))
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn fixes_followed(start: &str) -> (Vec<(String, String)>, PlasmidManifest) {
+        let mut declaration = start.to_string();
+        let mut followed: Vec<(String, String)> = Vec::new();
+        loop {
+            let error = match PlasmidManifest::parse(&declaration) {
+                Ok(manifest) => return (followed, manifest),
+                Err(error) => error,
+            };
+            assert!(
+                followed.len() < 10,
+                "{start}\nhas no end after {followed:?}: {error}"
+            );
+            let (_, field, fix) = field_refusal(&declaration);
+            let before = written_ports(&declaration);
+            declaration = with_fix(&declaration, &field, &fix);
+            let after = written_ports(&declaration);
+            assert!(
+                after.iter().all(|port| before.contains(port)),
+                "{field} with {fix:?} wrote a port: {before:?} became {after:?}"
+            );
+            followed.push((field, fix));
+        }
+    }
+
+    #[test]
+    fn following_the_fixes_from_one_host_and_port_65536_ends_with_no_network_and_no_added_port() {
+        let start = "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n\
+                     [impl]\nwasm = \"pr.wasm\"\n\
+                     [network]\nhosts = [\"api.github.com\"]\nports = [65536]\n";
+        let (followed, manifest) = fixes_followed(start);
+        let removed = |field: &str| (field.to_string(), REMOVAL.to_string());
+        assert_eq!(
+            followed,
+            vec![
+                removed("network.ports[0]"),
+                removed("network.hosts[0]"),
+                removed("network"),
+            ]
+        );
+        assert_eq!(manifest.network, None);
+        assert_eq!(manifest.wasm, Some(PathBuf::from("pr.wasm")));
+    }
+
+    #[test]
+    fn hosts_with_no_ports_are_removed_one_entry_at_a_time_and_no_port_is_written() {
+        for ports in ["", "ports = []"] {
+            let start = format!(
+                "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n\
+                 impl.wasm = \"pr.wasm\"\n\
+                 [network]\nhosts = [\"a.example\", \"b.example\", \"c.example\"]\n{ports}\n"
+            );
+            let (followed, manifest) = fixes_followed(&start);
+            let fields: Vec<&str> = followed.iter().map(|(field, _)| field.as_str()).collect();
+            assert_eq!(
+                fields,
+                [
+                    "network.hosts[0]",
+                    "network.hosts[0]",
+                    "network.hosts[0]",
+                    "network"
+                ],
+                "{start}"
+            );
+            assert!(followed.iter().all(|(_, fix)| fix == REMOVAL), "{start}");
+            assert_eq!(manifest.network, None, "{start}");
+        }
+    }
+
+    #[test]
+    fn a_pin_fix_never_unpins_the_network() {
+        for (pins_written, field, fix, kept) in [
+            (
+                "[\"nonsense\"]",
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+                vec!["192.0.2.0/24"],
+            ),
+            (
+                "[\"\"]",
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+                vec!["192.0.2.0/24"],
+            ),
+            (
+                "[\"nonsense\", \"192.0.2.0/24\"]",
+                "network.pin_cidrs[0]",
+                REMOVAL,
+                vec!["192.0.2.0/24"],
+            ),
+            (
+                "[\"192.0.2.0/24\", \"nonsense\", \"no\"]",
+                "network.pin_cidrs[1]",
+                REMOVAL,
+                vec!["192.0.2.0/24"],
+            ),
+            (
+                "[\"nonsense\", \"198.51.100.7/24\"]",
+                "network.pin_cidrs[1]",
+                "\"198.51.100.0/24\"",
+                vec!["198.51.100.0/24"],
+            ),
+            (
+                "[\"192.0.2.1/24\"]",
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+                vec!["192.0.2.0/24"],
+            ),
+            (
+                "[\"10.1.2.3/8\", \"2001:db8::1/32\"]",
+                "network.pin_cidrs[0]",
+                "\"10.0.0.0/8\"",
+                vec!["10.0.0.0/8", "2001:db8::/32"],
+            ),
+        ] {
+            let start = declared(&format!(
+                "{WITH_HOST}ports = [443]\npin_cidrs = {pins_written}"
+            ));
+            let (_, actual_field, actual_fix) = field_refusal(&start);
+            assert_eq!(
+                (actual_field.as_str(), actual_fix.as_str()),
+                (field, fix),
+                "{pins_written}"
+            );
+            let (_, manifest) = fixes_followed(&start);
+            assert_eq!(pins(&manifest.network.unwrap()), kept, "{pins_written}");
+        }
+    }
+
+    #[test]
+    fn a_canonical_dst_is_kept_exactly_as_written() {
+        for dst in [
+            "/srv/work.d",
+            "/srv/work",
+            "/workspace",
+            "/a/.hidden/b..c/...",
+            "/w",
+        ] {
+            let manifest =
+                PlasmidManifest::parse(&workspace_declaration(&format!("{{ dst = \"{dst}\" }}")))
+                    .unwrap_or_else(|error| panic!("{dst} was refused: {error}"));
+            assert_eq!(manifest.workspace.unwrap().dst, dst);
+        }
+    }
+
+    #[test]
+    fn a_workspace_with_no_mount_is_refused_even_beside_another_capability() {
+        let declaration = declared(&format!("{WITH_HOST}ports = [443]\n[workspace]"));
+        let (_, field, fix) = field_refusal(&declaration);
+        assert_eq!(
+            (field.as_str(), fix.as_str()),
+            ("workspace.mount", "mount = { dst = \"/workspace\" }")
+        );
+        let repaired = PlasmidManifest::parse(&with_fix(&declaration, &field, &fix)).unwrap();
+        assert_eq!(repaired.workspace.unwrap().dst, "/workspace");
+    }
+
+    #[test]
+    fn a_command_network_keeps_the_values_it_parses_today() {
+        let declaration = declared(
+            "[commands.commands.git]\nexec = [\"git\"]\n\
+             [commands.commands.git.network]\n\
+             hosts = [\"API.example\", \"192.0.2.1\", \"API.example\"]\n\
+             ports = [443, 443]\npin_cidrs = [\"nonsense\", \"192.0.2.1/24\"]\n",
+        );
+        let manifest = PlasmidManifest::parse(&declaration).unwrap();
+        let network = manifest.commands.unwrap().commands[0]
+            .network
+            .clone()
+            .unwrap();
+        assert_eq!(network.hosts, ["API.example", "192.0.2.1", "API.example"]);
+        assert_eq!(network.ports, [443, 443]);
+        assert_eq!(network.pin_cidrs, ["nonsense", "192.0.2.1/24"]);
+        for ports in ["", "ports = []"] {
+            let declaration = declared(&format!(
+                "[commands.commands.git]\nexec = [\"git\"]\n\
+                 [commands.commands.git.network]\nhosts = [\"alpha.ak.local\"]\n{ports}"
+            ));
+            let manifest = PlasmidManifest::parse(&declaration)
+                .unwrap_or_else(|error| panic!("{ports}: {error}"));
+            let network = manifest.commands.unwrap().commands[0]
+                .network
+                .clone()
+                .unwrap();
+            assert!(network.ports.is_empty(), "{ports}");
+        }
     }
 
     fn refusal_detail(declaration: &str) -> String {
@@ -3448,7 +3935,71 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 format!(
                     "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"x{ESCAPE}y\"]"
                 ),
-                &format!("[mock] stands in for \"x{ESCAPE}y\", which [network] does not declare"),
+                &format!(
+                    "[mock] stands in for \"x{ESCAPE}y\", which [network] does not declare, \
+                     and [network] declares no port"
+                ),
+            ),
+            (
+                format!(
+                    "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                     [mock]\nhosts = [\"x{ESCAPE}y\"]"
+                ),
+                &format!("[mock] stands in for \"x{ESCAPE}y\", which is not a lower-case DNS name"),
+            ),
+            (
+                format!(
+                    "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                     [mock]\nhosts = [\"uploads.github.com\"]"
+                ),
+                "[mock] stands in for \"uploads.github.com\", which [network] does not declare",
+            ),
+            (
+                "[mock]\nhosts = [\"api.github.com\"]".to_string(),
+                "a mock stands in for hosts that [network] declares, and there is no [network]",
+            ),
+            (
+                format!("[network]\nhosts = [\"x{ESCAPE}y\"]\nports = [443]"),
+                &format!("\"x{ESCAPE}y\" is not a lower-case DNS name"),
+            ),
+            (
+                "[network]\nhosts = [\"a.example\", \"a.example\"]\nports = [443]".to_string(),
+                "\"a.example\" is already declared",
+            ),
+            (
+                "[network]\nhosts = [\"a.example\"]\nports = [443, 443]".to_string(),
+                "443 is already declared",
+            ),
+            (
+                "[network]\nhosts = [\"a.example\"]".to_string(),
+                "a network section that names hosts must declare a port",
+            ),
+            (
+                "[network]".to_string(),
+                "a network section with no host and no port declares nothing",
+            ),
+            (
+                "[network]\nhosts = [\"a.example\"]\nports = [443]\npin_cidrs = [\"192.0.2.1/24\"]"
+                    .to_string(),
+                "\"192.0.2.1/24\" has host bits set past its prefix",
+            ),
+            (
+                format!(
+                    "[network]\nhosts = [\"a.example\"]\nports = [443]\npin_cidrs = [\"x{ESCAPE}\"]"
+                ),
+                &format!("\"x{ESCAPE}\" is not a CIDR such as \"192.0.2.0/24\""),
+            ),
+            (
+                "[workspace]".to_string(),
+                "a workspace section must declare its mount",
+            ),
+            (
+                format!("[workspace]\nmount = {{ dst = \"a{ESCAPE}\" }}"),
+                &format!("\"a{ESCAPE}\" is not a canonical absolute path"),
+            ),
+            (
+                "[workspace]\nmount = { dst = 5 }".to_string(),
+                "5 is not a path string",
             ),
             (
                 "[commands.commands.git]\nexec = []".to_string(),
