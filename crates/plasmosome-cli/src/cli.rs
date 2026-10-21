@@ -427,47 +427,51 @@ impl<'a> Line<'a> {
             deadline_ms: None,
             form: self.form(),
         };
-        for (index, flag) in self.flags() {
-            let Some(value) = self
-                .head
-                .get(index + 1)
-                .filter(|arg| arg.kind == Kind::Value)
-                .map(|arg| arg.text)
-            else {
-                continue;
-            };
-            let text = value.to_string_lossy().into_owned();
-            let refused = |rule: &str| {
-                self.usage(
-                    format!("`{text}` is refused for {}: {rule}", flag.to_string_lossy()),
-                    Some(value),
-                )
-            };
-            if flag == KERNEL {
-                if !is_instance_name(&text) {
-                    return refused(
-                        "an instance name is not empty, `.` or `..`, and holds no `/`, \
-                         backslash, NUL or terminal control",
-                    );
-                }
-                invocation.kernel = Some(text);
-            } else if flag == SOCKET {
-                if !is_normal_absolute(&text) {
-                    return refused(
-                        "a socket path is absolute, with no empty, `.` or `..` component",
-                    );
-                }
-                invocation.socket = Some(text);
-            } else if flag == DEADLINE {
-                let Some(deadline_ms) = deadline_ms(&text) else {
-                    return refused(&format!(
-                        "a deadline is an integer from 1 to {MAX_DEADLINE_MS}"
-                    ));
-                };
-                invocation.deadline_ms = Some(deadline_ms);
+        if let Some(name) = self.value(KERNEL) {
+            if !is_instance_name(&name) {
+                return self.refused(
+                    KERNEL,
+                    &name,
+                    "an instance name is not empty, `.` or `..`, and holds no `/`, backslash, \
+                     NUL or terminal control",
+                );
             }
+            invocation.kernel = Some(name);
+        }
+        if let Some(path) = self.value(SOCKET) {
+            if !is_normal_absolute(&path) {
+                return self.refused(
+                    SOCKET,
+                    &path,
+                    "a socket path is absolute, with no empty, `.` or `..` component",
+                );
+            }
+            invocation.socket = Some(path);
+        }
+        if let Some(text) = self.value(DEADLINE) {
+            let Some(deadline_ms) = deadline_ms(&text) else {
+                return self.refused(
+                    DEADLINE,
+                    &text,
+                    &format!("a deadline is an integer from 1 to {MAX_DEADLINE_MS}"),
+                );
+            };
+            invocation.deadline_ms = Some(deadline_ms);
         }
         Reading::Run(invocation)
+    }
+
+    fn value(&self, flag: &str) -> Option<String> {
+        let (index, _) = self.flags().find(|(_, text)| *text == flag)?;
+        let value = self.head.get(index + 1)?;
+        Some(value.text.to_string_lossy().into_owned())
+    }
+
+    fn refused(&self, flag: &str, value: &str, rule: &str) -> Reading {
+        self.usage(
+            format!("`{value}` is refused for {flag}: {rule}"),
+            Some(OsStr::new(value)),
+        )
     }
 }
 
