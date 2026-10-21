@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Defend health-report uncertainty, delivery windows, pagination, security issues and read-only failure boundaries."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -562,8 +563,13 @@ def runner_refused_group_of_exited_leader():
         assert child.stdout.closed and child.stderr.closed, "a refused group left its pipes open"
         assert "after reap" not in calls, f"signalled a group after its leader was reaped: {calls}"
         assert len(calls) == 1, f"expected exactly one killpg, saw {calls}"
-        if sys.platform == "darwin":
-            assert calls == ["kernel"], f"the kernel did not refuse a group whose only member is a zombie: {calls}"
+    return calls
+
+
+def the_kernel_refuses_killpg_on_a_group_whose_only_member_is_a_zombie():
+    only_on_macos("killpg on a group whose leader exited unreaped returns EPERM only on Darwin")
+    calls = runner_refused_group_of_exited_leader()
+    assert calls == ["kernel"], f"the kernel did not refuse a group whose only member is a zombie: {calls}"
 
 
 def runner_refused_group_of_live_leader():
@@ -654,7 +660,54 @@ def runner_ends_descendants_of_exited_leader():
                     pass
 
 
+def only_on_macos_skips_by_name_off_darwin():
+    platform = sys.platform
+    try:
+        sys.platform = "linux"
+        try:
+            only_on_macos("a probe reason")
+        except Skipped as skipped:
+            assert str(skipped) == "macOS only: a probe reason", skipped
+        else:
+            raise AssertionError("only_on_macos let a row run off Darwin")
+        sys.platform = "darwin"
+        try:
+            returned = only_on_macos("a probe reason")
+        except Skipped as skipped:
+            raise AssertionError(f"only_on_macos skipped a row on Darwin: {skipped}") from None
+        assert returned is None, returned
+    finally:
+        sys.platform = platform
+
+
+def a_failed_row_fails_the_run_whatever_rows_skip():
+    def passes():
+        pass
+
+    def fails():
+        raise AssertionError("broken")
+
+    def crashes():
+        raise RuntimeError("crashed")
+
+    def skips():
+        raise Skipped("macOS only: a probe reason")
+
+    printed, errors = io.StringIO(), io.StringIO()
+    with redirect_stdout(printed), redirect_stderr(errors):
+        statuses = [run_rows([skips, fails]), run_rows([crashes, skips]), run_rows([passes, skips])]
+    assert statuses == [1, 1, 0], statuses
+    assert printed.getvalue().splitlines() == [
+        "skip skips: macOS only: a probe reason", "FAIL fails: AssertionError: broken", "0 passed, 1 failed, 1 skipped",
+        "FAIL crashes: RuntimeError: crashed", "skip skips: macOS only: a probe reason", "0 passed, 1 failed, 1 skipped",
+        "ok passes", "skip skips: macOS only: a probe reason", "1 passed, 0 failed, 1 skipped",
+    ], printed.getvalue()
+    assert errors.getvalue().count("Traceback") == 2, errors.getvalue()
+
+
 def main():
+    only_on_macos_skips_by_name_off_darwin()
+    a_failed_row_fails_the_run_whatever_rows_skip()
     native_uncertainty()
     delivery_boundaries()
     security_issues()
@@ -665,6 +718,7 @@ def main():
     cli_exit_metadata()
     runner_released_group_identity()
     runner_refused_group_of_exited_leader()
+    the_kernel_refuses_killpg_on_a_group_whose_only_member_is_a_zombie()
     runner_refused_group_of_live_leader()
     runner_refused_group_of_exiting_leader()
     runner_ends_descendants_of_exited_leader()
