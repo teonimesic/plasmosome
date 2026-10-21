@@ -55,14 +55,18 @@ pub enum StartError {
         lock: SupervisorLock,
         source: io::Error,
     },
-    /// `step` failed with `errno`, in this process or in a child before its exec.
+    /// `step` failed with `errno`, in this process or in a child before its exec. A failure
+    /// report the children cannot have written, or a failed read of it, reads as `Exec` with
+    /// `EPROTO` or the read's errno.
     Exec {
         lock: SupervisorLock,
         step: StartStep,
         errno: i32,
     },
     /// Descriptor 3 was closed before `membraned` read the whole record: `membraned` exited or
-    /// closed it.
+    /// closed it. A new process that died before its exec without a report, such as by a signal
+    /// sent to the caller's process group before it left that group, also ends here, since the
+    /// start reads its silence as a successful exec.
     SupervisorClosedPipe,
     /// `membraned` had not read the whole record by the deadline.
     RecordNotTaken,
