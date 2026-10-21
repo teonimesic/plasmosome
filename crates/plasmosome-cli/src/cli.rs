@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::Once;
 
 use plasmosome_core::state::InstanceName;
 
@@ -91,8 +92,12 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>, version: &str) -> u8 
 }
 
 /// Reads `args` against `commands`, writes the outcome to `stdout` or `stderr`, and returns the
-/// exit. A panic prints nothing of its own: it ends in one `internal` envelope on `stderr` and
-/// [`Exit::Internal`].
+/// exit. A panic prints nothing of its own: it ends in one `internal` envelope on `stderr`, in
+/// the form the line chose, and [`Exit::Internal`].
+///
+/// The first call installs a panic hook for the whole process. The hook is silent on a thread
+/// while it runs `handle`, and passes every other panic to the hook that was set before it. A
+/// hook set after that first call replaces it, and a panic in a command then reaches that hook.
 pub fn handle(
     args: &[OsString],
     version: &str,
@@ -102,20 +107,22 @@ pub fn handle(
 ) -> Exit {
     quiet_panics();
     let mut named = INVALID.to_string();
-    QUIET.set(true);
+    let mut form = Form::Json;
+    let quiet = QUIET.replace(true);
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         let reading = read(args, commands);
         named = reading.command().to_string();
+        form = reading.form();
         act(reading, version, stdout, stderr)
     }));
-    QUIET.set(false);
+    QUIET.set(quiet);
     outcome.unwrap_or_else(|_| {
         let error = client(
             ClientCode::Internal,
             "the client failed; please report it".to_string(),
             Vec::new(),
         );
-        refuse(named, error, Form::Json, stdout, stderr)
+        refuse(named, error, form, stdout, stderr)
     })
 }
 
@@ -154,6 +161,14 @@ impl Reading {
             Reading::Version => VERSION,
             Reading::Refuse { command, .. } => command,
             Reading::Run(invocation) => invocation.command.command,
+        }
+    }
+
+    fn form(&self) -> Form {
+        match self {
+            Reading::Help { form, .. } | Reading::Refuse { form, .. } => *form,
+            Reading::Version => Form::Json,
+            Reading::Run(invocation) => invocation.form,
         }
     }
 }
@@ -556,19 +571,18 @@ fn deadline_ms(text: &str) -> Option<u32> {
 }
 
 fn quiet_panics() {
-    let previous = panic::take_hook();
-    panic::set_hook(Box::new(move |info| {
-        if !QUIET.get() {
-            previous(info);
-        }
-    }));
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if !QUIET.get() {
+                previous(info);
+            }
+        }));
+    });
 }
 
 fn act(reading: Reading, version: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit {
-    #[cfg(test)]
-    if tests::PANIC_IN_COMMAND.get() {
-        panic!("the panic a test asked for");
-    }
     match reading {
         Reading::Help { text, form } => print(&text, HELP, form, stdout, stderr),
         Reading::Version => print(
@@ -653,13 +667,4 @@ fn refuse(
 fn client(code: ClientCode, message: String, fields: Vec<(String, Json)>) -> ClientError {
     ClientError::new(code, message, fields)
         .expect("the client's own fields repeat no key and hold no object")
-}
-
-#[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    thread_local! {
-        pub(super) static PANIC_IN_COMMAND: Cell<bool> = const { Cell::new(false) };
-    }
 }
