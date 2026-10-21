@@ -12,6 +12,7 @@ pub(crate) enum Form {
 enum Code {
     InvalidArgument,
     NotServed,
+    LocalIo,
 }
 
 impl Code {
@@ -19,15 +20,21 @@ impl Code {
         match self {
             Code::InvalidArgument => "invalid_argument",
             Code::NotServed => "not_served",
+            Code::LocalIo => "local_io",
         }
     }
+}
+
+enum Detail {
+    Text(String),
+    Number(i32),
 }
 
 pub(crate) struct Refusal {
     command: String,
     code: Code,
     message: String,
-    field: Option<(&'static str, String)>,
+    field: Option<(&'static str, Detail)>,
     form: Form,
 }
 
@@ -37,7 +44,12 @@ impl Refusal {
             command: "invalid".to_string(),
             code: Code::InvalidArgument,
             message,
-            field: argument.map(|argument| ("argument", argument.to_string_lossy().into_owned())),
+            field: argument.map(|argument| {
+                (
+                    "argument",
+                    Detail::Text(argument.to_string_lossy().into_owned()),
+                )
+            }),
             form,
         }
     }
@@ -47,7 +59,22 @@ impl Refusal {
             command: method.to_string(),
             code: Code::NotServed,
             message,
-            field: Some(("method", method.to_string())),
+            field: Some(("method", Detail::Text(method.to_string()))),
+            form,
+        }
+    }
+
+    pub(crate) fn local_io(
+        command: &str,
+        message: String,
+        errno: Option<i32>,
+        form: Form,
+    ) -> Refusal {
+        Refusal {
+            command: command.to_string(),
+            code: Code::LocalIo,
+            message,
+            field: errno.map(|errno| ("errno", Detail::Number(errno))),
             form,
         }
     }
@@ -56,6 +83,7 @@ impl Refusal {
         match self.code {
             Code::InvalidArgument => Exit::Usage,
             Code::NotServed => Exit::Refused,
+            Code::LocalIo => Exit::Unavailable,
         }
     }
 
@@ -73,7 +101,10 @@ impl Refusal {
                     out.push(',');
                     write_string(&mut out, key);
                     out.push(':');
-                    write_string(&mut out, value);
+                    match value {
+                        Detail::Text(text) => write_string(&mut out, text),
+                        Detail::Number(number) => out.push_str(&number.to_string()),
+                    }
                 }
                 out.push_str("}}");
             }

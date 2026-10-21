@@ -8,6 +8,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use args::Reading;
+use envelope::{Form, Refusal};
 
 #[derive(Clone, Copy)]
 enum Exit {
@@ -30,9 +31,11 @@ fn main() -> ExitCode {
 
 fn run(arguments: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit {
     match args::read(arguments) {
-        Reading::Help(text) => print(&text, stdout, stderr),
+        Reading::Help(text, form) => print(&text, args::HELP, form, stdout, stderr),
         Reading::Version => print(
             &format!("plasmid {}\n", env!("CARGO_PKG_VERSION")),
+            args::VERSION,
+            Form::Json,
             stdout,
             stderr,
         ),
@@ -44,18 +47,27 @@ fn run(arguments: &[OsString], stdout: &mut dyn Write, stderr: &mut dyn Write) -
     }
 }
 
-fn print(text: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit {
+fn print(
+    text: &str,
+    command: &str,
+    form: Form,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Exit {
     match stdout
         .write_all(text.as_bytes())
         .and_then(|()| stdout.flush())
     {
         Ok(()) => Exit::Done,
         Err(error) => {
-            note(
-                stderr,
-                &format!("plasmid: cannot write to stdout: {error}; nothing changed\n"),
+            let failure = Refusal::local_io(
+                command,
+                format!("could not write to stdout: {error}"),
+                error.raw_os_error(),
+                form,
             );
-            Exit::Unavailable
+            note(stderr, &failure.render());
+            failure.exit()
         }
     }
 }

@@ -5,9 +5,9 @@ use crate::help;
 
 const SHORT_HELP: &str = "-h";
 
-const HELP: &str = "--help";
+pub(crate) const HELP: &str = "--help";
 
-const VERSION: &str = "--version";
+pub(crate) const VERSION: &str = "--version";
 
 const JSON: &str = "--json";
 
@@ -16,6 +16,17 @@ const HUMAN: &str = "--human";
 const VALUE_FLAGS: [&str; 3] = ["--kernel", "--socket", "--deadline-ms"];
 
 const FLAGS: [&str; 5] = ["--kernel", "--socket", "--deadline-ms", JSON, HUMAN];
+
+const HELP_READS_PAST: [&str; 8] = [
+    "--kernel",
+    "--socket",
+    "--deadline-ms",
+    JSON,
+    HUMAN,
+    SHORT_HELP,
+    HELP,
+    VERSION,
+];
 
 const NAME_LIMIT: usize = 64;
 
@@ -82,7 +93,7 @@ pub(crate) const COMMANDS: [Command; 6] = [
 ];
 
 pub(crate) enum Reading<'a> {
-    Help(String),
+    Help(String, Form),
     Version,
     Refuse(Refusal),
     New(&'a str),
@@ -96,7 +107,6 @@ enum Kind {
 }
 
 struct Line<'a> {
-    arguments: &'a [OsString],
     head: Vec<(Kind, &'a OsStr)>,
     dashes: bool,
 }
@@ -123,6 +133,10 @@ pub(crate) fn read(arguments: &[OsString]) -> Reading<'_> {
 
 fn command(word: &OsStr) -> Option<&'static Command> {
     COMMANDS.iter().find(|command| word == command.word)
+}
+
+fn served(word: &OsStr) -> Option<&'static Command> {
+    command(word).filter(|command| matches!(command.serving, Serving::Local))
 }
 
 fn unserved(word: &OsStr) -> Option<(&'static Command, &'static str)> {
@@ -153,7 +167,6 @@ impl<'a> Line<'a> {
             head.push((kind, argument.as_os_str()));
         }
         Line {
-            arguments,
             head,
             dashes: split < arguments.len(),
         }
@@ -194,9 +207,17 @@ impl<'a> Line<'a> {
     }
 
     fn help(&self) -> Reading<'a> {
-        let words = self.words();
+        let words: Vec<&OsStr> = self
+            .head
+            .iter()
+            .take_while(|(kind, argument)| {
+                *kind != Kind::Flag || HELP_READS_PAST.iter().any(|known| *argument == *known)
+            })
+            .filter(|(kind, _)| *kind == Kind::Word)
+            .map(|(_, word)| *word)
+            .collect();
         let Some(first) = words.first() else {
-            return Reading::Help(help::binary());
+            return Reading::Help(help::binary(), self.form());
         };
         let Some(command) = command(first) else {
             return self.unknown(first);
@@ -204,7 +225,7 @@ impl<'a> Line<'a> {
         if let Some(extra) = words.get(1 + command.positionals) {
             return self.extra(command, extra);
         }
-        Reading::Help(help::command(command))
+        Reading::Help(help::command(command), self.form())
     }
 
     fn unknown(&self, word: &OsStr) -> Reading<'a> {
@@ -237,8 +258,15 @@ impl<'a> Line<'a> {
     }
 
     fn not_served(&self, command: &Command, method: &str) -> Reading<'a> {
-        if let Some(fault) = self.repeated(&[JSON, HUMAN]).or_else(|| self.clash()) {
-            return fault;
+        let mut seen: Vec<&str> = Vec::new();
+        for (_, flag) in self.of(Kind::Flag) {
+            let Some(form) = [JSON, HUMAN].into_iter().find(|form| flag == *form) else {
+                continue;
+            };
+            if let Some(fault) = self.twice_or_clash(&seen, form) {
+                return fault;
+            }
+            seen.push(form);
         }
         Reading::Refuse(Refusal::not_served(
             method,
@@ -247,65 +275,71 @@ impl<'a> Line<'a> {
         ))
     }
 
-    fn repeated(&self, among: &[&str]) -> Option<Reading<'a>> {
-        let mut seen: Vec<&OsStr> = Vec::new();
-        for (_, flag) in self.of(Kind::Flag) {
-            if !among.iter().any(|known| flag == *known) {
-                continue;
-            }
-            if seen.contains(&flag) {
-                return Some(self.usage(
-                    format!(
-                        "{} is given twice; a flag is given at most once",
-                        flag.to_string_lossy()
-                    ),
-                    Some(flag),
-                ));
-            }
-            seen.push(flag);
+    fn twice_or_clash(&self, seen: &[&str], flag: &str) -> Option<Reading<'a>> {
+        if seen.contains(&flag) {
+            return Some(self.usage(
+                format!("{flag} is given twice; a flag is given at most once"),
+                Some(OsStr::new(flag)),
+            ));
         }
-        None
-    }
-
-    fn clash(&self) -> Option<Reading<'a>> {
-        let at = |wanted: &str| {
-            self.of(Kind::Flag)
-                .find(|(_, flag)| *flag == wanted)
-                .map(|(index, _)| index)
+        let other = match flag {
+            JSON => HUMAN,
+            HUMAN => JSON,
+            _ => return None,
         };
-        let (json, human) = (at(JSON)?, at(HUMAN)?);
-        let later = if json > human { JSON } else { HUMAN };
-        Some(self.usage(
-            format!("{JSON} and {HUMAN} cannot be given together"),
-            Some(OsStr::new(later)),
-        ))
+        seen.contains(&other).then(|| {
+            self.usage(
+                format!("{JSON} and {HUMAN} cannot be given together"),
+                Some(OsStr::new(flag)),
+            )
+        })
     }
 
     fn parse(&self) -> Reading<'a> {
-        if let Some(bad) = self
-            .arguments
-            .iter()
-            .find(|argument| argument.to_str().is_none())
-        {
-            return self.usage(
-                format!(
-                    "`{}` is not valid UTF-8, and every argument must be",
-                    bad.to_string_lossy()
-                ),
-                Some(bad),
-            );
+        let mut seen: Vec<&str> = Vec::new();
+        let mut command: Option<&Command> = None;
+        let mut name: Option<&'a str> = None;
+        for &(kind, argument) in &self.head {
+            let Some(text) = argument.to_str() else {
+                return self.usage(
+                    format!(
+                        "`{}` is not valid UTF-8, and every argument must be",
+                        argument.to_string_lossy()
+                    ),
+                    Some(argument),
+                );
+            };
+            match (kind, command, name) {
+                (Kind::Value, _, _) => {}
+                (Kind::Flag, _, _) if !FLAGS.contains(&text) => {
+                    return self.usage(
+                        format!("unknown flag `{text}`; see plasmid --help"),
+                        Some(argument),
+                    );
+                }
+                (Kind::Flag, Some(command), _) => return self.not_taken(command, text),
+                (Kind::Flag, None, _) => {
+                    if let Some(fault) = self.twice_or_clash(&seen, text) {
+                        return fault;
+                    }
+                    seen.push(text);
+                }
+                (Kind::Word, None, _) => {
+                    let Some(served) = served(argument) else {
+                        return self.unknown(argument);
+                    };
+                    if let Some(flag) = seen.first() {
+                        return self.not_taken(served, flag);
+                    }
+                    command = Some(served);
+                }
+                (Kind::Word, Some(_), None) if is_plasmid_name(text) => name = Some(text),
+                (Kind::Word, Some(_), None) => return self.not_a_name(text),
+                (Kind::Word, Some(command), Some(_)) => return self.extra(command, argument),
+            }
         }
-        if let Some((_, flag)) = self
-            .of(Kind::Flag)
-            .find(|(_, flag)| !FLAGS.iter().any(|known| flag == known))
-        {
-            return self.usage(
-                format!(
-                    "unknown flag `{}`; see plasmid --help",
-                    flag.to_string_lossy()
-                ),
-                Some(flag),
-            );
+        if let Some(fault) = self.missing_value() {
+            return fault;
         }
         if self.dashes {
             return self.usage(
@@ -313,24 +347,17 @@ impl<'a> Line<'a> {
                 Some(OsStr::new("--")),
             );
         }
-        if let Some(fault) = self
-            .repeated(&FLAGS)
-            .or_else(|| self.missing_value())
-            .or_else(|| self.clash())
-        {
-            return fault;
-        }
-        let words = self.words();
-        let Some(first) = words.first() else {
-            return self.usage(
+        match (command, name) {
+            (None, _) => self.usage(
                 "a command is required; see plasmid --help".to_string(),
                 None,
-            );
-        };
-        let Some(command) = command(first) else {
-            return self.unknown(first);
-        };
-        self.parse_new(command, &words)
+            ),
+            (Some(_), None) => self.usage(
+                "plasmid new takes exactly one name, such as `plasmid new my-plasmid`".to_string(),
+                None,
+            ),
+            (Some(_), Some(name)) => Reading::New(name),
+        }
     }
 
     fn missing_value(&self) -> Option<Reading<'a>> {
@@ -344,37 +371,25 @@ impl<'a> Line<'a> {
         })
     }
 
-    fn parse_new(&self, command: &Command, words: &[&'a OsStr]) -> Reading<'a> {
-        if let Some((_, flag)) = self.of(Kind::Flag).next() {
-            return self.usage(
-                format!(
-                    "plasmid new takes none of the global flags, and {} is one",
-                    flag.to_string_lossy()
-                ),
-                Some(flag),
-            );
-        }
-        let Some(name) = words.get(1) else {
-            return self.usage(
-                "plasmid new takes exactly one name, such as `plasmid new my-plasmid`".to_string(),
-                None,
-            );
-        };
-        if let Some(extra) = words.get(2) {
-            return self.extra(command, extra);
-        }
-        match name.to_str().filter(|name| is_plasmid_name(name)) {
-            Some(name) => Reading::New(name),
-            None => self.usage(
-                format!(
-                    "`{}` is not a plasmid name, which is lower-case letters and digits in words \
-                     joined by single hyphens, at most {NAME_LIMIT} bytes, such as my-plasmid; \
-                     nothing was written",
-                    name.to_string_lossy()
-                ),
-                Some(name),
+    fn not_taken(&self, command: &Command, flag: &str) -> Reading<'a> {
+        self.usage(
+            format!(
+                "plasmid {} takes no flag but -h and --help, and {flag} is one",
+                command.word
             ),
-        }
+            Some(OsStr::new(flag)),
+        )
+    }
+
+    fn not_a_name(&self, name: &str) -> Reading<'a> {
+        self.usage(
+            format!(
+                "`{name}` is not a plasmid name, which is lower-case letters and digits in words \
+                 joined by single hyphens, at most {NAME_LIMIT} bytes, such as my-plasmid; \
+                 nothing was written"
+            ),
+            Some(OsStr::new(name)),
+        )
     }
 }
 
