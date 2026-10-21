@@ -911,6 +911,8 @@ impl CellDir {
                 return Err(error);
             }
         };
+        #[cfg(test)]
+        tests::after_naming_the_lock();
         self.check_lock_named(&file, &path)?;
         self.sync_dir()?;
         Ok(SupervisorLock { file, path })
