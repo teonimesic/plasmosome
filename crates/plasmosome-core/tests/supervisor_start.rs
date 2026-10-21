@@ -16,12 +16,13 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CASE: &str = "PLASMOSOME_SUPERVISOR_START_CASE";
 const CONTROLLER: &str = "PLASMOSOME_SUPERVISOR_START_CONTROLLER";
+const DEADLINE: &str = "PLASMOSOME_SUPERVISOR_START_DEADLINE";
 const CASE_DEADLINE: Duration = Duration::from_secs(20);
-const WAIT: Duration = Duration::from_secs(5);
+const DEADLINE_MARGIN: Duration = Duration::from_secs(2);
 const STANDIN_PATIENCE: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(5);
 const STARTED: &str = "the child controller started its supervisor";
@@ -127,6 +128,10 @@ fn run_every_case(arguments: &[OsString]) -> ExitCode {
 fn run_case(name: &str) -> Result<(), String> {
     let mut child = Command::new(this_executable())
         .env(CASE, name)
+        .env(
+            DEADLINE,
+            (epoch_millis() + CASE_DEADLINE.as_millis()).to_string(),
+        )
         .process_group(0)
         .stdin(Stdio::null())
         .spawn()
@@ -159,7 +164,7 @@ fn starts_detached_with_only_0_to_4() {
     let log = cell.log();
     let record = cell.record();
     let planted = Planted::low_and_last();
-    started(cell.start(&root.membraned(), lock, log, record.clone(), WAIT));
+    started(cell.start(&root.membraned(), lock, log, record.clone()));
     drop(planted);
     let report = Report::read(&cell.path);
     assert_eq!(
@@ -199,24 +204,31 @@ fn lock_never_free_until_exit() {
     let cell = Cell::create(&root.path, "cell-105");
     let lock = cell.lock();
     let probe = Probe::start(&root.path, "cell-105");
-    started(cell.start(&root.membraned(), lock, cell.log(), cell.record(), WAIT));
+    started(cell.start(&root.membraned(), lock, cell.log(), cell.record()));
+    probe.start_returned();
     let report = Report::read(&cell.path);
+    match probe.next() {
+        Seen::HeldAfterStart => {}
+        Seen::Free(_) => panic!("the lock was free before the stand-in was released; {report}"),
+        Seen::Unexpected(found) => panic!("the probe finds the lock held or free, not {found}"),
+    }
     let released_at = Instant::now();
-    release(&cell.path);
-    let (probes, freed_at) = probe.first_free();
-    assert!(
-        freed_at > released_at,
-        "the lock was never free before the stand-in was released; {report}"
-    );
-    assert!(
-        freed_at - released_at < Duration::from_secs(1),
-        "the lock is free within a second of the stand-in's release, not {:?}",
-        freed_at - released_at
-    );
-    assert!(
-        probes >= 10,
-        "the probe tried the lock {probes} times before it was free"
-    );
+    let exited_at = release(&cell.path);
+    match probe.next() {
+        Seen::Free(freed_at) => {
+            assert!(
+                freed_at > released_at,
+                "the lock was never free before the stand-in was released; {report}"
+            );
+            assert!(
+                freed_at < exited_at + Duration::from_secs(1),
+                "the lock is free within a second of the stand-in's exit, not {:?} after it",
+                freed_at.saturating_duration_since(exited_at)
+            );
+        }
+        Seen::HeldAfterStart => unreachable!("the probe reports Held once"),
+        Seen::Unexpected(found) => panic!("the probe finds the lock held or free, not {found}"),
+    }
 }
 
 fn survives_the_controller_group() {
@@ -255,7 +267,7 @@ fn survives_the_controller_group() {
 fn child_controller(root: &Path) -> ! {
     let cell = Cell::create(root, "cell-102");
     let membraned = membraned_in(root);
-    started(cell.start(&membraned, cell.lock(), cell.log(), cell.record(), WAIT));
+    started(cell.start(&membraned, cell.lock(), cell.log(), cell.record()));
     println!("{STARTED}");
     std::io::stdout().flush().expect("stdout flushes");
     loop {
@@ -268,7 +280,7 @@ fn exec_failure_returns_the_lock() {
     let cell = Cell::create(&root.path, "cell-106");
     let missing =
         RecipePath::parse(&format!("{}/missing", root.path.display())).expect("a canonical path");
-    match cell.start(&missing, cell.lock(), cell.log(), cell.record(), WAIT) {
+    match cell.start(&missing, cell.lock(), cell.log(), cell.record()) {
         Err(StartError::Exec { lock, step, errno }) => {
             assert_eq!((step, errno), (StartStep::Exec, libc::ENOENT));
             assert!(
@@ -292,7 +304,6 @@ fn early_exit_is_closed_pipe() {
         cell.lock(),
         cell.log(),
         oversized_record(),
-        WAIT,
     ) {
         Err(StartError::SupervisorClosedPipe) => {}
         other => panic!("a reader that exits early closes the pipe, not {other:?}"),
@@ -334,7 +345,7 @@ fn lock_already_at_four() {
     low.free(4);
     let lock = cell.lock();
     assert_eq!(lock.as_fd().as_raw_fd(), 4, "the controller's lock is at 4");
-    started(cell.start(&root.membraned(), lock, cell.log(), cell.record(), WAIT));
+    started(cell.start(&root.membraned(), lock, cell.log(), cell.record()));
     let report = Report::read(&cell.path);
     assert_descriptors(&report, &cell);
 }
@@ -354,7 +365,7 @@ fn sources_sit_on_each_others_targets() {
     );
     let record = cell.record();
     let stdin = close_stdin();
-    started(cell.start(&root.membraned(), lock, log, record, WAIT));
+    started(cell.start(&root.membraned(), lock, log, record));
     drop(stdin);
     let report = Report::read(&cell.path);
     assert_descriptors(&report, &cell);
@@ -370,7 +381,7 @@ fn a_cell_holding_a_nul_is_refused_before_any_fork() {
         log: cell.log(),
         record: cell.record(),
     };
-    match start_supervisor(start, Instant::now() + WAIT) {
+    match start_supervisor(start, case_deadline()) {
         Err(StartError::Prepare { lock, source }) => {
             assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
             assert!(
@@ -398,7 +409,7 @@ fn no_handler_of_the_controller_runs_in_a_child() {
     let storm = Storm::start();
     for _ in 0..20 {
         let lock = cell.lock();
-        match cell.start(&missing, lock, cell.log(), cell.record(), WAIT) {
+        match cell.start(&missing, lock, cell.log(), cell.record()) {
             Err(StartError::Exec { lock, .. }) => drop(lock),
             Err(StartError::SupervisorClosedPipe) => {}
             other => panic!("a missing membraned under signals fails, not {other:?}"),
@@ -601,7 +612,32 @@ fn first_line(child: &mut Child) -> Option<String> {
         let _ = BufReader::new(stdout).read_line(&mut line);
         let _ = sent.send(line.trim_end().to_owned());
     });
-    received.recv_timeout(WAIT).ok()
+    received.recv_timeout(until_the_case_deadline()).ok()
+}
+
+fn case_deadline() -> Instant {
+    static AT: OnceLock<Instant> = OnceLock::new();
+    *AT.get_or_init(|| {
+        let left = std::env::var(DEADLINE)
+            .ok()
+            .and_then(|at| at.parse::<u128>().ok())
+            .map_or(CASE_DEADLINE, |at| {
+                Duration::from_millis(
+                    u64::try_from(at.saturating_sub(epoch_millis())).unwrap_or(u64::MAX),
+                )
+            });
+        Instant::now() + left.saturating_sub(DEADLINE_MARGIN)
+    })
+}
+
+fn until_the_case_deadline() -> Duration {
+    case_deadline().saturating_duration_since(Instant::now())
+}
+
+fn epoch_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis())
 }
 
 fn this_executable() -> PathBuf {
@@ -694,7 +730,6 @@ impl Cell {
         lock: SupervisorLock,
         log: File,
         record: Vec<u8>,
-        wait: Duration,
     ) -> Result<(), StartError> {
         let start = SupervisorStart {
             membraned,
@@ -703,7 +738,7 @@ impl Cell {
             log,
             record,
         };
-        start_supervisor(start, Instant::now() + wait)
+        start_supervisor(start, case_deadline())
     }
 }
 
@@ -721,18 +756,18 @@ impl Drop for Released {
     }
 }
 
-fn release(cell: &Path) {
+fn release(cell: &Path) -> Instant {
     let _ = File::create(cell.join("release"));
     let Some(pid) = std::fs::read_to_string(cell.join("standin.pid"))
         .ok()
         .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
     else {
-        return;
+        return Instant::now();
     };
-    let deadline = Instant::now() + WAIT;
-    while is_running(pid) && Instant::now() < deadline {
+    while is_running(pid) && Instant::now() < case_deadline() {
         thread::sleep(POLL);
     }
+    Instant::now()
 }
 
 fn recipe(limits: &PlatformLimits) -> RuntimeRecipe {
@@ -763,8 +798,15 @@ fn recipe(limits: &PlatformLimits) -> RuntimeRecipe {
     RuntimeRecipe::parse(&line, limits).expect("the recipe is valid")
 }
 
+enum Seen {
+    HeldAfterStart,
+    Free(Instant),
+    Unexpected(String),
+}
+
 struct Probe {
-    outcome: mpsc::Receiver<(usize, Instant)>,
+    seen: mpsc::Receiver<Seen>,
+    start_returned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Probe {
@@ -773,29 +815,46 @@ impl Probe {
         let dir = instance
             .cell_dir(&CellId::from(cell))
             .expect("the probe opens the cell");
-        let (sent, outcome) = mpsc::channel();
+        let start_returned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let returned = std::sync::Arc::clone(&start_returned);
+        let (sent, seen) = mpsc::channel();
         thread::spawn(move || {
-            let deadline = Instant::now() + STANDIN_PATIENCE;
-            let mut probes = 0;
-            while Instant::now() < deadline {
+            let mut held_reported = false;
+            while Instant::now() < case_deadline() {
+                let after_start = returned.load(std::sync::atomic::Ordering::SeqCst);
                 match dir.probe_supervisor_lock() {
-                    Ok(LockProbe::Held) => probes += 1,
+                    Ok(LockProbe::Held) if after_start && !held_reported => {
+                        held_reported = true;
+                        let _ = sent.send(Seen::HeldAfterStart);
+                    }
+                    Ok(LockProbe::Held) => {}
                     Ok(LockProbe::Free(_)) => {
-                        let _ = sent.send((probes, Instant::now()));
+                        let _ = sent.send(Seen::Free(Instant::now()));
                         return;
                     }
-                    other => panic!("the probe finds the lock held or free, not {other:?}"),
+                    other => {
+                        let _ = sent.send(Seen::Unexpected(format!("{other:?}")));
+                        return;
+                    }
                 }
                 thread::sleep(Duration::from_millis(1));
             }
         });
-        Probe { outcome }
+        Probe {
+            seen,
+            start_returned,
+        }
     }
 
-    fn first_free(self) -> (usize, Instant) {
-        self.outcome
-            .recv_timeout(WAIT)
-            .expect("the probe finds the lock free once the stand-in exits")
+    fn start_returned(&self) {
+        self.start_returned
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn next(&self) -> Seen {
+        self.seen
+            .recv_timeout(until_the_case_deadline())
+            .expect("the probe sees the lock change by the case's deadline")
     }
 }
 
@@ -818,14 +877,13 @@ impl Descriptor {
 impl Report {
     fn read(cell: &Path) -> Report {
         let path = cell.join("standin.json");
-        let deadline = Instant::now() + WAIT;
         loop {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 return Report(serde_json::from_str(&text).expect("the report is JSON"));
             }
             assert!(
-                Instant::now() < deadline,
-                "the stand-in reported within {WAIT:?} at {}",
+                Instant::now() < case_deadline(),
+                "the stand-in reported by the case's deadline at {}",
                 path.display()
             );
             thread::sleep(POLL);
