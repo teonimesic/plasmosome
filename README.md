@@ -598,7 +598,7 @@ failure. After the build container runs, the tool reads only two things it left 
 the read-back in `check/`, which must still be a directory and is read through a bound.
 
 The images root above is the lab location, next to the runtime bundles. It is gated. Spec 001
-refuses an artifact with a replaceable parent (001:907), and `/usr/local/var` is admin-writable,
+refuses an artifact with a replaceable parent (001:990), and `/usr/local/var` is admin-writable,
 so product verification cannot accept an image from there. Owner gate O-1 (spec 027) is about the
 instance root, not the image, so answering O-1 alone does not admit an image there.
 
@@ -627,7 +627,8 @@ The image is the base with these changes: the `workload` account (uid and gid 10
 and `/sys`, and fixed `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`. The tool refuses a base
 with anything under `/opt` or `/usr/local/bin`, or with a path that names plasmosome or plasmid
 (spec 027). It also refuses a base whose account files already name `workload` or use id 1000. It
-reads those files as glibc does, so a name or member with leading blanks still counts.
+reads those files as glibc does, so a name or member with leading blanks still counts. A NUL byte
+in one of them is refused, because glibc ends a line there.
 `--add SRC:DEST:MODE` adds a root-owned file and makes the kind `test`, never `product`. Two builds
 with the same base and `--source-date-epoch` give the same `content_sha256`. The ext4 bytes can
 differ, so compare rebuilds by `content_sha256`.
