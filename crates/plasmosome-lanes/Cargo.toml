@@ -41,3 +41,6 @@ unsafe_code = "deny"
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 missing_safety_doc = "deny"
+
+[package.metadata.ofaf-throwaway]
+reverted = "in this pull request"
