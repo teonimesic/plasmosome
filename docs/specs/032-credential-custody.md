@@ -73,7 +73,7 @@ Defended:
   that true: the component host holds no value, no surrogate and no key.
 - **A plasmid author** who names references and hosts. The declaration bounds what may be bound.
   Only the operator places a credential, and only at a target the same plasmid holds.
-- **A bound host that echoes the value exactly**, in a response header or an unencoded body. On a
+- **A bound host that echoes the value exactly**, in a response head or an unencoded body. On a
   request that carries a value, the relay asks for an unencoded response, refuses one it cannot
   scrub, and replaces each exact copy (§5).
 
@@ -361,6 +361,8 @@ content, and drops the bytes there.
   needs no timer and no controller" (`028:125-126`). A relay that asked the controller on each
   request would put it back in.
 - No verb, new or old, has a value as its payload.
+- `membraned` sets its core file size limit to zero before it reads a value or the key, so a
+  crash writes neither to disk.
 
 At apply, `membraned` repeats every check of §1 except spec 022's rule 5. That rule needs the
 instance's journals, which only the controller reads, so it is the controller's, at resolution.
@@ -394,14 +396,18 @@ attaches a binding's value to a request only when all of these hold.
 4. The relay itself sends the request to the holding's recorded destination, resolved as spec 017
    says: "A DNS name is resolved only for this authorized destination." (`017:124`).
 5. It sends it over its own TLS connection, after verifying the upstream's certificate for the
-   binding's host against the relay's pinned roots and C4's `roots`. It never attaches a value over
+   binding's host against the relay's pinned roots and the path's extra roots: C4's `roots` on the
+   workload path, and spec 031's `component_runtime.roots` on the component path. It never
+   attaches a value over
    plain text: at a target whose upstream does not complete that handshake, nothing is attached.
 6. It sends a request it wrote itself. It parses the request, checks it under the request rules
    below, and writes what it sends from what it checked: the method, the canonical path, the
    query, exactly one `Host`, the fields it kept, and framing it chose. It never forwards the
    guest's raw bytes, nor a component's.
 7. An upstream connection that carried an attached request is never shared with another
-   attachment's flow or with an unbound flow.
+   attachment's flow, with an unbound flow, or with a component request that names no reference.
+   An attached request goes only on a connection that has carried nothing but requests the relay
+   wrote under the request rules for the same attachment.
 8. The relay never follows a redirect. It returns a redirect response as it came, and a request
    to the new location is a new request, checked like any other.
 
@@ -425,7 +431,9 @@ sends any byte. On the workload path it then closes the guest's connection.
    `Content-Length` values, with a `Transfer-Encoding` other than `chunked`, with an obs-fold, a
    space before a colon or a bare LF, with a header line or a head over its bound (C3), or with the
    binding's header more than once. A component's own `Content-Length`, `Transfer-Encoding` or
-   `Connection` is refused, since the relay writes framing itself.
+   `Connection` is refused, since the relay writes framing itself. It drops the client's
+   `Connection`, every field that `Connection` names, `Keep-Alive` and `Upgrade`, so a request it
+   attaches a value to never switches protocols.
 
 Each of these rules closes one way to send the value somewhere the binding does not name: a path
 trick, another site at one address, or a second request smuggled past the rules.
@@ -495,8 +503,9 @@ and removes `TE`, `Range` and `If-Range`. It refuses that request's response whe
 coding other than `identity`, a transfer coding other than `chunked`, or status 206: the guest's
 connection is closed, or the component's request fails, and no byte of the body passes. On an
 intercepted flow, and on a component's request at a bound target, it drops response trailers.
-Then it scrubs. It replaces each exact copy of a value bound at the target, in response header
-values and bodies, across chunk boundaries, under G12's hold-back. On the workload path it writes
+Then it scrubs. It replaces each exact copy of a value bound at the target, in the whole head of
+each interim and final response, the status line and field names included, and in the body,
+across chunk boundaries, under G12's hold-back. On the workload path it writes
 that binding's surrogate when the surrogate has the value's length, and otherwise the placeholder.
 On the component path it writes the placeholder: a run of `x` as long as the value. Each
 replacement keeps the length, so the response's framing is unchanged; the price is that the run of
@@ -611,7 +620,8 @@ what holds outside the guest.
   destination after verifying the certificate for the binding's host, and only under §5's request
   and substitution rules. This holds in every mode: at `simulate` and `capture` nothing is
   attached. Never on a redirect, which the relay never follows, and never on an upstream
-  connection that another attachment's flow or an unbound flow shares.
+  connection that another attachment's flow, an unbound flow or a component request naming no
+  reference shares.
 - **G5. Only while admitted.** The binding's gate admits the request before anything is attached.
   From the fence or the withdrawal on, nothing is attached on any flow, old or new.
 - **G6. Explicit use.** A value is never added to a request that did not name its reference or
@@ -641,8 +651,10 @@ what holds outside the guest.
 - **G14. The instance authority.** Its private key never enters a cell. It is never in the
   journal, a session log, status, a refusal, a reply or the component host. Only `membraned` reads
   it, under §1's file checks, which the controller also runs, rule 5 included, at each resolution
-  that binds an `inject` credential. A leaf certificate is issued only for a target with an
-  `inject` binding that admits, and expires no later than that attachment's bound B as known at
+  that binds an `inject` credential; the controller reads it only to check it, and drops the
+  bytes. The authority's certificate file holds no key. A leaf certificate is issued only for a
+  target with an `inject` binding that admits, and expires no later than that attachment's bound
+  B as known at
   issue; with several bindings at the target, the earliest. That notAfter is an upper bound only:
   the gate ends use at the current B, and `membraned` destroys the leaf's key when no binding at
   the target admits. A leaf's own key stays in `membraned`'s memory.
@@ -662,9 +674,11 @@ Each has a default. The first consumer's PR settles it, by editing this spec.
   a body passed through as it streams, never held whole. None is measured.
 - **C4. The instance authority.** Default: the controller's configuration gains
   `credential_authority: {certificate: Artifact, key: PATH, roots: Artifact | null}` (the proposed
-  spec 001 change). `certificate` is the authority's certificate, and `key` the canonical path of
-  its private key, under §1's file checks, holding one PEM private key instead of §1's content
-  rule. `roots` are extra roots the relay trusts upstream: for tests, as spec 031's
+  spec 001 change). `certificate` is the authority's certificate, a file of exactly one PEM
+  `CERTIFICATE` block and nothing else: one that holds any other block, a private key included,
+  refuses startup, so the file the operator adds to the image carries no key. `key` is the
+  canonical path of its private key, under §1's file checks, holding one PEM private key instead
+  of §1's content rule. `roots` are extra roots the relay trusts upstream: for tests, as spec 031's
   `component_runtime.roots`, and in production for an upstream behind a private CA, such as an
   `allow_private` destination. The operator adds `certificate` to the root image with
   `tools/root-image`; its subject and its file name in the image name nothing about Plasmosome, as
@@ -850,8 +864,8 @@ that commit.
   `boot_deadline_ms` (the remaining start budget at spawn)." (`023:182-184`) with "It has exactly
   these keys: `cell`, `instance_root`, `runtime_recipe` (the template plus the three per-cell
   paths), `boot_deadline_ms` (the remaining start budget at spawn) and `credential_authority`
-  (spec 032's instance authority, as the paths of its certificate and key, never the key, or null
-  when the controller's configuration has none)."
+  (spec 032's instance authority, as the paths of its certificate, key and roots, never the key
+  itself; null when the controller's configuration has none)."
 
 ## Open questions
 
@@ -864,7 +878,8 @@ Each has the default this spec uses until the owner answers.
    alternative gives `[model]` a consumer and a scope, which is a spec 011 grammar change.
 2. **Q2. Where a value is kept.** Default: one file per credential, under §1's checks. The macOS
    Keychain is not a source yet: it needs the user's session unlocked, and a framework call in the
-   controller and in each `membraned`.
+   controller and in each `membraned`. The alternative adds a Keychain source to §1's `source`, so
+   both readers make that call, and a locked session refuses the read.
 3. **Q3. Intercepting a workload's TLS.** Default: yes, only for the flows of an attachment that
    binds an `inject` credential at their target, with an instance authority the operator adds to
    the root image. Many runtimes ignore the system trust store. Node uses its bundled roots unless
@@ -879,9 +894,11 @@ Each has the default this spec uses until the owner answers.
 5. **Q5. Registry members.** Default: an entry serves a registry member only when its
    `publishers` names the member's registry and publisher, since a publisher's name is unique only
    within one registry (spec 020). Is a bare publisher name ever enough, for example when the
-   controller knows one registry only?
+   controller knows one registry only? A yes changes harm guard G13 and item 5, and has to say
+   what such an entry serves once a second registry is configured.
 6. **Q6. `helper` and `mint`.** Default: 103 `unsupported:credential:<ref>` until a consumer needs
-   one. A minted value then expires at its issuer by B (§7).
+   one. A minted value then expires at its issuer by B (§7). The alternative realizes one now,
+   and either one puts a value in the cell (§7, Q4).
 7. **Q7. Reflection.** Default: on a request that carries a value, ask for `identity`, refuse a
    response that is still encoded or is a 206, drop trailers, and scrub exact copies across chunks.
    A copy the host transforms is not defended. The alternative decodes compressed bodies to scrub
@@ -889,7 +906,8 @@ Each has the default this spec uses until the owner answers.
 8. **Q8. The surrogate's shape.** Default: the entry's `surrogate_prefix`, then random characters
    from `A-Z`, `a-z` and `0-9`: at least 22 of them, which carry at least 128 bits, and more up to
    the value's length at resolution. Its length tells the guest the value's length, unless the
-   minimum makes it longer.
+   minimum makes it longer. The alternative is one fixed length, which hides the value's length
+   from status and the guest; scrubbing then writes the run of `x`, which still shows it.
 
 ## Acceptance
 
@@ -929,9 +947,12 @@ percent-encoded and hex forms, and its SHA-256 in hex, so a copy in another enco
    rows are reported not run. With a binding standing, a later plasmid attached to another cell
    is 108 with `path` the operator file, and nothing is prepared, when its Mount source is the
    secrets directory, lies inside it (a subdirectory), or is an ancestor of it: one row each. The
-   marker never appears in any refusal. A value with one trailing LF is sent without it. Catches:
-   a readable secret trusted; header injection through CR or LF; secret bytes echoed in a refusal;
-   a trailing newline sent; a later Mount that puts a bound secret file in a guest.
+   three rows run twice: once while the operator file names the secret file, and once after the
+   operator file stops naming it, with the binding still standing. The marker never appears in
+   any refusal. A value with one trailing LF is sent without it. Catches: a readable secret
+   trusted; header injection through CR or LF; secret bytes echoed in a refusal; a trailing
+   newline sent; a later Mount that puts a bound secret file in a guest; a Mount guard that reads
+   only the operator file.
 5. **Not keyed by ID alone (model; G13).** A registry member with the local entry's ID is 103
    `entry:credential:<ref>` when the entry has no `publishers`. It binds when the entry names its
    registry and publisher. It is 103 for another publisher, and for the same publisher name in
@@ -951,13 +972,15 @@ percent-encoded and hex forms, and its SHA-256 in hex, so a copy in another enco
    `get` that returns the value; a value printed by `{:?}`; values from the inherited environment.
 9. **The component path (membrane; G4, G6).** With a fake component host, and a fixture TLS server
    for H trusted through test roots: a request naming R to H arrives with the value in the
-   binding's header, and a request naming nothing arrives with no value. These are each refused
+   binding's header, and a request naming nothing arrives with no value, on another upstream
+   connection than any request naming R, whichever is sent first. These are each refused
    before any byte reaches a fixture: a request naming R to a declared but unbound H2; one naming
    an undeclared R2; and one naming R that adds its own `Host`, `Content-Length`,
    `Transfer-Encoding` or `Connection`. Only R2 yields §8's denial, and its `fix`, written into
    the declaration, parses. A request to a host no grant holds yields the `network.hosts` denial.
    Catches: attaching unasked; attaching at an unbound host; a component's `Host` sent to a shared
-   front; a denial for a line the author cannot write; a `fix` that does not parse.
+   front; an attached request behind an unchecked one on one connection; a denial for a line the
+   author cannot write; a `fix` that does not parse.
 10. **The workload path's substitution rules (membrane; G4).** With a test client that trusts a
     test authority, the surrogate in the bound header, `Host` H and a path inside the
     `path_scope`, the fixture receives the value. The fixture receives the surrogate, and no value,
@@ -969,9 +992,10 @@ percent-encoded and hex forms, and its SHA-256 in hex, so a copy in another enco
     connection fails, and the fixture receives no request byte. A fixture that answers 302 to
     another host: the client receives the 302, and the relay sends nothing else. Catches: an
     unverified upstream; a followed redirect carrying the value.
-12. **Reflection (membrane; G1, G8, G12).** A fixture echoes the request's headers and body. The
+12. **Reflection (membrane; G1, G8, G12).** A fixture echoes the request's headers and body, and
+    puts the value in its reason phrase, in a field name and in a 103 response's fields. The
     client, and on the component path the fake component host, receive the surrogate or the
-    placeholder where the value was, in headers and in the body. The value is 40 characters, split
+    placeholder where the value was, in each of those places. The value is 40 characters, split
     across two transfer-coding chunks, with a chunk-size line between the halves, at every offset.
     The fixture receives `Accept-Encoding: identity` and no `TE`, `Range` or `If-Range`, whatever
     the client sent. A fixture that answers with gzip anyway, one that answers with
@@ -1015,17 +1039,21 @@ percent-encoded and hex forms, and its SHA-256 in hex, so a copy in another enco
     value. A scan of the guest's files, every process's environment and arguments, and
     `mountinfo` finds no copy of the marker. Reported not run until O-1, O-6, O-7 and O-11.
     Catches: a value staged in the guest by any path.
-18. **The instance authority (membrane and model; G1, G14).** The marker here is the base64 text
-    of the test authority's private key. It is never found in the journal, the session log, any
+18. **The instance authority (membrane and model; G1, G14).** The marker here is the test
+    authority's private key as DER bytes, searched raw and in each form the preamble names, so its
+    base64 form is the PEM body without line breaks. It is never found in the journal, the session
+    log, any
     reply, status or refusal text, nor in any byte the fake component host or the fake guest
     bridge receives. A client that connects to a declared host with no `inject` binding gets no
     certificate from the instance authority: it sees the fixture's own chain. A leaf the relay
     presents for a bound target expires no later than the attachment's B. A key file that fails a
-    §1 file check, rule 5 included, is 108 with `path` the key file. A later plasmid whose Mount
+    §1 file check, rule 5 included, is 108 with `path` the key file. A `certificate` file that
+    also holds a PEM private key refuses startup. A later plasmid whose Mount
     source is the key's directory, lies inside it (a subdirectory), or is an ancestor of it,
-    attached to another cell, is 108: one row each. Catches: an authority key in a record or the
-    guest; interception of a flow with no binding; a leaf that outlives its attachment; an
-    unchecked key file; a Mount that exposes the key.
+    attached to another cell, is 108 with `path` the operator file, and nothing is prepared: one
+    row each. Catches: an authority key in a record or the guest; interception of a flow with no
+    binding; a leaf that outlives its attachment; an unchecked key file; a Mount that exposes the
+    key; a certificate file that carries the key into the image.
 19. **What the controller sends `membraned` (model; G2, G3, G14).** The fake backend records every
     message the controller sends a `membraned`: each `membrane.effect.apply`'s params, the launch
     record, and the argv, environment and files of each launch. Neither marker, the value's or the
@@ -1033,11 +1061,12 @@ percent-encoded and hex forms, and its SHA-256 in hex, so a copy in another enco
     Catches: a controller that reads the value and sends it in the apply params; a key sent at
     launch.
 20. **What `membraned` writes (membrane; G2, G14).** Both markers are set: the value's in the
-    secret file, and the key's as the test authority's private key. After a substitution on each
-    path, after a leaf is issued with that key, and after each refusal of §5, `membraned.log`,
-    every log `membraned` writes, and every reply on `membrane.uds` hold neither marker. Catches:
-    a relay that logs the request it sent, or a parse error that quotes it; a relay that logs the
-    key when it signs a leaf.
+    secret file, and the key's as item 18 defines it. After a substitution on each path, after a
+    leaf is issued with that key, and after each refusal of §5, `membraned.log`, every log
+    `membraned` writes, every reply on `membrane.uds`, and every byte the fake component host and
+    the fake guest bridge receive hold neither marker. Catches: a relay that logs the request it
+    sent, or a parse error that quotes it; a relay that logs the key when it signs a leaf; an error
+    to a component that quotes the request the relay sent.
 21. **No surrogate, no value (membrane; G6).** On an intercepted flow, a request without the
     binding's header, one whose header holds anything but this binding's surrogate, and one with
     the surrogate only in another field each reach the fixture with no value. Catches: a relay
