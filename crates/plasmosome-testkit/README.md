@@ -23,12 +23,13 @@ returned entry, in the recorded object, or in both, and `snapshot_never_invents_
 reject each. A fourth, `RevokeReturnsAnotherRecipe`, makes a revoke return the issued entry with
 another recipe, and `grant_is_replayable` must reject it.
 
-Seven defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
+Nine defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
 `GrantReturnsAnotherRecipe`, `GrantRecordsAnotherRecipe`, `RevokeReturnsAStranger`,
-`RevokeReturnsAnotherRecipe` and `AcceptsInvalidOperationsOf`, which also names the call. Their
-witnesses run each of them once for each of the five classes, against
-`snapshot_never_invents_objects` or `grant_is_replayable`. So those two clauses fail a witness if
-they check only their first grant or only one class of invalid operation. Every other defect runs
+`RevokeReturnsAnotherRecipe`, `AcceptsInvalidOperationsOf`, `LeaksAnInvalidOperationOf` and
+`RefusalRollsBackTheAddressOf`. The last three also name the call. Their witnesses run each of
+them once for each of the five classes, against `snapshot_never_invents_objects` or
+`grant_is_replayable`. So those two clauses fail a witness if they check only their first grant,
+or only one class of invalid operation at a fresh or at an issued address. Every other defect runs
 once, and no other clause is held to that.
 
 Callers prepare grants. `GrantClosure` collects one owner's capabilities in attach order. Each
