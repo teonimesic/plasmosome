@@ -113,24 +113,46 @@ def unused_exceptions_are_reported():
     assert [(item["kind"], item["severity"]) for item in found] == [("license-exception-not-encountered", "warning")], found
 
 
+PULL_REQUEST = "github.event_name == 'pull_request'"
+WRAPPER_STEPS = [
+    {"run": "python3 tools/cargo-deny-check sources"},
+    {"if": PULL_REQUEST, "run": "python3 tools/cargo-deny-check advisories --changed-since HEAD^1"},
+    {"if": PULL_REQUEST, "run": "python3 tools/cargo-deny-check licenses --changed-since HEAD^1"},
+]
+
+
+def gates_job(workflow):
+    return next(block for block in re.split(r"(?m)^(?=  [\w-]+:\s*$)", workflow) if "cargo install cargo-deny" in block)
+
+
+def wrapper_steps(workflow):
+    """Each gates step that runs the wrapper, as its keys and values without its name."""
+    steps = [dict(re.findall(r"(?m)^(?:      - |        )([\w-]+):[ \t]*(.*?)[ \t]*$", step))
+             for step in re.split(r"(?m)^(?=      - )", gates_job(workflow))]
+    return [{key: value for key, value in step.items() if key != "name"} for step in steps
+            if re.search(r"tools/cargo-deny-check(?![\w.-])", step.get("run", ""))]
+
+
 def gates_job_pins_cargo_deny():
     """The cache key names the installed version, and the three checks run on the events spec 026 section 4 names."""
     workflow = (SOURCE.parent.parent / ".github" / "workflows" / "ci.yml").read_text()
     versions = re.findall(r"cargo install cargo-deny --version (\S+) --locked", workflow)
     assert len(versions) == 1, versions
-    job = next(block for block in re.split(r"(?m)^(?=  [\w-]+:\s*$)", workflow) if "cargo install cargo-deny" in block)
-    keys = re.findall(r"(?m)^\s+key:\s*(\S+)\s*$", job)
+    keys = re.findall(r"(?m)^\s+key:\s*(\S+)\s*$", gates_job(workflow))
     assert len(keys) == 1 and versions[0] in re.split(r"[^0-9A-Za-z.]+", keys[0]), (versions, keys)
-    steps = [dict(re.findall(r"(?m)^(?:      - |        )([\w-]+):[ \t]*(.*?)[ \t]*$", step))
-             for step in re.split(r"(?m)^(?=      - )", job)]
-    checks = [{key: value for key, value in step.items() if key != "name"} for step in steps
-              if re.search(r"tools/cargo-deny-check(?![\w.-])", step.get("run", ""))]
-    pull_request = "github.event_name == 'pull_request'"
-    assert checks == [
-        {"run": "python3 tools/cargo-deny-check sources"},
-        {"if": pull_request, "run": "python3 tools/cargo-deny-check advisories --changed-since HEAD^1"},
-        {"if": pull_request, "run": "python3 tools/cargo-deny-check licenses --changed-since HEAD^1"},
-    ], checks
+    assert wrapper_steps(workflow) == WRAPPER_STEPS, wrapper_steps(workflow)
+    sources = "        run: python3 tools/cargo-deny-check sources\n"
+    advisories = "      - name: cargo-deny advisories\n        if: github.event_name == 'pull_request'\n"
+    advisories_run = "        run: python3 tools/cargo-deny-check advisories --changed-since HEAD^1\n"
+    for old, new, caught in (
+        ("      - name: cargo-deny sources\n", "      - name: cargo-deny sources, renamed\n", False),
+        (sources, sources + "          || true\n", True),
+        (advisories_run, advisories_run + "          --changed-since HEAD\n", True),
+        (advisories, advisories + "          && false\n", True),
+    ):
+        assert workflow.count(old) == 1, old
+        edited = wrapper_steps(workflow.replace(old, new))
+        assert (edited != WRAPPER_STEPS) == caught, (new, edited)
 
 
 def classification():
