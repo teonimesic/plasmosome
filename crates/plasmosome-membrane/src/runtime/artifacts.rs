@@ -698,8 +698,17 @@ mod tests {
         }
 
         struct Bundle {
-            tree: ArtifactTree,
+            _tree: ArtifactTree,
             paths: Vec<(ArtifactRole, PathBuf)>,
+        }
+
+        impl Bundle {
+            fn identities(&self) -> Vec<FileIdentity> {
+                self.paths
+                    .iter()
+                    .map(|(_, path)| identity_of(path))
+                    .collect()
+            }
         }
 
         const ROLES: [(ArtifactRole, &str, &str); 7] = [
@@ -718,7 +727,7 @@ mod tests {
                 .iter()
                 .map(|(role, _, name)| (*role, tree.immutable_file(name, name.as_bytes())))
                 .collect();
-            Bundle { tree, paths }
+            Bundle { _tree: tree, paths }
         }
 
         fn recipe_pinning(bundle: &Bundle, tampered: Option<ArtifactRole>) -> RuntimeRecipe {
@@ -876,15 +885,9 @@ mod tests {
                 .map(|artifact| (artifact.role(), artifact.path().as_path().to_path_buf()))
                 .collect();
             assert_eq!(found, bundle.paths);
-            let identities: Vec<FileIdentity> = bundle
-                .paths
-                .iter()
-                .map(|(_, path)| identity_of(path))
-                .collect();
-            assert_eq!(descriptors_naming(&identities).len(), 7);
+            assert_eq!(descriptors_naming(&bundle.identities()).len(), 7);
             drop(verified);
-            assert_eq!(descriptors_naming(&identities), Vec::<i32>::new());
-            drop(bundle.tree);
+            assert_eq!(descriptors_naming(&bundle.identities()), Vec::<i32>::new());
         }
 
         #[test]
@@ -901,12 +904,7 @@ mod tests {
                     actual: Digest::of(b"rootfs.raw"),
                 }
             );
-            let identities: Vec<FileIdentity> = bundle
-                .paths
-                .iter()
-                .map(|(_, path)| identity_of(path))
-                .collect();
-            assert_eq!(descriptors_naming(&identities), Vec::<i32>::new());
+            assert_eq!(descriptors_naming(&bundle.identities()), Vec::<i32>::new());
         }
     }
 }

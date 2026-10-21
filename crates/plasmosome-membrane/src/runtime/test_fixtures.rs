@@ -54,28 +54,21 @@ pub(crate) mod tree {
         pub(crate) fn new() -> ArtifactTree {
             let mut refusals = Vec::new();
             for base in root_bases() {
-                let dir = match tempfile::Builder::new().prefix("aep").tempdir_in(&base) {
-                    Ok(dir) => dir,
-                    Err(error) => {
-                        refusals.push(format!("{}: {error}", base.display()));
-                        continue;
-                    }
-                };
-                let path = fs::canonicalize(dir.path()).expect("the tree resolves");
-                set_mode(&path, 0o700);
-                let walked = Walk::from_root(&path)
-                    .and_then(|walk| walk.open_directory(|_| Ok::<(), WalkRefusal>(())));
+                let made = tempfile::Builder::new().prefix("aep").tempdir_in(&base);
+                let walked = made.map_err(|error| error.to_string()).and_then(|dir| {
+                    let path = fs::canonicalize(dir.path()).expect("the tree resolves");
+                    set_mode(&path, 0o700);
+                    let walk = Walk::from_root(&path).map_err(|refusal| refusal.to_string())?;
+                    walk.open_directory(|_| Ok::<(), WalkRefusal>(()))
+                        .map_err(|refusal| refusal.to_string())?;
+                    Ok(ArtifactTree { path, _dir: dir })
+                });
                 match walked {
-                    Ok(_) => return ArtifactTree { path, _dir: dir },
+                    Ok(tree) => return tree,
                     Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
                 }
             }
-            panic!(
-                "no base holds a tree the walk from / accepts; on macOS the base is the per-user \
-                 temp directory confstr(_CS_DARWIN_USER_TEMP_DIR) names, on Linux \
-                 XDG_RUNTIME_DIR when it is set, then the test binary's directory:\n{}",
-                refusals.join("\n")
-            );
+            panic!("no base holds a tree the walk from / accepts: {refusals:?}");
         }
 
         pub(crate) fn join(&self, relative: &str) -> PathBuf {
