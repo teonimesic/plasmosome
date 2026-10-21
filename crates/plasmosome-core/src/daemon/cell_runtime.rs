@@ -830,15 +830,16 @@ mod tests {
 
     #[test]
     fn a_template_whose_largest_config_record_is_over_the_bound_refuses_startup() {
+        const PAD: usize = 400;
         let library = |index: usize, pad: usize| {
             artifact(
                 &format!("/opt/cell/lib/{}lib{index:06}.dylib", "p".repeat(pad)),
                 '5',
             )
         };
-        let with_libraries = |count: usize, pad: usize| {
-            let mut libraries: Vec<Value> = (0..count).map(|index| library(index, 0)).collect();
-            libraries[0] = library(0, pad);
+        let with_libraries = |count: usize, extra: usize| {
+            let mut libraries: Vec<Value> = (0..count).map(|index| library(index, PAD)).collect();
+            libraries[0] = library(0, PAD + extra);
             with_template(|fields| {
                 fields.insert("libraries".into(), Value::Array(libraries));
             })
@@ -858,12 +859,12 @@ mod tests {
         let one = record_bytes(&with_libraries(1, 0));
         let each = record_bytes(&with_libraries(2, 0)) - one;
         let count = 1 + (MAX_RECORD_BYTES - one) / each;
-        let pad = MAX_RECORD_BYTES - record_bytes(&with_libraries(count, 0));
-        let largest = with_libraries(count, pad);
+        let extra = MAX_RECORD_BYTES - one - (count - 1) * each;
+        let largest = with_libraries(count, extra);
         assert_eq!(record_bytes(&largest), MAX_RECORD_BYTES);
         accepted(&largest);
 
-        let refusal = refused(&with_libraries(count, pad + 1));
+        let refusal = refused(&with_libraries(count, extra + 1));
         assert_eq!(
             refusal,
             CellRuntimeError::Record(ConfigRecordRefusal::TooLarge {
