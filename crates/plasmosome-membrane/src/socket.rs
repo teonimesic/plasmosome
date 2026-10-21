@@ -3,9 +3,9 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::PathBuf;
 
 /// A socket this process bound, known by the device and inode its pathname
-/// named right after the bind. Dropping it unlinks the pathname only while a
-/// no-follow inspection still finds that same socket there, so a replacement
-/// settled at the name is left alone.
+/// named right after the bind. Removing or dropping it unlinks the pathname
+/// only while a no-follow inspection still finds that same socket there, so a
+/// replacement settled at the name is left alone.
 ///
 /// The inspection and the unlink are two calls, not one atomic one. A writer
 /// with authority over the directory, the same uid included, can substitute
@@ -35,6 +35,12 @@ impl OwnedSocketPath {
             dev: metadata.dev(),
             ino: metadata.ino(),
         })
+    }
+
+    /// Removes the pathname if it still names the captured socket, and says
+    /// what it found there.
+    pub(crate) fn remove(self) -> RemoveOutcome {
+        todo!()
     }
 
     fn unlink(&self) -> RemoveOutcome {

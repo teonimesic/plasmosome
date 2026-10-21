@@ -1,5 +1,6 @@
 pub mod confinement;
 pub use plasmosome_backend::digest;
+pub mod endpoints;
 pub mod hello;
 pub mod launch;
 pub(crate) use plasmosome_core::runtime::strict_json;
