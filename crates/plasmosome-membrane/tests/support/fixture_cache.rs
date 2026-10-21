@@ -49,7 +49,7 @@ fn a_second_test_process_publishes_no_new_key_and_leaves_no_temporary_files() {
     let child = Command::new(std::env::current_exe().expect("the test executable has a path"))
         .args([
             "--exact",
-            "fixture::the_supervision_fixture_is_cached_inside_the_target_directory",
+            "fixture_cache::the_supervision_fixture_is_cached_inside_the_target_directory",
             "fixture_cache::a_freshly_compiled_fixture_is_run_once_before_it_is_returned",
         ])
         .env("TMPDIR", temporary.path())
@@ -438,4 +438,25 @@ fn the_fixture_cache_sits_in_the_nearest_directory_cargo_tagged_whatever_the_lay
 #[should_panic(expected = "/work/target/debug/membraned")]
 fn the_fixture_cache_refuses_an_executable_outside_a_cargo_target_directory() {
     fixture::fixture_cache_root(Path::new("/work/target/debug/membraned"));
+}
+
+#[test]
+fn the_supervision_fixture_is_cached_inside_the_target_directory() {
+    let executable = std::env::current_exe().expect("the running test executable has a path");
+    let fixture = fixture::supervision_fixture();
+    let root = fixture
+        .parent()
+        .and_then(Path::parent)
+        .expect("the fixture sits two directories below its cache root");
+    let target = root
+        .parent()
+        .expect("the cache root sits in the target directory");
+    assert!(
+        root.ends_with("plasmosome-supervision-fixture")
+            && target.join("CACHEDIR.TAG").is_file()
+            && executable.starts_with(target),
+        "the compiled fixture {} is cached in the Cargo target directory that holds the test executable {}, not in a shared temporary directory",
+        fixture.display(),
+        executable.display()
+    );
 }

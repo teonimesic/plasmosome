@@ -1,3 +1,4 @@
+pub mod confinement;
 pub use plasmosome_backend::digest;
 pub mod hello;
 pub mod launch;

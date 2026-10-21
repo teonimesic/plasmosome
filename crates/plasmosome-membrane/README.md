@@ -20,7 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. Nothing here verifies an artifact or boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. Nothing here verifies an artifact or boots a cell yet |
 
 ## Use
 
@@ -63,6 +63,84 @@ verdict is refused.
 Shutdown reaches the probes. SIGINT or SIGTERM cancels the query in flight: the control
 conversation closes with no reply and no invented wire state, and teardown begins without waiting
 out the allowance.
+
+## Observing a helper's sandbox
+
+Spec 001 §4.2 asks the supervisor to check the helper's host confinement itself before readiness,
+not to take the helper's or the guest's word for it. On Darwin, `runtime::confinement::observe(pid)`
+asks the kernel through `sandbox_check`, from outside the helper. Off Darwin the result is always
+`UnsupportedPlatform`. Nothing calls it yet; the cell composition in native task `plasmosome-7em`
+will.
+
+Pass the pid of a child this process has not reaped, such as the helper it spawned and still
+holds. Until it is reaped, its pid cannot name another process. `observe` also reads the kernel's
+unique id of the process before and after its queries, and the evidence keeps that id.
+
+`Confined` claims only this: the kernel reports the process sandboxed, and `process-fork`,
+`network-outbound`, `network-inbound`, `network-bind` and `file-write-create` each answer denied
+when asked with no filter argument. A cell must not be reported ready on any other result, which
+includes a supervisor that is sandboxed itself and a query the kernel cannot answer.
+
+`Confined` does not show that the verified host policy is installed, and its evidence says so with
+`PolicyBinding::PropertiesObserved`. Profiles much looser than the host policy read `Confined` too.
+Measured on macOS 26.6.2, a child under each of these three could still do the following:
+
+- `(version 1)(deny default)(allow file-read*)(allow file-write* (subpath "/"))(allow network* (remote ip))(allow network* (local ip))`.
+  The child created, overwrote and unlinked files outside the work tree, connected over TCP to
+  127.0.0.1 and bound a TCP socket. Only `fork` and running `/bin/echo` were denied. Asked with
+  no filter, its four file and network operations answered denied although it allows them for
+  every path under `/` and for any IP address.
+- `(version 1)(allow default)(deny process-fork)(deny network*)(deny file-write-create)`.
+  The child overwrote and unlinked existing files and ran `/bin/echo`. Operations outside the
+  five are not asked.
+- `(version 1)(allow default)` with a `deny` for exactly the five operations and nothing else.
+  The child could do what it could under the second profile. A profile can always deny exactly
+  the operations it is asked about, so asking more operations with no filter cannot settle O-3.
+
+The macOS tests here apply all three and expect `Confined`.
+
+A bare `(deny default)` profile reads `Confined` as well. Spec 001 §4.2 says "Substituting another
+policy, even one called deny-default, must fail." This check alone cannot meet that: Darwin has no
+call that returns a process's installed profile, and the profiles above are substitutes that pass.
+Nor does it give the evidence §4.2 asks for, binding the verified policy and its installation to
+the process; the unique id binds only the process. Owner gate O-3 on native task `plasmosome-qep`
+decides what Darwin evidence is enough.
+
+One option tells the first looser profile from the host policy: `file-write-create` asked with a
+path filter. Measured on macOS 26.6.2, for a file outside the work tree, the first profile answers
+allowed and the host policy denied. The path must exist. For a path that does not exist, the query
+answers denied under every profile measured, `(allow default)` included, and so does the host
+policy inside its own work tree. A create check that names a file not there yet therefore catches
+nothing. The option does not catch the second or third looser profile: for a file outside the work
+tree, both answer denied, as the host policy does. The network operations have no filter like
+that.
+
+For an existing file inside the work tree, the host policy answers allowed, while the second and
+third looser profiles and `(deny default)` answer denied. Of the six profiles measured here (the
+host policy, the three looser ones, `(allow default)` and `(deny default)`), only the host policy
+gives that pair of answers, denied outside and allowed inside. A reviewer then measured two
+profiles written to match it, and both were reproduced here:
+`(version 1)(allow default)(deny process-fork)(deny network*)(deny file-write*)(allow file-write* (subpath W))`,
+with `W` the work tree, and the same rules with the `allow` first. Each answered as the host
+policy does to the sandboxed query, to the five, and to `file-write-create` for an existing and a
+missing file both inside and outside the work tree. Yet its child still ran `/bin/echo`. So no
+fixed set of queries, path-filtered ones included, settles O-3.
+
+It also says nothing about descriptors the helper already holds, or about the images it loaded
+(owner gate O-5).
+
+A dead process answers denied to every query. Measured on macOS 26.6.2, a reaped pid, or a zombie
+that had no sandbox, answers the queries `observe` makes just as a confined process does. So the
+result is unverifiable unless `proc_pidinfo` reads the same unique id before and after the
+queries; it cannot read a zombie's. The unique id comes from the flavor
+PROC_PIDUNIQIDENTIFIERINFO, whose record XNU declares only in a private header, so the crate
+declares the 56-byte record itself and its macOS tests check it against the running kernel.
+
+`sandbox_check` is declared in no SDK header either, and spec 001 notes that `sandbox_init` is
+deprecated and not a supported portable API. If a later macOS makes `sandbox_check` return -1, the
+observation is unverifiable. If it changes the answers instead, the macOS tests here fail: they
+expect the qualified policy confined, and allow-default, no sandbox and each of the five allowed
+alone unconfined.
 
 ## Dropping a handle cleans up its managed group
 
