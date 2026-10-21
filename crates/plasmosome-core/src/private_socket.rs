@@ -1782,6 +1782,140 @@ mod tests {
     }
 
     #[test]
+    fn a_taken_temporary_or_one_matching_the_name_ignoring_case_is_drawn_again() {
+        let (_root, cell, dir) = private_cell();
+        let taken = cell.join(".aaaa");
+        fs::write(&taken, b"taken").expect("write");
+        let taken_before = fs::symlink_metadata(&taken).expect("stat");
+        let mut bound_at = Vec::new();
+        let (_listener, bound) = publish_drawing(
+            dir,
+            ".SOCK",
+            effective_uid(),
+            &[".aaaa", ".sock", ".good"],
+            |step| {
+                if step == Step::Bound {
+                    bound_at = entries(&cell);
+                }
+            },
+        )
+        .expect("publish binds");
+        assert_eq!(bound_at, vec![taken.clone(), cell.join(".good")]);
+        assert_eq!(bound.entry.path, cell.join(".SOCK"));
+        assert_eq!(entries(&cell), vec![cell.join(".SOCK"), taken.clone()]);
+        let taken_after = fs::symlink_metadata(&taken).expect("the taken entry stays");
+        assert_eq!(
+            (taken_after.dev(), taken_after.ino()),
+            (taken_before.dev(), taken_before.ino())
+        );
+        assert_eq!(fs::read(&taken).expect("read"), b"taken");
+    }
+
+    #[test]
+    fn eight_taken_temporaries_give_up_with_the_last_one_named() {
+        let (_root, cell, dir) = private_cell();
+        let names = [".t1", ".t2", ".t3", ".t4", ".t5", ".t6", ".t7", ".t8"];
+        let taken: Vec<PathBuf> = names.iter().map(|name| cell.join(name)).collect();
+        for path in &taken {
+            fs::write(path, b"taken").expect("write");
+        }
+        let mut steps = Vec::new();
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            "sock",
+            effective_uid(),
+            &names,
+            |step| steps.push(step),
+        ));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::Io {
+                op: "bind",
+                path: cell.join(".t8"),
+                errno: libc::EADDRINUSE
+            }
+        );
+        assert_eq!(steps, Vec::<Step>::new());
+        assert_eq!(entries(&cell), taken);
+        for path in &taken {
+            assert_eq!(fs::read(path).expect("read"), b"taken");
+        }
+    }
+
+    #[test]
+    fn a_bind_the_directory_refuses_is_io_naming_the_temporary_and_is_not_drawn_again() {
+        let (_root, cell, dir) = private_cell();
+        let mut draws = 0;
+        let mut draw = |_room: usize| {
+            draws += 1;
+            assert_eq!(draws, 1, "a refused bind drew a second temporary");
+            set_mode(&cell, 0o500);
+            DRAWN.to_string()
+        };
+        let seam = Seam {
+            draw: &mut draw,
+            observe: &mut |_| {},
+        };
+        let outcome = publish(dir, "sock", effective_uid(), seam);
+        set_mode(&cell, 0o700);
+        if effective_uid() == 0 {
+            assert!(outcome.is_ok(), "root ignores the mode");
+            return;
+        }
+        assert_eq!(
+            refusal_of(outcome),
+            PrivateSocketError::Io {
+                op: "bind",
+                path: cell.join(DRAWN),
+                errno: libc::EACCES
+            }
+        );
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn the_temporary_fits_the_room_left_and_has_one_shape() {
+        for (name, room) in [
+            ("a", 1),
+            ("sock", 2),
+            ("sock", 15),
+            ("sock", 16),
+            ("sock", 90),
+        ] {
+            for _ in 0..1000 {
+                let temporary = choose_temporary(
+                    Path::new("/r/cell"),
+                    name,
+                    room,
+                    &mut random_temporary,
+                    |_| Ok(()),
+                )
+                .expect("a free temporary");
+                assert_eq!(
+                    temporary.len(),
+                    room.min(16),
+                    "{temporary:?} at room {room}"
+                );
+                let rest = if room >= 2 {
+                    assert!(temporary.starts_with('.'), "{temporary:?} at room {room}");
+                    &temporary[1..]
+                } else {
+                    &temporary[..]
+                };
+                assert!(
+                    rest.bytes()
+                        .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()),
+                    "{temporary:?} at room {room}"
+                );
+                assert!(
+                    !temporary.eq_ignore_ascii_case(name),
+                    "{temporary:?} names the entry {name:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_test_root_is_removed_even_when_its_test_panics() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
