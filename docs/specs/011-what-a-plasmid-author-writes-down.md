@@ -72,7 +72,7 @@ like `pr.read`, and the intended consumer of that list is a model, which cannot 
 name. Both fields are required rather than optional, because an optional purpose field is one
 nobody fills in and a registry of blanks is worse than none. The third gap is named and left:
 a requirement is a capability name with no version range, and nothing selects a version across
-competing providers: a local plasmid's requirement is met by an attached provider or by exactly one
+competing providers. A local plasmid's requirement is met by an attached provider or by exactly one
 listed candidate (spec 022 §5), and spec 020 binds a registry plasmid's required keys to pinned
 provider releases. How an author writes a range, and how a conflict is explained to them, is its own
 spec. Amended on 2026-10-21: this said the kernel underneath already selects a version across

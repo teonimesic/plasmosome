@@ -680,13 +680,15 @@ ProxyMap (O-11) or Mount (O-7).
 10. Author refusals, each 108 with the field, a nonempty `fix` and the plasmid ID: ports `70000`,
     `-1`, `0`, `65536`, `"443"` and `443.5`; a repeated port or host; hosts with no ports; an
     upper-case or IP-literal host; a malformed CIDR; `192.0.2.1/24`; `[workspace]` with no `mount`;
-    `dst = "workspace"`; `dst = "/a//b"`. Each bad or repeated port names `network.ports[i]`.
-    `["443"]` gives `443`;
-    `70000`, `-1`, `0`, `65536`, `443.5` and a repeat give `remove this entry`; hosts with
-    `ports = []` give `network.hosts[0]` and `remove this entry`. Following the fixes in turn from
-    `[65536]` with one host ends with no host and no port. Catches: a truncating parser, a missing
-    or whole-line `fix`, a `fix` that invents a port, and a `dst` check that misses an empty
-    component. Amended on 2026-10-21: this item had no `dst` with an empty component.
+    `dst = "workspace"`; `dst = "/a//b"`. `dst = "/srv/work.d"` is not an author refusal: with no
+    Mount entry for it, it is 103 `entry:workspace:/srv/work.d`. Each bad or repeated port names
+    `network.ports[i]`. `["443"]` gives `443`; `70000`, `-1`, `0`, `65536`, `443.5` and a repeat
+    give `remove this entry`; hosts with `ports = []` give `network.hosts[0]` and `remove this
+    entry`. Following the fixes in turn from `[65536]` with one host ends with no host and no port.
+    Catches: a truncating parser, a missing or whole-line `fix`, a `fix` that invents a port, and a
+    `dst` check that misses an empty component, refuses a `.` inside a component, or refuses every
+    `dst` but `/workspace`. Amended on 2026-10-21: this item had no `dst` with an empty component,
+    and no written `dst` that the parser must accept.
 11. Pins, on a fixture the task adds with `pin_cidrs = ["192.0.2.0/25"]` and `[mock].hosts`
     naming its host; no in-tree fixture has both. `192.0.2.10` attaches. `192.0.2.200`,
     `192.0.2.10.example.com` and `2001:db8::1` are 103. `::192.0.2.10`, `::ffff:192.0.2.10` and

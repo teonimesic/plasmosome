@@ -117,8 +117,8 @@ an executable mode supplied by workload text.
 authorized write. Observation verifies the original inode/access association and independently
 effective permissions; it does not replace the prepared recipe with current file bytes.
 Amended on 2026-10-21: this said that host and guest paths are absolute. `Capability::validate`,
-which also runs each recipe's own check, already refused one that is not canonical, such as
-`/workspace/` or `/`.
+which also runs each recipe's or launch's own check, already refused one that is not canonical,
+such as `/workspace/` or `/`.
 
 `destination` is one ASCII DNS hostname or numeric IP address, with no scheme, path, wildcard,
 userinfo or embedded port. A DNS name is resolved only for this authorized destination. Every
