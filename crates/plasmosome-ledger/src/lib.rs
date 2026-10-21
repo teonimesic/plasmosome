@@ -989,7 +989,7 @@ mod tests {
             "refusal names the object the plugin does not hold: {error:?}"
         );
         assert_eq!(
-            backend.snapshot_os_state().len(),
+            backend.snapshot_os_state().unwrap().state().len(),
             1,
             "the object its real owner holds must still be standing"
         );
@@ -1022,7 +1022,7 @@ mod tests {
             vec!["effect 2", "effect 1", "effect 0"],
             "LIFO: last pushed replays first"
         );
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     #[test]
@@ -1035,7 +1035,7 @@ mod tests {
                 proxy_map("api.github.com", "staged"),
             ))
             .unwrap();
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let (handle_a, _) = grant_uds(&mut backend, "/run/ak/egressd.uds");
         let (handle_b, _) = grant_file(&mut backend, "/skills/pr.md");
         let mut ledger = Ledger::new("github-pr");
@@ -1076,11 +1076,12 @@ mod tests {
             "an unpublished outbox entry is dropped, never published"
         );
         assert!(report.asserted.is_empty());
-        let after = backend.snapshot_os_state();
+        let after = backend.snapshot_os_state().unwrap();
         assert!(
-            Diff::between(&before, &after).is_empty(),
+            Diff::between(before.state(), after.state()).is_empty(),
             "replay must restore the pre-attach universe"
         );
+        assert!(after.grants().is_empty() && after.incomplete().is_empty());
     }
 
     #[test]
@@ -1093,7 +1094,7 @@ mod tests {
         };
         let mut forced = forced;
         let mut backend = FakeBackend::new();
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let report = forced
             .detach_forced(
                 &mut backend,
@@ -1108,7 +1109,9 @@ mod tests {
             report.forced.as_deref(),
             Some("operator `stefano` asserted: the emission was approved")
         );
-        assert!(Diff::between(&before, &backend.snapshot_os_state()).is_empty());
+        let after = backend.snapshot_os_state().unwrap();
+        assert!(Diff::between(before.state(), after.state()).is_empty());
+        assert!(after.grants().is_empty() && after.incomplete().is_empty());
     }
 
     #[test]
@@ -1160,7 +1163,7 @@ mod tests {
             sealed.detach(&mut backend, &cell(), graceful).is_err(),
             "stuck handle must refuse graceful drain"
         );
-        assert!(!backend.snapshot_os_state().is_empty());
+        assert!(!backend.snapshot_os_state().unwrap().is_empty());
         let forced = DrainSpec::forcing();
         let report = sealed.detach(&mut backend, &cell(), forced).unwrap();
         assert_eq!(
@@ -1169,7 +1172,7 @@ mod tests {
             "the retry resumes at the stuck entry; entries already replayed must not replay twice"
         );
         assert!(
-            backend.snapshot_os_state().is_empty(),
+            backend.snapshot_os_state().unwrap().is_empty(),
             "the pre-registered force deadline reclaims it"
         );
     }
@@ -1239,7 +1242,7 @@ mod tests {
             .unwrap();
         assert_eq!(report.replayed, vec!["effect 0"]);
         assert_eq!(report.asserted, vec!["emission"]);
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     #[test]
@@ -1278,14 +1281,19 @@ mod tests {
                     })
                 );
                 assert_eq!(
-                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    backend
+                        .snapshot_os_state()
+                        .unwrap()
+                        .state()
+                        .objects()
+                        .collect::<Vec<_>>(),
                     vec![&stuck.object()]
                 );
                 let resumed =
                     detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
                         .unwrap();
                 assert_eq!(resumed.replayed, vec!["stuck skill file"]);
-                assert!(backend.snapshot_os_state().is_empty());
+                assert!(backend.snapshot_os_state().unwrap().is_empty());
                 let again =
                     detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
                         .unwrap();
@@ -1340,7 +1348,12 @@ mod tests {
                         unknown_in_cell_one(&op)
                     );
                     assert_eq!(
-                        backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                        backend
+                            .snapshot_os_state()
+                            .unwrap()
+                            .state()
+                            .objects()
+                            .collect::<Vec<_>>(),
                         vec![&op.object()]
                     );
                 }
@@ -1354,7 +1367,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(report.replayed, vec!["skill file in cell-2"]);
-                assert!(owner_backend.snapshot_os_state().is_empty());
+                assert!(owner_backend.snapshot_os_state().unwrap().is_empty());
             }
         }
     }
@@ -1383,7 +1396,12 @@ mod tests {
                         }
                     );
                     assert_eq!(
-                        backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                        backend
+                            .snapshot_os_state()
+                            .unwrap()
+                            .state()
+                            .objects()
+                            .collect::<Vec<_>>(),
                         vec![&op.object()]
                     );
                 }
@@ -1401,7 +1419,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(report.replayed, vec!["skill file in cell-2"]);
-                assert!(backend.snapshot_os_state().is_empty());
+                assert!(backend.snapshot_os_state().unwrap().is_empty());
             }
         }
     }
@@ -1444,7 +1462,7 @@ mod tests {
                         deadline_ms: 4,
                     })
                 );
-                let stalled = backend.snapshot_os_state();
+                let stalled = backend.snapshot_os_state().unwrap();
                 assert_eq!(
                     detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
                         .unwrap_err(),
@@ -1453,13 +1471,13 @@ mod tests {
                         requested: elsewhere,
                     }
                 );
-                assert_eq!(backend.snapshot_os_state(), stalled);
+                assert_eq!(backend.snapshot_os_state().unwrap(), stalled);
                 let resumed =
                     detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
                         .unwrap();
                 assert_eq!(resumed.replayed, vec!["stuck skill file"]);
                 assert_eq!(resumed.asserted, asserted);
-                assert!(backend.snapshot_os_state().is_empty());
+                assert!(backend.snapshot_os_state().unwrap().is_empty());
             }
         }
     }
@@ -1504,7 +1522,7 @@ mod tests {
                     InverseVia::Backend(stuck),
                 ));
                 let mut closure = ledger.close();
-                let untouched = backend.snapshot_os_state();
+                let untouched = backend.snapshot_os_state().unwrap();
                 assert_eq!(
                     detach_either(
                         &mut closure,
@@ -1518,14 +1536,19 @@ mod tests {
                         deadline_ms: 4,
                     })
                 );
-                assert_eq!(backend.snapshot_os_state(), untouched);
+                assert_eq!(backend.snapshot_os_state().unwrap(), untouched);
                 assert_eq!(
                     detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
                         .unwrap_err(),
                     unknown_in_cell_one(&object)
                 );
                 assert_eq!(
-                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    backend
+                        .snapshot_os_state()
+                        .unwrap()
+                        .state()
+                        .objects()
+                        .collect::<Vec<_>>(),
                     vec![&object.object()]
                 );
                 assert_eq!(
@@ -1555,7 +1578,12 @@ mod tests {
                     );
                 }
                 assert_eq!(
-                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    backend
+                        .snapshot_os_state()
+                        .unwrap()
+                        .state()
+                        .objects()
+                        .collect::<Vec<_>>(),
                     vec![&object.object()]
                 );
             }
@@ -1589,7 +1617,7 @@ mod tests {
                     detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
                         .unwrap();
                 assert_eq!(first.replayed.len(), usize::from(with_effect));
-                assert!(backend.snapshot_os_state().is_empty());
+                assert!(backend.snapshot_os_state().unwrap().is_empty());
                 let error =
                     detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
                         .unwrap_err();
