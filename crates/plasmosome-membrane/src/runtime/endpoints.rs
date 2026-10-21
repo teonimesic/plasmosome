@@ -743,51 +743,63 @@ mod tests {
 
     #[test]
     fn each_refusal_names_its_path_and_what_failed() {
-        let path = RecipePath::parse("/run/cell/control.sock").unwrap();
-        for (refusal, text) in [
-            (
-                EndpointRefusal::AddressInUse { path: path.clone() },
-                "/run/cell/control.sock already exists, so no listener was bound there",
-            ),
-            (
-                EndpointRefusal::Bind {
-                    path: path.clone(),
-                    errno: libc::EACCES,
-                },
-                &format!(
-                    "binding a listener at /run/cell/control.sock failed: errno {}",
-                    libc::EACCES
-                ),
-            ),
-            (
-                EndpointRefusal::Identity {
-                    path: path.clone(),
-                    errno: Some(libc::EIO),
-                },
-                &format!(
-                    "the entry bound at /run/cell/control.sock could not be inspected: errno {}",
-                    libc::EIO
-                ),
-            ),
-            (
-                EndpointRefusal::Identity {
-                    path: path.clone(),
-                    errno: None,
-                },
-                "the entry at /run/cell/control.sock after the bind is not a socket",
-            ),
-            (
-                EndpointRefusal::Permissions {
-                    path: path.clone(),
-                    errno: libc::EPERM,
-                },
-                &format!(
-                    "/run/cell/control.sock could not be made private to its owner: errno {}",
-                    libc::EPERM
-                ),
-            ),
-        ] {
-            assert_eq!(refusal.to_string(), text);
-        }
+        let path = RecipePath::parse("/run/c.sock").unwrap();
+        let texts = [
+            EndpointRefusal::AddressInUse { path: path.clone() },
+            EndpointRefusal::Bind {
+                path: path.clone(),
+                errno: 13,
+            },
+            EndpointRefusal::Identity {
+                path: path.clone(),
+                errno: Some(5),
+            },
+            EndpointRefusal::Identity {
+                path: path.clone(),
+                errno: None,
+            },
+            EndpointRefusal::Permissions { path, errno: 1 },
+        ]
+        .map(|refusal| refusal.to_string());
+        assert_eq!(
+            texts,
+            [
+                "/run/c.sock already exists, so no listener was bound there",
+                "binding a listener at /run/c.sock failed: errno 13",
+                "the entry bound at /run/c.sock could not be inspected: errno 5",
+                "the entry at /run/c.sock after the bind is not a socket",
+                "/run/c.sock could not be made private to its owner: errno 1",
+            ]
+        );
+    }
+
+    fn waits_for_the_fork_side<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let held = crate::spawn_lock::hold_fork_side();
+        let (sent, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(work());
+        });
+        let early = received.recv_timeout(Duration::from_millis(250));
+        drop(held);
+        assert!(
+            matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
+            "the work finished while a fork held the spawn lock"
+        );
+        received
+            .recv_timeout(PATIENCE)
+            .expect("the work finishes once the fork releases the spawn lock")
+    }
+
+    #[test]
+    fn bind_and_accept_wait_while_a_fork_holds_the_spawn_lock() {
+        let scratch = Scratch::new();
+        let path = scratch.path("control.sock");
+        let binding = path.clone();
+        let listener = waits_for_the_fork_side(move || RuntimeListener::bind(&binding))
+            .expect("the bind succeeds");
+        let _client = UnixStream::connect(path.as_path()).unwrap();
+        let accepted =
+            waits_for_the_fork_side(move || listener.accept_ready().map(|a| a.is_some()));
+        assert!(matches!(accepted, Ok(true)), "{accepted:?}");
     }
 }
