@@ -26,8 +26,9 @@ Runs on the host, one per cell. This is where enforcement lives.
 - This crate is in the `unsafe` register of
   [spec 026](../../docs/specs/026-security-standard.md#2-unsafe-code), because forking a child
   that may only call async-signal-safe functions, exact-child waits, process-group signals, the
-  Darwin process-table helper and the Darwin sandbox observation need `libc` and C calls the
-  standard library does not offer;
+  Darwin process-table helper, the Darwin sandbox observation, and the `flock` and close-on-exec
+  flag on the supervisor lock `membraned` is handed need `libc` and C calls the standard library
+  does not offer;
   `#[allow(unsafe_code)]` goes on the item that holds the `unsafe`, never on a `mod` or the crate
   root.
 
