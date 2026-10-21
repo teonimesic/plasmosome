@@ -105,8 +105,8 @@ impl RuntimeListener {
 
     /// Accepts one pending connection without blocking, holding the write
     /// side of the spawn lock, and returns it nonblocking and close-on-exec
-    /// with the process id the kernel reports for its peer. Returns `None`
-    /// when no connection is pending.
+    /// with the process id [`peer_pid`] reads for its peer right after the
+    /// accept. Returns `None` when no connection is pending.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
@@ -155,9 +155,18 @@ fn restrict_to_owner(path: &RecipePath) -> Result<(), i32> {
     }
 }
 
-/// The process id the kernel recorded for the peer of `stream` when it
-/// connected: `LOCAL_PEERPID` on Darwin, `SO_PEERCRED` on Linux. It is the
-/// process that called `connect`, not one that later received the descriptor.
+/// The process id the kernel reports for the peer of `stream`. What it names
+/// differs by platform.
+///
+/// On Linux it is `SO_PEERCRED`'s: the process that called `connect`, recorded
+/// then. A process that later inherits or receives the peer's descriptor, and
+/// sends on it, does not change it.
+///
+/// On Darwin it is `LOCAL_PEERPID`'s: the last process that created, connected
+/// or sent on the peer's socket, as of this call. A process that inherited the
+/// connection and sent one byte before the call is the one reported, not the
+/// one that connected (measured on macOS 26.6.2). A match with a child's pid
+/// then shows only that the child was the last to use that socket.
 #[allow(unsafe_code)]
 pub fn peer_pid(stream: &UnixStream) -> std::io::Result<libc::pid_t> {
     #[cfg(target_os = "linux")]

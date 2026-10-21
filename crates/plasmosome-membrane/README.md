@@ -242,9 +242,13 @@ the identity read are separate calls, so the path must be in a directory only th
 write. The cell, plasmosome-7em, which is not built yet, is to check that directory; another process
 of the same uid is owner gate O-4 on `plasmosome-qep`.
 
-`accept_ready` accepts one pending connection without blocking and returns the peer's process id as
-the kernel recorded it: `LOCAL_PEERPID` on Darwin, `SO_PEERCRED` on Linux. That is the process that
-called `connect`, so the handshake can compare it with the helper's pid.
+`accept_ready` accepts one pending connection without blocking and reads the peer's process id right
+after the accept. What that pid names differs by platform. On Linux it is `SO_PEERCRED`'s: the
+process that called `connect`, recorded then. On Darwin it is `LOCAL_PEERPID`'s: the last process
+that created, connected or sent on the peer's socket before the read. A process that inherited the
+connection and sent one byte before the accept is the one reported (measured on macOS 26.6.2). So on
+Darwin a match with the helper's pid shows that the helper was the last process to use that socket,
+not that it connected, and a genuine helper whose child sent first does not match.
 
 `DiagnosticTranscript` reads the read end of the diagnostic pipe that `HelperExec::prepare` returns,
 on a thread of its own, so a helper that writes a lot never blocks on descriptor 2. It keeps the
