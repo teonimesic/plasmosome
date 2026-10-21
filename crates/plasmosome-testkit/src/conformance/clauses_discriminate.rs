@@ -79,6 +79,8 @@ enum Defect {
     LiveGrantLosesItsRecordTo(Call),
     RecordsItsOwnRecoveryLog,
     AcceptsInvalidOperations(Call),
+    SwallowsInvalidOperations(Call),
+    ValidatesAfterTheEffect(Call),
     RefusesAnotherLaunchAtAnOccupiedEndpoint,
 }
 
@@ -171,17 +173,24 @@ impl DefectiveBackend {
         }
     }
 
-    fn validated(&self, operation: &UniverseOp, call: Call) -> Result<(), BackendError> {
-        if self.defect == Defect::AcceptsInvalidOperations(call) {
-            return Ok(());
+    fn validated(&mut self, operation: &UniverseOp, call: Call) -> Result<bool, BackendError> {
+        let Err(error) = operation.validate() else {
+            return Ok(true);
+        };
+        let refusal = BackendError::InvalidOperation {
+            class: operation.class().as_str(),
+            id: operation.id(),
+            error,
+        };
+        match self.defect {
+            Defect::AcceptsInvalidOperations(accepted) if accepted == call => Ok(true),
+            Defect::SwallowsInvalidOperations(swallowed) if swallowed == call => Ok(false),
+            Defect::ValidatesAfterTheEffect(late) if late == call => {
+                self.state.insert(operation.object())?;
+                Err(refusal)
+            }
+            _ => Err(refusal),
         }
-        operation
-            .validate()
-            .map_err(|error| BackendError::InvalidOperation {
-                class: operation.class().as_str(),
-                id: operation.id(),
-                error,
-            })
     }
 
     fn observed(&self) -> OsState {
@@ -515,7 +524,14 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::GrantPanics {
             std::panic::panic_any(InfrastructureFailure::Grant);
         }
-        self.validated(&operation, Call::Grant)?;
+        if !self.validated(&operation, Call::Grant)? {
+            return Ok(LedgerEntry {
+                handle: operation.handle(),
+                owner: operation.owner().clone(),
+                capability: operation.capability(),
+                kind,
+            });
+        }
         let mut owner = operation.owner().clone();
         let mut capability = operation.capability();
         if self.defect == Defect::GrantSubstitutesRequestedOwner {
@@ -698,7 +714,9 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
-        self.validated(&op, Call::Apply)?;
+        if !self.validated(&op, Call::Apply)? {
+            return Ok(());
+        }
         if self.mirrors_its_ledger() {
             if self.mirrored_state().insert(op.object())? {
                 self.applied.push(op);
@@ -774,7 +792,9 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
-        self.validated(&object.operation(), Call::Plant)?;
+        if !self.validated(&object.operation(), Call::Plant)? {
+            return Ok(());
+        }
         if self.mirrors_its_ledger() {
             if self.mirrored_state().insert(object.clone())? {
                 self.planted.push(object);
@@ -1780,13 +1800,55 @@ fn a_recovery_log_carries_grants_and_revokes_into_the_next_instance() {
 }
 
 #[test]
-fn the_snapshot_clause_rejects_an_invalid_operation_accepted_by_any_call() {
+fn the_snapshot_clause_rejects_any_call_that_mishandles_an_invalid_operation() {
     for call in [Call::Grant, Call::Apply, Call::Plant] {
-        assert_rejected(|| {
-            conformance::snapshot_never_invents_objects(carrying(Defect::AcceptsInvalidOperations(
-                call,
-            )))
-        });
+        for defect in [
+            Defect::AcceptsInvalidOperations(call),
+            Defect::SwallowsInvalidOperations(call),
+            Defect::ValidatesAfterTheEffect(call),
+        ] {
+            assert_rejected(|| conformance::snapshot_never_invents_objects(carrying(defect)));
+        }
+    }
+}
+
+#[test]
+fn an_invalid_operation_defect_mishandles_only_its_own_call_in_its_own_way() {
+    let invalid = conformance::invalid_operation();
+    let calls = [Call::Grant, Call::Apply, Call::Plant];
+    let run = |backend: &mut DefectiveBackend, call: Call| match call {
+        Call::Grant => backend
+            .grant(invalid.clone(), GrantKind::Hot)
+            .map(|entry| assert_eq!(entry.handle, invalid.handle())),
+        Call::Apply => backend.apply(invalid.clone()),
+        Call::Plant => backend.plant(invalid.object()),
+    };
+    for defective in calls {
+        for (defect, refused, changed) in [
+            (Defect::AcceptsInvalidOperations(defective), false, true),
+            (Defect::SwallowsInvalidOperations(defective), false, false),
+            (Defect::ValidatesAfterTheEffect(defective), true, true),
+        ] {
+            for call in calls {
+                let mut backend = DefectiveBackend::carrying(defect);
+                let outcome = run(&mut backend, call);
+                let (refused, changed) = if call == defective {
+                    (refused, changed)
+                } else {
+                    (true, false)
+                };
+                assert_eq!(
+                    matches!(outcome, Err(BackendError::InvalidOperation { .. })),
+                    refused,
+                    "{defect:?} through {call:?}: {outcome:?}"
+                );
+                assert_eq!(
+                    !backend.snapshot_os_state().is_empty(),
+                    changed,
+                    "{defect:?} through {call:?}"
+                );
+            }
+        }
     }
 }
 
