@@ -364,6 +364,22 @@ A changed route or destination, or a narrower set, proceeds with fresh replaceme
 Spec 008's reload preflight still applies. To widen, the operator removes the plasmid and adds it
 again.
 
+**A reload keeps the plasmid's keys.** It does not search for providers again (§5): spec 008 carries
+the attachment's `requires` and `provides` records unchanged. So a local member's re-read
+declaration must name the keys those records hold: its distinct `[requires].capabilities` entries
+must be the `capability` values of its `requires` records, and its `[provides]` binding keys must be
+its `provides`, each compared as a set. Only keys are compared, not the tools inside a binding. When
+either set differs, the reload refuses before prepare with 108, `path` the declaration, and `detail`
+naming the plasmid ID and each key the declaration adds or drops, with its section. It carries no
+`fix`: the declaration is valid, and only an add writes these records. When the reload also widens,
+which refusal is returned is not part of the contract (§7). To change the keys, the operator removes
+the plasmid and adds it again. Amended on 2026-10-21: this did not say what a reload does when the
+re-read declaration's keys differ from the records spec 008 carries. Carried over such a
+declaration, the old records would disagree with what the new generation requires and serves: a key
+it now requires would have no provider, a provider it no longer requires would stay, §5 step 1 would
+never find a key it now provides, and a key it no longer provides would stay listed while its
+requirers lose that key's tools.
+
 ## Changes proposed to accepted specs
 
 These are proposed text. The PR that accepts this spec edits no other accepted document. Each
@@ -596,7 +612,18 @@ ProxyMap (O-11) or Mount (O-7).
    file, stale recipes on reload, and a collision check that counts the holdings being replaced.
 7. Reload widening: `allow_private` false to true, a Mount `read_only` to `read_write`, a changed
    Mount `source`, and a host added to a local declaration are each 109 with nothing prepared.
-   Catches: a reload that silently grants more.
+   Changed keys: P is local and attached, requires `q` and `s`, which attached Q and S provide, and
+   provides `p`, which an attached R requires. A reload of P whose declaration requires `q`, `s` and
+   `n`, which an attached N provides; requires `q` and `n`; provides `p` and `m`; or provides
+   nothing, is each 108 with `path` P's declaration, a `detail` naming P and each added or dropped
+   key with its section, no `fix`, and nothing prepared. With requires `s` and `q`, a tool added to
+   `p`'s binding and an entry's `destination` changed, the reload proceeds, and its replacement
+   carries P's `requires` and `provides` unchanged. A registry member whose listing now names a
+   declaration with other keys reloads from its imported declaration. Catches: a reload that
+   silently grants more, one that carries the old records over new keys or writes the new ones, a
+   comparison of counts or of ordered lists, a check of one section or one direction, refusing a
+   changed tool, a changed key reported as a widening, and a registry member's keys read from its
+   listing. Amended on 2026-10-21: this item had no case for changed keys.
 8. Trust checks, each a 108 whose `detail` names the check, with no journal record:
    - a group-writable file, and a 0600 file with an `everyone allow write` ACL (`mode`);
    - a second hard link (`links`);

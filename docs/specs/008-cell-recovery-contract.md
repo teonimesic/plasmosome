@@ -191,15 +191,17 @@ restart spec 022 §5 step 1 had nothing to read but declarations, which it must 
 The prepare that adds the plasmid writes `named` from that request, and `requires` from the
 `[requires]` keys of the plasmid's own declaration, with the providers described above, and
 `provides` from the `[provides]` keys of that declaration. No later replacement changes them. A
-reload or a renewal carries them unchanged, as a reload carries the source and the lifetime.
-Recovery, expiry, renewal and withdrawal read the requires graph from the journal, and spec 022 §5
-reads what an attached plasmid provides from it, never from a declaration, which can change on disk
-after the add. So after a restart a provider's end still reaches its requirers (spec 028), and spec
-011's detach still knows who requires whom and which providers the request named. Journal reading
-refuses each of these as InvalidClosure: a blank, repeated or unsorted key; an empty or unsorted
-provider list; a repeated provider; a requirer naming itself; a provider that is not attached once a
-prepare's changes apply, which also refuses a removal that leaves an attached requirer naming it; a
-cycle among the `requires` edges; a repeated or unsorted provided key; a requirement that names a
+reload or a renewal carries them unchanged, as a reload carries the source and the lifetime. A
+reload whose re-read declaration names other `[requires]` or `[provides]` keys is refused before
+prepare (spec 022 §8), so the keys a reload carries are always its declaration's. Recovery, expiry,
+renewal and withdrawal read the requires graph from the journal, and spec 022 §5 reads what an
+attached plasmid provides from it, never from a declaration, which can change on disk after the add.
+So after a restart a provider's end still reaches its requirers (spec 028), and spec 011's detach
+still knows who requires whom and which providers the request named. Journal reading refuses each of
+these as InvalidClosure: a blank, repeated or unsorted key; an empty or unsorted provider list; a
+repeated provider; a requirer naming itself; a provider that is not attached once a prepare's
+changes apply, which also refuses a removal that leaves an attached requirer naming it; a cycle
+among the `requires` edges; a blank, repeated or unsorted provided key; a requirement that names a
 provider whose `provides` does not list its key; an attachment added with `named: false` that no
 other change of its prepare names as a provider; and a replacement of an attached plugin whose
 `named`, `requires` or `provides` differs from the recorded one. A replacement without `named`,
@@ -213,6 +215,9 @@ Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-i
 requires. Until then no text said when these fields are written or how a journal without them is
 read.
 Amended on 2026-10-21: until then this paragraph did not name `provides`.
+Amended on 2026-10-21: until then this paragraph did not say that a reload whose declaration names
+other keys is refused, so it read as carrying the old records over a changed declaration, and it did
+not refuse a blank provided key.
 
 Forensic replay can encounter an `Exact(Backend(handle))`, `External`, or `Delayed` effect with
 null operation. The reader retains it rather than pretending it is a universe operation. A
@@ -744,12 +749,13 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   attachment's recorded `named`, `requires` and `provides` unchanged. Each of these is
   InvalidClosure at its physical line: a blank, repeated or unsorted key; an empty or unsorted
   provider list; a repeated provider; a requirer naming itself; a provider not attached once a
-  prepare's changes apply; a cycle among the `requires` edges; a repeated or unsorted provided key;
-  a requirement that names a provider whose `provides` does not list its key; a `named: false`
-  attachment that no other change of its prepare names as a provider; and a later replacement that
-  changes `named`, `requires` or `provides`. Amended on 2026-10-20, as [spec
+  prepare's changes apply; a cycle among the `requires` edges; a blank, repeated or unsorted
+  provided key; a requirement that names a provider whose `provides` does not list its key; a
+  `named: false` attachment that no other change of its prepare names as a provider; and a later
+  replacement that changes `named`, `requires` or `provides`. Amended on 2026-10-20, as [spec
   028](028-capability-lifetime.md#2-who-declares-it-and-the-default) requires. Until then this item
-  named neither field. Amended on 2026-10-21: until then this item did not name `provides`.
+  named neither field. Amended on 2026-10-21: until then this item did not name `provides`. Amended
+  on 2026-10-21: until then this item did not name a blank provided key.
 - **R3 — durable generation:** prepare/commit/finish and prepare/abort/finish round-trip;
   interrupted legal prefixes are pending. Zero, decreasing/skipped generations, duplicate or
   reordered terminal events refuse. Empty attachments and removal consume durable generations;
