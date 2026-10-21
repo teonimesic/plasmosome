@@ -1474,6 +1474,40 @@ mod tests {
         drop(other);
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum View {
+        Absent,
+        Refused(PrivateSocketError),
+        Unreachable,
+        Ready,
+        Unexpected(Option<i32>),
+    }
+
+    fn view_of(root: &TestRoot, cell: &str, name: &str) -> View {
+        let checked = open_in(root, cell).and_then(|dir| dir.socket_entry(name, effective_uid()));
+        let connected = UnixStream::connect(root.path().join(cell).join(name))
+            .map(drop)
+            .map_err(|error| error.raw_os_error());
+        match (checked, connected) {
+            (Err(PrivateSocketError::NoSocket { .. }), Err(Some(libc::ENOENT))) => View::Absent,
+            (Err(refusal), _) => View::Refused(refusal),
+            (Ok(_), Ok(())) => View::Ready,
+            (Ok(_), Err(Some(libc::ECONNREFUSED))) => View::Unreachable,
+            (Ok(_), Err(errno)) => View::Unexpected(errno),
+        }
+    }
+
+    #[test]
+    fn a_client_finds_no_entry_at_the_name_until_the_socket_is_private_and_listening() {
+        let root = test_root();
+        make_dir(&root.path().join("cell"), 0o700);
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let mut views = Vec::new();
+        let prepared = prepare_with(dir, "sock", || views.push(view_of(&root, "cell", "sock")));
+        assert!(prepared.is_ok(), "prepare binds");
+        assert_eq!(views, vec![View::Absent]);
+    }
+
     #[test]
     fn a_test_root_is_removed_even_when_its_test_panics() {
         let (sender, receiver) = std::sync::mpsc::channel();
