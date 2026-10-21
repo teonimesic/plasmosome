@@ -295,16 +295,22 @@ mod tests {
     fn a_repeated_incomplete_address_is_refused_even_with_an_identical_operation() {
         let first = op(session_file("/skills/pr.md"));
         let another_owner = at(&first, owner("audit"), session_file("/skills/pr.md"));
+        let between = op(broker("egressd"));
         for repeated in [first.clone(), another_owner] {
-            assert_eq!(
-                EnforcementSnapshot::new(
-                    OsState::new(),
-                    Vec::new(),
-                    vec![incomplete(&first), incomplete(&repeated)],
-                ),
-                Err(conflict(&first)),
-                "{repeated:?}"
-            );
+            for effects in [
+                vec![incomplete(&first), incomplete(&repeated)],
+                vec![
+                    incomplete(&first),
+                    incomplete(&between),
+                    incomplete(&repeated),
+                ],
+            ] {
+                assert_eq!(
+                    EnforcementSnapshot::new(OsState::new(), Vec::new(), effects),
+                    Err(conflict(&first)),
+                    "{repeated:?}"
+                );
+            }
         }
     }
 
@@ -332,16 +338,18 @@ mod tests {
             kind: GrantKind::GenerationBound,
             ..issued(&granted)
         };
+        let between = op(broker("egressd"));
         for repeated in [issued(&granted), other_kind] {
-            assert_eq!(
-                EnforcementSnapshot::new(
-                    standing(&[&granted]),
-                    vec![issued(&granted), repeated.clone()],
-                    Vec::new(),
-                ),
-                Err(conflict(&granted)),
-                "{repeated:?}"
-            );
+            for records in [
+                vec![issued(&granted), repeated.clone()],
+                vec![issued(&granted), issued(&between), repeated.clone()],
+            ] {
+                assert_eq!(
+                    EnforcementSnapshot::new(standing(&[&granted, &between]), records, Vec::new()),
+                    Err(conflict(&granted)),
+                    "{repeated:?}"
+                );
+            }
         }
     }
 
@@ -643,6 +651,14 @@ mod tests {
                 conflict(&held),
             ),
             (
+                encode(
+                    OsState::new(),
+                    Vec::new(),
+                    vec![held.clone(), lost.clone(), held.clone()],
+                ),
+                conflict(&held),
+            ),
+            (
                 encode(standing(&[&held]), Vec::new(), vec![held.clone()]),
                 conflict(&held),
             ),
@@ -650,6 +666,14 @@ mod tests {
                 encode(
                     standing(&[&held]),
                     vec![issued(&held), issued(&held)],
+                    Vec::new(),
+                ),
+                conflict(&held),
+            ),
+            (
+                encode(
+                    standing(&[&held, &lost]),
+                    vec![issued(&held), issued(&lost), issued(&held)],
                     Vec::new(),
                 ),
                 conflict(&held),
