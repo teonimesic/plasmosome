@@ -462,9 +462,10 @@ cell, not run until one boots).
    descriptors at the end equal those at its start. Catches: a per-process view taken at start, a
    restart, and an edited `PATH`.
 3. **Refusals, cell.** A second plasmid that provides an attached command name is 102, naming the
-   holder, and leaves no trace; so is a name the image resolves on `PATH`. Neither carries a `fix`.
-   Catches: shadowing, and a 102 carrying a field its row does not list. Amended on 2026-10-21:
-   this did not say the 102 carries no `fix`.
+   holder, and leaves no trace; so is a name the image resolves on `PATH`. Neither carries a
+   structured field but `target`, so neither carries a `fix`. Catches: shadowing, and a 102
+   carrying a field its row does not list. Amended on 2026-10-21: this did not say the 102 carries
+   only `target`.
 4. **Probe from inside, mechanism.** A placement whose call succeeds but which the workload
    namespace cannot see fails the attach, staged through `private` propagation and through a bind
    from a source the namespace cannot reach. The same staging made visible succeeds. Catches:
