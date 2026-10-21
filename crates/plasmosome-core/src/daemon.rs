@@ -1162,10 +1162,11 @@ mod tests {
             );
             #[cfg(target_os = "linux")]
             assert_eq!(
-                end.expect_err("the daemon closed the connection with its request unread")
+                end.expect_err("the daemon closed the connection with its request still queued")
                     .kind(),
                 ErrorKind::ConnectionReset,
-                "the {attempt} untrusted connection is reset: its request was never read"
+                "the {attempt} untrusted connection is reset: its request was still queued when \
+                 the daemon closed it"
             );
         }
         assert!(
