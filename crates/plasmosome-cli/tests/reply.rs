@@ -469,6 +469,23 @@ fn end_of_input_before_a_newline_is_closed() {
     assert_eq!(read_reply(&mut empty), Err(ReadFailure::Closed));
     let mut partial: &[u8] = br#"{"id":1,"result":{}}"#;
     assert_eq!(read_reply(&mut partial), Err(ReadFailure::Closed));
+
+    let mut the_bound_then_the_end = Chunked {
+        bytes: vec![b'x'; MAX_REPLY_BYTES],
+        at: 0,
+    };
+    assert_eq!(
+        read_reply(&mut the_bound_then_the_end),
+        Err(ReadFailure::Closed)
+    );
+    let mut one_byte_more_then_the_end = Chunked {
+        bytes: vec![b'x'; MAX_REPLY_BYTES + 1],
+        at: 0,
+    };
+    assert_eq!(
+        read_reply(&mut one_byte_more_then_the_end),
+        Err(ReadFailure::TooLarge)
+    );
 }
 
 #[test]
