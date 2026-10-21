@@ -43,12 +43,14 @@ on stdout and exits 0. A sole `--version` prints `membraned` and the package ver
 configuration path, so a file named `--version` is passed as `./--version`.
 
 Exactly `--config-fd=3 --lock-fd=4 --cell=<id>`, in that order with `<id>` a cell ID, is how
-spec 023 §4 starts a cell's supervisor. Cell mode is not built yet (native task
-`plasmosome-t8nq`), so for now that form prints one line saying so and exits 2, with no usage
-text. No argument, or any other list of more than one, prints usage on stderr and exits 64. That
-includes those three arguments in another order, with a fourth, or with a `--cell=` value that
-is not a cell ID. A configuration the daemon cannot read, or refuses, exits 2. A failure to bind
-or serve exits 1. These are spec 025 §6's rules.
+spec 023 §4 starts a cell's supervisor. Spec 025 §6 says `membraned` then starts as spec 023 §5
+says, but cell mode is not built yet. Until native task `plasmosome-t8nq` builds it, that exact
+form prints one line saying so and exits 2, with no usage text, by Main's decision (3) on native
+task `plasmosome-rhn`. No argument, or any other list of more than one, prints usage on stderr
+and exits 64. That includes those three arguments in another order, with a fourth, or with a
+`--cell=` value that is not a cell ID. A configuration the daemon cannot read, or refuses,
+exits 2. A failure to bind or serve exits 1. The `-h`, `--help`, `--version` and exit 64 rules
+are spec 025 §6's. Exits 2 and 1 are unchanged.
 
 ## Readiness is an answered query
 
