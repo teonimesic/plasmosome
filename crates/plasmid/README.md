@@ -26,10 +26,10 @@ than a library and a binary sharing one dependency table.
 
 `plasmid --help` lists them with these marks, the global flags, `PLASMOSOME_KERNEL` and the exit
 codes. `plasmid <command> --help` describes one command. `plasmid --version` prints
-`plasmid 0.0.0`; anywhere but as the sole argument, `--version` is a usage error.
+`plasmid 0.0.0`; anywhere else before `--`, `--version` is a usage error.
 
-A command that is not served exits 2 and prints one JSON line on stderr. It reads nothing else on
-the line, no environment variable and no socket:
+A command that is not served exits 2 and prints one JSON line on stderr. Of the rest of the line
+it reads only `--json` and `--human`, and it reads no environment variable and no socket:
 
 ```console
 $ plasmid add my-thing
@@ -39,7 +39,8 @@ $ echo $?
 ```
 
 A command line that is wrong exits 64 with an `invalid` envelope. `argument` names the argument
-at fault when there is one:
+at fault when there is one, and when the line holds more than one fault it names the first,
+reading from the left:
 
 ```console
 $ plasmid frobnicate
@@ -48,10 +49,12 @@ $ echo $?
 64
 ```
 
-Both envelopes follow the command line's spec, 025: stdout stays empty, and every terminal control
-in a string is written as a `\u` escape. With `--human` the command prints the message and then
-`(client not_served)` or `(client invalid_argument)`, with each terminal control shown as
-`<U+XXXX>`. The human form is for a person; nothing may parse it. `--json` and `--human` together,
+Help or the version that cannot be written to stdout exits 1 with a third envelope, `local_io`,
+under `command` `--help` or `--version`, with the `errno` when there is one. All three envelopes
+follow the command line's spec, 025: stdout stays empty, and every terminal control in a string is
+written as a `\u` escape. With `--human` the command prints the message and then
+`(client not_served)`, `(client invalid_argument)` or `(client local_io)`, with each terminal
+control shown as `<U+XXXX>`. The human form is for a person; nothing may parse it. `--json` and `--human` together,
 or either one twice, is a usage error.
 
 ## Writing a declaration
@@ -84,7 +87,7 @@ are prose on stderr, as above, and its exit code says which one happened:
 | 2 | It wrote `<name>.toml` and printed the sections still missing. |
 | 1 | Something already exists at `<name>.toml`, whether a file, a directory or a symlink, and is left untouched; or the file cannot be created. Nothing was written. |
 | 3 | It created `<name>.toml` but could not finish writing it, or could not print the sections. Look at `<name>.toml` before you run the command again. |
-| 64 | The command line is wrong: no name, a second name, a name outside the grammar, or any global flag such as `--kernel` or `--json`. Nothing was written, and stderr holds an `invalid` envelope. |
+| 64 | The command line is wrong: no name, a second name, a name outside the grammar, or any flag but `-h` and `--help`, such as `--kernel` or `--json`. Nothing was written, and stderr holds an `invalid` envelope. |
 
 ## Status
 

@@ -24,8 +24,8 @@ on it.
 
 ## The envelopes
 
-The binary writes spec 025's two envelopes, `not_served` and `invalid`, with its own writer in
-`src/envelope.rs`. It does not use `plasmosome-cli`'s writer: `plasmosome-cli` is not published,
+The binary writes spec 025's envelopes, `not_served`, `invalid` and `local_io`, with its own
+writer in `src/envelope.rs`. It does not use `plasmosome-cli`'s writer: `plasmosome-cli` is not published,
 and a normal dependency on an unpublished package stops this crate from packaging, which spec 010
 requires it to keep doing. Whether plasmid moves onto `plasmosome-cli` later is an open question
 (plasmosome-4t24). Both writers escape the terminal controls spec 025 section 3 names.
