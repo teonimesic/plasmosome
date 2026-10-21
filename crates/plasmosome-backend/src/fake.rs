@@ -1131,7 +1131,7 @@ mod tests {
         backend.plant(planted.clone()).unwrap();
         assert_eq!(
             backend.snapshot_os_state(),
-            EnforcementSnapshot::new(
+            Ok(EnforcementSnapshot::new(
                 standing(&[
                     hot.object(),
                     bound.object(),
@@ -1141,6 +1141,7 @@ mod tests {
                 vec![hot.clone(), bound.clone()],
                 Vec::new(),
             )
+            .unwrap())
         );
         backend.revoke(hot.handle, DrainSpec::forcing()).unwrap();
         backend
@@ -1148,11 +1149,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             backend.snapshot_os_state(),
-            EnforcementSnapshot::new(
+            Ok(EnforcementSnapshot::new(
                 standing(&[applied.object(), planted]),
                 Vec::new(),
                 Vec::new()
             )
+            .unwrap())
         );
     }
 
@@ -1174,9 +1176,10 @@ mod tests {
             standing(&[entry.object(), applied.object()]),
             vec![entry.clone()],
             Vec::new(),
-        );
-        assert_eq!(backend.snapshot_os_state(), complete);
-        assert_eq!(backend.snapshot_os_state(), complete);
+        )
+        .unwrap();
+        assert_eq!(backend.snapshot_os_state(), Ok(complete.clone()));
+        assert_eq!(backend.snapshot_os_state(), Ok(complete));
         assert_eq!(backend.peek_entry(entry.handle).unwrap(), entry);
     }
 }
