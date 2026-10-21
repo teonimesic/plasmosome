@@ -42,11 +42,12 @@ capabilities remain separate holdings, and identity conflicts fail without repla
 `snapshot_os_state` returns the backend's complete account as an `EnforcementSnapshot`: its
 standing holdings, the original issued record of each grant whose withdrawal authority remains,
 and its unfinished effects as `IncompleteEffect`s. An applied or planted object has no record, and
-a record is never rebuilt from an object. `EnforcementSnapshot::new` refuses an address repeated
-in the unfinished effects, an address both standing and unfinished, a repeated issued handle, and
-a record whose owner or capability disagrees with its row, each with `IdentityConflict`. It
-refuses a record with neither a standing nor an unfinished row with `Fault`. Decoding runs the
-same checks. A caller deciding that nothing is left asks `is_empty`, which is true only when all
+a record is never rebuilt from an object. `EnforcementSnapshot::new` first refuses a row whose
+capability fails `validate` with `InvalidOperation`, the reason encoding and decoding give. It
+then refuses an address repeated in the unfinished effects, an address both standing and
+unfinished, a repeated issued handle, and a record whose owner or capability disagrees with its
+row, each with `IdentityConflict`. It refuses a record with neither a standing nor an unfinished
+row with `Fault`. Decoding runs the same checks. A caller deciding that nothing is left asks `is_empty`, which is true only when all
 three collections are empty.
 
 The snapshot can fail. An observation that fails returns an error, never an empty or partial

@@ -4,6 +4,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::backend::{BackendError, Capability, Handle, LedgerEntry};
+use crate::recipe::RecipeError;
 use crate::universe::{CellOwner, OsState, UniverseOp};
 use crate::wire::{ObjectOnly, object_serde};
 
@@ -49,12 +50,14 @@ pub struct EnforcementSnapshot {
 impl EnforcementSnapshot {
     /// Builds the account, or refuses it with the first failure in this order:
     ///
-    /// 1. an address repeated in `incomplete` returns `IdentityConflict`;
-    /// 2. an address both standing and in `incomplete` returns `IdentityConflict`;
-    /// 3. a handle repeated in `grants` returns `IdentityConflict`;
-    /// 4. an issued record whose standing or incomplete row has another owner or capability
+    /// 1. a standing object, issued record or unfinished effect whose capability fails
+    ///    `validate` returns `InvalidOperation` at its address, the reason decoding gives;
+    /// 2. an address repeated in `incomplete` returns `IdentityConflict`;
+    /// 3. an address both standing and in `incomplete` returns `IdentityConflict`;
+    /// 4. a handle repeated in `grants` returns `IdentityConflict`;
+    /// 5. an issued record whose standing or incomplete row has another owner or capability
     ///    returns `IdentityConflict`;
-    /// 5. an issued record with neither a standing nor an incomplete row returns `Fault`.
+    /// 6. an issued record with neither a standing nor an incomplete row returns `Fault`.
     ///
     /// A repeat is refused even when its payload is identical. An issued record whose holding is
     /// in `incomplete` is accepted: a withdrawal that failed after release keeps its record.
@@ -65,6 +68,15 @@ impl EnforcementSnapshot {
         mut grants: Vec<LedgerEntry>,
         mut incomplete: Vec<IncompleteEffect>,
     ) -> Result<EnforcementSnapshot, BackendError> {
+        for object in state.objects() {
+            valid(object.operation().handle(), object.capability.validate())?;
+        }
+        for entry in &grants {
+            valid(entry.handle, entry.capability.validate())?;
+        }
+        for effect in &incomplete {
+            valid(effect.handle(), effect.operation.validate())?;
+        }
         let mut unfinished = BTreeMap::new();
         for effect in &incomplete {
             if unfinished.insert(effect.handle(), effect).is_some() {
@@ -150,6 +162,14 @@ impl EnforcementSnapshot {
     pub fn is_empty(&self) -> bool {
         self.state.is_empty() && self.grants.is_empty() && self.incomplete.is_empty()
     }
+}
+
+fn valid(address: Handle, checked: Result<(), RecipeError>) -> Result<(), BackendError> {
+    checked.map_err(|error| BackendError::InvalidOperation {
+        class: address.class.as_str(),
+        id: address.id,
+        error,
+    })
 }
 
 fn conflict(address: Handle) -> BackendError {
