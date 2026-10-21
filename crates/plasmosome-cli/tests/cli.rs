@@ -1017,6 +1017,15 @@ fn help_text(line: &[&str], commands: &[Command]) -> String {
 }
 
 #[test]
+fn help_says_how_this_build_reaches_an_instance() {
+    let help = help_text(&["--help"], COMMANDS);
+    assert!(
+        help.contains("This build reaches an instance only through --socket."),
+        "{help}"
+    );
+}
+
+#[test]
 fn help_says_what_each_command_is() {
     let commands = status_served();
     let help = help_text(&["--help"], &commands);
