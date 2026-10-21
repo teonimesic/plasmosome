@@ -439,7 +439,18 @@ mod tests {
             owner("audit"),
             mount("/code", "/workspace"),
         ));
+        let invalid = op(mount("relative/source", "/workspace"));
         let cases = [
+            (
+                OsState::new(),
+                Vec::new(),
+                vec![incomplete(&invalid), incomplete(&invalid)],
+                BackendError::InvalidOperation {
+                    class: invalid.class().as_str(),
+                    id: invalid.id(),
+                    error: invalid.validate().unwrap_err(),
+                },
+            ),
             (
                 standing(&[&overlapping]),
                 Vec::new(),
