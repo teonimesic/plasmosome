@@ -103,6 +103,21 @@ enum Defect {
     GrantedRemovalKeepsItsObject,
     SnapshotOmitsIssuedRecords,
     SnapshotReconstructsGrantsFromObjects,
+    HidesIncompleteEffects,
+    FailedGrantReturnsAnEntry,
+    OmitsIncompleteEffectsFromTheSnapshot,
+    AFailedGrantIssuesARecord,
+    RetryContinuesCreation(Call),
+    AnotherOperationOverwritesIncomplete,
+    PlantOverwritesIncomplete,
+    RevokeTakesAnUnfinishedEffect,
+    IncompleteCleanupIgnoresTheOwner,
+    IncompleteCleanupIgnoresTheCapability,
+    DoomedOwnerValidatesAfterTheEffect,
+    CleanupKeepsTheMarker,
+    IncompleteCleanupTakesEqualPeers,
+    RecoversUnfinishedEffectsFromItsOwnLog,
+    ApplyRemovalLeavesAnUnfinishedEffectOf(Call),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1211,8 +1226,12 @@ fn carrying(defect: Defect) -> impl Fn() -> DefectiveBackend {
 }
 
 fn carrying_a_shared_log() -> impl Fn() -> DefectiveBackend {
+    sharing_a_log(Defect::RecordsItsOwnRecoveryLog)
+}
+
+fn sharing_a_log(defect: Defect) -> impl Fn() -> DefectiveBackend {
     let log = Rc::new(RefCell::new(Vec::new()));
-    move || DefectiveBackend::recovering(Defect::RecordsItsOwnRecoveryLog, Rc::clone(&log))
+    move || DefectiveBackend::recovering(defect, Rc::clone(&log))
 }
 
 fn factory_panics() -> DefectiveBackend {
@@ -1272,6 +1291,7 @@ fn run_all(defect: Defect) {
     conformance::graceful_timeouts_preserve_the_selected_holding(carrying(defect));
     conformance::grant_retry_returns_the_original_entry(carrying(defect));
     conformance::fresh_backends_share_no_authority(carrying(defect));
+    conformance::failed_grants_stay_incomplete_until_exact_withdrawal(carrying(defect));
 }
 
 #[test]
@@ -3100,4 +3120,102 @@ fn a_snapshot_defect_changes_only_the_issued_records_it_reports() {
         );
         assert_eq!(snapshot.state().len(), 3, "{defect:?}");
     }
+}
+
+#[test]
+fn the_incomplete_clause_rejects_each_mishandled_step() {
+    for (defect, reason) in [
+        (
+            Defect::HidesIncompleteEffects,
+            "must return IncompleteEffect at its address",
+        ),
+        (
+            Defect::FailedGrantReturnsAnEntry,
+            "grant of the doomed operation must return IncompleteEffect",
+        ),
+        (
+            Defect::OmitsIncompleteEffectsFromTheSnapshot,
+            "must be reported exactly, with no standing object and no record",
+        ),
+        (
+            Defect::AFailedGrantIssuesARecord,
+            "must be reported exactly, with no standing object and no record",
+        ),
+        (
+            Defect::RetryContinuesCreation(Call::Grant),
+            "a retry through grant must return IncompleteEffect again",
+        ),
+        (
+            Defect::RetryContinuesCreation(Call::Apply),
+            "a retry through apply must return IncompleteEffect again",
+        ),
+        (
+            Defect::AnotherOperationOverwritesIncomplete,
+            "another owner's grant at an unfinished address must conflict",
+        ),
+        (
+            Defect::PlantOverwritesIncomplete,
+            "a plant at an unfinished address must conflict",
+        ),
+        (
+            Defect::RevokeTakesAnUnfinishedEffect,
+            "a revoke of an unfinished operation's handle must return UnknownHandle",
+        ),
+        (
+            Defect::IncompleteCleanupIgnoresTheOwner,
+            "a removal naming another owner must not select an unfinished effect",
+        ),
+        (
+            Defect::IncompleteCleanupIgnoresTheCapability,
+            "a removal naming another capability must not select an unfinished effect",
+        ),
+        (
+            Defect::DoomedOwnerValidatesAfterTheEffect,
+            "a refused invalid doomed operation changed the account",
+        ),
+        (
+            Defect::CleanupKeepsTheMarker,
+            "the exact removal must clear the unfinished effect and nothing else",
+        ),
+        (
+            Defect::IncompleteCleanupTakesEqualPeers,
+            "the exact removal must clear the unfinished effect and nothing else",
+        ),
+    ] {
+        assert_rejected(reason, || {
+            conformance::failed_grants_stay_incomplete_until_exact_withdrawal(carrying(defect))
+        });
+    }
+}
+
+#[test]
+fn every_emptiness_check_reads_the_unfinished_effects() {
+    assert_rejected("the earlier instance kept a holding", || {
+        conformance::fresh_backends_share_no_authority(carrying(
+            Defect::RevokeLeavesAnUnfinishedEffect,
+        ))
+    });
+    assert_rejected("fresh from the factory must observe nothing", || {
+        conformance::fresh_backends_share_no_authority(sharing_a_log(
+            Defect::RecoversUnfinishedEffectsFromItsOwnLog,
+        ))
+    });
+    assert_rejected("fresh from the factory must observe nothing", || {
+        conformance::snapshot_never_invents_objects(sharing_a_log(
+            Defect::RecoversUnfinishedEffectsFromItsOwnLog,
+        ))
+    });
+    assert_rejected("apply_removal of planted residue must take it", || {
+        conformance::repeated_grants_are_independently_removable(carrying(
+            Defect::ApplyRemovalLeavesAnUnfinishedEffectOf(Call::Plant),
+        ))
+    });
+    assert_rejected(
+        "apply_removal of a granted holding must take its holding",
+        || {
+            conformance::repeated_grants_are_independently_removable(carrying(
+                Defect::ApplyRemovalLeavesAnUnfinishedEffectOf(Call::Grant),
+            ))
+        },
+    );
 }

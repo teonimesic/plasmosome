@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use plasmosome_backend::{
     BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend,
-    EnforcementSnapshot, FileAccess, GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState,
-    PluginId, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
+    EnforcementSnapshot, FileAccess, GrantId, GrantKind, Handle, IncompleteEffect, LedgerEntry,
+    OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 use crate::builders::{
@@ -187,6 +187,7 @@ pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> 
             &observe(&mut backend),
             &[live_object],
             std::slice::from_ref(&live),
+            &[],
             "a failed revoke must preserve the live grant and its issued record",
         );
     }
@@ -208,6 +209,7 @@ pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B
             });
             assert_account(
                 &observe(&mut backend),
+                &[],
                 &[],
                 &[],
                 &format!(
@@ -245,6 +247,7 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
             &observe(&mut backend),
             &[residue],
             &[],
+            &[],
             "only planted residue may remain, with no issued record",
         );
     }
@@ -280,6 +283,7 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         &seen,
         &expected,
         &records,
+        &[],
         "the snapshot lost or invented an object or an issued record",
     );
     let at_issued: Vec<UniverseOp> = issued
@@ -398,6 +402,7 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
                 &observe(&mut backend),
                 &expected,
                 &records,
+                &[],
                 "a revoke must withdraw its own exact object and record and preserve all survivors",
             );
         }
@@ -450,6 +455,7 @@ where
                     &observe(&mut backend),
                     &expected,
                     &[],
+                    &[],
                     "applied operations must coexist with all unrelated observations and issue no record",
                 );
                 let arranged = order.arrange_ops(vec![first, second]);
@@ -473,6 +479,7 @@ where
                             &observe(&mut backend),
                             &expected,
                             &[],
+                            &[],
                             "a refused removal naming another owner changed the account",
                         );
                     }
@@ -491,6 +498,7 @@ where
                     assert_account(
                         &snapshot,
                         &expected,
+                        &[],
                         &[],
                         "an applied removal selected the wrong instance or damaged unrelated state",
                     );
@@ -539,6 +547,7 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
                 &observe(&mut backend),
                 &[live.object()],
                 std::slice::from_ref(&live),
+                &[],
                 "a refused spent-handle revoke changed the account",
             );
         }
@@ -580,6 +589,7 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
                             &observe(&mut backend),
                             &expected,
                             &records,
+                            &[],
                             "revoke took another owner's object or record",
                         );
                     }
@@ -623,6 +633,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                     &observe(&mut backend),
                     &expected,
                     &records,
+                    &[],
                     "two requested holdings must coexist with their complete requested payloads and records",
                 );
                 for (entry, object) in
@@ -641,6 +652,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                         &observe(&mut backend),
                         &expected,
                         &records,
+                        &[],
                         "repeated-grant revoke selected the wrong instance",
                     );
                 }
@@ -664,12 +676,14 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             &observe(&mut backend),
             &[residue.clone(), live_object],
             std::slice::from_ref(&live),
+            &[],
             "live broker and equal residue must coexist exactly, with a record for the grant only",
         );
         contract_unwrap!(backend.revoke(live.handle, drain));
         assert_account(
             &observe(&mut backend),
             std::slice::from_ref(&residue),
+            &[],
             &[],
             "live broker revoke must preserve equal residue and take its own record",
         );
@@ -681,7 +695,11 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             &residue.owner,
             drain,
         ));
-        contract_assert!(observe(&mut backend).is_empty());
+        contract_assert!(
+            observe(&mut backend).is_empty(),
+            "a successful {} apply_removal of planted residue must take it",
+            policy_of(drain)
+        );
         let removed = grant_prepared(&mut backend, &hot_grant(residue.owner.clone(), &capability));
         contract_unwrap!(backend.apply_removal(removed.removal(), &removed.owner, drain));
         contract_assert!(
@@ -730,6 +748,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                     &observe(&mut backend),
                     &expected,
                     std::slice::from_ref(&entry),
+                    &[],
                     "a retry changed the account",
                 );
                 let conflict = BackendError::IdentityConflict {
@@ -773,6 +792,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                         &observe(&mut backend),
                         &expected,
                         std::slice::from_ref(&entry),
+                        &[],
                         "a conflicting grant changed the account",
                     );
                 }
@@ -817,6 +837,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                             &observe(&mut backend),
                             &expected,
                             std::slice::from_ref(&entry),
+                            &[],
                             "a refused grant at a standing address changed the account",
                         );
                         contract_assert_eq!(
@@ -834,6 +855,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                     &observe(&mut backend),
                     &expected,
                     std::slice::from_ref(&entry),
+                    &[],
                     "applying or planting a live grant's own object must change nothing",
                 );
                 contract_assert_eq!(
@@ -850,6 +872,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                 assert_account(
                     &observe(&mut backend),
                     &expected,
+                    &[],
                     &[],
                     "revoking the retried grant must take only its own holding and record",
                 );
@@ -891,12 +914,14 @@ pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() 
             &observe(&mut second),
             &own,
             &own_records,
+            &[],
             "a fresh backend must hold exactly its own grants and records",
         );
         assert_account(
             &observe(&mut first),
             &earlier_objects,
             &earlier,
+            &[],
             "a later instance changed what the earlier one holds",
         );
         for (entry, _) in order.arrange(earlier.into_iter().zip(earlier_objects).collect()) {
@@ -1004,6 +1029,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     &observe(&mut backend),
                     &all,
                     &records,
+                    &[],
                     "a stalled holding must coexist with its equal peers",
                 );
                 let address = Handle {
@@ -1024,6 +1050,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         &observe(&mut backend),
                         &all,
                         &records,
+                        &[],
                         "a timed-out apply_removal of a grant must keep the holding, its issued record and every peer",
                     );
                 }
@@ -1047,6 +1074,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         &observe(&mut backend),
                         &all,
                         &records,
+                        &[],
                         "a graceful timeout must keep the selected holding, its issued record and every peer",
                     );
                 }
@@ -1073,6 +1101,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         &observe(&mut backend),
                         &all,
                         &records,
+                        &[],
                         "a refused wrong-owner removal changed the account",
                     );
                 }
@@ -1120,6 +1149,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         &observe(&mut backend),
                         &remaining,
                         &remaining_records,
+                        &[],
                         "a withdrawal must take only its own holding and record",
                     );
                 }
@@ -1196,6 +1226,37 @@ fn withdraw<B: EnforcementBackend>(
         }
     }
     Ok(())
+}
+
+/// The owner whose grants and applies fail after their first effect. A factory passed to
+/// `failed_grants_stay_incomplete_until_exact_withdrawal` must return a backend in which every
+/// valid grant or apply owned by exactly this owner, at a free address, has its first effect and
+/// then returns `IncompleteEffect`, while an invalid one is refused with `InvalidOperation` before
+/// any effect. Its removals drain normally. Every other owner must grant and apply normally.
+/// `FakeBackend` is armed with `fail_after_effect_for_owner(doomed_owner(), detail)`.
+pub fn doomed_owner() -> CellOwner {
+    CellOwner {
+        cell: CellId::from("conformance-doomed-cell"),
+        plugin: PluginId::from("conformance-doomed"),
+    }
+}
+
+/// Checks, for every sample capability, both revoke policies and both entry points, that a grant
+/// or apply owned by `doomed_owner()` returns `IncompleteEffect` at its own address and leaves
+/// exactly that operation incomplete, with no standing object and no issued record; that while it
+/// is incomplete a retry through either entry point returns `IncompleteEffect` again, another
+/// owner's grant or apply at its address and a plant there return `IdentityConflict`, a revoke of
+/// its handle returns `UnknownHandle`, and a removal naming another owner or capability returns
+/// `UnknownObject`, each changing nothing; that an invalid operation of that owner is refused with
+/// `InvalidOperation` and changes nothing; and that the exact removal clears the effect and
+/// nothing else. An error is compared by class and address, never by its detail. The factory's
+/// backend must fail every grant or apply owned by `doomed_owner()` after its first effect. Each
+/// pass withdraws at most one holding on a fresh backend, so the clause has no withdrawal order to
+/// walk.
+pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBackend>(
+    make: impl Fn() -> B,
+) {
+    let _ = make;
 }
 
 fn hot_grant(owner: CellOwner, capability: &Capability) -> PreparedGrant {
@@ -1541,6 +1602,7 @@ fn assert_account(
     actual: &EnforcementSnapshot,
     standing: &[OsObject],
     grants: &[LedgerEntry],
+    incomplete: &[UniverseOp],
     context: &str,
 ) {
     let mut state = OsState::new();
@@ -1549,7 +1611,13 @@ fn assert_account(
             .insert(object.clone())
             .expect("expected conformance objects must have unique addresses");
     }
-    let expected = EnforcementSnapshot::new(state, grants.to_vec(), Vec::new())
+    let unfinished = incomplete
+        .iter()
+        .map(|operation| IncompleteEffect {
+            operation: operation.clone(),
+        })
+        .collect();
+    let expected = EnforcementSnapshot::new(state, grants.to_vec(), unfinished)
         .expect("the expected conformance account must be valid");
     contract_assert_eq!(actual, &expected, "{context}");
 }
