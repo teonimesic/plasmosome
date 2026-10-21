@@ -835,6 +835,100 @@ fn a_daemon_that_never_becomes_addressable_fails_the_test_with_its_stderr() {
     );
 }
 
+fn probe(script: &str, arguments: &[&Path]) -> Daemon {
+    Daemon {
+        child: Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .arg("probe")
+            .args(arguments)
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the probe starts as a process"),
+    }
+}
+
+fn addressable_failure(daemon: Daemon, socket: PathBuf, budget: Duration) -> (String, Daemon) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut daemon = daemon;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            addressable_within(&mut daemon, &socket, budget)
+        }));
+        let message = outcome
+            .err()
+            .and_then(|payload| payload.downcast_ref::<String>().cloned());
+        let _ = sender.send((message, daemon));
+    });
+    let (message, daemon) = receiver
+        .recv_timeout(PATIENCE)
+        .expect("addressable gives up within ten seconds when its budget is shorter");
+    (
+        message.expect("addressable fails with a formatted message when nothing binds"),
+        daemon,
+    )
+}
+
+#[allow(unsafe_code)]
+fn reaped(pid: i32) -> bool {
+    // SAFETY: kill with signal 0 takes no pointer and sends nothing; it only asks whether the pid
+    // names a process, and a reaped child no longer has one.
+    let answer = unsafe { libc::kill(pid, 0) };
+    answer == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[test]
+fn a_live_daemon_that_never_binds_fails_the_test_with_its_stderr_and_is_reaped() {
+    let root = private_root();
+    let ready = root.path().join("ready");
+    let daemon = probe(
+        "echo probe-reason >&2; : > \"$1\"; exec sleep 30",
+        &[&ready],
+    );
+    let pid = daemon.pid();
+    let started = Instant::now();
+    while !ready.exists() {
+        assert!(
+            started.elapsed() < PATIENCE,
+            "the probe writes to its stderr within {PATIENCE:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let (message, mut daemon) = addressable_failure(
+        daemon,
+        root.path().join("never.uds"),
+        Duration::from_millis(200),
+    );
+    assert!(
+        message.contains("its stderr was:\nprobe-reason\n"),
+        "the failure carries what the live daemon wrote: {message}"
+    );
+    assert!(reaped(pid), "addressable reaped the daemon it gave up on");
+    let status = daemon
+        .child
+        .try_wait()
+        .expect("the probe's state is readable")
+        .expect("the probe has exited");
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(libc::SIGKILL),
+        "addressable killed the live daemon before it reaped it: {status:?}"
+    );
+}
+
+#[test]
+fn a_daemon_stderr_that_is_not_utf8_still_reaches_the_failure() {
+    let root = private_root();
+    let daemon = probe("printf 'refused \\377\\n' >&2; exit 1", &[]);
+    let (message, _daemon) = addressable_failure(daemon, root.path().join("never.uds"), PATIENCE);
+    let shown = format!("its stderr was:\nrefused {}\n", char::REPLACEMENT_CHARACTER);
+    assert!(
+        message.contains(&shown),
+        "the failure shows a stderr that is not UTF-8, with the bad byte replaced: {message}"
+    );
+}
+
 #[test]
 fn a_socket_directory_that_is_a_file_is_refused_and_left_alone() {
     let root = private_root();
