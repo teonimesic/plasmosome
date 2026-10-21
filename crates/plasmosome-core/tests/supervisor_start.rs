@@ -369,6 +369,11 @@ fn an_unconfirmed_exec_leaves_membraned_an_empty_record() {
             Err(StartError::ExecUnconfirmed { lock }) => {
                 let report = Report::read(&cell.path);
                 assert_eq!(
+                    report.descriptor(3).kind,
+                    "fifo",
+                    "the late stand-in reads the record's pipe on 3; {report}"
+                );
+                assert_eq!(
                     report.text("record"),
                     "",
                     "an unconfirmed start writes no record; {report}"
@@ -1877,7 +1882,11 @@ mod standin {
                 .map(|(fd, open)| described(fd, open))
                 .collect()
         });
-        let record = read_descriptor_three();
+        let record = if inherited.is_some_and(|inherited| inherited.open[3]) {
+            read_descriptor_three()
+        } else {
+            Vec::new()
+        };
         let decoded = PlatformLimits::host()
             .ok()
             .and_then(|limits| SupervisorConfig::decode(&record, &limits).ok())
