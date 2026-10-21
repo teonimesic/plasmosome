@@ -1437,150 +1437,51 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prepare_leaves_a_0600_socket_that_refuses_connections() {
-        let root = test_root();
-        make_dir(&root.path().join("cell"), 0o700);
-        let dir = open_in(&root, "cell").expect("a private directory opens");
-        let (socket, bound) = prepare(dir, "sock").expect("prepare binds");
-        let path = root.path().join("cell/sock");
-        let metadata = fs::symlink_metadata(&path).expect("the socket exists");
-        assert!(metadata.file_type().is_socket());
-        assert_eq!(metadata.uid(), effective_uid());
-        assert_eq!(metadata.mode() & 0o7777, 0o600);
-        assert_eq!(
-            bound.entry,
-            SocketEntry {
-                path: path.clone(),
-                dev: metadata.dev(),
-                ino: metadata.ino()
-            }
-        );
-        let refused = UnixStream::connect(&path).expect_err("nothing listens yet");
-        assert_eq!(refused.raw_os_error(), Some(libc::ECONNREFUSED));
-        drop(socket);
-        drop(bound);
-        assert!(fs::symlink_metadata(&path).is_err());
+    const DRAWN: &str = ".0123456789abcde";
+
+    fn publish_drawing(
+        dir: PrivateDir,
+        name: &str,
+        owner: u32,
+        temporaries: &[&str],
+        mut observe: impl FnMut(Step),
+    ) -> Result<(UnixListener, BoundEntry), PrivateSocketError> {
+        let mut drawn = temporaries.iter();
+        let mut draw = |_room: usize| match drawn.next() {
+            Some(temporary) => (*temporary).to_string(),
+            None => panic!("a draw past the {} temporaries given", temporaries.len()),
+        };
+        let seam = Seam {
+            draw: &mut draw,
+            observe: &mut observe,
+        };
+        publish(dir, name, owner, seam)
     }
 
     fn refusal_of(
-        outcome: Result<(OwnedFd, BoundEntry), PrivateSocketError>,
+        outcome: Result<(UnixListener, BoundEntry), PrivateSocketError>,
     ) -> PrivateSocketError {
         match outcome {
-            Ok((_, bound)) => panic!("prepare bound {:?}", bound.entry),
+            Ok((_, bound)) => panic!("publish bound {:?}", bound.entry),
             Err(refusal) => refusal,
         }
     }
 
     fn entries(path: &Path) -> Vec<PathBuf> {
-        fs::read_dir(path)
+        let mut found: Vec<PathBuf> = fs::read_dir(path)
             .expect("readdir")
             .map(|entry| entry.expect("an entry").path())
-            .collect()
+            .collect();
+        found.sort();
+        found
     }
 
-    #[test]
-    fn prepare_refuses_a_directory_that_stopped_being_private_without_binding() {
+    fn private_cell() -> (TestRoot, PathBuf, PrivateDir) {
         let root = test_root();
         let cell = root.path().join("cell");
         make_dir(&cell, 0o700);
         let dir = open_in(&root, "cell").expect("a private directory opens");
-        set_mode(&cell, 0o750);
-        let mut bound = false;
-        let refusal = refusal_of(prepare_with(dir, "sock", || bound = true));
-        assert_eq!(
-            refusal,
-            PrivateSocketError::NotPrivate {
-                path: cell.clone(),
-                mode: 0o750
-            }
-        );
-        assert!(
-            !bound,
-            "the socket was bound in a directory no longer private"
-        );
-        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
-    }
-
-    #[test]
-    fn prepare_reports_the_recheck_and_removes_a_socket_bound_before_the_directory_changed() {
-        let root = test_root();
-        let cell = root.path().join("cell");
-        make_dir(&cell, 0o700);
-        let dir = open_in(&root, "cell").expect("a private directory opens");
-        let refusal = refusal_of(prepare_with(dir, "sock", || set_mode(&cell, 0o750)));
-        assert_eq!(
-            refusal,
-            PrivateSocketError::NotPrivate {
-                path: cell.clone(),
-                mode: 0o750
-            }
-        );
-        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
-    }
-
-    #[test]
-    fn prepare_reports_a_directory_replaced_after_bind_and_removes_the_socket() {
-        let root = test_root();
-        let cell = root.path().join("cell");
-        let moved = root.path().join("moved");
-        make_dir(&cell, 0o700);
-        let dir = open_in(&root, "cell").expect("a private directory opens");
-        let refusal = refusal_of(prepare_with(dir, "sock", || {
-            fs::rename(&cell, &moved).expect("rename");
-            make_dir(&cell, 0o700);
-        }));
-        assert_eq!(refusal, PrivateSocketError::Replaced { path: cell.clone() });
-        assert_eq!(entries(&moved), Vec::<PathBuf>::new());
-        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
-    }
-
-    #[test]
-    fn prepare_reports_bind_escaped_and_leaves_the_name_when_no_socket_is_there() {
-        let root = test_root();
-        let cell = root.path().join("cell");
-        make_dir(&cell, 0o700);
-        let sock = cell.join("sock");
-        let dir = open_in(&root, "cell").expect("a private directory opens");
-        let refusal = refusal_of(prepare_with(dir, "sock", || {
-            fs::remove_file(&sock).expect("unlink");
-        }));
-        assert_eq!(
-            refusal,
-            PrivateSocketError::BindEscaped { path: sock.clone() }
-        );
-        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
-
-        let dir = open_in(&root, "cell").expect("a private directory opens");
-        let refusal = refusal_of(prepare_with(dir, "sock", || {
-            fs::remove_file(&sock).expect("unlink");
-            fs::write(&sock, b"planted").expect("write");
-        }));
-        assert_eq!(
-            refusal,
-            PrivateSocketError::BindEscaped { path: sock.clone() }
-        );
-        assert_eq!(fs::read(&sock).expect("the planted file stays"), b"planted");
-    }
-
-    #[test]
-    fn prepare_leaves_a_socket_it_did_not_bind_when_the_recheck_fails() {
-        let root = test_root();
-        let cell = root.path().join("cell");
-        make_dir(&cell, 0o700);
-        let sock = cell.join("sock");
-        let dir = open_in(&root, "cell").expect("a private directory opens");
-        let mut other = None;
-        let stand_in = effective_uid().wrapping_add(1);
-        let refusal = refusal_of(prepare_as(dir, "sock", stand_in, || {
-            fs::remove_file(&sock).expect("unlink");
-            other = Some(UnixListener::bind(&sock).expect("bind another socket"));
-            set_mode(&cell, 0o770);
-        }));
-        let left = fs::symlink_metadata(&sock).expect("the socket this call did not bind stays");
-        assert!(left.file_type().is_socket());
-        assert_eq!(refusal, PrivateSocketError::BindEscaped { path: sock });
-        drop(other);
+        (root, cell, dir)
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -1606,15 +1507,314 @@ mod tests {
         }
     }
 
+    fn listening(listener: UnixListener, bound: BoundEntry) -> PrivateListener {
+        PrivateListener {
+            listener,
+            bound,
+            trusted_uid: effective_uid(),
+        }
+    }
+
+    fn accept_pending(listener: &PrivateListener) -> Accepted {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(accepted) = listener.accept().expect("accept") {
+                return accepted;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no connection arrived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn a_client_finds_no_entry_at_the_name_until_the_socket_is_private_and_listening() {
-        let root = test_root();
-        make_dir(&root.path().join("cell"), 0o700);
-        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let (root, _, dir) = private_cell();
         let mut views = Vec::new();
-        let prepared = prepare_with(dir, "sock", || views.push(view_of(&root, "cell", "sock")));
-        assert!(prepared.is_ok(), "prepare binds");
-        assert_eq!(views, vec![View::Absent]);
+        let (listener, bound) = publish_drawing(dir, "sock", effective_uid(), &[DRAWN], |step| {
+            views.push((step, view_of(&root, "cell", "sock")));
+        })
+        .expect("publish binds");
+        assert_eq!(
+            views,
+            vec![
+                (Step::Bound, View::Absent),
+                (Step::Restricted, View::Absent),
+                (Step::Listening, View::Absent),
+            ]
+        );
+        let listener = listening(listener, bound);
+        assert_eq!(view_of(&root, "cell", "sock"), View::Ready);
+        assert!(
+            matches!(accept_pending(&listener), Accepted::Trusted(_)),
+            "the client that found the socket is trusted"
+        );
+    }
+
+    #[test]
+    fn the_temporary_is_private_and_listening_before_it_is_renamed() {
+        let (_root, cell, dir) = private_cell();
+        let temporary = cell.join(DRAWN);
+        let mut seen = None;
+        let mut client = None;
+        let (listener, bound) = publish_drawing(dir, "sock", effective_uid(), &[DRAWN], |step| {
+            if step == Step::Listening {
+                seen = Some(fs::symlink_metadata(&temporary).expect("the temporary exists"));
+                client = Some(UnixStream::connect(&temporary).expect("the temporary accepts"));
+            }
+        })
+        .expect("publish binds");
+        let seen = seen.expect("the last observation point ran");
+        assert!(seen.file_type().is_socket());
+        assert_eq!(seen.uid(), effective_uid());
+        assert_eq!(seen.mode() & 0o7777, 0o600);
+        let published = fs::symlink_metadata(cell.join("sock")).expect("the socket has its name");
+        assert_eq!((published.dev(), published.ino()), (seen.dev(), seen.ino()));
+        assert_eq!(
+            bound.entry,
+            SocketEntry {
+                path: cell.join("sock"),
+                dev: seen.dev(),
+                ino: seen.ino()
+            }
+        );
+        assert_eq!(entries(&cell), vec![cell.join("sock")]);
+        let listener = listening(listener, bound);
+        assert!(
+            matches!(accept_pending(&listener), Accepted::Trusted(_)),
+            "the connection made at the temporary is accepted"
+        );
+        drop(client);
+    }
+
+    #[test]
+    fn an_entry_that_appears_at_the_name_before_the_rename_is_refused_and_left() {
+        for kind in ["file", "dangling symlink", "socket"] {
+            let (_root, cell, dir) = private_cell();
+            let sock = cell.join("sock");
+            let mut other = None;
+            let mut planted = None;
+            let refusal = refusal_of(publish_drawing(
+                dir,
+                "sock",
+                effective_uid(),
+                &[DRAWN],
+                |step| {
+                    if step != Step::Listening {
+                        return;
+                    }
+                    match kind {
+                        "file" => fs::write(&sock, b"planted").expect("write"),
+                        "dangling symlink" => symlink(cell.join("absent"), &sock).expect("symlink"),
+                        _ => other = Some(UnixListener::bind(&sock).expect("bind another socket")),
+                    }
+                    planted = Some(fs::symlink_metadata(&sock).expect("the planted entry"));
+                },
+            ));
+            assert_eq!(
+                refusal,
+                PrivateSocketError::AddressInUse { path: sock.clone() },
+                "{kind}"
+            );
+            let before = planted.expect("the last observation point ran");
+            let after = fs::symlink_metadata(&sock).expect("the planted entry stays");
+            assert_eq!(
+                (after.dev(), after.ino(), after.file_type()),
+                (before.dev(), before.ino(), before.file_type()),
+                "{kind}"
+            );
+            match kind {
+                "file" => assert_eq!(fs::read(&sock).expect("read"), b"planted"),
+                "dangling symlink" => {
+                    assert_eq!(fs::read_link(&sock).expect("readlink"), cell.join("absent"))
+                }
+                _ => assert!(after.file_type().is_socket()),
+            }
+            assert_eq!(
+                entries(&cell),
+                vec![sock.clone()],
+                "{kind}: the temporary is gone"
+            );
+            drop(other);
+        }
+    }
+
+    #[test]
+    fn a_failure_before_the_rename_removes_only_the_temporary_it_created() {
+        let (_root, cell, dir) = private_cell();
+        let sock = cell.join("sock");
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            "sock",
+            effective_uid(),
+            &[DRAWN],
+            |step| {
+                if step == Step::Bound {
+                    fs::write(&sock, b"planted").expect("write");
+                    set_mode(&cell, 0o750);
+                }
+            },
+        ));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::NotPrivate {
+                path: cell.clone(),
+                mode: 0o750
+            }
+        );
+        assert_eq!(fs::read(&sock).expect("the planted file stays"), b"planted");
+        assert_eq!(entries(&cell), vec![sock]);
+    }
+
+    #[test]
+    fn publish_refuses_a_directory_that_stopped_being_private_without_binding() {
+        let (_root, cell, dir) = private_cell();
+        set_mode(&cell, 0o750);
+        let mut steps = Vec::new();
+        let refusal = refusal_of(publish_drawing(dir, "sock", effective_uid(), &[], |step| {
+            steps.push(step)
+        }));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::NotPrivate {
+                path: cell.clone(),
+                mode: 0o750
+            }
+        );
+        assert_eq!(
+            steps,
+            Vec::<Step>::new(),
+            "the socket was bound in a directory no longer private"
+        );
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn publish_reports_the_recheck_and_removes_a_temporary_bound_before_the_directory_changed() {
+        let (_root, cell, dir) = private_cell();
+        let mut bound_at = Vec::new();
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            "sock",
+            effective_uid(),
+            &[DRAWN],
+            |step| {
+                if step == Step::Bound {
+                    bound_at = entries(&cell);
+                    set_mode(&cell, 0o750);
+                }
+            },
+        ));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::NotPrivate {
+                path: cell.clone(),
+                mode: 0o750
+            }
+        );
+        assert_eq!(bound_at, vec![cell.join(DRAWN)]);
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn publish_reports_a_directory_replaced_after_bind_and_removes_the_temporary() {
+        let (root, cell, dir) = private_cell();
+        let moved = root.path().join("moved");
+        let mut bound_at = Vec::new();
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            "sock",
+            effective_uid(),
+            &[DRAWN],
+            |step| {
+                if step == Step::Bound {
+                    bound_at = entries(&cell);
+                    fs::rename(&cell, &moved).expect("rename");
+                    make_dir(&cell, 0o700);
+                }
+            },
+        ));
+        assert_eq!(refusal, PrivateSocketError::Replaced { path: cell.clone() });
+        assert_eq!(bound_at, vec![cell.join(DRAWN)]);
+        assert_eq!(entries(&moved), Vec::<PathBuf>::new());
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn publish_reports_bind_escaped_and_leaves_the_temporary_when_no_socket_is_there() {
+        let (root, cell, dir) = private_cell();
+        let temporary = cell.join(DRAWN);
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            "sock",
+            effective_uid(),
+            &[DRAWN],
+            |step| {
+                if step == Step::Bound {
+                    fs::remove_file(&temporary).expect("unlink");
+                }
+            },
+        ));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::BindEscaped {
+                path: temporary.clone()
+            }
+        );
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            "sock",
+            effective_uid(),
+            &[DRAWN],
+            |step| {
+                if step == Step::Bound {
+                    fs::remove_file(&temporary).expect("unlink");
+                    fs::write(&temporary, b"planted").expect("write");
+                }
+            },
+        ));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::BindEscaped {
+                path: temporary.clone()
+            }
+        );
+        assert_eq!(
+            fs::read(&temporary).expect("the planted file stays"),
+            b"planted"
+        );
+        assert_eq!(entries(&cell), vec![temporary]);
+    }
+
+    #[test]
+    fn publish_leaves_a_socket_it_did_not_bind_when_the_recheck_fails() {
+        let (_root, cell, dir) = private_cell();
+        let temporary = cell.join(DRAWN);
+        let mut other = None;
+        let stand_in = effective_uid().wrapping_add(1);
+        let refusal = refusal_of(publish_drawing(dir, "sock", stand_in, &[DRAWN], |step| {
+            if step == Step::Bound {
+                fs::remove_file(&temporary).expect("unlink");
+                other = Some(UnixListener::bind(&temporary).expect("bind another socket"));
+                set_mode(&cell, 0o770);
+            }
+        }));
+        let left =
+            fs::symlink_metadata(&temporary).expect("the socket this call did not bind stays");
+        assert!(left.file_type().is_socket());
+        assert_eq!(
+            refusal,
+            PrivateSocketError::BindEscaped {
+                path: temporary.clone()
+            }
+        );
+        assert_eq!(entries(&cell), vec![temporary]);
+        drop(other);
     }
 
     #[test]
