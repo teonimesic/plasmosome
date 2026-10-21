@@ -317,7 +317,7 @@ fn a_kernel_exit_reads_the_code_it_was_given() {
 
 #[test]
 fn every_bad_reply() {
-    let cases: [(&[u8], &str); 24] = [
+    let cases: [(&[u8], &str); 25] = [
         (b"not json", "expected a value at byte 0"),
         (b"", "the text ends inside a value at byte 0"),
         (&[b'{', 0xff, b'}'], "the text is not UTF-8 at byte 1"),
@@ -329,6 +329,7 @@ fn every_bad_reply() {
         ),
         (br#"{"id":1}"#, "the reply has neither result nor error"),
         (br#"{"id":2,"result":{}}"#, "the reply's id is not 1"),
+        (br#"{"id":-1,"result":{}}"#, "the reply's id is not 1"),
         (br#"{"id":"1","result":{}}"#, "the reply's id is not 1"),
         (br#"{"id":1.0,"result":{}}"#, "the reply's id is not 1"),
         (br#"{"result":{}}"#, "the reply's id is not 1"),
@@ -445,15 +446,16 @@ fn bytes_after_the_newline_are_not_read() {
     assert!(matches!(judge_reply(&line), Ok(Reply::Result(_))));
 
     let mut reader = Script::new(vec![
-        Step::Bytes(b"{\"id\":1,\"result\":{}}\ntail".to_vec()),
+        Step::Bytes(b"{\"id\":1,\"result\":{}}\n".to_vec()),
         Step::Fail(io::Error::other("a read after the newline")),
+        Step::Bytes(b"tail".to_vec()),
     ]);
     assert_eq!(
         read_reply(&mut reader).expect("the line ends with a newline"),
         br#"{"id":1,"result":{}}"#
     );
+    assert!(matches!(reader.steps.front(), Some(Step::Fail(_))));
     assert_eq!(reader.left(), b"tail");
-    assert!(matches!(reader.steps.back(), Some(Step::Fail(_))));
 }
 
 #[test]
