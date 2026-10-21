@@ -460,8 +460,9 @@ steps passes both, taken from the first step's `instance`, and passes `--cell` o
 taken from `cell new` or `cell list`. Then a second instance or cell appearing between steps
 cannot change its target.
 
-**Default selection** is spec 001 §2's "one running instance → default", done by the client
-(amendment A), for a person at a terminal with one instance.
+**Default selection** is spec 001 §2's "Exactly one instance is the default", done by the client
+(amendment A), for a person at a terminal with one instance. Amended on 2026-10-21: this quoted
+spec 001 §2 as "one running instance → default", words amendment A replaced there.
 
 - The client first checks `$HOME/.plasmosome/instances/` itself against #124's ancestor rules
   and opens it for listing, through a public function in #124's module. That function is
