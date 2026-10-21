@@ -1842,11 +1842,14 @@ fn above_zero_other_cell_step_rejects_a_plugin_keyed_stall_above_zero() {
 
 #[test]
 fn forced_granted_removal_step_rejects_a_stale_handle() {
-    assert_rejected("successful forced apply_removal", || {
-        conformance::repeated_grants_are_independently_removable(carrying(
-            Defect::ForcedApplyRemovalLeavesAStaleHandle,
-        ))
-    });
+    assert_rejected(
+        "forced apply_removal of a granted holding must retire its handle",
+        || {
+            conformance::repeated_grants_are_independently_removable(carrying(
+                Defect::ForcedApplyRemovalLeavesAStaleHandle,
+            ))
+        },
+    );
 }
 
 #[test]
@@ -1860,11 +1863,14 @@ fn peer_removal_step_rejects_a_graceful_stale_handle() {
 
 #[test]
 fn graceful_granted_removal_step_rejects_a_stale_handle() {
-    assert_rejected("successful drained apply_removal", || {
-        conformance::repeated_grants_are_independently_removable(carrying(
-            Defect::GracefulApplyRemovalLeavesAStaleHandle,
-        ))
-    });
+    assert_rejected(
+        "drained apply_removal of a granted holding must retire its handle",
+        || {
+            conformance::repeated_grants_are_independently_removable(carrying(
+                Defect::GracefulApplyRemovalLeavesAStaleHandle,
+            ))
+        },
+    );
 }
 
 fn revoke_after_one_removal(
