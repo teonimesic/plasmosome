@@ -124,7 +124,9 @@ never calls, so each is `internal`, exit 70.
 
 Every path is written by lossy UTF-8 conversion, so the caller passes only UTF-8 paths, as spec
 025 §5 requires. A path that is not UTF-8 would be shown with U+FFFD, and `NotPrivate`'s `fix`
-would then name another path.
+would then name another path. `list_trusted_dir`'s `Io` refusal for an entry it cannot `fstatat`
+joins `instances/` with the entry's raw name, so on Linux its `path` can hold U+FFFD whatever the
+caller passed.
 
 ## What's inside
 
