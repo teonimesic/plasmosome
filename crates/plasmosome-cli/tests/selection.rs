@@ -823,29 +823,33 @@ fn a_stopped_instance_with_a_long_name_blocks_nothing() {
 
 #[test]
 fn a_candidate_whose_path_is_too_long_refuses_the_selection() {
-    let home = Home::new();
-    let a = home.listening("a");
-    let long = too_long(&home);
-    home.dir(&long);
-    let elsewhere = Home::new();
-    let bound = elsewhere.path().join("s.uds");
-    let listener = UnixListener::bind(&bound).expect("a socket at a short path");
-    listener
-        .set_nonblocking(true)
-        .expect("the listener does not block");
-    let socket = home.socket(&long);
-    fs::rename(&bound, &socket).expect("the socket moves to the long path");
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("0600");
+    for alone in [false, true] {
+        let home = Home::new();
+        let a = (!alone).then(|| home.listening("a"));
+        let long = too_long(&home);
+        home.dir(&long);
+        let elsewhere = Home::new();
+        let bound = elsewhere.path().join("s.uds");
+        let listener = UnixListener::bind(&bound).expect("a socket at a short path");
+        listener
+            .set_nonblocking(true)
+            .expect("the listener does not block");
+        let socket = home.socket(&long);
+        fs::rename(&bound, &socket).expect("the socket moves to the long path");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("0600");
 
-    let envelope = failure(&run(&["status"], home.vars()), Exit::Refused);
-    let error = &envelope["error"];
-    assert_eq!(error["code"], "socket_path_too_long", "{error}");
-    assert_eq!(error["path"], text(&socket));
-    assert_eq!(error["max_bytes"], MAX_PATH);
-    assert!(envelope.get("instance").is_none(), "{envelope}");
-    assert_never_reached(&a, "a selection with a candidate too long to connect to");
-    assert_never_reached(
-        &listener,
-        "a selection with a candidate too long to connect to",
-    );
+        let envelope = failure(&run(&["status"], home.vars()), Exit::Refused);
+        let error = &envelope["error"];
+        assert_eq!(error["code"], "socket_path_too_long", "{error}");
+        assert_eq!(error["path"], text(&socket));
+        assert_eq!(error["max_bytes"], MAX_PATH);
+        assert!(envelope.get("instance").is_none(), "{envelope}");
+        if let Some(a) = &a {
+            assert_never_reached(a, "a selection with a candidate too long to connect to");
+        }
+        assert_never_reached(
+            &listener,
+            "a selection with a candidate too long to connect to",
+        );
+    }
 }
