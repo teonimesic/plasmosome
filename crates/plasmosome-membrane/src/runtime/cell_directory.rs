@@ -417,9 +417,11 @@ mod tests {
     use crate::runtime::test_fixtures::tree::set_mode;
     use plasmosome_core::private_socket::effective_uid;
     use std::fs;
-    use std::io;
+    use std::io::{self, Seek, SeekFrom};
     use std::os::unix::fs::{MetadataExt, symlink};
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     fn recipe_path(path: &Path) -> RecipePath {
         RecipePath::parse(path.to_str().expect("test paths are UTF-8"))
@@ -571,6 +573,63 @@ mod tests {
         assert_eq!(metadata.nlink(), 1);
         assert_eq!(metadata.uid(), effective_uid());
         assert_eq!(fs::read(cell.root_img()).expect("read"), bytes);
+    }
+
+    const UMASK_PROBE: &str = "PLASMOSOME_CELL_DIRECTORY_UMASK_PROBE";
+    const PROBE_DEADLINE: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn the_copy_is_0600_under_a_umask_that_clears_the_owner_bits() {
+        let probe = "runtime::cell_directory::tests::probe_a_copy_under_umask_0377";
+        let output = tempfile::tempfile().expect("the probe has a file for its output");
+        let mut command = Command::new(std::env::current_exe().expect("the test binary's path"));
+        command
+            .args(["--exact", probe, "--ignored", "--test-threads=1"])
+            .env(UMASK_PROBE, "1")
+            .stdin(Stdio::null())
+            .stdout(output.try_clone().expect("the output file is shared"))
+            .stderr(output.try_clone().expect("the output file is shared"));
+        let spawned = {
+            let _no_descriptor_mid_creation = crate::spawn_lock::hold_fork_side();
+            command.spawn()
+        };
+        let mut child = spawned.expect("the probe starts");
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("the probe's status") {
+                break Some(status);
+            }
+            if started.elapsed() >= PROBE_DEADLINE {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut said = String::new();
+        let mut output = output;
+        let _ = output
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| output.read_to_string(&mut said));
+        assert_eq!(status.map(|status| status.success()), Some(true), "{said}");
+        assert!(said.contains("1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "helper process for the_copy_is_0600_under_a_umask_that_clears_the_owner_bits"]
+    #[allow(unsafe_code)]
+    fn probe_a_copy_under_umask_0377() {
+        if std::env::var_os(UMASK_PROBE).is_none() {
+            return;
+        }
+        // SAFETY: umask takes a mode and returns the old one. This probe process runs only this
+        // test, so no other thread creates a file under the changed mask.
+        unsafe { libc::umask(0o377) };
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let _root = copy_of(&cell.root_img(), &dir, b"bytes").expect("the copy is made");
+        let mode = fs::symlink_metadata(cell.root_img()).expect("lstat").mode();
+        assert_eq!(mode & 0o7777, 0o600);
     }
 
     #[test]
