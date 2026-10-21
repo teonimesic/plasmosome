@@ -1,0 +1,82 @@
+name = "guest-kernel"
+purpose = """\
+  The Linux kernel the cell's guest boots under spec 001 §4.2, as kernel format raw, with the \
+  protected initramfs and the fixed command line. plasmosome-lanes' test lanes boot it today.\
+  """
+version = "6.12.91"
+bundle_manifest_sha256 = "eed141b574337d9911885a839b9afe6835ee5aa27472bbd41ee768f108266b3f"
+file = "boot/kernel"
+sha256 = "694461b39b69b9d6919c3329b92554db88179d4ac977b1d6fea2e956b0fdc8c7"
+sources = [
+  """\
+  Linux 6.12.91: https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.91.tar.xz, SHA-256 \
+  0ff2ab9e169f9f1948557471fbb450d3018f8c5b77caf288e1a3982582597969.\
+  """,
+  """\
+  libkrunfw v5.5.0, https://github.com/containers/libkrunfw at commit \
+  ec4b297964877d83432f9ccda6dad8ff6e9de3e4: its 30 patches in patches/, and upstream's config, \
+  config-libkrunfw_aarch64, SHA-256 \
+  596a4921a62f7c03936c6142f202f90db71d039fd1fc8d217231d0aefdcfc0c6.\
+  """,
+  """\
+  One change to upstream's config, authorized by Main on 2026-09-18 in plasmosome-itt: the \
+  protected initramfs of spec 001 §4.2 needs CONFIG_BLK_DEV_INITRD, which upstream's config \
+  leaves unset. Two lines are appended, `# plasmosome-itt named deviation (Main-authorized \
+  2026-09-18): CONFIG_BLK_DEV_INITRD=y` and `CONFIG_BLK_DEV_INITRD=y`. The result is the config \
+  used, SHA-256 9dc49d1bd3c919fdddecb2730a4293d195821068e8eda55b5374ebbdb1cf2821.\
+  """,
+  """\
+  make olddefconfig turned the config used into the built config, SHA-256 \
+  1166d66b42f33425601a8b1ac604f51dce895f3d8f50ea3c7b4c6408fa9e91af, the .config that make Image \
+  built from. plasmosome-itt's build script kept it after make Image. It changes the value of 33 \
+  options, and drops the line for CONFIG_RUST, whose value stays unset. It sets the 16 options \
+  that come with CONFIG_BLK_DEV_INITRD, by the tarball's init/Kconfig and usr/Kconfig: \
+  CONFIG_INITRAMFS_SOURCE, CONFIG_INITRAMFS_PRESERVE_MTIME, CONFIG_RD_GZIP, CONFIG_RD_BZIP2, \
+  CONFIG_RD_LZMA, CONFIG_RD_XZ, CONFIG_RD_LZO, CONFIG_RD_LZ4, CONFIG_RD_ZSTD, \
+  CONFIG_DECOMPRESS_GZIP, CONFIG_DECOMPRESS_BZIP2, CONFIG_DECOMPRESS_LZMA, CONFIG_DECOMPRESS_XZ, \
+  CONFIG_DECOMPRESS_LZO, CONFIG_DECOMPRESS_LZ4 and CONFIG_DECOMPRESS_ZSTD. The other 17 follow \
+  from the toolchain: the version lines, now for the compiler and linker the next entry names, and \
+  options that probe it, such as CONFIG_RELR, CONFIG_RUST_IS_AVAILABLE and \
+  CONFIG_CC_HAS_COUNTED_BY, which are no longer set.\
+  """,
+  """\
+  Built by plasmosome-itt on 2026-09-18 with make olddefconfig and make Image, inside a Debian \
+  12 arm64 VM under QEMU 11.1.1 with HVF. The kernel's version banner names its compiler and \
+  linker, `gcc (Debian 12.2.0-14+deb12u1) 12.2.0` and `GNU ld (GNU Binutils for Debian) 2.40`. \
+  The file is that build's arm64 Image, 24,176,648 bytes. The same build's libkrunfw embeds these \
+  bytes padded with zeros to 24,182,784 bytes, the size that manifest.json's kernel_extraction \
+  reports. No rebuild has been compared with it: plasmosome-itt's notes record one build from \
+  the config used, after an earlier one from upstream's config.\
+  """,
+]
+licence = "GPL-2.0-only WITH Linux-syscall-note"
+limits = [
+  """\
+  CONFIG_SECURITY is not set in the config used or in the built config, so the guest kernel has \
+  no security modules and no mandatory access control (spec 027, "Blocked on"). Spec 026's \
+  threat model claims no file or exec enforcement inside the guest until owner gate O-7 is \
+  settled.\
+  """,
+  """\
+  Whoever distributes this binary must also make its corresponding source available: the \
+  tarball, the patches, the config used and the built config, which sources names (GPL-2.0, \
+  section 3, and libkrunfw's README at ec4b2979, "License"). No workflow in this repository \
+  publishes a bundle today, so the duty falls on the first release that ships one.\
+  """,
+]
+
+[checks]
+cadence = "weekly"
+updates = """\
+  Compare 6.12.91 with the newest 6.12 stable release on https://www.kernel.org, and v5.5.0 \
+  with the newest release of https://github.com/containers/libkrunfw. A new pin takes \
+  libkrunfw's kernel version, patches and config together.\
+  """
+advisories = """\
+  Read the Linux kernel CNA's announcements, https://lore.kernel.org/linux-cve-announce/, for \
+  fixes in 6.12 releases after 6.12.91, and keep those in code that the built config, SHA-256 \
+  1166d66b42f33425601a8b1ac604f51dce895f3d8f50ea3c7b4c6408fa9e91af, builds. Read the GitHub \
+  security advisories of https://github.com/containers/libkrunfw too.\
+  """
+by = "Nobody, until the owner answers spec 026 Q6."
+last = "never"
