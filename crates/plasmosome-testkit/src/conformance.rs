@@ -266,11 +266,22 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         &expected,
         "the snapshot lost or invented an object",
     );
-    for invalid in invalid_operations() {
+    let at_issued: Vec<UniverseOp> = issued
+        .iter()
+        .map(|standing| {
+            op_for(
+                standing.id(),
+                standing.owner().clone(),
+                invalid_capability(&standing.capability()),
+            )
+        })
+        .collect();
+    let fresh = invalid_operations();
+    for invalid in fresh.iter().chain(&at_issued) {
         let before = backend.snapshot_os_state();
         contract_assert_eq!(
             backend.grant(invalid.clone(), GrantKind::Hot),
-            Err(invalid_refusal(&invalid)),
+            Err(invalid_refusal(invalid)),
             "a grant of an invalid {} operation must be refused before any change",
             invalid.class().as_str()
         );
@@ -280,6 +291,8 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             "a refused invalid {} grant changed the state",
             invalid.class().as_str()
         );
+    }
+    for invalid in &fresh {
         contract_assert_eq!(
             backend.revoke(invalid.handle(), DrainSpec::forcing()),
             Err(BackendError::UnknownHandle {
@@ -289,11 +302,11 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             invalid.class().as_str()
         );
     }
-    for invalid in invalid_operations() {
+    for invalid in invalid_operations().iter().chain(&at_issued) {
         let before = backend.snapshot_os_state();
         contract_assert_eq!(
             backend.apply(invalid.clone()),
-            Err(invalid_refusal(&invalid)),
+            Err(invalid_refusal(invalid)),
             "an apply of an invalid {} operation must be refused before any change",
             invalid.class().as_str()
         );
@@ -304,11 +317,11 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             invalid.class().as_str()
         );
     }
-    for invalid in invalid_operations() {
+    for invalid in invalid_operations().iter().chain(&at_issued) {
         let before = backend.snapshot_os_state();
         contract_assert_eq!(
             backend.plant(invalid.object()),
-            Err(invalid_refusal(&invalid)),
+            Err(invalid_refusal(invalid)),
             "a plant of an invalid {} object must be refused before any change",
             invalid.class().as_str()
         );
@@ -317,47 +330,6 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             before,
             "a refused invalid {} plant changed the state",
             invalid.class().as_str()
-        );
-    }
-    for standing in &issued {
-        let invalid = op_for(
-            standing.id(),
-            standing.owner().clone(),
-            invalid_capability(&standing.capability()),
-        );
-        let class = invalid.class().as_str();
-        let before = backend.snapshot_os_state();
-        contract_assert_eq!(
-            backend.grant(invalid.clone(), GrantKind::Hot),
-            Err(invalid_refusal(&invalid)),
-            "an invalid {class} grant at an issued address must be refused before any change"
-        );
-        contract_assert_eq!(
-            backend.snapshot_os_state(),
-            before,
-            "a refused invalid {class} grant at an issued address changed the state"
-        );
-        let before = backend.snapshot_os_state();
-        contract_assert_eq!(
-            backend.apply(invalid.clone()),
-            Err(invalid_refusal(&invalid)),
-            "an invalid {class} apply at an issued address must be refused before any change"
-        );
-        contract_assert_eq!(
-            backend.snapshot_os_state(),
-            before,
-            "a refused invalid {class} apply at an issued address changed the state"
-        );
-        let before = backend.snapshot_os_state();
-        contract_assert_eq!(
-            backend.plant(invalid.object()),
-            Err(invalid_refusal(&invalid)),
-            "an invalid {class} plant at an issued address must be refused before any change"
-        );
-        contract_assert_eq!(
-            backend.snapshot_os_state(),
-            before,
-            "a refused invalid {class} plant at an issued address changed the state"
         );
     }
     contract_assert!(
