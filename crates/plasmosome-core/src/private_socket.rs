@@ -715,42 +715,6 @@ struct Seam<'a> {
     observe: &'a mut dyn FnMut(Step),
 }
 
-#[cfg(test)]
-fn prepare(dir: PrivateDir, name: &str) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
-    prepare_with(dir, name, || {})
-}
-
-#[cfg(test)]
-fn prepare_with(
-    dir: PrivateDir,
-    name: &str,
-    after_bind: impl FnOnce(),
-) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
-    prepare_as(dir, name, effective_uid(), after_bind)
-}
-
-#[cfg(test)]
-fn prepare_as(
-    dir: PrivateDir,
-    name: &str,
-    owner: u32,
-    after_bind: impl FnOnce(),
-) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
-    let mut after_bind = Some(after_bind);
-    let mut observe = |step| {
-        if step == Step::Bound
-            && let Some(after_bind) = after_bind.take()
-        {
-            after_bind();
-        }
-    };
-    let seam = Seam {
-        draw: &mut random_temporary,
-        observe: &mut observe,
-    };
-    publish(dir, name, owner, seam).map(|(listener, bound)| (OwnedFd::from(listener), bound))
-}
-
 #[allow(unsafe_code)]
 fn publish(
     dir: PrivateDir,
