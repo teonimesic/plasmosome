@@ -527,14 +527,15 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   refused at `provides.""` with `remove this entry`. Catches: a parser that keeps a blank key, one
   that drops it and its tools in silence, one that refuses only the empty key, a fix that writes the
   blank key back, and a check inside the binding first. Amended on 2026-10-21: this item is new.
-- `[provides."a:tools".tools]` with tools `"a.read"`, `""`, `" "` and `"\t"`, each with a sentence,
-  is refused at one blank name, such as `provides."a:tools".tools.""`, with `fix`
-  `remove this entry`. Each time the refused tool is removed, the next blank name is refused the
-  same way, and then the declaration parses with only `a.read`. `"" = 42` and `"" = ""` are each
-  refused at `provides."a:tools".tools.""` with `remove this entry`. Catches: a parser that keeps a
-  blank name, one that drops it in silence, one that refuses only the empty name or trims only
-  spaces, a fix that writes the blank name back, and a description check first. Amended on
-  2026-10-21: this item is new.
+- `[provides."a:tools".tools]` with tools `"a.read"`, `""`, `" "`, `"\t"` and `"\u3000"` (a tab and
+  an ideographic space), each with a sentence, is refused at one blank name, such as
+  `provides."a:tools".tools.""`, with `fix` `remove this entry`. Each time the refused tool is
+  removed, the next blank name is refused the same way at its own path, and then the declaration
+  parses with only `a.read`. `"" = 42` and `"" = ""` are each refused at
+  `provides."a:tools".tools.""` with `remove this entry`. Catches: a parser that keeps a blank name,
+  one that drops it in silence, one that refuses only the empty name or trims only spaces, one that
+  knows only ASCII whitespace, a fix that writes the blank name back, and a description check first.
+  Amended on 2026-10-21: this item is new.
 - A plasmid granted two hosts and denied a third produces a report naming the denied host and the
   hosts field, in which neither granted host appears anywhere.
 - The denial report reaches the session log and the plasmid's status, and the calling code inside

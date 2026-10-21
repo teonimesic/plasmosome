@@ -699,11 +699,12 @@ ProxyMap (O-11) or Mount (O-7).
     case-sensitive comparison, and a following walk.
 18. Tools at reload. P is local and attached and provides `p` with tools `t1` and `t2`, and an
     attached R requires `p`. A reload of P whose `p` binding declares only `t1` proceeds. After it,
-    `t1` resolves and `t2` does not, and P's `requires` and `provides` records are unchanged. A
+    `t1` resolves and `t2` does not where R looks, and P's `requires` and `provides` records are
+    unchanged. R stays attached and active, with its records unchanged. From the same start, a
     reload whose `p` binding declares `t1`, `t2` and `t3` proceeds, and `t3` resolves. Catches: a
-    reload that refuses a dropped tool, one that requires the new tools to hold the old ones, and a
-    swap that leaves a dropped tool resolving or a new one unresolved. Amended on 2026-10-21: this
-    item is new.
+    reload that refuses a dropped tool, one that requires the new tools to hold the old ones, a swap
+    that leaves a dropped tool resolving or a new one unresolved, and one that detaches R or changes
+    its records. Amended on 2026-10-21: this item is new.
 
 ## Out of scope
 
