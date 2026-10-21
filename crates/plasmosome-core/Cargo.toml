@@ -30,6 +30,11 @@ name = "plasmosomed"
 path = "src/main.rs"
 bench = false
 
+[[test]]
+name = "supervisor_start"
+path = "tests/supervisor_start.rs"
+harness = false
+
 [[bench]]
 name = "manifest_parse"
 harness = false
