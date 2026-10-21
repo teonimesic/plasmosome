@@ -4,6 +4,7 @@
 //! private control socket.
 
 pub mod brokers;
+pub mod cell_args;
 pub mod control;
 pub mod daemon;
 pub mod exec;

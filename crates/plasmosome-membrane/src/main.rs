@@ -1,16 +1,18 @@
+use plasmosome_membrane::cell_args::CellArgs;
 use plasmosome_membrane::daemon;
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 const USAGE: &str = "usage: membraned <config.json>
-       membraned -h | --help";
+       membraned -h | --help | --version";
 
 const HELP: &str = "membraned — membrane status daemon
 
 usage: membraned <config.json>
-       membraned -h | --help
+       membraned -h | --help | --version
 
 Runs in the foreground with required JSON configuration:
   {\"control_socket\":\"/private/path/membrane.uds\",\"status_deadline_ms\":500,\"brokers\":[]}
@@ -44,16 +46,23 @@ fn refuse(reason: String) -> ! {
 }
 
 fn main() {
-    let mut arguments = std::env::args_os().skip(1);
-    let (Some(path), None) = (arguments.next(), arguments.next()) else {
+    let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let [path] = arguments.as_slice() else {
+        if CellArgs::parse(&arguments).is_some() {
+            refuse("cell mode is not built yet".to_string());
+        }
         eprintln!("{USAGE}");
-        std::process::exit(2);
+        std::process::exit(64);
     };
     if path == "-h" || path == "--help" {
         print!("{HELP}");
         return;
     }
-    let path = Path::new(&path);
+    if path == "--version" {
+        println!("membraned {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let path = Path::new(path);
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => refuse(format!("cannot read {}: {error}", path.display())),
