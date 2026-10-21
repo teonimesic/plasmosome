@@ -31,7 +31,7 @@ const STARTED: &str = "the child controller started its supervisor";
 const ONE_MIB: usize = 1 << 20;
 const LAST_SIGNAL: libc::c_int = 64;
 
-const CASES: [(&str, fn()); 12] = [
+const CASES: [(&str, fn()); 13] = [
     (
         "starts_detached_with_only_0_to_4",
         starts_detached_with_only_0_to_4,
@@ -67,6 +67,10 @@ const CASES: [(&str, fn()); 12] = [
     (
         "the_callers_signal_mask_is_restored",
         the_callers_signal_mask_is_restored,
+    ),
+    (
+        "an_unconfirmed_exec_leaves_membraned_an_empty_record",
+        an_unconfirmed_exec_leaves_membraned_an_empty_record,
     ),
 ];
 
@@ -314,6 +318,34 @@ fn the_callers_signal_mask_is_restored() {
         before,
         "the start gives the calling thread back the mask it had"
     );
+}
+
+fn an_unconfirmed_exec_leaves_membraned_an_empty_record() {
+    let root = Root::new();
+    for attempt in 0..20 {
+        let cell = Cell::create(&root.path, &format!("cell-{}", 111 + attempt));
+        let lock = cell.lock();
+        let log = cell.log();
+        let record = cell.record();
+        match cell.start_until(&root.membraned(), lock, log, record, Instant::now()) {
+            Err(StartError::ExecUnconfirmed { lock }) => {
+                let report = Report::read(&cell.path);
+                assert_eq!(
+                    report.text("record"),
+                    "",
+                    "an unconfirmed start writes no record; {report}"
+                );
+                assert_eq!(report.text("decoded"), "refused", "{report}");
+                drop(lock);
+                return;
+            }
+            Ok(()) | Err(StartError::RecordNotTaken) => {}
+            other => panic!(
+                "a start whose deadline has passed is unconfirmed, or confirmed before it polled, not {other:?}"
+            ),
+        }
+    }
+    panic!("none of 20 starts was still unconfirmed when its deadline had passed");
 }
 
 fn lock_never_free_until_exit() {
