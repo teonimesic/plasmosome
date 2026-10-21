@@ -41,7 +41,7 @@ states what the tree serves now.
 | --- | --- |
 | `plasmosomed <config.json>` | Runs a foreground controller and serves only `plasmosome.status` on its configured Unix socket. |
 | `membraned <config.json>` | Runs a foreground empty/broker supervisor and serves only `membrane.status` on its configured Unix socket. |
-| `plasmid --help` | Describes the reserved author command; `plasmid new` refuses without writing a scaffold. |
+| `plasmid new <name>` | Writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. |
 
 There is no `plasmosome` executable or `plasmosome start` command today. The accepted future
 controller methods — `plasmosome.start/list/status/stop`, `cell.new/list/status/kill/exec`,
@@ -51,9 +51,9 @@ reserved. See the [`plasmosome-core`](crates/plasmosome-core/README.md),
 [`plasmosome-membrane`](crates/plasmosome-membrane/README.md) and
 [`plasmid`](crates/plasmid/README.md) guides for their narrower current contracts.
 
-The SDK WIT, plasmid declaration scaffold, VM launch/orchestration and guest execution remain
-separate work. Native task `plasmosome-soh` carries the declaration scaffold. `plasmid-sdk` is
-reserved in this repository and unimplemented, and no spec defines its interface yet.
+The SDK WIT, the plasmid component scaffold, VM launch/orchestration and guest execution remain
+separate work. `plasmid-sdk` is reserved in this repository and unimplemented, and no spec
+defines its interface yet.
 
 ## Status-only quickstart
 
@@ -553,7 +553,7 @@ that its complete runtime role is delivered.
 | `plasmosome-ledger` | Typed reversibility: effects and their inverses; spec 020's registry IDs and release references |
 | `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
 | `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes and client codes; never shipped |
-| `plasmid` | Reserved plasmid-author command line |
+| `plasmid` | Plasmid-author command line; today `plasmid new` writes a declaration |
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
 | `plasmosome-guards` | Repository policy checks |
 | `plasmosome-testkit` | Test support; never shipped |
