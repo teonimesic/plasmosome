@@ -22,7 +22,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// launches the helper, and keeps until teardown.
 ///
 /// Get one from [`RuntimeListener::bind`]. It is core's `PrivateListener`: its
-/// socket file sits in a directory that walk found private, has mode 0600
+/// socket file sits in a directory core's walk found private, has mode 0600
 /// before it listens, and its descriptor is nonblocking and close-on-exec.
 /// Closing or dropping it closes the listener, then removes the socket file
 /// only while the entry at that name in the held directory is still the socket

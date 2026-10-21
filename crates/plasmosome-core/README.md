@@ -340,7 +340,8 @@ reads its replies can hold the daemon open past shutdown.
 It refuses every peer whose kernel-reported effective UID is not the trusted one. It also keeps
 other UIDs from reaching the socket path. That second property has not yet been shown with a
 second UID: the distinct-UID test waits on owner decision O-8. `plasmosomed` binds its control
-socket through it too, as [Socket ownership](#socket-ownership) says.
+socket through it too, as [Socket ownership](#socket-ownership) says, and so do
+`plasmosome-membrane`'s runtime listeners.
 
 - `PrivateDir::open` walks the socket's parent directory from `/`, without following symlinks.
   The path must be absolute and normal: no `.` or `..` component, no empty component and no
@@ -375,8 +376,12 @@ socket through it too, as [Socket ownership](#socket-ownership) says.
     glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
     `EOPNOTSUPP` without it. The socket is then matched by device and inode and set with
     `fchmodat` without that flag.
-  - On drop, it removes only the socket it created, matched by device and inode, through the
-    held directory.
+  - `close` closes the socket, then removes only the socket it created, matched by device and
+    inode, through the held directory, and says what it found as a `RemoveOutcome`: `Removed`,
+    `AlreadyGone`, `LeftReplacement` or `Failed` with the errno. Dropping it does the same and
+    discards the outcome.
+  - It implements `AsFd`, so `plasmosome-membrane` can bind it under its spawn lock, which checks
+    that the listening descriptor is close-on-exec.
 - `PrivateListener::accept` reads the peer's effective UID from the kernel: `getpeereid` on
   macOS, `SO_PEERCRED` on Linux. It closes an untrusted peer before reading a byte.
 - A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`

@@ -20,7 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here verifies an artifact or boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here verifies an artifact or boots a cell yet |
 
 ## Use
 
@@ -228,35 +228,38 @@ libraries before it prepares the launch.
 ## The runtime's listeners and diagnostics
 
 Spec 001 §4.2 has the supervisor create the control and data listeners before it launches the
-helper, and keep them. `runtime::endpoints::RuntimeListener::bind` makes one at a recipe path. It
-refuses any entry already there with `AddressInUse` and leaves it as it was: a live or stale socket,
-a file, a directory or a symlink, dangling or not. It inspects the path without following a symlink
-before the bind, because Darwin's `bind` follows a dangling symlink and creates the socket at its
-target (measured on macOS 26.6.2). Then it records the socket's device and inode, sets the file to
-mode 0600 with `fchmodat` and `AT_SYMLINK_NOFOLLOW`, and makes the listener nonblocking. On Linux,
-glibc makes that call with the kernel's `fchmodat2` or through `/proc`; where it cannot, it fails
-with `EOPNOTSUPP` and the bind refuses with `Permissions` rather than fall back to a call that
-follows a symlink. Closing or dropping the listener removes the path only while that same socket is
-there, with the code `membraned` uses for its control socket, below. The inspection, the bind and
-the identity read are separate calls, so the path must be in a directory only the supervisor can
-write. The socket also listens before it is set to 0600: until the chmod it has the mode the umask
-leaves, and a connection made then stays queued. So the directory must also be one no other
-principal can search. The cell, plasmosome-7em, which is not built yet, is to check that directory;
-another process of the same uid is owner gate O-4 on `plasmosome-qep`.
+helper, and keep them. `runtime::endpoints::RuntimeListener::bind` makes one at a recipe path with
+core's `private_socket`, the boundary `plasmosomed` binds its control socket with; core's README,
+"Private recovery sockets", describes it. `PrivateDir::open` walks the parent from `/` without
+following a symlink, and requires every ancestor owned by root or this uid and writable by neither
+group nor other, and the parent itself owned by this uid with no group or other bits.
+`PrivateListener::bind` then binds the name inside that held directory. It refuses any entry
+already there with `AddressInUse` and leaves it as it was: a live or stale socket, a file, a
+directory, a FIFO or a symlink, dangling or not. It sets the socket to 0600 before it listens, so no
+connection lands while the umask's mode holds. A path too long for a socket address is
+`PathTooLong`. Each refusal comes back as `EndpointRefusal::Private` with core's error, which names
+the rule broken and the component that broke it. The bind holds the spawn lock's write side,
+because on Darwin core makes the socket close-on-exec in a second call. Closing the listener closes
+it, then removes the socket file only while the entry at that name in the held directory is still
+that socket, and says what it found as a `RemoveOutcome`. Dropping it does the same. The cell,
+plasmosome-7em, which is not built yet, is to create that private directory.
 
-`accept_ready` accepts one pending connection without blocking and reads the peer's process id right
-after the accept. What that pid names differs by platform. On Linux it is `SO_PEERCRED`'s: the
-process that called `connect`, recorded then. On Darwin it is `LOCAL_PEERPID`'s: the last process
-that created, connected or sent on the peer's socket before the read. A process that inherited the
-connection and sent one byte before the accept is the one reported (measured on macOS 26.6.2). So on
-Darwin a match with the helper's pid shows that the helper was the last process to use that socket,
-not that it connected, and a genuine helper whose child sent first does not match.
+`accept_ready` takes one pending connection without blocking, holding the same write side. Core
+reads the peer's effective uid from the kernel and closes a peer of another uid unread: that is
+`Connection::Refused` with core's refusal. A trusted stream is made nonblocking, and the peer's
+process id is read right after the accept. What that pid names differs by platform. On Linux it is
+`SO_PEERCRED`'s: the process that called `connect`, recorded then. On Darwin it is
+`LOCAL_PEERPID`'s: the last process that created, connected or sent on the peer's socket before the
+read. A process that inherited the connection and sent one byte before the accept is the one
+reported (measured on macOS 26.6.2). So on Darwin a match with the helper's pid shows that the
+helper was the last process to use that socket, not that it connected, and a genuine helper whose
+child sent first does not match.
 
-Each accepted connection comes back as one `Connection`. When its pid cannot be read, it is
-`Unidentified` with the errno, and the connection is closed. On Darwin a peer that connected and
-exited before the accept is that case, with `ENOTCONN`; on Linux the same peer is `Identified` with
-the pid it had. `accept_ready` returns an error only when the listener's own accept fails, so a
-process that connects and leaves cannot make the listener look broken.
+When the peer's credentials or pid cannot be read, the connection is `Refused` with
+`PeerCredentials` and closed. On Darwin a peer that connected and exited before the accept is that
+case, with `ENOTCONN`; on Linux the same peer is `Identified` with the pid it had. `accept_ready`
+returns an error only when the listener's own accept fails, so a process that connects and leaves
+cannot make the listener look broken.
 
 `DiagnosticTranscript` reads the read end of the diagnostic pipe that `HelperExec::prepare` returns,
 on a thread of its own, so a helper that writes a lot never blocks on descriptor 2. Start it before
