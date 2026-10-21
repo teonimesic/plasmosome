@@ -19,7 +19,7 @@ only to hosts the plasmid itself declared.
 
 This is the sibling spec 011 leaves open: "Freezing the world is its sibling spec, and it is the
 larger of the two." (`011:537-538`). Spec 001 defers the same interface: "The plasmid WIT world
-(SDK surface) — deferred by design" (`001:1545`). Spec 011 promises that "A plasmid is reported
+(SDK surface) — deferred by design" (`001:1609`). Spec 011 promises that "A plasmid is reported
 active only when every tool its declaration names resolves." (`011:392`), and spec 020's use
 witness is to "attach it to a real cell and call its declared tool" (`020:508`). Neither can be
 met while nothing runs a component. It serves four intents. Intent 010: anyone may write a
@@ -52,7 +52,7 @@ seccomp, and this spec makes no claim about it.
 
 The component runs **on the host**, in one component host process per attachment. The cell's
 `membraned` launches it as its own child, as spec 001 says of brokers: "the membrane owns the VMM
-child, shim, and brokers as **its** children" (`001:736-737`). It is a spec 017 Broker holding, so
+child, shim, and brokers as **its** children" (`001:800-801`). It is a spec 017 Broker holding, so
 spec 017's Broker rules apply: "use the original owned child and answered private control
 readiness" (`017:402`), and "The first equal holding may launch; the last shuts down/reaps the
 original owned child" (`017:405-406`).
@@ -67,8 +67,8 @@ Why the host and not the guest:
   prepare, answered readiness, a per-grant relay that can be withdrawn alone, and reaping by the
   last holding. Spec 024 already says what the workload sees when a Broker stream is refused.
 - The credential grammar pairs a component with a handle: "`consumer` pairs with it
-  (`handle⇔wasm`" (`001:552-553`). The credential proxy is on the host: "The credential vsock
-  proxy remains RESERVED: port4041 terminates at the membrane" (`001:751-752`). So a future
+  (`handle⇔wasm`" (`001:616-617`). The credential proxy is on the host: "The credential vsock
+  proxy remains RESERVED: port4041 terminates at the membrane" (`001:815-816`). So a future
   credential handle never has to enter the guest or the component.
 - The guest's trusted code does not grow.
 
@@ -94,7 +94,7 @@ alternative and its costs.
   component host executable, `policy` its pinned Seatbelt policy, and `roots` optional extra
   trusted certificate roots in PEM form, for tests (§10). Each is an Artifact as spec 001 §4.2
   defines it, and spec 023's rule applies: "Spec 001 §4.2's immutability rule for the helper applies
-  to `membraned`" (`023:77`). Without `component_runtime`, an attach of a plasmid with
+  to `membraned`" (`023:78`). Without `component_runtime`, an attach of a plasmid with
   `[impl].wasm` is refused before prepare with 103, `capability` `unsupported:component`. The
   names are provisional.
 - **The engine.** The component host runs the component with wasmtime, built with only the
@@ -164,7 +164,7 @@ These hold whatever the world grows into. Each is a rule with an acceptance item
   passed to it at exec; it opens no path and creates, binds or connects no socket. `membraned`
   verifies the policy before readiness and at every observation, as spec 001 asks of the VMM
   helper: "Before readiness and during every recovery observation, verify that retained binding"
-  (`001:1082-1083`). The check is the membrane's existing confinement observation, with its known
+  (`001:1146-1147`). The check is the membrane's existing confinement observation, with its known
   limit: it shows that the required operations answer denied, not which profile is installed
   (owner gate O-3 on task plasmosome-qep). `membraned` forks and at once execs the component host;
   no confinement happens between fork and exec.
@@ -208,9 +208,9 @@ These hold whatever the world grows into. Each is a rule with an acceptance item
   in the workload's mount namespace, at `/run/tools/<plasmid>.sock`. The path is provisional (Q3).
   It is the guest side of the plasmid's Broker holding, at the target whose key is the Broker's
   name: "key is respectively the recorded guest_path, guest_path, host, host, name or target"
-  (`001:1385-1386`). The Broker's name is the plasmid ID.
+  (`001:1449-1450`). The Broker's name is the plasmid ID.
 - **The path is recorded, not derived.** Today spec 001 says "Broker data is exposed at the
-  reserved guest Unix path" (`001:1201-1202`), a path under `/.plasmosome/` built from the name. A
+  reserved guest Unix path" (`001:1265-1266`), a path under `/.plasmosome/` built from the name. A
   name with `plasmosome` in it is a hint under spec 027. So the Broker capability records its
   guest path, as UdsSocket's recipe does, and nothing derives it. That is spec 017's rule for
   launch paths too: "Paths and arguments are exact payload, not a recipe to be guessed from a
@@ -224,11 +224,11 @@ These hold whatever the world grows into. Each is a rule with an acceptance item
   there. Spec 027 counts file names under `/run` as hints too, so its reference lanes make the same
   directory and serve the same socket (the proposed spec 027 change).
 - **The listener stays while any holding is at it.** As "The shared resolver/TUN/route persist
-  while peer bindings exist" (`001:1342`), the socket at a target stays while any Broker holding
+  while peer bindings exist" (`001:1406`), the socket at a target stays while any Broker holding
   is at it, so a reload's two generations hand over without a moment with no socket.
 - **An ID that cannot be a path.** An ID that is not one path component, or that makes a path
   longer than Linux's 108-byte `sun_path`, is refused, as spec 001 says: "Unrepresentable
-  names/paths and cross-class projection collisions refuse in preflight" (`001:1203-1204`). It is
+  names/paths and cross-class projection collisions refuse in preflight" (`001:1267-1268`). It is
   refused before prepare with 108 at field `id`, whose `fix` is an `id` line with a name that
   fits.
 - **What resolves means.** A tool **resolves** when a connection made from inside the workload
@@ -298,7 +298,7 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   "Additional launch inputs require an accepted contract" (`017:483-484`). The field names are
   provisional.
 - **How it reaches the process.** `membraned` launches the component host the way spec 001 launches
-  the VMM helper: "The membrane uses direct exec, not a shell" (`001:1055`), with an empty
+  the VMM helper: "The membrane uses direct exec, not a shell" (`001:1119`), with an empty
   environment. It passes, each on its own descriptor, the policy bytes, the launch record, the
   component bytes from a file opened without following a link, the control and data endpoints, the
   egress channel and the lifeline pipe (G6). Whether the pinned policy lets the process accept
@@ -324,8 +324,8 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
 - **A component host that dies.** It is reaped and never restarted. Its plasmid's `state` becomes
   `failed`, its socket closes every new connection at once, and `plasmid.remove` or
   `plasmid.reload` clears it. Until then the cell's `membrane.status` is not ready, since a
-  membrane is ready only when "every broker answers ready" (`001:659`), and it names the holder:
-  "`broker` — the one that held the set back" (`001:663`). A trap inside a call is not a death:
+  membrane is ready only when "every broker answers ready" (`001:723`), and it names the holder:
+  "`broker` — the one that held the set back" (`001:727`). A trap inside a call is not a death:
   the instance is dropped and the host keeps serving.
 
 ### 9. What a failure looks like on each wire
@@ -340,7 +340,7 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
 
 After prepare, a failed launch check aborts the transaction, and the reply is 108. Spec 001 says
 "a mid-commit failure rolls the prefix back and replies `CommitFailed`-shaped code `103`/`109`"
-(`001:548-549`); this is the case it gains.
+(`001:612-613`); this is the case it gains.
 
 - digest mismatch, a file that is not a component, a world version this spec does not list, or an
   import the world does not name: 108 with `path` the component and `detail` naming what failed,
@@ -443,7 +443,7 @@ merge base.
 **Spec 001** (F1).
 
 - §5: replace "The plasmid WIT world (SDK surface) — deferred by design; `plasmid-sdk` is a
-  reserved crate with a placeholder world." (`001:1545-1546`) with "The plasmid WIT world is
+  reserved crate with a placeholder world." (`001:1609-1610`) with "The plasmid WIT world is
   provisional, at version 0.1.0, as spec 031 defines it. It is not frozen."
 - §1: replace "Exactly three refusals an author can cause name no declaration field" (`001:127`)
   with "Exactly four refusals an author can cause name no declaration field", and after the item "a
@@ -451,23 +451,23 @@ merge base.
   amendment note, add "4. a component that spec 031's launch checks refuse because it is not a
   component, targets a world version spec 031 does not list, or imports what that world does not
   name."
-- §3.9: after "Absent declarations mean `passthrough`." (`001:512`), add "`state` is `failed`
+- §3.9: after "Absent declarations mean `passthrough`." (`001:576`), add "`state` is `failed`
   while a spec 031 component host of the plasmid has exited and the plasmid is not yet removed or
   reloaded. A `failed` plasmid is never `active`."
 - §3.10: after "a mid-commit failure rolls the prefix back and replies `CommitFailed`-shaped code
-  `103`/`109` with the rolled-back list." (`001:548-549`), add "A spec 031 launch check that fails
+  `103`/`109` with the rolled-back list." (`001:612-613`), add "A spec 031 launch check that fails
   after prepare aborts the transaction the same way, and the reply is 108 as spec 031 §9 says. An
   attach of a component plasmid is complete only after spec 031 §10's probe from inside the
   workload namespace."
-- §4.1: after "`SpawnBroker` carries `{id,name,launch,owner}`" (`001:880`) and the rest of that
+- §4.1: after "`SpawnBroker` carries `{id,name,launch,owner}`" (`001:944`) and the rest of that
   sentence, add "A spec 031 component's Broker capability also carries its `guest_path` and its
   component launch record (spec 017)."
 - §4.2: replace "Broker data is exposed at the reserved guest Unix path
-  `/.plasmosome/brokers/<hex-encoded UTF-8 name>.sock`;" (`001:1201-1202`) with "Broker data is
+  `/.plasmosome/brokers/<hex-encoded UTF-8 name>.sock`;" (`001:1265-1266`) with "Broker data is
   exposed at the capability's recorded `guest_path`, under `/run/tools`, which PID1 makes before
   hello (spec 024 §5). One listener stands at each Broker target while any holding is at it, so a
   reload hands over with no gap;".
-- §4.2: after "Workload edits of resolver configuration grant no bypass." (`001:1344-1345`), add
+- §4.2: after "Workload edits of resolver configuration grant no bypass." (`001:1408-1409`), add
   "A ProxyMap holding whose recipe says a spec 031 component reaches it is never installed in the
   guest. It adds no DNS answer, route or rule here, and the cell's egress relay serves it only to
   that component's host (spec 017)."
@@ -545,12 +545,12 @@ merge base.
 
 **Spec 023** (F3).
 
-- §1: after "Invalid configuration refuses startup, as spec 001 §4.1 says." (`023:73`) and the
+- §1: after "Invalid configuration refuses startup, as spec 001 §4.1 says." (`023:74`) and the
   rest of that paragraph, add "The configuration also takes an optional `component_runtime`, spec
   031's deployment input. `membraned` never reads it: the controller puts its Artifacts in each
   component's launch record."
 - §1: replace "Spec 001 §4.2's immutability rule for the helper applies to `membraned` and to every
-  Artifact in the template." (`023:77-78`) with "Spec 001 §4.2's immutability rule for the helper
+  Artifact in the template." (`023:78-79`) with "Spec 001 §4.2's immutability rule for the helper
   applies to `membraned`, to every Artifact in the template and to every Artifact in
   `component_runtime`."
 
