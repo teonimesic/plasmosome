@@ -128,8 +128,12 @@ sources for its cell.
 }
 ```
 
-- `plasmids` maps a plasmid ID to its entry. A key is a nonempty, NUL-free string equal to the
-  `id` of the declaration it lists.
+- `plasmids` maps a plasmid ID to its entry. A key is a nonempty, NUL-free string, and must equal
+  the `id` of the declaration it lists. Reading this file opens no declaration, so §5 checks the key
+  each time it opens one: for the named plasmid, and for each listing step 2's search opens. A
+  mismatch is §5's 108 with `path` the declaration, not a `content` fault of this file. Amended on
+  2026-10-21: this did not say when the key is checked, so a mismatch read both as this file's
+  `content` fault and as §5's 108 naming the declaration.
 - `declaration` is optional: the absolute path of the plasmid's declaration file, for local
   selection (§5).
 - `proxy_maps` and `mounts` are required arrays and may be empty.
@@ -177,34 +181,45 @@ the add attached, with a record spec 008 accepts, so the attached case is a new 
 
 For each key the plasmid does not provide itself, in order:
 
-1. If one or more plasmids already attached to the cell provide the key, it is satisfied. None of
-   them is read or resolved again, and nothing joins the closure; D2b propagation still reaches
-   them (§6).
-2. Otherwise the candidates are the listed plasmids whose declaration's `[provides]` binds the
-   key. The search opens every listed declaration under §3. One that fails §3 or does not parse
-   refuses the request with 108 naming it: the search fails closed. Exactly one candidate joins
-   the closure and is resolved like the named plasmid; spec 001's version selection still applies
-   to it. None is 103, `capability` the key, `plasmid` the requirer. More than one is 100 with
-   their IDs.
+1. If one or more plasmids already attached to the cell provide the key, it is satisfied. What an
+   attached plasmid provides is the `provides` its record in the cell's journal lists (spec 008),
+   written from the declaration its add admitted. None of them is read or resolved again, and
+   nothing joins the closure; D2b propagation still reaches them (§6). Amended on 2026-10-21: this
+   did not say where step 1 learns what an attached plasmid provides, and the journal did not record
+   it, so after a restart step 1 had nothing to read but declarations, which it must not read.
+2. Otherwise the candidates are the listed plasmids not attached to the cell whose declaration's
+   `[provides]` binds the key. An attached plasmid is never a candidate, even when its listed
+   declaration now binds a key its record does not: what it provides is what step 1 reads, and it is
+   not resolved again (§6). The search opens every listed declaration under §3, an attached
+   plasmid's included. One that fails §3, does not parse or has an `id` other than its key refuses
+   the request with 108 naming it: the search fails closed. Exactly one candidate joins the closure
+   and is resolved like the named plasmid; spec 001's version selection still applies to it. None is
+   103, `capability` the key, `plasmid` the requirer. More than one is 100 with their IDs. Amended
+   on 2026-10-21: this did not say whether an attached plasmid can be a candidate. Taking one would
+   give the requirer an edge to a plasmid whose record does not provide the key, which spec 008
+   refuses, and whose attached generation serves none of the key's tools. Amended on 2026-10-21:
+   this did not refuse a listing whose `id` differs from its key.
 
 **No cycle.** When step 2's one candidate is already in the closure, it does not join or get
 resolved again: the requirer's edge goes to it, so two members that require one provider share it.
 The requires edges spec 008 records must not form a cycle. When they would, the request refuses with
 108 under spec 011's author-refusal rule: `detail` naming each edge on the cycle as the requirer's
 plasmid ID, the key and the provider's plasmid ID, sorted by the requirer's plasmid ID in byte
-order; `path` the declaration of the first requirer in that order; field `requires.capabilities[i]`
-for its edge's key; and `fix` exactly `remove this entry`. Removing the entry for any edge the
-`detail` names ends the cycle. When the edges hold more than one cycle, each is its own refusal, and
-which one is returned is not part of the contract (§7). A cycle of one plasmid is the self-provider
-refusal above. Only local plasmids that this request attaches can be on a cycle: an attached
-plasmid's recorded providers are all attached (spec 008), so no edge leads from one back to a
-plasmid this request attaches, and a registry member's edges follow its graph, which spec 020 §2
-requires to be acyclic. So this refusal agrees with spec 020, which refuses a cyclic graph before
-publication or import, and with spec 008, which refuses a cycle among the `requires` edges when the
-journal is read: no add that this section accepts writes a cycle. Amended on 2026-10-20: this did
-not refuse a cycle, or say that a shared provider joins once. When step 2 chose a member already in
-the closure and that edge closed a cycle, the add could write records spec 008 refuses as a cycle
-among the `requires` edges.
+order; `path` the declaration of the first requirer in that order, and that requirer's ID as the
+plasmid ID spec 011's rule carries; field `requires.capabilities[i]` for its edge's key; and `fix`
+exactly `remove this entry`. Removing the entry for any edge the `detail` names ends the cycle. When
+the edges hold more than one cycle, each is its own refusal, and which one is returned is not part
+of the contract (§7). A cycle of one plasmid is the self-provider refusal above. Only local plasmids
+that this request attaches can be on a cycle: an attached plasmid's recorded providers are all
+attached (spec 008), so no edge leads from one back to a plasmid this request attaches, and a
+registry member's edges follow its graph, which spec 020 §2 requires to be acyclic. So this refusal
+agrees with spec 020, which refuses a cyclic graph before publication or import, and with spec 008,
+which refuses a cycle among the `requires` edges when the journal is read: no add that this section
+accepts writes a cycle. Amended on 2026-10-20: this did not refuse a cycle, or say that a shared
+provider joins once. When step 2 chose a member already in the closure and that edge closed a cycle,
+the add could write records spec 008 refuses as a cycle among the `requires` edges. Amended on
+2026-10-21: this did not say which plasmid ID the refusal carries. Spec 011's rule carries the ID of
+the declaration at `path`, the first requirer's.
 
 A registry member (spec 020) keeps its imported declaration and its graph's provider bindings.
 The operator file supplies only its ProxyMap and Mount entries, keyed by its plasmid ID alone.
@@ -538,30 +553,39 @@ ProxyMap (O-11) or Mount (O-7).
 4. Providers. R requires `k` and listed P provides it, each with entries under its own ID: R's
    operations name only R's hosts, P's only P's; with P's entry moved under R's ID, 103 naming P.
    Two listed providers of `k`: 100. None: 103 `k`. An unrelated group-writable listing: 108
-   naming it. Two attached providers whose files are then deleted: R attaches and their holdings
-   are unchanged. R that also provides `k` is 108 with `path` R's declaration, field
-   `requires.capabilities[0]`, `fix` `remove this entry` and a `detail` naming `k` and R, and
-   leaves no journal record, whether P is unlisted, listed or attached. A P that R's search selects
-   and that requires a key `j` it provides is 108 with `path` P's declaration and a `detail` naming
-   `j` and P, and leaves no journal record. Cycles are each 108 with `fix` `remove this entry` and
-   leave no journal record. R requires `k` from P, P requires `n`, which an attached plasmid
-   provides, and then `j` from Q, and Q requires `m`, which R provides: `path` P's declaration,
-   field `requires.capabilities[1]`, and a `detail` naming the edges of P, Q and R in that order.
-   With Q requiring `i` from P instead: `path` P's declaration and a `detail` naming only the edges
-   of P and Q. A shared provider is not a cycle: with P requiring nothing, R requiring `k` and `m`,
-   and Q providing `m` and requiring `k`, R, P and Q attach, and P is attached once. Catches:
-   borrowing another member's entries, an undefined candidate set, skipping an unsafe listing,
-   re-reading an attached provider, a plasmid made its own provider or only left out of its own
-   candidates, a refusal that names R's declaration for P's fault, a cycle check that sees only two
-   plasmids or only cycles through R, refusing a shared provider, a field that names the requirer's
-   first entry, and a `path` that depends on the order of the walk. Amended on 2026-10-20: this item
-   had no self-provider case. Amended on 2026-10-20: this item had no cycle case.
+   naming it. Two attached providers whose files are then deleted: R attaches, with or without a
+   controller restart in between, with a record naming both, and their holdings are unchanged. An
+   attached H whose record does not provide `k`, but whose listed declaration now does, is not a
+   candidate: R is 103 `k`, and with a listed P that provides `k`, P joins and R's record names only
+   P. R that also provides `k` is 108 with `path` R's declaration, field `requires.capabilities[0]`,
+   `fix` `remove this entry` and a `detail` naming `k` and R, and leaves no journal record, whether
+   P is unlisted, listed or attached. A P that R's search selects and that requires a key `j` it
+   provides is 108 with `path` P's declaration and a `detail` naming `j` and P, and leaves no
+   journal record. Cycles are each 108 with `fix` `remove this entry` and leave no journal record. R
+   requires `k` from P, P requires `n`, which an attached plasmid provides, and then `j` from Q, and
+   Q requires `m`, which R provides: `path` P's declaration, plasmid ID P, field
+   `requires.capabilities[1]`, and a `detail` naming the edges of P, Q and R in that order. With Q
+   requiring `i` from P instead: `path` P's declaration and a `detail` naming only the edges of P
+   and Q. A shared provider is not a cycle: with P requiring nothing, R requiring `k` and `m`, and Q
+   providing `m` and requiring `k`, R, P and Q attach, and P is attached once. Catches: borrowing
+   another member's entries, an undefined candidate set, skipping an unsafe listing, re-reading an
+   attached provider, a plasmid made its own provider or only left out of its own candidates, a
+   refusal that names R's declaration for P's fault, a cycle check that sees only two plasmids or
+   only cycles through R, refusing a shared provider, a field that names the requirer's first entry,
+   a `path` that depends on the order of the walk, a step 1 that knows what an attached plasmid
+   provides only until a restart, an edge to an attached plasmid that does not provide the key, and
+   a cycle refusal carrying another plasmid's ID. Amended on 2026-10-20: this item had no
+   self-provider case. Amended on 2026-10-20: this item had no cycle case. Amended on 2026-10-21:
+   this item had no restart case and no attached candidate case, and did not check the cycle
+   refusal's plasmid ID.
 5. Local selection. An unlisted ID is 101 `plasmid <id>`, even with a valid declaration at the
    project root and under `.plasmosome/plasmids/`; so is an entry with no `declaration`. An unsafe
-   or mismatched declaration is 108 with `path` the declaration. A listed, matching one attaches
-   with source `{"kind": "local"}`. `cell.new` with a genome and no artifact is 101 `genome
-   <name>`, with no cell directory, even with `.plasmosome/genomes/<name>.toml` present. Catches:
-   searching any default path.
+   or mismatched declaration is 108 with `path` the declaration, not the operator file, both for the
+   named plasmid and for a listing that only step 2's search opens. A listed, matching one attaches
+   with source `{"kind": "local"}`. `cell.new` with a genome and no artifact is 101 `genome <name>`,
+   with no cell directory, even with `.plasmosome/genomes/<name>.toml` present. Catches: searching
+   any default path, and a mismatch reported as the operator file's `content` fault. Amended on
+   2026-10-21: this item did not cover a mismatched listing that only the search opens.
 6. Attach, change the entry's `destination`, restart. Recovery holds the original destination.
    Reload: the new generation holds the new one with a fresh ID. With a second plasmid holding
    that host at the old recipe, the reload is 108. Catches: recovery that reads the operator
@@ -575,13 +599,15 @@ ProxyMap (O-11) or Mount (O-7).
    - a final-component symlink, and a symlinked ancestor, to valid targets (`path`);
    - a group-writable parent (`parent` or `ancestor`);
    - a FIFO, refused within one second (`not_regular`);
-   - over 1 MiB, non-UTF-8, a duplicate key, an unknown field, `version: 2` (`content`);
+   - over 1 MiB (`size`);
+   - non-UTF-8, a duplicate key, an unknown field, `version: 2` (`content`);
    - `/private/etc/hosts` (`parent`), and with O-8 a second UID's file in a directory the
      controller's UID owns (`owner`).
 
    Then delete the file and restart: startup and recovery succeed. Catches: trusting the path
    text, checking only the file's mode, following links, blocking on a FIFO, and reporting every
-   fault as a parse error.
+   fault as a parse error. Amended on 2026-10-21: this listed a file over 1 MiB under `content`,
+   while rule 4 refuses it as `size`.
 9. Cell A holds a `read_write` Mount of S. The operator file inside S, a listed declaration inside
    S, and S declared but not yet held each give 108 `inside_mount_source`; outside S, requests
    succeed. Rename S away: a request for cell A is 108 `inside_mount_source`, and one for cell B

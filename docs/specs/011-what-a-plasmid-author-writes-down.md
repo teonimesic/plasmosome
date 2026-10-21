@@ -365,6 +365,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   and spec 001's closed table gives `fix` only to 108. Corrected on 2026-10-20: this said the
   requirers are named in the message and the `fix`, and did not say why a detach refusal carries
   none.
+- **Each `[requires].capabilities` entry is a capability key: a string that is not empty or only
+  whitespace.** An entry that is not a string, or is blank, is refused naming
+  `requires.capabilities[i]`, where `i` is the entry's own index in the declaration, with `fix`
+  exactly `remove this entry`. No key is guessed from such an entry and no entry is skipped, so
+  every index a later refusal names is the declaration's own. Spec 008 refuses a blank key when the
+  journal is read, so no attach records one. Amended on 2026-10-21: this had no rule for such an
+  entry.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the
@@ -444,6 +451,11 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   scope; a relative path-scope entry; a network section with no hosts; a declaration naming no
   capability and no implementation; a command secret naming no subject; and a declaration with no
   `id`, which names `id` and carries no plasmid id.
+- `requires.capabilities = ["a", 5, "", " ", "k"]` is refused at `requires.capabilities[1]` with
+  `fix` `remove this entry`. Each time the refused entry is removed, the next refusal is again at
+  `requires.capabilities[1]`, for `""` and then `" "`, and the result parses with requires `["a",
+  "k"]`. Catches: a parser that drops an entry and shifts later indexes, and one that keeps a blank
+  key. Amended on 2026-10-21: this item is new.
 - A plasmid granted two hosts and denied a third produces a report naming the denied host and the
   hosts field, in which neither granted host appears anywhere.
 - The denial report reaches the session log and the plasmid's status, and the calling code inside

@@ -336,8 +336,8 @@ drift and readiness: no host authority remains to match it, and it never blocks 
 later attach at the same target. The host side is checked against the supervisor's own inventory
 keyed by GrantId (gates, source roots, handles, listeners and flows), as spec 001 §4.2's absence
 check requires (`001:1277-1278`). It must hold nothing for that grant; a holding found there has
-no journal record and is an unknown holding (`008:476-478`). The amendments to spec 001 and spec
-008 below say the same.
+no journal record and is an unknown holding (`008:496-497`). The amendments to spec 001 and spec 008
+below say the same.
 
 **A binding that stands while the host refuses it.** A grant can stop serving while its guest
 binding stands: a fence (spec 028), a graceful removal's reversible pause, or a Force removal
@@ -679,10 +679,10 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
 - Signalling one started process, and environment variables or image entries beyond §4 and §5;
   a later spec may add them.
 - Subject spawns and attestation.
-- How attached software becomes visible inside a cell (`011:536-540`). It is bound by two rules
+- How attached software becomes visible inside a cell (`011:548-552`). It is bound by two rules
   here: `PATH` is fixed to three directories, and spec 017 forbids executing a managed file. So a
-  plasmid's software can be found by name only if it lands, as files that are not managed files,
-  in one of those directories.
+  plasmid's software can be found by name only if it lands, as files that are not managed files, in
+  one of those directories.
 - SessionFile handles held across a removal (§9).
 - How the cell and its supervisor start and end, and how `cell.kill` divides its deadline. That
   is spec 023.
