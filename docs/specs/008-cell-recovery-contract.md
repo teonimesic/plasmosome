@@ -686,14 +686,15 @@ rule for the instance's control socket is unchanged.
 On successful startup, construct ControllerState from recovered identities/modes and actual
 supervisor state, retain the entire recovery account, and pass desired.generation to
 Controller::new. Quarantined and set-aside cells are absent from the ordinary cell registry and
-visible in `plasmosome.recovery`. The controller's ready flag is false if any quarantine, set-aside
-cell, unmatched effect, incomplete effect, drift or unsettled publication remains; an empty instance
-is ready only after the same startup requirements. A `revoked` guest binding (spec 024), after its
-removal completed, is none of these. An observed ready cell is not relabelled dead because its
-desired holdings drift. The diagnostic surface states that discrepancy separately. Equal object
-snapshots do not establish equal participant generations or publication content. Matching published
-records do not establish matching holdings. No journal record or recovery result by itself proves
-liveness. Amended on 2026-10-21: this did not name set-aside cells (spec 023 §8).
+visible in `plasmosome.recovery`. The controller's ready flag is false while any condition listed in
+spec 001 §3.3 remains; an empty instance is ready only after the same startup requirements. A
+`revoked` guest binding (spec 024), after its removal completed, is none of these. An observed ready
+cell is not relabelled dead because its desired holdings drift. The diagnostic surface states that
+discrepancy separately. Equal object snapshots do not establish equal participant generations or
+publication content. Matching published records do not establish matching holdings. No journal
+record or recovery result by itself proves liveness. Amended on 2026-10-21: this did not name
+set-aside cells (spec 023 §8). Amended on 2026-10-21: this kept a second list, which lacked spec
+028's expiry past H; spec 001 §3.3 holds the only one.
 
 The controller reconnects to surviving supervisors and retains exact inverses for subsequent
 ordinary revocation. Before any other mutation of a cell, it expires every attachment whose
