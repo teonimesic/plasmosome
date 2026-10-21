@@ -93,6 +93,7 @@ enum Defect {
     RefusalRollsBackTheAddressOf(UniverseClass, Call),
     ConflictWithdrawsTheLiveGrantOfItsKey,
     RefusalSwapsItsAddress(Call),
+    UnknownRevokeTidiesResidue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +249,22 @@ impl DefectiveBackend {
                 Err(refusal)
             }
             _ => Err(refusal),
+        }
+    }
+
+    fn tidy_residue(&mut self) {
+        let residue: Vec<OsObject> = self
+            .state
+            .objects()
+            .filter(|held| {
+                let address = held.operation().handle();
+                !self.ledger.contains_key(&address)
+                    && !self.applied.iter().any(|op| op.handle() == address)
+            })
+            .cloned()
+            .collect();
+        for object in residue {
+            self.state.remove(&removal_of(&object), &object.owner);
         }
     }
 
@@ -775,6 +792,14 @@ impl EnforcementBackend for DefectiveBackend {
             return Err(BackendError::UnknownHandle { handle });
         }
         let Some(entry) = self.ledger.get(&handle).cloned() else {
+            if self.defect == Defect::UnknownRevokeTidiesResidue
+                && !self
+                    .state
+                    .objects()
+                    .any(|held| held.class() == handle.class && held.id == handle.id)
+            {
+                self.tidy_residue();
+            }
             return match self.defect {
                 Defect::UnknownHandleReportsSuccess => Ok(a_stranger(handle)),
                 Defect::ARevokedHandleRevokesAgain => self
@@ -1948,6 +1973,41 @@ fn a_conflict_that_withdraws_a_live_grant_keeps_its_record_and_a_later_apply_hid
             "{defect:?}"
         );
     }
+}
+
+#[test]
+fn the_snapshot_clause_rejects_an_unknown_revoke_that_tidies_residue() {
+    assert_rejected(|| {
+        conformance::snapshot_never_invents_objects(carrying(Defect::UnknownRevokeTidiesResidue))
+    });
+}
+
+#[test]
+fn an_unknown_revoke_at_an_empty_address_tidies_only_residue_and_still_refuses() {
+    let owner = conformance::conformance_owner;
+    let mut backend = DefectiveBackend::carrying(Defect::UnknownRevokeTidiesResidue);
+    let granted = conformance::op_for(GrantId::new(), owner(), mount("/src", "/work"));
+    backend.grant(granted.clone(), GrantKind::Hot).unwrap();
+    let applied = conformance::op_for(GrantId::new(), owner(), mount("/src", "/applied"));
+    backend.apply(applied.clone()).unwrap();
+    let residue = conformance::op_for(GrantId::new(), owner(), mount("/src", "/residue")).object();
+    backend.plant(residue.clone()).unwrap();
+    let all = backend.snapshot_os_state();
+    let at_residue = residue.operation().handle();
+    assert_eq!(
+        backend.revoke(at_residue, DrainSpec::forcing()),
+        Err(BackendError::UnknownHandle { handle: at_residue })
+    );
+    assert_eq!(backend.snapshot_os_state(), all);
+    let nowhere = conformance::op_for(GrantId::new(), owner(), mount("/src", "/none")).handle();
+    assert_eq!(
+        backend.revoke(nowhere, DrainSpec::forcing()),
+        Err(BackendError::UnknownHandle { handle: nowhere })
+    );
+    let mut expected = OsState::new();
+    expected.insert(granted.object()).unwrap();
+    expected.insert(applied.object()).unwrap();
+    assert_eq!(backend.snapshot_os_state(), expected);
 }
 
 #[test]
