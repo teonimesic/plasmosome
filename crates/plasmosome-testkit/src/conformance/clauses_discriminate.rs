@@ -412,7 +412,7 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::GrantSubstitutesRequestedOwner {
             grant.owner.plugin = PluginId::from("substituted-owner");
         }
-        if matches!(self.defect, Defect::GrantSubstitutesRequestedCapability(_)) {
+        if self.defect == Defect::GrantSubstitutesRequestedCapability(grant.capability.class()) {
             grant.capability = substituted_capability(&grant.capability);
         }
         if self.defect == Defect::GrantSubstitutesRecipe(grant.capability.class()) {
@@ -526,7 +526,7 @@ impl EnforcementBackend for DefectiveBackend {
         self.grant_order.retain(|held| *held != handle);
         self.freed.push(handle);
         self.spent.insert(handle, entry.clone());
-        if matches!(self.defect, Defect::RevokeReturnsAStranger(_)) {
+        if self.defect == Defect::RevokeReturnsAStranger(handle.class) {
             return Ok(a_stranger(handle));
         }
         Ok(entry)
