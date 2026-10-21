@@ -48,7 +48,8 @@ in `src/lib.rs`, or on a single item:
 
 - `src/krun.rs` (macOS): libkrun reached through `dlopen` and `dlsym`, the loader's image list,
   dyld's shared-cache query, and `sandbox_init`.
-- `src/guest_sys.rs` (Linux): `mount`, `sync`, `reboot`, `waitpid`, `kill`, `uname`, and a
+- `src/guest_sys.rs` (Linux): `mount`, `umount2`, `unshare`, `sync`, `reboot`, `waitpid`,
+  `kill`, `uname`, `geteuid`, `sendmsg` and `recvmsg` for one `SCM_RIGHTS` descriptor, and a
   private read-only `mmap` read with `read_volatile` and released with `munmap`.
 
 These are the FFI modules spec 026 §2 lets this file name for a module-wide allow. Everything
@@ -63,7 +64,8 @@ outside the modules carry it:
 Every `unsafe` block has a `// SAFETY:` comment, every `unsafe fn` a `# Safety` section, private
 ones included, and the `unsafe extern` block documents what each declaration assumes. No safe
 route exists. libkrun is a C library. std offers none of those Linux calls, no `sync`, no
-process-group kill, and nothing that lists dyld's loaded images or asks its shared cache.
+process-group kill, no stable way to pass a descriptor over `SCM_RIGHTS`, and nothing that lists
+dyld's loaded images or asks its shared cache.
 `nix` and `rustix` wrap some of the Linux calls, but each would be a new dependency under spec
 026 §1, and neither reaches libkrun or dyld.
 
@@ -71,3 +73,7 @@ process-group kill, and nothing that lists dyld's loaded images or asks its shar
 
 `cargo test -p plasmosome-lanes`. The boot tests are ignored; run them on a Mac with the bundle
 as `README.md` says, after building the guest binaries, and paste their output in the PR.
+
+The gate lanes in `tests/q1a_gate.rs` and `tests/rerun.rs` are ignored too. Each writes a record,
+and `write_the_results_file` turns the records into the dated results file under
+`docs/benchmarks/`. Each record names the test commit it ran from.
