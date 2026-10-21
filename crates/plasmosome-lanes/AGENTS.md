@@ -30,7 +30,11 @@ for what each piece does.
 - **The bundle is pinned.** `PINNED_BUNDLE_ID` names the one bundle these lanes load, and
   `Libkrun::open` takes only a `VerifiedBundle`. A self-consistent bundle with another ID is
   refused. A symlink or FIFO anywhere in the bundle tree is refused, because each lets a path
-  `SHA256SUMS` vouched for name other bytes later.
+  `SHA256SUMS` vouched for name other bytes later. A PR that changes a pin here updates its record
+  in `docs/dependencies/native/` in the same PR, as spec 026 §1 says, or the record vouches for
+  bytes the lanes no longer load. Each public pin names its record in its doc comment.
+  `BUNDLE_KERNEL_RELEASE` in `tests/boot.rs` is private, so it has none: it is
+  `guest-kernel.toml`'s `version`.
 - **A check that cannot fail proves nothing.** The SBPL self-check runs unconfined first and
   needs all four operations to succeed, so file modes cannot pass for the sandbox. Confined, it
   counts a refusal only as `EPERM`; `EACCES` and a missing directory are not refusals. Keep the
