@@ -891,7 +891,7 @@ pub(crate) mod fixtures {
             panic!(
                 "no base holds a test root the walk from / accepts; on macOS the base is the \
                  per-user temp directory that confstr(_CS_DARWIN_USER_TEMP_DIR) names, on Linux \
-                 XDG_RUNTIME_DIR, else the test binary's directory:\n{}",
+                 XDG_RUNTIME_DIR when it is set, then the test binary's directory:\n{}",
                 refusals.join("\n")
             );
         }
@@ -940,6 +940,12 @@ pub(crate) mod fixtures {
     impl Drop for TestRoot {
         fn drop(&mut self) {
             open_up(&self.path);
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("/bin/chmod")
+                .args(["-R", "-N"])
+                .arg(&self.path)
+                .stderr(std::process::Stdio::null())
+                .status();
         }
     }
 
