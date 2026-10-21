@@ -1173,6 +1173,7 @@ PID1 remains in the protected initramfs, mounts the single unpartitioned ext4 `/
 then creates the workload's controlled mount and network namespaces and its control group. It starts
 no workload at boot. Every workload process is started by a 4090 `exec` (spec 024), with
 `/workload` moved over `/` in those namespaces.
+Before hello it also makes the software directories of spec 027.
 It does not replace itself with a workload-root executable or make its original root/policy
 accessible to the workload. Managed guest paths are relative to that workload root. Host-only
 RuntimeRecipe fields are never injected into it. Add exactly one disk, first and only,
