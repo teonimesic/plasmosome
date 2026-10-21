@@ -161,7 +161,7 @@ class JsonRunner:
         except ProcessLookupError:
             pass
         except PermissionError:
-            # macOS refuses a group whose only member is its exiting or exited, unreaped leader.
+            # Refused: an exiting or exited leader with no member left to signal (macOS), or a live group this user may not signal.
             grace = self.exit_grace
         try:
             child.wait(timeout=grace)
