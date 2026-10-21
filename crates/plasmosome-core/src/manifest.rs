@@ -547,6 +547,14 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
     let mut tools = Vec::new();
     for (name, binding) in bindings {
         let binding_path = || format!("provides.{}", diagnostic_key(name));
+        if name.trim().is_empty() {
+            return Err(field_error(
+                id,
+                binding_path(),
+                REMOVE_ENTRY.into(),
+                "a capability key must not be empty or only whitespace",
+            ));
+        }
         let binding = binding.as_table().ok_or_else(|| {
             let field = binding_path();
             let fix = format!("[{field}]");
