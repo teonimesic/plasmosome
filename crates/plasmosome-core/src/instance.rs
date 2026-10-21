@@ -5194,6 +5194,26 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_retired_between_the_two_listings_is_never_allocated_again() {
+        let (_dir, root) = temp_root();
+        entries(&root, "cells", &["cell-1", "cell-2"]);
+        let (instance, lock) = locked(&root);
+        let (instance, lock) = (Rc::new(instance), Rc::new(lock));
+        let (retiring, retiring_lock) = (Rc::clone(&instance), Rc::clone(&lock));
+        on_first_scan(move || {
+            let newest = retiring
+                .cell_dir(&cell("cell-2"))
+                .expect("the newest cell opens");
+            retiring
+                .retire(&retiring_lock, newest)
+                .expect("the newest cell retires");
+        });
+        assert_eq!(allocated(&instance, &lock), cell("cell-3"));
+        assert_eq!(names_under(&root.join("retired")), ["cell-2"]);
+        assert_eq!(names_under(&root.join("cells")), ["cell-1", "cell-3"]);
+    }
+
+    #[test]
     fn a_panic_during_an_allocation_does_not_stop_the_next() {
         let (_dir, root) = temp_root();
         let (instance, lock) = locked(&root);
