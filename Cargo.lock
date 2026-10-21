@@ -535,6 +535,7 @@ dependencies = [
  "plasmosome-backend",
  "plasmosome-core",
  "plasmosome-ledger",
+ "plasmosome-membrane",
  "serde",
  "serde_json",
  "tempfile",
