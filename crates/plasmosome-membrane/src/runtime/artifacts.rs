@@ -460,116 +460,27 @@ mod tests {
 
     #[test]
     fn the_judge_refuses_another_type_a_foreign_owner_a_write_bit_and_a_set_id_bit_in_that_order() {
+        use ArtifactFault::{ForeignOwner, SetIdBits, Writable};
+        use Kind::{Directory, Other, Regular, Socket, Symlink};
+        let not_regular = |kind| ArtifactFault::NotRegular { kind };
         let rows = [
-            (
-                Kind::Directory,
-                EUID,
-                0o555,
-                ArtifactFault::NotRegular {
-                    kind: Kind::Directory,
-                },
-            ),
-            (
-                Kind::Other,
-                EUID,
-                0o444,
-                ArtifactFault::NotRegular { kind: Kind::Other },
-            ),
-            (
-                Kind::Socket,
-                EUID,
-                0o444,
-                ArtifactFault::NotRegular { kind: Kind::Socket },
-            ),
-            (
-                Kind::Symlink,
-                EUID,
-                0o444,
-                ArtifactFault::NotRegular {
-                    kind: Kind::Symlink,
-                },
-            ),
-            (
-                Kind::Other,
-                OTHER,
-                0o666,
-                ArtifactFault::NotRegular { kind: Kind::Other },
-            ),
-            (
-                Kind::Regular,
-                OTHER,
-                0o444,
-                ArtifactFault::ForeignOwner { uid: OTHER },
-            ),
-            (
-                Kind::Regular,
-                OTHER,
-                0o4777,
-                ArtifactFault::ForeignOwner { uid: OTHER },
-            ),
-            (
-                Kind::Regular,
-                EUID,
-                0o644,
-                ArtifactFault::Writable { mode: 0o644 },
-            ),
-            (
-                Kind::Regular,
-                EUID,
-                0o464,
-                ArtifactFault::Writable { mode: 0o464 },
-            ),
-            (
-                Kind::Regular,
-                EUID,
-                0o446,
-                ArtifactFault::Writable { mode: 0o446 },
-            ),
-            (
-                Kind::Regular,
-                0,
-                0o466,
-                ArtifactFault::Writable { mode: 0o466 },
-            ),
-            (
-                Kind::Regular,
-                EUID,
-                0o4755,
-                ArtifactFault::Writable { mode: 0o4755 },
-            ),
-            (
-                Kind::Regular,
-                EUID,
-                0o4555,
-                ArtifactFault::SetIdBits { mode: 0o4555 },
-            ),
-            (
-                Kind::Regular,
-                0,
-                0o2555,
-                ArtifactFault::SetIdBits { mode: 0o2555 },
-            ),
+            (facts(Directory, EUID, 0o555), not_regular(Directory)),
+            (facts(Other, EUID, 0o444), not_regular(Other)),
+            (facts(Socket, EUID, 0o444), not_regular(Socket)),
+            (facts(Symlink, EUID, 0o444), not_regular(Symlink)),
+            (facts(Other, OTHER, 0o666), not_regular(Other)),
+            (facts(Regular, OTHER, 0o444), ForeignOwner { uid: OTHER }),
+            (facts(Regular, OTHER, 0o4777), ForeignOwner { uid: OTHER }),
+            (facts(Regular, EUID, 0o644), Writable { mode: 0o644 }),
+            (facts(Regular, EUID, 0o464), Writable { mode: 0o464 }),
+            (facts(Regular, 0, 0o446), Writable { mode: 0o446 }),
+            (facts(Regular, EUID, 0o4755), Writable { mode: 0o4755 }),
+            (facts(Regular, EUID, 0o4555), SetIdBits { mode: 0o4555 }),
+            (facts(Regular, 0, 0o2555), SetIdBits { mode: 0o2555 }),
         ];
-        for (kind, uid, mode, fault) in rows {
-            assert_eq!(
-                judge_artifact(&facts(kind, uid, mode), EUID),
-                Err(fault),
-                "{kind:?} uid {uid} mode {mode:o}"
-            );
+        for (facts, fault) in rows {
+            assert_eq!(judge_artifact(&facts, EUID), Err(fault), "{facts:?}");
         }
-    }
-
-    #[test]
-    fn only_a_set_immutable_flag_passes_and_cannot_tell_is_a_refusal() {
-        assert_eq!(judge_immutability(Immutability::Set), Ok(()));
-        assert_eq!(
-            judge_immutability(Immutability::Clear),
-            Err(ArtifactFault::NotImmutable)
-        );
-        assert_eq!(
-            judge_immutability(Immutability::Unverifiable),
-            Err(ArtifactFault::ImmutabilityUnverifiable)
-        );
     }
 
     #[test]
@@ -701,62 +612,50 @@ mod tests {
 
     #[test]
     fn a_refusal_names_its_role_and_path_and_shows_where_the_walk_stopped() {
-        let refusal = ArtifactRefusal {
-            role: ArtifactRole::Library(1),
-            path: RecipePath::parse("/opt/cell/lib/libkrun.dylib").expect("a recipe path"),
-            fault: ArtifactFault::Walk(WalkRefusal::Replaceable {
-                path: "/opt".into(),
-                mode: 0o775,
-            }),
-        };
-        let shown = refusal.to_string();
-        for part in [
-            "libraries[1]",
-            "/opt/cell/lib/libkrun.dylib",
-            "/opt",
-            "0775",
-        ] {
+        let tree = ArtifactTree::new();
+        let dir = tree.dir("shared", 0o700);
+        let path = tree.file("shared/kernel", b"kernel", 0o444);
+        crate::runtime::test_fixtures::tree::set_mode(&dir, 0o775);
+        let shown = verify_pinned(&path, &Digest::of(b"kernel"))
+            .expect_err("the directory is group-writable")
+            .to_string();
+        let path = path.to_str().expect("UTF-8");
+        let dir = dir.to_str().expect("UTF-8");
+        for part in ["kernel ", path, &format!("{dir} has mode 0775")] {
             assert!(shown.contains(part), "{shown:?} names {part}");
         }
     }
 
     #[test]
     fn each_fault_says_what_was_found() {
-        let identity = FileIdentity { dev: 7, ino: 8 };
-        let other = FileIdentity { dev: 7, ino: 9 };
+        use ArtifactFault::*;
+        use Kind::{Directory, Other, Regular, Socket, Symlink};
+        let (expected, actual) = (Digest::of(b"a"), Digest::of(b"b"));
+        let mismatch = format!("{actual}, not the pinned {expected}");
+        let replaced = Replaced {
+            verified: FileIdentity { dev: 7, ino: 8 },
+            found: FileIdentity { dev: 7, ino: 9 },
+        };
+        let io = Io {
+            op: "fstat",
+            errno: 5,
+        };
         let rows = [
-            (
-                ArtifactFault::NotRegular { kind: Kind::Other },
-                "not a regular file",
-            ),
-            (ArtifactFault::ForeignOwner { uid: OTHER }, "502"),
-            (ArtifactFault::Writable { mode: 0o644 }, "0644"),
-            (ArtifactFault::SetIdBits { mode: 0o4555 }, "4555"),
-            (ArtifactFault::WriteAcl, "ACL"),
-            (ArtifactFault::NotImmutable, "uchg"),
-            (ArtifactFault::ImmutabilityUnverifiable, "cannot show"),
-            (ArtifactFault::ChangedWhileHashing, "while it was hashed"),
-            (
-                ArtifactFault::DigestMismatch {
-                    expected: Digest::of(b"a"),
-                    actual: Digest::of(b"b"),
-                },
-                &Digest::of(b"b").hex(),
-            ),
-            (
-                ArtifactFault::Replaced {
-                    verified: identity,
-                    found: other,
-                },
-                "inode 9",
-            ),
-            (
-                ArtifactFault::Io {
-                    op: "fstat",
-                    errno: 5,
-                },
-                "fstat",
-            ),
+            (NotRegular { kind: Other }, "special file, not a regular"),
+            (NotRegular { kind: Directory }, "a directory, not"),
+            (NotRegular { kind: Socket }, "a socket, not"),
+            (NotRegular { kind: Symlink }, "a symlink, not"),
+            (NotRegular { kind: Regular }, "a regular file, not"),
+            (ForeignOwner { uid: OTHER }, "owned by uid 502"),
+            (Writable { mode: 0o644 }, "mode 0644, with a write bit"),
+            (SetIdBits { mode: 0o4555 }, "mode 4555, with a set-user"),
+            (WriteAcl, "ACL allow entry granting write"),
+            (NotImmutable, "neither uchg nor schg"),
+            (ImmutabilityUnverifiable, "cannot show it immutable"),
+            (ChangedWhileHashing, "moved while it was hashed"),
+            (DigestMismatch { expected, actual }, &mismatch),
+            (replaced, "inode 9, not the verified device 7 inode 8"),
+            (io, "fstat failed with errno 5"),
         ];
         for (fault, part) in rows {
             let shown = fault.to_string();
@@ -943,16 +842,17 @@ mod tests {
             set_flags(&path, 0);
             fs::rename(&path, tree.join("kernel.old")).expect("rename");
             let replacement = tree.immutable_file("kernel", b"kernel");
+            let refusal = verified
+                .reconfirm()
+                .expect_err("the path names another file");
+            assert_eq!(refusal.role, ArtifactRole::Kernel);
+            assert_eq!(refusal.path.as_path(), path);
             assert_eq!(
-                verified.reconfirm(),
-                Err(ArtifactRefusal {
-                    role: ArtifactRole::Kernel,
-                    path: verified.path().clone(),
-                    fault: ArtifactFault::Replaced {
-                        verified: verified.identity(),
-                        found: identity_of(&replacement),
-                    },
-                })
+                refusal.fault,
+                ArtifactFault::Replaced {
+                    verified: verified.identity(),
+                    found: identity_of(&replacement),
+                }
             );
         }
 

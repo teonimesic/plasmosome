@@ -78,10 +78,6 @@ pub(crate) mod tree {
             );
         }
 
-        pub(crate) fn path(&self) -> &Path {
-            &self.path
-        }
-
         pub(crate) fn join(&self, relative: &str) -> PathBuf {
             self.path.join(relative)
         }
@@ -128,7 +124,7 @@ pub(crate) mod tree {
             return;
         }
         #[cfg(target_os = "macos")]
-        clear_flags(path);
+        chflags(path, 0);
         if !metadata.is_dir() {
             return;
         }
@@ -147,19 +143,12 @@ pub(crate) mod tree {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn set_flags(path: &Path, flags: libc::c_uint) {
-        let outcome = chflags(path, flags);
-        assert_eq!(
-            outcome,
-            0,
-            "chflags {flags:#x} {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
+        let error = (chflags(path, flags) != 0).then(std::io::Error::last_os_error);
+        assert!(
+            error.is_none(),
+            "chflags {flags:#x} {}: {error:?}",
+            path.display()
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    fn clear_flags(path: &Path) {
-        let _ = chflags(path, 0);
     }
 
     #[cfg(target_os = "macos")]
