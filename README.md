@@ -160,6 +160,11 @@ def refuse_base(reason):
 private_base = Path(
     os.path.realpath(os.environ.get("PLASMOSOME_QUICKSTART_DIR") or tempfile.gettempdir())
 )
+try:
+    os.fsencode(private_base).decode("utf-8")
+except UnicodeDecodeError:
+    shown = os.fsencode(private_base).decode("utf-8", "backslashreplace")
+    refuse_base(f"{shown} is not valid UTF-8, which the controller's JSON config cannot carry")
 for directory in [*reversed(private_base.parents), private_base]:
     try:
         info = os.lstat(directory)
