@@ -33,6 +33,7 @@ const CREATED_FILE: &CStr = c"created";
 const RUNTIME_DIR: &CStr = c"runtime";
 const RETIRED_DIR: &CStr = c"retired";
 const SUPERVISOR_LOCK_FILE: &CStr = c"supervisor.lock";
+const SUPERVISOR_LOCK_TEMPORARY: &CStr = c"supervisor.lock.tmp";
 const SUPERVISOR_LOG_FILE: &CStr = c"membraned.log";
 const ALLOCATION_ATTEMPTS: usize = 64;
 const CELL_ID_PREFIX: &[u8] = b"cell-";
@@ -858,10 +859,38 @@ impl CellDir {
     /// [`CellDir::probe_supervisor_lock`] reports it `Free`.
     pub fn create_supervisor_lock(&self) -> Result<SupervisorLock, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOCK_FILE);
-        let file = self.create_private_file(SUPERVISOR_LOCK_FILE)?;
-        lock_exclusive_nonblocking(file.as_fd()).map_err(cell_dir_io(&path))?;
+        self.remove_if_present(SUPERVISOR_LOCK_TEMPORARY)?;
+        let file = match self.lock_and_name_supervisor_lock(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.remove_if_present(SUPERVISOR_LOCK_TEMPORARY)?;
+                return Err(error);
+            }
+        };
         self.sync_dir()?;
         Ok(SupervisorLock { file, path })
+    }
+
+    fn lock_and_name_supervisor_lock(&self, path: &Path) -> Result<File, CellDirError> {
+        let file = self.create_private_file(SUPERVISOR_LOCK_TEMPORARY)?;
+        lock_exclusive_nonblocking(file.as_fd())
+            .map_err(cell_dir_io(&self.entry_path(SUPERVISOR_LOCK_TEMPORARY)))?;
+        match rename_no_replace(
+            self.dir.as_fd(),
+            SUPERVISOR_LOCK_TEMPORARY,
+            self.dir.as_fd(),
+            SUPERVISOR_LOCK_FILE,
+        ) {
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                let path = path.to_path_buf();
+                Err(match kind_at(self.dir.as_fd(), SUPERVISOR_LOCK_FILE) {
+                    Ok(Kind::Symlink) => CellDirError::Symlink { path },
+                    Ok(Kind::Directory | Kind::Other) => CellDirError::NotARegularFile { path },
+                    Ok(Kind::Regular) | Err(_) => CellDirError::AlreadyExists { path },
+                })
+            }
+            renamed => renamed.map(|()| file).map_err(cell_dir_io(path)),
+        }
     }
 
     /// Tries `supervisor.lock` on a fresh descriptor (spec 023 §4 step 6, §7 step 4 and §8),
@@ -930,6 +959,13 @@ impl CellDir {
             .parent()
             .map_or_else(PathBuf::new, Path::to_path_buf);
         self.sync().map_err(cell_dir_io(&path))
+    }
+
+    fn remove_if_present(&self, name: &CStr) -> Result<(), CellDirError> {
+        match remove_at(self.dir.as_fd(), name) {
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+            removed => removed.map_err(cell_dir_io(&self.entry_path(name))),
+        }
     }
 
     fn write_temporary(&self, contents: &[u8]) -> Result<(), CellDirError> {
