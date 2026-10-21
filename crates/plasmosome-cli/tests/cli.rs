@@ -625,6 +625,8 @@ fn the_full_parse_names_the_leftmost_fault() {
         (&status, "status --deadline-ms 0 --socket rel", Some("0")),
         (&status, "--kernel ../x", Some("../x")),
         (&status, "--deadline-ms 0", Some("0")),
+        (&status, "status --frob extra", Some("--frob")),
+        (&status, "--frob --kernel ../x", Some("--frob")),
         (
             &search,
             "registry search --kernel a extra",
@@ -681,10 +683,11 @@ fn the_lines_that_read_two_ways_name_the_settled_argument() {
         (&status, "registry source --kernel a", Some("source")),
         (&status, "status --", Some("--")),
         (&status, "status -- a<0xff>", Some("--")),
-        (&status, "-- x", None),
-        (&status, "-- --version", None),
-        (&status, "-- --help", None),
-        (&status, "-- a<0xff>", Some("a<0xff>")),
+        (&status, "-- x", Some("--")),
+        (&status, "-- --version", Some("--")),
+        (&status, "-- --help", Some("--")),
+        (&status, "-- a<0xff>", Some("--")),
+        (&status, "--kernel a -- a<0xff>", Some("--")),
     ];
     let wrong = misnamed(&rows);
     assert!(
@@ -727,6 +730,83 @@ fn the_full_parse_refuses_an_unknown_flag_that_holds_a_value() {
     for flag in ["--frob=x", "--deadline=5"] {
         assert_usage(args(&["status", flag]), &status_served(), Some(flag));
     }
+}
+
+#[test]
+fn a_flag_is_any_argument_before_dashes_that_starts_with_a_dash() {
+    let status = status_served();
+    let rows: Vec<(&[Command], &str, Option<&str>)> = vec![
+        (&status, "--kernel=work", Some("--kernel=work")),
+        (&status, "status --kernel=work", Some("--kernel=work")),
+        (&status, "status -", Some("-")),
+        (&status, "status -5", Some("-5")),
+        (&status, "--kernel --", Some("--kernel")),
+        (&status, "status --kernel --", Some("--kernel")),
+    ];
+    let wrong = misnamed(&rows);
+    assert!(
+        wrong.is_empty(),
+        "{} of {} lines name the wrong argument:\n{}",
+        wrong.len(),
+        rows.len(),
+        wrong.join("\n")
+    );
+    let reading = read(&args(&["--=x", "cell", "list"]), COMMANDS);
+    let (command, code, _) = refused(&reading);
+    assert_eq!((command, code), ("cell.list", ClientCode::NotServed));
+    let help = help_text(&["cell", "list", "-", "--help"], COMMANDS);
+    assert!(
+        help.starts_with("Usage: plasmosome cell list [FLAGS]"),
+        "{help}"
+    );
+}
+
+#[test]
+fn the_form_flags_count_only_the_arguments_before_dashes() {
+    let status = status_served();
+    let rows: Vec<(&[Command], &[&str], &str, ClientCode)> = vec![
+        (
+            COMMANDS,
+            &["cell", "exec", "--human", "--", "tool", "--human"],
+            "cell.exec",
+            ClientCode::NotServed,
+        ),
+        (
+            COMMANDS,
+            &["cell", "exec", "--human", "--", "--json"],
+            "cell.exec",
+            ClientCode::NotServed,
+        ),
+        (
+            COMMANDS,
+            &["status", "--human", "--", "--human"],
+            "plasmosome.status",
+            ClientCode::NotServed,
+        ),
+        (
+            &status,
+            &["status", "--human", "--", "--human"],
+            "invalid",
+            ClientCode::InvalidArgument,
+        ),
+    ];
+    for (commands, line, command, code) in rows {
+        let reading = read(&args(line), commands);
+        let (named, refused_with, _) = refused(&reading);
+        let Reading::Refuse { form, .. } = &reading else {
+            panic!("{line:?} is refused");
+        };
+        assert_eq!(
+            (named, refused_with, *form),
+            (command, code, Form::Human),
+            "{line:?}"
+        );
+    }
+    assert_usage(
+        args(&["status", "--human", "--", "--human"]),
+        &status,
+        Some("--"),
+    );
 }
 
 #[test]

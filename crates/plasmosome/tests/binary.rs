@@ -384,6 +384,19 @@ fn usage_errors() {
     assert_usage(&plasmosome(&["frobnicate", "--frob"]), Some("frobnicate"));
     assert_usage(&plasmosome(&["--frob=x", "frobnicate"]), Some("--frob=x"));
     assert_usage(&plasmosome(&["-x=y", "cell", "list"]), Some("-x=y"));
+    assert_usage(&plasmosome(&["--"]), Some("--"));
+    assert_usage(&plasmosome(&["--", "--version"]), Some("--"));
+    assert_usage(&plasmosome(&["--", "--help"]), Some("--"));
+    assert_usage(
+        &run(
+            vec!["--".into(), OsString::from_vec(vec![b'a', 0xff, b'b'])],
+            |_| {},
+        ),
+        Some("--"),
+    );
+    assert_usage(&plasmosome(&["--kernel", "--"]), Some("--kernel"));
+    assert_usage(&plasmosome(&["--kernel=work"]), Some("--kernel=work"));
+    assert_usage(&plasmosome(&["--frob", "--kernel", "../x"]), Some("--frob"));
     assert_usage(
         &plasmosome(&["cell", "list", "--json", "--human", "--json"]),
         Some("--human"),
@@ -420,8 +433,21 @@ fn usage_errors() {
 }
 
 #[test]
+fn the_form_counts_only_the_arguments_before_dashes() {
+    let output = plasmosome(&["status", "--human", "--", "--human"]);
+    assert_eq!(code(&output), 2, "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let shown = text(&output.stderr);
+    assert!(shown.ends_with("\n(client not_served)\n"), "{shown:?}");
+}
+
+#[test]
 fn a_closed_stdout_is_local_io() {
-    for (flag, command) in [("--help", "--help"), ("--version", "--version")] {
+    for (flag, command) in [
+        ("--help", "--help"),
+        ("-h", "--help"),
+        ("--version", "--version"),
+    ] {
         let (reader, writer) = std::io::pipe().expect("a pipe");
         drop(reader);
         let output = run(vec![flag.into()], |process| {
