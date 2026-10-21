@@ -483,6 +483,7 @@ fn plasmid_new_names_the_first_fault_on_its_line() {
         (&["--kernel", "../x", "new", "demo"], "--kernel"),
         (&["--kernel", "a", "--frob", "new", "demo"], "--frob"),
         (&["--kernel", "a", "--frob=x", "new", "demo"], "--kernel"),
+        (&["--kernel", "a", "-x=1", "new", "demo"], "-x=1"),
         (&["--frob=x", "new", "demo"], "--frob=x"),
         (&["--json", "--human", "new", "demo"], "--json"),
         (&["new", "a", "b", "--json"], "b"),

@@ -205,10 +205,14 @@ fn a_command_help_says_whether_it_is_served() {
             "{arguments:?}: {stdout}"
         );
     }
-    let error = usage_error(&run(&["frobnicate", "--help"]));
-    assert_eq!(error["argument"], "frobnicate");
-    let error = usage_error(&run(&["add", "x", "y", "--help"]));
-    assert_eq!(error["argument"], "y");
+    for (arguments, argument) in [
+        (&["frobnicate", "--help"][..], "frobnicate"),
+        (&["--frob=x", "frobnicate", "--help"], "frobnicate"),
+        (&["add", "x", "y", "--help"], "y"),
+    ] {
+        let error = usage_error(&run(arguments));
+        assert_eq!(error["argument"], argument, "{arguments:?}");
+    }
 }
 
 fn command_help(command: &str) -> String {
@@ -230,11 +234,41 @@ fn help_is_read_from_a_value_and_up_to_a_bare_flag_it_does_not_know() {
             command_help("add"),
         ),
         (&["list", "--cell", "c1", "--help"], command_help("list")),
+        (
+            &["add", "my-thing", "--kernel", "work", "--help"],
+            command_help("add"),
+        ),
+        (
+            &["list", "--kernel", "work", "--help"],
+            command_help("list"),
+        ),
+        (
+            &["--kernel", "work", "add", "x", "--help"],
+            command_help("add"),
+        ),
     ] {
         let output = run(arguments);
         assert_eq!(output.status.code(), Some(0), "{arguments:?}: {output:?}");
         assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
         assert_eq!(text(&output.stdout), expected, "{arguments:?}");
+    }
+}
+
+#[test]
+fn only_an_unknown_flag_shaped_like_name_equals_value_is_read_past() {
+    for (arguments, named) in [(&["-x=1", "list"][..], "-x=1"), (&["-=", "list"], "-=")] {
+        let error = usage_error(&run(arguments));
+        assert_eq!(error["argument"], named, "{arguments:?}");
+    }
+    let binary = binary_help();
+    for arguments in [
+        &["-x=1", "list", "--help"][..],
+        &["-x=1", "add", "x", "y", "--help"],
+    ] {
+        let output = run(arguments);
+        assert_eq!(output.status.code(), Some(0), "{arguments:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+        assert_eq!(text(&output.stdout), binary, "{arguments:?}");
     }
 }
 
@@ -271,13 +305,20 @@ fn unserved_commands_refuse_with_not_served() {
         assert_not_served(&run(arguments), "plasmid.add");
     }
 
-    let output = run(&["add", "x", "--human"]);
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-    assert!(output.stdout.is_empty(), "{output:?}");
-    assert_eq!(
-        text(&output.stderr),
-        "plasmid add is not served by this build\n(client not_served)\n"
-    );
+    for arguments in [
+        &["add", "x", "--human"][..],
+        &["add", "x", "--cell", "c1", "--human"],
+        &["add", "my-thing", "--artifact", "reg/x@1", "--human"],
+    ] {
+        let output = run(arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}: {output:?}");
+        assert_eq!(
+            text(&output.stderr),
+            "plasmid add is not served by this build\n(client not_served)\n",
+            "{arguments:?}"
+        );
+    }
 
     for (arguments, named) in [
         (&["add", "x", "--json", "--human"][..], "--human"),
@@ -287,6 +328,11 @@ fn unserved_commands_refuse_with_not_served() {
         (&["add", "x", "--json", "--human", "--json"], "--human"),
         (&["add", "x", "--human", "--json", "--human"], "--json"),
         (&["add", "x", "--json", "--json", "--human"], "--json"),
+        (
+            &["add", "x", "--cell", "c1", "--json", "--human"],
+            "--human",
+        ),
+        (&["add", "x", "--frob", "--human", "--human"], "--human"),
         (&["--frob", "add", "x"], "--frob"),
         (&["--frob", "list"], "--frob"),
     ] {
@@ -324,10 +370,12 @@ fn usage_errors_are_invalid_envelopes() {
 #[test]
 fn the_full_parse_names_the_first_fault_on_the_line() {
     for (arguments, argument) in [
-        (&["frobnicate", "--", "x"][..], "frobnicate"),
+        (&["--"][..], "--"),
+        (&["frobnicate", "--", "x"], "frobnicate"),
         (&["--", "frobnicate"], "--"),
         (&["frobnicate", "--frob"], "frobnicate"),
         (&["--frob", "frobnicate"], "--frob"),
+        (&["--frob=x", "frobnicate"], "--frob=x"),
         (&["frobnicate", "--json", "--json"], "frobnicate"),
         (&["--json", "--json", "frobnicate"], "--json"),
         (&["frobnicate", "--json", "--human"], "frobnicate"),
