@@ -59,11 +59,11 @@ tests run in the Linux CI job, which is not a claim that Linux is supported.
 - Its logic lives in a new `crates/plasmosome-cli` package with `publish = false`, as decision
   009's trigger requires, and the binary stays a thin `main`. `plasmid` does not use that
   library while it is unpublished. Spec 010 keeps `plasmid` publishable and authorizes no
-  private dependency's release, and `cargo package -p plasmid` fails once `plasmid` depends on a
-  package that is not on crates.io (measured on #236 with a path dependency: exit 101). So
-  `plasmid` keeps its own envelope writer and argument reader until the owner answers open
-  question 6. Amended on 2026-10-21: this said `plasmid` would use the same library when it
-  served its first control verb.
+  private dependency's release, and `cargo package -p plasmid` fails once `plasmid` has a
+  normal dependency on a package that is not on crates.io (measured on #236 with a path
+  dependency: exit 101). So `plasmid` keeps its own envelope writer and argument reader until
+  the owner answers open question 6. Amended on 2026-10-21: this said `plasmid` would use the
+  same library when it served its first control verb.
 - The socket checks are not written twice. `plasmosome-cli` calls `plasmosome-core`'s
   `check_private_path` and `check_peer_uid` from PR #124. The UID that the socket
   owner and the peer must have is a parameter of `plasmosome-cli`'s functions. The binary always
@@ -156,24 +156,30 @@ exit 2 already fits section 4. It reports its own outcomes in prose on stderr, n
 envelopes, and section 4's client codes gain none for them. It exits 2 when it wrote the
 declaration; 1 when `<name>.toml` already exists or cannot be created, and nothing was written;
 and 3 when it created the file but could not finish it or print the sections it still needs, so
-the caller looks at the file before running it again. Only its command-line faults are
-`invalid` envelopes, exit 64. Amended on 2026-10-21: this did not say how `plasmid new` fails.
+the caller looks at the file before running it again. Section 4's exit 1 holds here with one
+caveat: nothing was written, but a repeat fails the same way for as long as `<name>.toml`
+exists. Only its command-line faults are `invalid` envelopes, exit 64. Amended on 2026-10-21:
+this did not say how `plasmid new` fails.
 
-Global flags may come before or after the command words, never after `--`: `--kernel NAME`,
+Global flags may come anywhere among the command words, never after `--`: `--kernel NAME`,
 `--socket PATH`, `--deadline-ms N`, `--json`, `--human`, and `-h` or `--help`. A flag given twice
 is a usage error, never last-one-wins. `--kernel`, `--socket` and `--deadline-ms` are usage
 errors on commands that reach no control socket (`plasmid new` and the registry commands), and
-`--json` and `--human` are usage errors on `plasmid new`.
+`--json` and `--human` are usage errors on `plasmid new`. Amended on 2026-10-21: this said
+global flags may come before or after the command words.
 
-The client reads its arguments in this order, and the first rule that applies decides. The
-**command words** are the words before `--` that are neither a flag nor a flag's value, read
-from the left. The argument after a flag that takes a value (`--kernel`, `--socket` and
-`--deadline-ms` today) is that flag's value, even when it starts with `-`; `--` is never a
-value. The reading passes over every flag this build knows (today the global flags and
-`--version`) with its value, and over an unknown flag written `--name=value`. It stops at any
-other unknown flag, such as `--frob` or `-x=1`. So the command words of `plasmid --frob=x add x`
-are `add x`, and `plasmid --frob add x` has none. Rules 1, 3 and 4 read the command words this
-way.
+The client reads its arguments in this order, and the first rule that applies decides. A
+**flag** is any argument before `--` that starts with `-`, `-` alone and `-5` included, unless
+it stands where a flag's value does. The argument after a flag that takes a value (`--kernel`,
+`--socket` and `--deadline-ms` today) is that flag's value, even when it starts with `-`; `--`
+is never a value. A known flag matches its name exactly, and its value is the next argument,
+so `--kernel=work` is an unknown flag. The **command words** are the words before `--` that are
+neither a flag nor a flag's value, read from the left. The reading passes over every flag this
+build knows (today the global flags and `--version`) with its value, and over an unknown flag
+that starts with `--` and holds `=`, such as `--frob=x`, `--kernel=work` or `--=x`. It stops at
+any other unknown flag, such as `--frob`, `-x=1` or `-`. So the command words of
+`plasmid --frob=x add x` are `add x`, and `plasmid --frob add x` has none. Rules 1, 3 and 4
+read the command words this way.
 
 1. **Help comes first.** `-h` or `--help` anywhere before `--` prints help and exits 0, whatever
    flags are on the line. It is read before any parse, so it counts even where a flag's value
@@ -182,8 +188,8 @@ way.
    that name a command, followed by no more than that command's positional arguments, print its
    help, served or not, so `plasmid add --help` prints the help of `add`. Words that name a
    group, such as `cell` or `registry`, list the group's commands. Any other words are a usage
-   error naming the first word that leaves the words naming no command or group, or the first
-   word past the command's positional arguments (`plasmid add x y z --help` names `y`).
+   error naming the first word at which the words stop naming a command or a group, or the
+   first word past the command's positional arguments (`plasmid add x y z --help` names `y`).
 2. **Version.** `--version` as the sole argument prints the version. Anywhere else before `--`,
    a flag's value position included, it is a usage error naming `--version`, whatever else is
    wrong on the line.
@@ -202,7 +208,7 @@ way.
 whole line. It judges each argument where it stands, against what the command words name, and
 the error's `argument` is the first argument found wrong, whatever its fault:
 
-- the first command word that leaves the words naming no command or group
+- the first command word at which the words stop naming a command or a group
   (`plasmosome cell frob` names `frob`), or a group's last word when no command word follows it
   (`plasmosome cell` names `cell`);
 - a word past the command's positional arguments, or a positional argument the command refuses
@@ -221,9 +227,9 @@ So `plasmosome frobnicate --frob` names `frobnicate`, and so does `frobnicate` f
 argument that is not UTF-8. A line wrong only for what it lacks, such as a command
 (`plasmosome --json`) or a name (`plasmid new`), names no argument. Rules 1 to 3 come before
 the scan, so `frobnicate --version` names `--version`. Amended on 2026-10-21: this did not
-define the command words, say that help is read before any parse and judges only words, say
-what repeated or conflicting form flags mean on a command not served, or say which argument a
-usage error names.
+define a flag or the command words, say that help is read before any parse and judges only
+words, say what repeated or conflicting form flags mean on a command not served, or say which
+argument a usage error names.
 
 When the client implements a command and the daemon answers `-32601`, that error is relayed and
 exits 2. The client never prints a result it did not receive, falls back to another verb, or
@@ -268,7 +274,9 @@ empty and the exit code is 0. The object is spec 020's envelope with one more ke
   spec 001's, and later specs', and change only when those specs change.
 
 On failure, stdout is empty, stderr is exactly one compact JSON line, and the exit code is the
-one section 4 gives. If stderr cannot be written either, only the exit code reports the failure.
+one section 4 gives, except `plasmid new`'s own outcomes, which are prose (section 2). If
+stderr cannot be written either, only the exit code reports the failure. Amended on 2026-10-21:
+this did not name that exception.
 
 ```json
 {"schema":1,"command":"plasmosome.status",
@@ -306,7 +314,11 @@ indented, one key per line. A failure prints the message, then a `fix:` line whe
 `fix`, then the domain and code in parentheses. Every string it prints, whatever its source,
 shows each terminal control as `<U+XXXX>`. Streams and exit codes are those of the JSON form. The
 human form is not a stable interface, and nothing may parse it. `--json` names the JSON form;
-`--json` together with `--human` is a usage error.
+`--json` together with `--human` is a usage error. A line chooses the human form only when it
+holds `--human` once and `--json` not at all, a flag's value aside. On every other line each
+envelope is JSON, the usage error included, so a line with `--human` twice, or with both
+flags, is refused in JSON. Amended on 2026-10-21: this did not say which form such a line
+gets.
 
 Three commands print something other than an envelope on stdout: `--help`, `--version`
 (section 6) and `plasmid new` (spec 011).
@@ -418,11 +430,13 @@ wins.
 
 A name is valid UTF-8, follows `plasmosome-core`'s `InstanceName` rules (not empty; no `/`,
 backslash or NUL; not `.` or `..`), and contains no terminal control (section 3). It is checked
-before any path is built; a bad name from the flag or the variable is a usage error naming its
-source. Rules 2 to 4 need `$HOME` to be an absolute, normal UTF-8 path; otherwise the command
-exits 2 with `invalid_home`. A trailing `/` on `$HOME` counts as normal and is dropped before the
-path is built; any other empty component does not. The client never falls back to another home
-directory, the password database included.
+before any path is built, and a bad name is a usage error. From `--kernel`, its `argument` is
+the name given, as section 2 names a value its flag refuses. From `PLASMOSOME_KERNEL`, which no
+argument holds, its `argument` is `PLASMOSOME_KERNEL`. Rules 2 to 4 need `$HOME` to be an
+absolute, normal UTF-8 path; otherwise the command exits 2 with `invalid_home`. A trailing `/`
+on `$HOME` counts as normal and is dropped before the path is built; any other empty component
+does not. The client never falls back to another home directory, the password database
+included. Amended on 2026-10-21: this said a bad name is a usage error naming its source.
 
 When the client knows a name, it sends it in the verb's instance parameter (`name` for
 `plasmosome.*`, `kernel` otherwise), so a daemon configured under another name refuses with
@@ -510,8 +524,10 @@ the socket path for `check_private_path`, or `instances/` for `list_trusted_dir`
 `peer_mismatch`'s `path` is the socket path, and its `uid` is the trusted UID. Its `peer_uid` is
 `PeerMismatch`'s `found`; `PeerCredentials` gives no `peer_uid`, because the UID could not be
 read. `socket_path_too_long`'s `max_bytes` is `PathTooLong`'s `max`. `local_io` carries `Io`'s
-`path` and `errno`. `invalid_argument` names `--socket` as its `argument`. Each code carries
-only the fields the client-code table lists for it.
+`path` and `errno`. `invalid_argument`, for `BadPath` from `--socket`, names the path given as
+its `argument`, as section 2 names a value its flag refuses. Each code carries only the fields
+the client-code table lists for it. Amended on 2026-10-21: this named `--socket` as the
+`argument`.
 
 Amended on 2026-10-21: this table was pinned to #124's draft head `33f2eb6`. It named
 `NotAbsolute`, which is now `BadPath`, and `Missing`, which is now `NoDirectory` and `NoSocket`.
@@ -553,6 +569,9 @@ These rules hold for `plasmosome`, `plasmosomed`, `membraned` and `plasmid`.
   `plasmosome --help` and `plasmid --help` list every command of theirs in section 2's table,
   each marked served or not served in this build, with the global flags, `PLASMOSOME_KERNEL` and
   the exit-code table. For these two binaries, section 2's reading order applies.
+- When help or the version cannot be written to stdout, `plasmosome` and `plasmid` exit 1 with
+  `local_io` on stderr, as section 3 says. That failure is the one exception to the exit 0 and
+  the empty stderr above. Amended on 2026-10-21: this did not name that exception.
 - For the daemons, `-h`, `--help` and `--version` count only as the sole argument. Every other
   sole argument is still a configuration path, so a file named `--version` is passed as
   `./--version`, as `./--help` already is. `membraned` also accepts exactly the three arguments
@@ -622,24 +641,32 @@ on Linux they are deferred with the platform.
 3. `plasmid add x`, `plasmid list`, `plasmid remove x`, `plasmid reload x` and `plasmid renew x`
    each exit 2 with one JSON envelope on stderr whose `error.code` is `not_served` and whose
    `command` and `method` are the wire method. `plasmid add x --help` and `plasmid add --help`
-   exit 0 with help saying `add` is not served. Catches: leaving them unknown verbs, which now
-   exit 64. Amended on 2026-10-21: this did not name `renew`, or help given fewer words than the
+   exit 0 with the help of `add`, not the binary's: it starts with `add`'s own usage line,
+   `plasmid add <name>`, and says `add` is not served. Catches: leaving them unknown verbs,
+   which now exit 64, and the binary's help printed for a command given fewer words than it
+   takes. Amended on 2026-10-21: this did not name `renew`, or help given fewer words than the
    command takes.
 4. `plasmid frobnicate`, bare `plasmid` and `plasmid help` each exit 64 with one `invalid`
    envelope; for `frobnicate`, `argument` is `frobnicate`. An argument holding a double quote,
    ESC and U+009B comes back in `argument` as the same string, with no raw control.
    `plasmid new x` still exits 2; `plasmid new x --kernel a` and `plasmid new x --human` exit 64.
-   `plasmid --kernel a new demo` names `--kernel`, `plasmid add x --json --human --json` names
-   `--human`, and bare `plasmid --` names `--`. `plasmid --kernel --help` prints help, and
+   `plasmid --kernel a new demo` and `plasmid --kernel a new Demo` name `--kernel`;
+   `plasmid --json --human new demo` names `--json`; `plasmid --json --human frobnicate` names
+   `--human`; `plasmid frobnicate --frob` names `frobnicate`, and so does `plasmid frobnicate`
+   followed by an argument that is not UTF-8; `plasmid add x y --help` names `y`;
+   `plasmid add x --json --human --json` names `--human`; and bare `plasmid --` and
+   `plasmid -- --help` name `--`. `plasmid --kernel --help` prints help, and
    `plasmid add x --kernel --human` is refused with `not_served` in JSON. Catches: prose usage
-   errors, hand-built JSON that breaks on a quote, raw controls, a fault named out of order, and
-   a flag's value read as a flag. Amended on 2026-10-21: this did not check which argument a
-   usage error names, or a flag's value position.
+   errors, hand-built JSON that breaks on a quote, raw controls, a fault named out of order or
+   one kind of fault judged before another, help read after `--`, and a flag's value read as a
+   flag. Amended on 2026-10-21: this did not check which argument a usage error names, or a
+   flag's value position.
 5. `--help` on each binary exits 0 with empty stderr. `plasmid --help` lists `new`, `list`, `add`,
    `remove`, `reload` and `renew` with their served marks. With stdout a pipe whose reader has
-   exited, `plasmid --help` and `plasmid --version` exit 1 with `local_io` under `command`
-   `--help` and `--version`. Catches: a hidden command, and a closed stdout that panics or
-   prints prose. Amended on 2026-10-21: this did not name `renew` or check a closed stdout.
+   exited, `plasmid --help` and `plasmid -h` exit 1 with `local_io` under `command` `--help`,
+   and `plasmid --version` under `command` `--version`. Catches: a hidden command, a closed stdout
+   that panics or prints prose, and `-h` reported under another `command`. Amended on 2026-10-21:
+   this did not name `renew` or check a closed stdout.
 
 **Task B.**
 
@@ -737,12 +764,15 @@ on Linux they are deferred with the platform.
     `PLASMOSOME_KERNEL=../x`; `--kernel` holding ESC; `PLASMOSOME_KERNEL` set to the empty
     string; a relative `--socket`; `--socket /a//b/control.uds`; `--deadline-ms 0` and
     `3600001`; a non-UTF-8 argument; `--json` with `--human`; `--version` after a command;
-    `--help` after words that name no command. `frobnicate --frob` names `frobnicate`,
-    `status --kernel ../x extra` names `../x`, `--kernel --` names `--kernel`, bare `--` and
-    `-- --version` name `--`, and a non-UTF-8 argument is named with U+FFFD for its invalid
-    bytes. Catches: last-one-wins, traversal through a name, an oversized deadline panicking, an
-    empty variable falling through, a fault named per pass instead of leftmost, and `--` read
-    as a value. Amended on 2026-10-21: this did not check which argument each names.
+    `--help` after words that name no command. `frobnicate --frob` names `frobnicate`, and so
+    does `frobnicate` followed by an argument that is not UTF-8; `status --frob extra` and
+    `--frob --kernel ../x` name `--frob`; `status --kernel ../x extra` names `../x`;
+    `--kernel --` names `--kernel`; bare `--`, `-- --version` and `-- --help` name `--`; and a
+    non-UTF-8 argument is named as section 2 says, with each invalid byte sequence replaced by
+    U+FFFD. Catches: last-one-wins, traversal through a name, an oversized deadline panicking, an
+    empty variable falling through, a fault named per pass instead of leftmost, a UTF-8 check
+    run before the scan, help read after `--`, and `--` read as a value. Amended on 2026-10-21:
+    this did not check which argument each names.
 22. `plasmosome cell list` exits 2 with `not_served` and `method` `cell.list`, without
     connecting, even with an invalid `PLASMOSOME_KERNEL`. `plasmosome registry search` exits 2
     with `not_served`, `command` `search` and no `method`. `plasmosome cell list --help` exits 0
@@ -851,8 +881,10 @@ every other client code and every registry refusal exits2." with
 > may have been received, and 1 otherwise. Every other client code and every registry refusal
 > exits 2.
 
-Why: one binary should have one exit table. Spec 020's output default is not amended; open
-question 4 asks about it.
+Why: one binary should have one exit table. Spec 020's output default for a served command's
+result is not amended; open question 4 asks about it. The client's own refusals are JSON by
+default on every command, registry commands included (section 3). Amended on 2026-10-21: this
+said spec 020's output default was not amended, and did not name the client's own refusals.
 
 **Not amended.** Spec 010: its "After the name-holding delivery" section already lets
 `crates/plasmosome` gain a binary (open question 5). Decision 009: it already says where client
@@ -873,18 +905,20 @@ logic goes when its trigger fires. Spec 011: `plasmid new` keeps its exit 2. Spe
    needs amendments to both accepted specs. Keep the split, or merge?
 4. **The output default.** This spec makes JSON the default for its commands, whatever the
    terminal, so an agent never needs a flag. Spec 020 makes the human form the default for
-   registry commands, in the same binary. Should one default hold for both, and which?
+   registry commands, in the same binary. Should one default hold for every served command's
+   result, and which? The client's own refusals are JSON by default whatever the answer
+   (section 3). Amended on 2026-10-21: this did not set the client's own refusals apart.
 5. **Is `status` alone a usable tool?** Spec 010 lets `crates/plasmosome` gain a binary once there
    is a usable tool to install. Task B serves one command. Is that enough, or should the binary
    wait for a command that changes state? Until the owner answers, this spec proceeds on yes:
    Task B adds the binary with `status`.
 6. **Do the published binaries share `plasmosome-cli`?** Spec 010 keeps `plasmosome` and
    `plasmid` publishable, while `plasmosome-cli` and `plasmosome-core` are `publish = false`, and
-   a package cannot be published with a dependency that is not. Should those two libraries be
-   published, so that both binaries can use them, or should each published binary keep its
-   client code to itself? Until the owner answers, `plasmid` keeps its own (section 1). The
-   `plasmosome` binary calls `plasmosome-cli` (section 1), so the same answer decides how that
-   package is published. Amended on 2026-10-21: this list had five questions.
+   a package cannot be published with a normal dependency that is not. Should those two
+   libraries be published, so that both binaries can use them, or should each published binary
+   keep its client code to itself? Until the owner answers, `plasmid` keeps its own (section 1).
+   The `plasmosome` binary calls `plasmosome-cli` (section 1), so the same answer decides how
+   that package is published. Amended on 2026-10-21: this list had five questions.
 
 ## Requests to specs 022, 023 and 024
 
