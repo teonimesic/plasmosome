@@ -71,9 +71,13 @@ to say **what the plasmid is for**, and nowhere to say **what a tool does** — 
 like `pr.read`, and the intended consumer of that list is a model, which cannot choose from a bare
 name. Both fields are required rather than optional, because an optional purpose field is one
 nobody fills in and a registry of blanks is worse than none. The third gap is named and left:
-a requirement is a capability name with no version range, while the kernel underneath already
-selects a version across competing providers. How an author writes a range, and how a conflict is
-explained to them, is its own spec.
+a requirement is a capability name with no version range, and nothing selects a version across
+competing providers. A local plasmid's requirement is met by an attached provider or by exactly one
+listed candidate (spec 022 §5), and spec 020 binds a registry plasmid's required keys to pinned
+provider releases. How an author writes a range, and how a conflict is explained to them, is its own
+spec. Amended on 2026-10-21: this said the kernel underneath already selects a version across
+competing providers. `plasmosome-core` has a `select_version` function that would pick one, but
+nothing calls it outside its own tests.
 
 ### What the author never writes
 
@@ -658,13 +662,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **The delivery modes, the consumer set and the pairing rules.** Unchanged. What this spec
   changes about the credential grammar is one thing only — that `delivery` may be omitted — and
   that change is named as an amendment above rather than claimed as untouched.
-- **Capability requirement and version selection between plasmids.** The kernel already selects a
-  version across providers; how an author writes a version range and how a conflict is explained
-  to them is its own question and its own spec.
+- **Capability requirement and version selection between plasmids.** Nothing selects a version
+  across providers yet (Behavior); how an author writes a version range and how a conflict is
+  explained to them is its own question and its own spec. Amended on 2026-10-21: this said the
+  kernel already selects a version across providers.
 - **The `[commands]` section's shape.** Reserved in spec 001; an author declaring a command still
   writes it as it stands today.
 - **How attached software becomes visible inside a cell.** A plasmid's software is not copied
   into a running cell: attach makes it visible, detach stops making it visible, and the layout
   that gives a later attach somewhere to land is prepared when the cell is created. All of that
-  is the kernel's, none of it is the author's to write, and its spec belongs to the isolation
-  work under intent 011.
+  is the kernel's, none of it is the author's to write, and spec 027 specifies it.

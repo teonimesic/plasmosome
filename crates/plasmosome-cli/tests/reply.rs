@@ -3,7 +3,7 @@ use std::io::{self, BufRead, Read};
 
 use plasmosome_cli::json::{Json, MAX_REPLY_BYTES, Number, scan, write_compact};
 use plasmosome_cli::reply::{
-    ReadFailure, Reply, judge_reply, kernel_exit, read_reply, request_line, unanswered,
+    ReadFailure, Reply, cut_off, judge_reply, kernel_exit, read_reply, request_line, unanswered,
 };
 use plasmosome_cli::{ClientCode, ClientError, Envelope, ErrorBody, Form, KernelError, emit};
 
@@ -665,6 +665,74 @@ fn unanswered_by_state_change() {
         );
         assert!(!error.message().is_empty(), "{label}");
     }
+}
+
+const EPIPE: i32 = 32;
+
+#[test]
+fn cut_off_by_state_change() {
+    let cases = [
+        (
+            io::ErrorKind::TimedOut.into(),
+            false,
+            "no_reply",
+            "deadline",
+            1,
+        ),
+        (
+            io::ErrorKind::WouldBlock.into(),
+            false,
+            "no_reply",
+            "deadline",
+            1,
+        ),
+        (
+            io::Error::from_raw_os_error(EPIPE),
+            false,
+            "no_reply",
+            "transport",
+            1,
+        ),
+        (
+            io::ErrorKind::TimedOut.into(),
+            true,
+            "outcome_unknown",
+            "deadline",
+            3,
+        ),
+        (
+            io::Error::from_raw_os_error(EPIPE),
+            true,
+            "outcome_unknown",
+            "transport",
+            3,
+        ),
+    ];
+    for (error, changes_state, code, cause, exit) in cases {
+        let cut = cut_off(&error, changes_state);
+        let label = format!("{error:?} with changes_state {changes_state}");
+        assert_eq!(cut.code().as_str(), code, "{label}");
+        assert_eq!(cut.code().exit().code(), exit, "{label}");
+        assert_eq!(
+            cut.fields(),
+            [("cause".to_string(), text(cause))].as_slice(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn a_cut_off_write_names_its_error_in_the_message() {
+    let error = io::Error::from_raw_os_error(EPIPE);
+    let message = cut_off(&error, false).message().to_string();
+    assert_eq!(
+        message,
+        format!(
+            "writing the request failed after part of it was sent: {error}; nothing can have \
+             changed"
+        )
+    );
+    assert!(message.contains("os error 32"), "{message}");
 }
 
 #[test]
