@@ -1020,6 +1020,28 @@ fn the_test_commit_is_marked_uncommitted_for_an_untracked_or_a_changed_file() {
 }
 
 #[test]
+fn the_test_commit_sees_an_untracked_file_in_a_repository_set_to_hide_them() {
+    let repo = tempfile::tempdir().expect("a directory for a repository");
+    scratch_git(repo.path(), &["init", "-q"]);
+    scratch_git(repo.path(), &["config", "status.showUntrackedFiles", "no"]);
+    write_file(&repo.path().join("tracked"), b"tracked\n", 0o644);
+    scratch_git(repo.path(), &["add", "tracked"]);
+    scratch_git(repo.path(), &["commit", "-q", "-m", "one"]);
+    let head = commit_at(repo.path());
+
+    write_file(
+        &repo.path().join(".cargo").join("config.toml"),
+        b"[build]\nrustflags = [\"--cfg\", \"untracked\"]\n",
+        0o644,
+    );
+
+    assert_eq!(
+        commit_at(repo.path()),
+        format!("{head} with uncommitted changes")
+    );
+}
+
+#[test]
 #[ignore = "reads the records the gate lanes and the re-runs wrote"]
 fn write_the_results_file() {
     let records = read_records();
