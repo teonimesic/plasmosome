@@ -408,16 +408,27 @@ fn a_verdict_no_row_reads_is_marked_in_its_runs_section_with_the_runs_its_row_re
             ("M1", Verdict::Pass),
             ("M2", Verdict::Fail("EROFS, not EACCES".to_string())),
             ("M9", Verdict::Pass),
+            ("M6", Verdict::Pass),
+            ("M7", Verdict::Fail("e".to_string())),
         ],
     );
     real.counts.insert("M9".to_string(), "3 of 3".to_string());
+    let m6 = row("M6", vec![run("one", Expect::Pass)]);
+    let m7 = row(
+        "M7",
+        vec![
+            run("a", Expect::Pass),
+            run("b", Expect::Fail),
+            run("c", Expect::Fail),
+        ],
+    );
     let records = [
         real,
         record("simplified", &[("M1", Verdict::Fail("c".to_string()))]),
         record("ro", &[("M2", Verdict::Fail("d".to_string()))]),
     ];
 
-    let text = render("", &[m1(), m2], &records);
+    let text = render("", &[m1(), m2, m6, m7], &records);
 
     let verdicts = |run: &str| -> Vec<String> {
         section_of(&text, run)
@@ -431,6 +442,8 @@ fn a_verdict_no_row_reads_is_marked_in_its_runs_section_with_the_runs_its_row_re
         [
             "- M1: pass",
             "- M2: fail: EROFS, not EACCES (no row reads this verdict; M2 reads `plain` and `ro`)",
+            "- M6: pass (no row reads this verdict; M6 reads `one`)",
+            "- M7: fail: e (no row reads this verdict; M7 reads `a`, `b` and `c`)",
             "- M9: pass (3 of 3) (no row reads this verdict)",
         ],
         "{text}"

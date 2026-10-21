@@ -972,6 +972,16 @@ fn the_test_commit_is_marked_uncommitted_for_an_untracked_or_a_changed_file() {
             .expect("git runs");
         assert!(status.success(), "git {args:?}");
     };
+    write_file(
+        &repo.path().join(".git"),
+        b"gitdir: no-such-directory\n",
+        0o644,
+    );
+    assert!(
+        commit_at(repo.path()).ends_with(" with uncommitted changes"),
+        "a directory git cannot read is not clean"
+    );
+    fs::remove_file(repo.path().join(".git")).expect("the .git file is removed");
     git(&["init", "-q"]);
     write_file(&repo.path().join("tracked"), b"tracked\n", 0o644);
     git(&["add", "tracked"]);
