@@ -713,6 +713,7 @@ mod tests {
         let stranger = effective_uid().wrapping_add(1);
         let listener = RuntimeListener::bind_trusting(&path, stranger).unwrap();
         let mut client = UnixStream::connect(path.as_path()).unwrap();
+        client.set_read_timeout(Some(PATIENCE)).unwrap();
         client.write_all(b"hello").unwrap();
         let taken = taken_within(&listener);
         assert!(
@@ -720,7 +721,6 @@ mod tests {
             "a peer of another uid is not handed out: {taken:?}"
         );
         drop(taken);
-        client.set_read_timeout(Some(PATIENCE)).unwrap();
         let mut byte = [0u8; 1];
         let read = client.read(&mut byte).map_err(|error| error.kind());
         assert!(
