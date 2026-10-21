@@ -60,6 +60,12 @@ fn main() -> ExitCode {
     if let Some(cell) = standin_cell(&arguments) {
         standin::run(&arguments, cell)
     }
+    if std::env::vars_os().next().is_none() {
+        eprintln!(
+            "supervisor_start: an empty environment without spec 023's argv is a broken start, not a test run"
+        );
+        standin::exit(2)
+    }
     if let Some(root) = std::env::var_os(CONTROLLER) {
         child_controller(Path::new(&root))
     }
@@ -1193,7 +1199,7 @@ mod standin {
     }
 
     #[allow(unsafe_code)]
-    fn exit(code: i32) -> ! {
+    pub(super) fn exit(code: i32) -> ! {
         // SAFETY: _exit takes an integer. It skips the exit handlers, so a stand-in started with an
         // empty environment writes no coverage profile into the working directory.
         unsafe { libc::_exit(code) }
