@@ -886,7 +886,7 @@ pub(crate) mod fixtures {
         pub(crate) fn walkable_from_root() -> TestRoot {
             let euid = effective_uid();
             let mut refusals = Vec::new();
-            for base in walkable_bases() {
+            for base in root_bases() {
                 let dir = match tempfile::Builder::new().prefix("nf").tempdir_in(&base) {
                     Ok(dir) => dir,
                     Err(error) => {
@@ -908,20 +908,43 @@ pub(crate) mod fixtures {
             }
             panic!(
                 "no base holds a test root the walk from / accepts; on macOS the base is the \
-                 per-user temp directory, on Linux XDG_RUNTIME_DIR, else the test binary's \
-                 directory:\n{}",
+                 per-user temp directory that confstr(_CS_DARWIN_USER_TEMP_DIR) names, on Linux \
+                 XDG_RUNTIME_DIR, else the test binary's directory:\n{}",
                 refusals.join("\n")
             );
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn walkable_bases() -> Vec<PathBuf> {
-        vec![std::env::temp_dir()]
+    #[allow(unsafe_code)]
+    pub(crate) fn root_bases() -> Vec<PathBuf> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: `buffer` is a live Vec of buffer.len() bytes, and confstr writes at most that
+        // many.
+        let length = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        assert!(
+            length > 1 && length <= buffer.len(),
+            "confstr(_CS_DARWIN_USER_TEMP_DIR) returned {length}"
+        );
+        buffer.truncate(length - 1);
+        let base = PathBuf::from(OsStr::from_bytes(&buffer));
+        vec![
+            base.canonicalize()
+                .unwrap_or_else(|error| panic!("{} does not resolve: {error}", base.display())),
+        ]
     }
 
     #[cfg(target_os = "linux")]
-    fn walkable_bases() -> Vec<PathBuf> {
+    pub(crate) fn root_bases() -> Vec<PathBuf> {
         let mut bases: Vec<PathBuf> = std::env::var_os("XDG_RUNTIME_DIR")
             .filter(|base| !base.is_empty())
             .map(PathBuf::from)
