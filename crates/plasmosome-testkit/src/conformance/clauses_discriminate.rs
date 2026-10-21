@@ -7,8 +7,8 @@ use super as conformance;
 use crate::builders::{broker, mount, proxy_map, session_file, uds_socket};
 use plasmosome_backend::{
     BackendError, Capability, CellId, CellOwner, CompositeBackend, DrainSpec, EnforcementBackend,
-    FileAccess, GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy,
-    UniverseClass, UniverseOp, UniverseRemoval,
+    EnforcementSnapshot, FileAccess, GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState,
+    PluginId, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +95,8 @@ enum Defect {
     RefusalSwapsItsAddress(Call),
     UnknownRevokeTidiesResidue,
     RefusedEffectLandsLate(Call),
+    SnapshotOmitsIssuedRecords,
+    SnapshotReconstructsGrantsFromObjects,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,6 +332,29 @@ impl DefectiveBackend {
             ));
         }
         Ok(())
+    }
+
+    fn standing(&mut self) -> OsState {
+        if self.mirrors_its_ledger() {
+            return self.mirrored_state();
+        }
+        let mut observed = self.state.clone();
+        for object in self.landed_effects.borrow().iter() {
+            let _ = observed.insert(object.clone());
+        }
+        let pending = std::mem::take(&mut *self.pending_effects.borrow_mut());
+        self.landed_effects.borrow_mut().extend(pending);
+        observed
+    }
+
+    fn record_rebuilt_from(&self, object: &OsObject) -> LedgerEntry {
+        let handle = object.operation().handle();
+        self.ledger.get(&handle).cloned().unwrap_or(LedgerEntry {
+            handle,
+            owner: object.owner.clone(),
+            capability: object.capability.clone(),
+            kind: GrantKind::Hot,
+        })
     }
 
     fn mirrored_state(&self) -> OsState {
@@ -851,20 +876,20 @@ impl EnforcementBackend for DefectiveBackend {
         Ok(entry)
     }
 
-    fn snapshot_os_state(&self) -> OsState {
+    fn snapshot_os_state(&mut self) -> Result<EnforcementSnapshot, BackendError> {
         if self.defect == Defect::SnapshotPanicsLikeAssertion {
             std::panic::panic_any(ASSERTION_SHAPED_INFRASTRUCTURE_PANIC);
         }
-        if self.mirrors_its_ledger() {
-            return self.mirrored_state();
-        }
-        let mut observed = self.state.clone();
-        for object in self.landed_effects.borrow().iter() {
-            let _ = observed.insert(object.clone());
-        }
-        let pending = std::mem::take(&mut *self.pending_effects.borrow_mut());
-        self.landed_effects.borrow_mut().extend(pending);
-        observed
+        let state = self.standing();
+        let grants = match self.defect {
+            Defect::SnapshotOmitsIssuedRecords => Vec::new(),
+            Defect::SnapshotReconstructsGrantsFromObjects => state
+                .objects()
+                .map(|object| self.record_rebuilt_from(object))
+                .collect(),
+            _ => self.ledger.values().cloned().collect(),
+        };
+        EnforcementSnapshot::new(state, grants, Vec::new())
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
@@ -1361,7 +1386,7 @@ fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
                 let entry = backend
                     .grant(request.operation.clone(), request.kind)
                     .unwrap();
-                let snapshot = backend.snapshot_os_state();
+                let snapshot = backend.standing();
                 let object = snapshot
                     .objects()
                     .find(|held| held.id == entry.handle.id)
@@ -1407,7 +1432,7 @@ fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
                 )
             );
             let returned = revoking.revoke(entry.handle, DrainSpec::forcing()).unwrap();
-            let snapshot = revoking.snapshot_os_state();
+            let snapshot = revoking.standing();
             assert!(
                 !snapshot.objects().any(|held| held.id == entry.handle.id),
                 "a revoke must withdraw the object: {prepared:?}"
@@ -1929,7 +1954,7 @@ fn a_replacing_grant_takes_over_only_its_own_change_to_an_object_of_its_own_orig
                         expected.insert(standing.object()).unwrap();
                     }
                     assert_eq!(
-                        backend.snapshot_os_state(),
+                        backend.standing(),
                         expected,
                         "{defect:?} {origin:?} {requested:?}"
                     );
@@ -1991,7 +2016,7 @@ fn a_conflict_that_withdraws_a_live_grant_keeps_its_record_and_a_later_apply_hid
         for bystander in &bystanders {
             expected.insert(bystander.object()).unwrap();
         }
-        assert_eq!(backend.snapshot_os_state(), expected, "{defect:?}");
+        assert_eq!(backend.standing(), expected, "{defect:?}");
         assert_eq!(
             backend.ledger.get(&entry.handle),
             Some(&entry),
@@ -2000,7 +2025,7 @@ fn a_conflict_that_withdraws_a_live_grant_keeps_its_record_and_a_later_apply_hid
         backend.apply(live.clone()).unwrap();
         assert!(
             backend
-                .snapshot_os_state()
+                .standing()
                 .objects()
                 .any(|held| *held == live.object()),
             "{defect:?}"
@@ -2025,13 +2050,13 @@ fn an_unknown_revoke_at_an_empty_address_tidies_only_residue_and_still_refuses()
     backend.apply(applied.clone()).unwrap();
     let residue = conformance::op_for(GrantId::new(), owner(), mount("/src", "/residue")).object();
     backend.plant(residue.clone()).unwrap();
-    let all = backend.snapshot_os_state();
+    let all = backend.standing();
     let at_residue = residue.operation().handle();
     assert_eq!(
         backend.revoke(at_residue, DrainSpec::forcing()),
         Err(BackendError::UnknownHandle { handle: at_residue })
     );
-    assert_eq!(backend.snapshot_os_state(), all);
+    assert_eq!(backend.standing(), all);
     let nowhere = conformance::op_for(GrantId::new(), owner(), mount("/src", "/none")).handle();
     assert_eq!(
         backend.revoke(nowhere, DrainSpec::forcing()),
@@ -2040,7 +2065,7 @@ fn an_unknown_revoke_at_an_empty_address_tidies_only_residue_and_still_refuses()
     let mut expected = OsState::new();
     expected.insert(granted.object()).unwrap();
     expected.insert(applied.object()).unwrap();
-    assert_eq!(backend.snapshot_os_state(), expected);
+    assert_eq!(backend.standing(), expected);
 }
 
 #[test]
@@ -2058,7 +2083,7 @@ fn a_refused_grant_that_keeps_a_record_changes_no_state_and_returns_the_refusal(
         backend.grant(invalid.clone(), GrantKind::Hot),
         Err(BackendError::InvalidOperation { .. })
     ));
-    assert!(backend.snapshot_os_state().is_empty());
+    assert!(backend.standing().is_empty());
     assert!(backend.ledger.contains_key(&invalid.handle()));
 
     let standing = conformance::op_for(
@@ -2068,12 +2093,12 @@ fn a_refused_grant_that_keeps_a_record_changes_no_state_and_returns_the_refusal(
     );
     let mut backend = DefectiveBackend::carrying(Defect::AConflictingGrantKeepsARecord);
     backend.apply(standing.clone()).unwrap();
-    let before = backend.snapshot_os_state();
+    let before = backend.standing();
     assert_eq!(
         backend.grant(standing.clone(), GrantKind::Hot),
         Err(identity_conflict(standing.handle()))
     );
-    assert_eq!(backend.snapshot_os_state(), before);
+    assert_eq!(backend.standing(), before);
     assert!(backend.ledger.contains_key(&standing.handle()));
 }
 
@@ -2191,7 +2216,7 @@ fn a_recovery_log_carries_grants_and_revokes_into_the_next_instance() {
     let mut second = make();
     let mut expected = OsState::new();
     expected.insert(kept.operation.object()).unwrap();
-    assert_eq!(second.snapshot_os_state(), expected);
+    assert_eq!(second.standing(), expected);
     assert_eq!(
         second.revoke(kept_entry.handle, DrainSpec::forcing()),
         Ok(kept_entry)
@@ -2288,7 +2313,7 @@ fn a_one_class_invalid_operation_defect_accepts_only_its_own_class_through_its_o
                         "{class:?} {defective:?} {call:?}"
                     );
                     assert_eq!(
-                        !backend.snapshot_os_state().is_empty(),
+                        !backend.standing().is_empty(),
                         accepted,
                         "{class:?} {defective:?} {call:?}"
                     );
@@ -2357,7 +2382,7 @@ fn an_occupied_address_defect_changes_only_its_own_call() {
                         "{defect:?} through {call:?}: {outcome:?}"
                     );
                 }
-                assert_eq!(backend.snapshot_os_state(), expected, "{defect:?} {call:?}");
+                assert_eq!(backend.standing(), expected, "{defect:?} {call:?}");
                 assert_eq!(backend.ledger.get(&entry.handle), Some(&entry));
             }
         }
@@ -2396,7 +2421,7 @@ fn a_one_class_leak_or_rollback_changes_only_its_own_class_through_its_own_call(
                         Err(conformance::invalid_refusal(&fresh))
                     );
                     assert_eq!(
-                        !leaking.snapshot_os_state().is_empty(),
+                        !leaking.standing().is_empty(),
                         own,
                         "{class:?} {defective:?} {call:?} {capability:?}"
                     );
@@ -2414,7 +2439,7 @@ fn a_one_class_leak_or_rollback_changes_only_its_own_class_through_its_own_call(
                         Err(conformance::invalid_refusal(&occupied))
                     );
                     assert_eq!(
-                        clearing.snapshot_os_state().is_empty(),
+                        clearing.standing().is_empty(),
                         own,
                         "{class:?} {defective:?} {call:?} {capability:?}"
                     );
@@ -2448,10 +2473,7 @@ fn a_swapping_refusal_changes_only_an_occupied_address_through_its_own_call() {
                 call_with(&mut backend, call, &fresh),
                 Err(conformance::invalid_refusal(&fresh))
             );
-            assert!(
-                backend.snapshot_os_state().is_empty(),
-                "{defective:?} {call:?}"
-            );
+            assert!(backend.standing().is_empty(), "{defective:?} {call:?}");
             let standing = conformance::hot_grant(owner(), &capability);
             backend
                 .grant(standing.operation.clone(), standing.kind)
@@ -2467,11 +2489,7 @@ fn a_swapping_refusal_changes_only_an_occupied_address_through_its_own_call() {
             } else {
                 expected.insert(standing.operation.object()).unwrap();
             }
-            assert_eq!(
-                backend.snapshot_os_state(),
-                expected,
-                "{defective:?} {call:?}"
-            );
+            assert_eq!(backend.standing(), expected, "{defective:?} {call:?}");
         }
     }
 }
@@ -2499,7 +2517,7 @@ fn an_invalid_operation_defect_mishandles_only_its_own_call_in_its_own_way() {
                     "{defect:?} through {call:?}: {outcome:?}"
                 );
                 assert_eq!(
-                    !backend.snapshot_os_state().is_empty(),
+                    !backend.standing().is_empty(),
                     changed,
                     "{defect:?} through {call:?}"
                 );
@@ -2559,7 +2577,7 @@ fn the_endpoint_guard_refuses_another_launch_at_either_socket_of_a_standing_brok
         for capability in &accepted {
             create(capability).unwrap();
         }
-        assert_eq!(backend.snapshot_os_state().len(), 3);
+        assert_eq!(backend.standing().len(), 3);
         let planted = conformance::hot_grant(conformance::second_owner(), &refused[0]);
         backend.plant(planted.operation.object()).unwrap();
     }
@@ -2634,8 +2652,8 @@ fn a_late_effect_shows_from_the_second_read_after_its_own_call() {
                 call_with(&mut backend, call, &invalid),
                 Err(conformance::invalid_refusal(&invalid))
             );
-            assert!(backend.snapshot_os_state().is_empty());
-            let later = backend.snapshot_os_state();
+            assert!(backend.standing().is_empty());
+            let later = backend.standing();
             if call == defective {
                 assert!(later.objects().any(|held| *held == invalid.object()));
                 assert_eq!(later.objects().count(), 1);
@@ -2643,5 +2661,62 @@ fn a_late_effect_shows_from_the_second_read_after_its_own_call() {
                 assert!(later.is_empty());
             }
         }
+    }
+}
+
+#[test]
+fn the_snapshot_clause_rejects_a_snapshot_that_omits_issued_records() {
+    assert_rejected(|| {
+        conformance::snapshot_never_invents_objects(carrying(Defect::SnapshotOmitsIssuedRecords))
+    });
+}
+
+#[test]
+fn the_applied_removal_clause_rejects_a_snapshot_that_rebuilds_records_from_objects() {
+    assert_rejected(|| {
+        conformance::apply_and_removal_reach_the_universe(carrying(
+            Defect::SnapshotReconstructsGrantsFromObjects,
+        ))
+    });
+}
+
+#[test]
+fn a_snapshot_defect_changes_only_the_issued_records_it_reports() {
+    let owner = conformance::conformance_owner;
+    for defect in [
+        Defect::None,
+        Defect::SnapshotOmitsIssuedRecords,
+        Defect::SnapshotReconstructsGrantsFromObjects,
+    ] {
+        let mut backend = DefectiveBackend::carrying(defect);
+        let granted = conformance::op_for(GrantId::new(), owner(), broker("egressd"));
+        let entry = backend
+            .grant(granted.clone(), GrantKind::GenerationBound)
+            .unwrap();
+        let applied = conformance::op_for(GrantId::new(), owner(), mount("/src", "/work"));
+        backend.apply(applied.clone()).unwrap();
+        let planted =
+            conformance::op_for(GrantId::new(), owner(), session_file("/skills/pr.md")).object();
+        backend.plant(planted.clone()).unwrap();
+        let rebuilt = |object: OsObject| LedgerEntry {
+            handle: object.operation().handle(),
+            owner: object.owner,
+            capability: object.capability,
+            kind: GrantKind::Hot,
+        };
+        let grants = match defect {
+            Defect::SnapshotOmitsIssuedRecords => Vec::new(),
+            Defect::SnapshotReconstructsGrantsFromObjects => {
+                vec![entry.clone(), rebuilt(applied.object()), rebuilt(planted)]
+            }
+            _ => vec![entry.clone()],
+        };
+        let snapshot = backend.snapshot_os_state().unwrap();
+        assert_eq!(
+            snapshot,
+            EnforcementSnapshot::new(backend.standing(), grants, Vec::new()).unwrap(),
+            "{defect:?}"
+        );
+        assert_eq!(snapshot.state().len(), 3, "{defect:?}");
     }
 }

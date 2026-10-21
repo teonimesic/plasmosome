@@ -3,9 +3,9 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FileAccess,
-    GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy,
-    UniverseClass, UniverseOp, UniverseRemoval,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend,
+    EnforcementSnapshot, FileAccess, GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState,
+    PluginId, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 use crate::builders::{
@@ -183,7 +183,7 @@ pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> 
             "revoking the never-granted handle must return UnknownHandle"
         );
         assert_exact_state(
-            &backend.snapshot_os_state(),
+            observe(&mut backend).state(),
             &[live_object],
             "a failed revoke must preserve the live grant",
         );
@@ -205,7 +205,7 @@ pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B
                 )
             });
             contract_assert!(
-                !holds_exact(&backend.snapshot_os_state(), &object),
+                !holds_exact(observe(&mut backend).state(), &object),
                 "a {} revoke left {} standing",
                 policy_of(drain),
                 object.describe()
@@ -227,7 +227,7 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
             let entry = grant_prepared(&mut backend, &prepared);
             contract_unwrap!(backend.revoke(entry.handle, drain));
             contract_assert!(
-                holds_exact(&backend.snapshot_os_state(), &residue),
+                holds_exact(observe(&mut backend).state(), &residue),
                 "a {} revoke of {} removed the unrelated {}",
                 policy_of(drain),
                 entry.handle,
@@ -235,7 +235,7 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
             );
         }
         assert_exact_state(
-            &backend.snapshot_os_state(),
+            observe(&mut backend).state(),
             &[residue],
             "only planted residue may remain",
         );
@@ -264,7 +264,7 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         "the residue fixture must plant"
     );
     expected.push(residue);
-    let mut seen = backend.snapshot_os_state();
+    let mut seen = observe(&mut backend).state().clone();
     assert_exact_state(&seen, &expected, "the snapshot lost or invented an object");
     let at_issued: Vec<UniverseOp> = issued
         .iter()
@@ -278,14 +278,14 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         .collect();
     let fresh = invalid_operations();
     for invalid in fresh.iter().chain(&at_issued) {
-        let before = unchanged_since(&backend, &seen);
+        let before = unchanged_since(&mut backend, &seen);
         contract_assert_eq!(
             backend.grant(invalid.clone(), GrantKind::Hot),
             Err(invalid_refusal(invalid)),
             "a grant of an invalid {} operation must be refused before any change",
             invalid.class().as_str()
         );
-        seen = backend.snapshot_os_state();
+        seen = observe(&mut backend).state().clone();
         contract_assert_eq!(
             seen,
             before,
@@ -294,7 +294,7 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         );
     }
     for invalid in &fresh {
-        let before = unchanged_since(&backend, &seen);
+        let before = unchanged_since(&mut backend, &seen);
         contract_assert_eq!(
             backend.revoke(invalid.handle(), DrainSpec::forcing()),
             Err(BackendError::UnknownHandle {
@@ -303,7 +303,7 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             "a refused invalid {} grant must issue no record",
             invalid.class().as_str()
         );
-        seen = backend.snapshot_os_state();
+        seen = observe(&mut backend).state().clone();
         contract_assert_eq!(
             seen,
             before,
@@ -312,14 +312,14 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         );
     }
     for invalid in invalid_operations().iter().chain(&at_issued) {
-        let before = unchanged_since(&backend, &seen);
+        let before = unchanged_since(&mut backend, &seen);
         contract_assert_eq!(
             backend.apply(invalid.clone()),
             Err(invalid_refusal(invalid)),
             "an apply of an invalid {} operation must be refused before any change",
             invalid.class().as_str()
         );
-        seen = backend.snapshot_os_state();
+        seen = observe(&mut backend).state().clone();
         contract_assert_eq!(
             seen,
             before,
@@ -328,14 +328,14 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         );
     }
     for invalid in invalid_operations().iter().chain(&at_issued) {
-        let before = unchanged_since(&backend, &seen);
+        let before = unchanged_since(&mut backend, &seen);
         contract_assert_eq!(
             backend.plant(invalid.object()),
             Err(invalid_refusal(invalid)),
             "a plant of an invalid {} object must be refused before any change",
             invalid.class().as_str()
         );
-        seen = backend.snapshot_os_state();
+        seen = observe(&mut backend).state().clone();
         contract_assert_eq!(
             seen,
             before,
@@ -344,7 +344,7 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         );
     }
     contract_assert!(
-        make().snapshot_os_state().is_empty(),
+        observe(&mut make()).state().is_empty(),
         "a backend fresh from the factory must observe nothing an earlier instance did"
     );
 }
@@ -377,7 +377,7 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
                 });
             remove_expected(&mut expected, &object);
             assert_exact_state(
-                &backend.snapshot_os_state(),
+                observe(&mut backend).state(),
                 &expected,
                 "a revoke must withdraw its own exact object and preserve all survivors",
             );
@@ -428,7 +428,7 @@ where
                 contract_unwrap!(backend.apply(second.clone()));
                 expected.extend([first.object(), second.object()]);
                 assert_exact_state(
-                    &backend.snapshot_os_state(),
+                    observe(&mut backend).state(),
                     &expected,
                     "applied operations must coexist with all unrelated observations",
                 );
@@ -450,7 +450,7 @@ where
                             order.name()
                         );
                         assert_exact_state(
-                            &backend.snapshot_os_state(),
+                            observe(&mut backend).state(),
                             &expected,
                             "a refused removal naming another owner changed the state",
                         );
@@ -466,7 +466,7 @@ where
                             )
                         });
                     remove_expected(&mut expected, &object);
-                    let state = backend.snapshot_os_state();
+                    let state = observe(&mut backend).state().clone();
                     assert_exact_state(
                         &state,
                         &expected,
@@ -512,7 +512,7 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
                 },
                 "revoking the already-revoked handle must return UnknownHandle"
             );
-            let state = backend.snapshot_os_state();
+            let state = observe(&mut backend).state().clone();
             contract_assert!(!holds_exact(&state, &spent_object));
             contract_assert!(
                 holds_exact(&state, &live.object()),
@@ -552,7 +552,7 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
                         });
                         remove_expected(&mut expected, &object);
                         assert_exact_state(
-                            &backend.snapshot_os_state(),
+                            observe(&mut backend).state(),
                             &expected,
                             "revoke took another owner's object",
                         );
@@ -593,7 +593,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                 contract_assert_ne!(first.handle, second.handle);
                 let mut expected = vec![first_object.clone(), second_object.clone()];
                 assert_exact_state(
-                    &backend.snapshot_os_state(),
+                    observe(&mut backend).state(),
                     &expected,
                     "two requested holdings must coexist with their complete requested payloads",
                 );
@@ -609,7 +609,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                     });
                     remove_expected(&mut expected, &object);
                     assert_exact_state(
-                        &backend.snapshot_os_state(),
+                        observe(&mut backend).state(),
                         &expected,
                         "repeated-grant revoke selected the wrong instance",
                     );
@@ -631,13 +631,13 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         let live = grant_prepared(&mut backend, &live_request);
         let live_object = requested_object(&live, &live_request);
         assert_exact_state(
-            &backend.snapshot_os_state(),
+            observe(&mut backend).state(),
             &[residue.clone(), live_object],
             "live broker and equal residue must coexist exactly",
         );
         contract_unwrap!(backend.revoke(live.handle, drain));
         assert_exact_state(
-            &backend.snapshot_os_state(),
+            observe(&mut backend).state(),
             std::slice::from_ref(&residue),
             "live broker revoke must preserve equal residue",
         );
@@ -649,10 +649,10 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             &residue.owner,
             drain,
         ));
-        contract_assert!(backend.snapshot_os_state().is_empty());
+        contract_assert!(observe(&mut backend).state().is_empty());
         let removed = grant_prepared(&mut backend, &hot_grant(residue.owner.clone(), &capability));
         contract_unwrap!(backend.apply_removal(removed.removal(), &removed.owner, drain));
-        contract_assert!(backend.snapshot_os_state().is_empty());
+        contract_assert!(observe(&mut backend).state().is_empty());
         contract_assert_eq!(
             backend.revoke(removed.handle, DrainSpec::forcing()),
             Err(BackendError::UnknownHandle {
@@ -691,7 +691,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                     capability.class_str()
                 );
                 assert_exact_state(
-                    &backend.snapshot_os_state(),
+                    observe(&mut backend).state(),
                     &expected,
                     "a retry changed the state",
                 );
@@ -733,7 +733,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                         "a grant with {change} at an issued address must conflict"
                     );
                     assert_exact_state(
-                        &backend.snapshot_os_state(),
+                        observe(&mut backend).state(),
                         &expected,
                         "a conflicting grant changed the state",
                     );
@@ -776,7 +776,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                             "a grant of {payload} at an {origin} address must conflict"
                         );
                         assert_exact_state(
-                            &backend.snapshot_os_state(),
+                            observe(&mut backend).state(),
                             &expected,
                             "a refused grant at a standing address changed the state",
                         );
@@ -792,7 +792,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                 contract_unwrap!(backend.apply(first.operation.clone()));
                 contract_unwrap!(backend.plant(issued_object.clone()));
                 assert_exact_state(
-                    &backend.snapshot_os_state(),
+                    observe(&mut backend).state(),
                     &expected,
                     "applying or planting a live grant's own object must change nothing",
                 );
@@ -808,7 +808,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                 );
                 remove_expected(&mut expected, &issued_object);
                 assert_exact_state(
-                    &backend.snapshot_os_state(),
+                    observe(&mut backend).state(),
                     &expected,
                     "revoking the retried grant must take only its own holding",
                 );
@@ -833,7 +833,7 @@ pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() 
         let earlier_objects: Vec<OsObject> = earlier.iter().map(LedgerEntry::object).collect();
         let mut second = make();
         contract_assert!(
-            second.snapshot_os_state().is_empty(),
+            observe(&mut second).state().is_empty(),
             "a backend fresh from the factory must observe nothing an earlier instance did"
         );
         assert_unknown_everywhere(&mut second, &earlier);
@@ -847,12 +847,12 @@ pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() 
         }
         assert_unknown_everywhere(&mut second, &earlier);
         assert_exact_state(
-            &second.snapshot_os_state(),
+            observe(&mut second).state(),
             &own,
             "a fresh backend must hold exactly its own grants",
         );
         assert_exact_state(
-            &first.snapshot_os_state(),
+            observe(&mut first).state(),
             &earlier_objects,
             "a later instance changed what the earlier one holds",
         );
@@ -872,7 +872,7 @@ pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() 
             );
         }
         contract_assert!(
-            first.snapshot_os_state().is_empty(),
+            observe(&mut first).state().is_empty(),
             "the earlier instance kept a holding after the {} pass",
             order.name()
         );
@@ -949,7 +949,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     neighbour.clone(),
                 ];
                 assert_exact_state(
-                    &backend.snapshot_os_state(),
+                    observe(&mut backend).state(),
                     &all,
                     "a stalled holding must coexist with its equal peers",
                 );
@@ -968,7 +968,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         "a graceful apply_removal of the stalled grant must time out at its address on the {pass}, not {refused:?}"
                     );
                     assert_exact_state(
-                        &backend.snapshot_os_state(),
+                        observe(&mut backend).state(),
                         &all,
                         "a timed-out apply_removal of a grant must keep the holding and every peer",
                     );
@@ -990,7 +990,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         "a graceful withdrawal of the stalled holding with a {deadline:?} deadline must time out, its handle still issued, on the {pass}"
                     );
                     assert_exact_state(
-                        &backend.snapshot_os_state(),
+                        observe(&mut backend).state(),
                         &all,
                         "a graceful timeout must keep the selected holding and every peer",
                     );
@@ -1015,7 +1015,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         holding.describe()
                     );
                     assert_exact_state(
-                        &backend.snapshot_os_state(),
+                        observe(&mut backend).state(),
                         &all,
                         "a refused wrong-owner removal changed the state",
                     );
@@ -1057,7 +1057,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     });
                     remove_expected(&mut remaining, object);
                     assert_exact_state(
-                        &backend.snapshot_os_state(),
+                        observe(&mut backend).state(),
                         &remaining,
                         "a withdrawal must take only its own holding",
                     );
@@ -1456,8 +1456,15 @@ fn remove_expected(expected: &mut Vec<OsObject>, removed: &OsObject) {
     expected.remove(index);
 }
 
-fn unchanged_since<B: EnforcementBackend>(backend: &B, seen: &OsState) -> OsState {
-    let now = backend.snapshot_os_state();
+fn observe<B: EnforcementBackend>(backend: &mut B) -> EnforcementSnapshot {
+    contract_expect!(
+        backend.snapshot_os_state(),
+        "a backend must observe its complete account"
+    )
+}
+
+fn unchanged_since<B: EnforcementBackend>(backend: &mut B, seen: &OsState) -> OsState {
+    let now = observe(backend).state().clone();
     contract_assert_eq!(
         now,
         *seen,
