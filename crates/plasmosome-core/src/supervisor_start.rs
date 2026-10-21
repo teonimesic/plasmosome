@@ -425,25 +425,32 @@ impl Closer {
     }
 }
 
-/// Sets every signal but `SIGKILL` and `SIGSTOP` to its default action, so none this process
-/// ignored or caught stays so across `execve`.
+/// Sets every signal but `SIGKILL` and `SIGSTOP` to be ignored and then to its default action, so
+/// none this process ignored or caught stays so across `execve`, and none still pending from
+/// before `setsid` is delivered.
 ///
 /// # Safety
 ///
 /// Call only in the grandchild, before `execve`, with every signal blocked.
 #[allow(unsafe_code)]
 unsafe fn default_signal_actions() -> bool {
-    // SAFETY: libc::sigaction is a plain C struct, for which all zeroes is a valid value: the
-    // default action with an empty mask and no flags.
-    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-    action.sa_sigaction = libc::SIG_DFL;
+    let action = |handler: libc::sighandler_t| {
+        // SAFETY: libc::sigaction is a plain C struct, for which all zeroes is a valid value: an
+        // action with an empty mask and no flags.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = handler;
+        action
+    };
+    let actions = [action(libc::SIG_IGN), action(libc::SIG_DFL)];
     (1..=LAST_SIGNAL)
         .filter(|signal| *signal != libc::SIGKILL && *signal != libc::SIGSTOP)
         .all(|signal| {
-            // SAFETY: `action` is a local the call only reads, the old action is not asked for,
-            // and sigaction is async-signal-safe.
-            let set = unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
-            set == 0 || errno() == libc::EINVAL
+            actions.iter().all(|action| {
+                // SAFETY: `action` is a local the call only reads, the old action is not asked
+                // for, and sigaction is async-signal-safe.
+                let set = unsafe { libc::sigaction(signal, action, std::ptr::null_mut()) };
+                set == 0 || errno() == libc::EINVAL
+            })
         })
 }
 
