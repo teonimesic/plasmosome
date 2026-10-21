@@ -1,47 +1,23 @@
+mod support;
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use plasmosome_core::daemon;
 use serde_json::{Value, json};
-use tempfile::TempDir;
+use support::{Daemon, base, private_dir};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_plasmosome");
 
 const PATIENCE: Duration = Duration::from_secs(10);
 
 const EPIPE: i64 = 32;
-
-#[cfg(target_os = "macos")]
-fn base() -> PathBuf {
-    let base = std::env::temp_dir();
-    base.canonicalize()
-        .unwrap_or_else(|error| panic!("{} does not resolve: {error}", base.display()))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn base() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|base| !base.is_empty())
-        .map_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")), PathBuf::from)
-}
-
-fn private_dir(base: &Path) -> TempDir {
-    let dir = tempfile::Builder::new()
-        .prefix("pb")
-        .tempdir_in(base)
-        .unwrap_or_else(|error| panic!("no directory under {}: {error}", base.display()));
-    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("0700");
-    dir
-}
 
 fn text(path: &Path) -> &str {
     path.to_str().expect("a UTF-8 path")
@@ -67,54 +43,6 @@ fn failure(output: &Output, code: i32) -> Value {
     assert_eq!(output.status.code(), Some(code), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     one_line(&output.stderr)
-}
-
-struct Daemon {
-    stop: &'static AtomicBool,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Daemon {
-    fn start(root: &Path, socket: &Path) -> Daemon {
-        let config = json!({
-            "control_socket": socket,
-            "name": "work",
-            "instance_root": root.join("instance"),
-            "recovery_deadline_ms": 5000,
-        });
-        let config = daemon::parse_config(&config.to_string()).expect("a valid configuration");
-        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
-        let thread = thread::spawn(move || {
-            daemon::run(config, stop).expect("plasmosomed serves until it is stopped");
-        });
-        let until = Instant::now() + PATIENCE;
-        while !socket.exists() {
-            assert!(
-                Instant::now() < until,
-                "plasmosomed did not bind {socket:?}"
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
-        Daemon {
-            stop,
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let until = Instant::now() + Duration::from_secs(2);
-            while !thread.is_finished() && Instant::now() < until {
-                thread::sleep(Duration::from_millis(5));
-            }
-            if thread.is_finished() {
-                let _ = thread.join();
-            }
-        }
-    }
 }
 
 fn raw_status(socket: &Path) -> Value {
@@ -146,7 +74,7 @@ fn without_uptime(mut result: Value) -> Value {
 fn status_against_the_real_daemon() {
     let root = private_dir(&base());
     let socket = root.path().join("control.uds");
-    let _daemon = Daemon::start(root.path(), &socket);
+    let _daemon = Daemon::start("work", root.path(), &socket);
 
     let output = run(&["status", "--socket", text(&socket)], |_| {});
     assert_eq!(output.status.code(), Some(0), "{output:?}");

@@ -8,18 +8,21 @@ mod cli;
 mod clock;
 mod codes;
 mod commands;
+mod env;
 mod envelope;
 mod exchange;
 mod help;
 pub mod json;
 mod refusal;
 pub mod reply;
+mod select;
 mod status;
 
 pub use cli::{Context, Invocation, Reading, handle, main_with, read};
 pub use clock::{Clock, Deadline, SystemClock};
 pub use codes::{ClientCode, Exit};
 pub use commands::{COMMANDS, Command};
+pub use env::Env;
 pub use envelope::{
     ClientError, EmitError, Envelope, ErrorBody, Form, Instance, KernelError, Stream, emit,
 };

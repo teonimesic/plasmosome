@@ -365,7 +365,7 @@ removal has completed, the binding is exempt only from host-authority associatio
 drift and readiness: no host authority remains to match it, and it never blocks readiness or a
 later attach at the same target. The host side is checked against the supervisor's own inventory
 keyed by GrantId (gates, source roots, handles, listeners and flows), as spec 001 §4.2's absence
-check requires (`001:1381-1382`). It must hold nothing for that grant; a holding found there has
+check requires (`001:1390-1391`). It must hold nothing for that grant; a holding found there has
 no journal record and is an unknown holding (`008:501-502`). The amendments to spec 001 and spec 008
 below say the same.
 
@@ -381,7 +381,7 @@ the pinned runtime and records it here, as for Mount above.
 | --- | --- | --- |
 | Mount | An operation through a reference bound to the grant: `ENOTCONN`, as above. A fresh lookup when the only grant at the target is refused: `ENOENT`. | Each operation, a fresh lookup included, fails at once with `ENOTCONN`, so a file that still stands never looks deleted. A failed operation destroys nothing, so after a restore new operations succeed. |
 | UdsSocket or Broker stream | The stream is closed: a read returns end-of-file, and a write fails with `EPIPE`. A new connection is closed the same way as soon as it is accepted. | Nothing is closed, since the pause may be undone. Data waits, and a blocked read or write returns when the pause is restored, or gets the outcome on the left when the removal goes ahead. |
-| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED` when no other eligible grant covers its host, port and transport, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN when no grant of that host, on any port or transport, is eligible (`001:1411-1413`). Corrected on 2026-10-20: this refused every new connect and DNS lookup, even one that another eligible grant still serves under spec 001 §4.2. | As for a stream. |
+| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED` when no other eligible grant covers its host, port and transport, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN when no grant of that host, on any port or transport, is eligible (`001:1420-1422`). Corrected on 2026-10-20: this refused every new connect and DNS lookup, even one that another eligible grant still serves under spec 001 §4.2. | As for a stream. |
 
 Two outcomes have kernel caveats. A Unix stream read can fail with `ECONNRESET` instead of
 returning end-of-file, when PID1 closes its end while the workload's bytes sit unread. An
@@ -401,7 +401,7 @@ within a bound:
 - one that starts after the gate closed fails at once, except on a paused stream or flow;
 - one on a paused stream or flow waits, and returns by the pause's deadline at the latest, when
   the pause is restored or the removal goes ahead. A pause expires at its original host deadline
-  (`001:1312-1314`), so the guest needs no deadline of its own;
+  (`001:1321-1323`), so the guest needs no deadline of its own;
 - one already in progress when its grant is revoked or refused returns by that removal's
   deadline.
 

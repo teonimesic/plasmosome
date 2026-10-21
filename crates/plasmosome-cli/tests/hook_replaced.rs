@@ -3,13 +3,26 @@ use std::io::{self, Write};
 use std::panic::{self, PanicHookInfo};
 use std::sync::{Mutex, PoisonError};
 
-use plasmosome_cli::{COMMANDS, Context, Exit, SystemClock, handle};
+use plasmosome_cli::{COMMANDS, Context, Env, Exit, SystemClock, handle};
+
+struct NoVariables;
+
+impl Env for NoVariables {
+    fn home(&self) -> Option<OsString> {
+        None
+    }
+
+    fn kernel(&self) -> Option<OsString> {
+        None
+    }
+}
 
 const CONTEXT: Context<'static> = Context {
     version: "0.0.0",
     commands: COMMANDS,
     trusted_uid: 0,
     clock: &SystemClock,
+    env: &NoVariables,
 };
 
 const IN_A_COMMAND: &str = "a panic inside a command, after a newer hook was set";
