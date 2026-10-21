@@ -235,6 +235,23 @@ fn a_leader_that_names_another_process_of_its_list_fails() {
 }
 
 #[test]
+fn a_leader_relates_to_its_list_across_a_field_of_another_name_kind() {
+    let manifest = with_rule("hint-processes", "mounts", RuleKind::MountId);
+    let mut runs = runs();
+    each_run(&mut runs, "hint-processes", "mounts", |lane, run| {
+        json!([20 + seed(lane, run)])
+    });
+    for run in 0..2 {
+        let processes = &mut observation(&mut runs, Lane::Cell, run, "hint-processes").fields;
+        processes.insert("leader".to_string(), json!(100 + run));
+    }
+    assert_eq!(
+        verdict(&manifest, &runs),
+        Verdict::Fail(vec![differs("hint-processes", "pids")])
+    );
+}
+
+#[test]
 fn fields_are_taken_in_byte_order_so_an_upper_case_name_sorts_first() {
     let manifest = with_rules(
         "hint-env",
@@ -353,26 +370,26 @@ fn two_kinds_that_name_things_are_never_numbered_together() {
 }
 
 #[test]
-fn a_boot_id_or_a_resolved_address_shares_no_numbers_with_process_ids() {
+fn a_boot_id_or_a_resolved_address_shares_no_numbers_with_another_name_kind() {
     for kind in [RuleKind::BootId, RuleKind::ResolvedAddress] {
-        let manifest = with_rules(
-            "hint-env",
-            &[("a_pids", RuleKind::Pid), (kind.name(), kind)],
-        );
-        let mut runs = runs();
-        each_run(&mut runs, "hint-env", "a_pids", |lane, run| match lane {
-            Lane::Cell => json!([1, 100 + seed(lane, run)]),
-            _ => json!([1]),
-        });
-        each_run(&mut runs, "hint-env", kind.name(), |lane, run| {
-            sample(kind, seed(lane, run))
-        });
-        assert_eq!(
-            verdict(&manifest, &runs),
-            Verdict::Fail(vec![differs("hint-env", "a_pids")]),
-            "{}",
-            kind.name()
-        );
+        for other in NAMES.into_iter().filter(|other| *other != kind) {
+            let manifest = with_rules("hint-env", &[("a_other", other), (kind.name(), kind)]);
+            let mut runs = runs();
+            each_run(&mut runs, "hint-env", "a_other", |lane, run| match lane {
+                Lane::Cell => json!([sample(other, 1), sample(other, 100 + seed(lane, run))]),
+                _ => json!([sample(other, 1)]),
+            });
+            each_run(&mut runs, "hint-env", kind.name(), |lane, run| {
+                sample(kind, seed(lane, run))
+            });
+            assert_eq!(
+                verdict(&manifest, &runs),
+                Verdict::Fail(vec![differs("hint-env", "a_other")]),
+                "{} beside {}",
+                kind.name(),
+                other.name()
+            );
+        }
     }
 }
 
@@ -445,22 +462,25 @@ fn durations_keep_no_relation() {
 }
 
 #[test]
-fn a_reach_probe_whose_lanes_differ_only_in_duration_order_does_not_discriminate() {
+fn a_reach_probe_whose_lanes_differ_only_in_their_durations_does_not_discriminate() {
     let manifest = with_rule("refusal-host-1", "elapsed", RuleKind::Duration);
-    let mut runs = runs();
-    let refused = json!("name does not resolve");
-    set(&mut runs, Lane::Open, "refusal-host-1", "outcome", refused);
-    each_run(&mut runs, "refusal-host-1", "elapsed", |lane, run| {
-        let seed = seed(lane, run);
-        match lane {
-            Lane::Open => json!([10 + seed, 20 + seed]),
-            _ => json!([20 + seed, 10 + seed]),
-        }
-    });
-    assert_eq!(
-        verdict(&manifest, &runs),
-        Verdict::Fail(vec![finding("refusal-host-1", Reason::NoDiscrimination)])
-    );
+    for (open, others) in [([10, 20], [20, 10]), ([10, 10], [10, 20])] {
+        let mut runs = runs();
+        let refused = json!("name does not resolve");
+        set(&mut runs, Lane::Open, "refusal-host-1", "outcome", refused);
+        each_run(&mut runs, "refusal-host-1", "elapsed", |lane, run| {
+            let shown = match lane {
+                Lane::Open => open,
+                _ => others,
+            };
+            json!(shown.map(|elapsed| elapsed + seed(lane, run)))
+        });
+        assert_eq!(
+            verdict(&manifest, &runs),
+            Verdict::Fail(vec![finding("refusal-host-1", Reason::NoDiscrimination)]),
+            "open {open:?}, others {others:?}"
+        );
+    }
 }
 
 #[test]
