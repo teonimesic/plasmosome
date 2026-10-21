@@ -37,8 +37,26 @@ kind returns the original entry and changes nothing. Another owner, capability o
 issued address returns `IdentityConflict`, and so does a grant at the address of an object that
 was applied or planted: a grant never turns such an object into an issued record. Equal
 capabilities remain separate holdings, and identity conflicts fail without replacing state.
-`FakeBackend::plant_residue`, the trait's `plant`, and `CompositeBackend::new` are fallible; the
-composite rejects initial observations assigned to the wrong leaf.
+`FakeBackend::plant_residue`, the trait's `plant`, and `CompositeBackend::new` are fallible.
+
+`snapshot_os_state` returns the backend's complete account as an `EnforcementSnapshot`: its
+standing holdings, the original issued record of each grant whose withdrawal authority remains,
+and its unfinished effects as `IncompleteEffect`s. An applied or planted object has no record, and
+a record is never rebuilt from an object. `EnforcementSnapshot::new` refuses an address repeated
+in the unfinished effects, an address both standing and unfinished, a repeated issued handle, and
+a record whose owner or capability disagrees with its row, each with `IdentityConflict`. It
+refuses a record with neither a standing nor an unfinished row with `Fault`. Decoding runs the
+same checks. A caller deciding that nothing is left asks `is_empty`, which is true only when all
+three collections are empty.
+
+The snapshot can fail. An observation that fails returns an error, never an empty or partial
+account. It takes `&mut self`, so a backend can keep what it observed.
+`FakeBackend::fail_next_observation` makes the next snapshot return `Fault` once, with no other
+effect. `CompositeBackend` observes all three leaves when it is built and on every snapshot. A
+leaf whose observation fails makes the whole snapshot fail, and so does a leaf that reports a
+standing object, issued record or unfinished effect of a class it does not own; that `Fault`
+names the leaf and the row. `BackendError::Fault` displays as `backend fault: {cause}`, because
+it reports real observation errors as well as injected faults.
 
 Spec 017 gives every capability a complete, nonsecret recipe: what an adapter needs to create
 the holding. The `recipe` module holds those records — `SessionFileRecipe`, `UdsRecipe`,
@@ -168,7 +186,8 @@ lives here, beside `DrainSpec`, because it reads only the drain's deadline and p
 
 | Piece | Responsibility |
 | --- | --- |
-| `EnforcementBackend` | The trait: grant, revoke, and observe system state |
+| `EnforcementBackend` | The trait: grant, revoke, and observe the complete account |
+| `EnforcementSnapshot` | A backend's complete account: standing holdings, issued records and unfinished effects, checked when built and when decoded |
 | `FakeBackend` | In-memory recorder — the test workhorse |
 | `CompositeBackend` | Routes capability classes to the backend that owns them |
 | Universe classes | What "system state" means for residue verification: sockets, mounts, processes, proxy entries, session files |
