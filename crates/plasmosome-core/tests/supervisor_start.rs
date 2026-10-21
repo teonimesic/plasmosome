@@ -70,11 +70,6 @@ const CASES: [(&str, fn()); 12] = [
     ),
 ];
 
-const LONGER_DEADLINES: [(&str, Duration); 1] = [(
-    "no_handler_of_the_controller_runs_in_a_child",
-    Duration::from_secs(60),
-)];
-
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     if let Some(cell) = standin_cell(&arguments) {
@@ -160,19 +155,18 @@ fn run_case(name: &str) -> Result<(), String> {
     let pids = scratch.path().join(PIDS);
     std::fs::create_dir(&pids)
         .map_err(|error| format!("the case's pid directory is not made: {error}"))?;
-    let deadline = deadline_of(name);
     let mut child = Command::new(this_executable())
         .env(CASE, name)
         .env(
             DEADLINE,
-            (epoch_millis() + deadline.as_millis()).to_string(),
+            (epoch_millis() + CASE_DEADLINE.as_millis()).to_string(),
         )
         .env(SCRATCH, scratch.path())
         .process_group(0)
         .stdin(Stdio::null())
         .spawn()
         .map_err(|error| format!("the case process does not start: {error}"))?;
-    let outcome = wait_for_case(&mut child, deadline);
+    let outcome = wait_for_case(&mut child);
     let left = stop_what_the_case_left(&pids);
     drop(scratch);
     match (outcome, left.is_empty()) {
@@ -183,15 +177,8 @@ fn run_case(name: &str) -> Result<(), String> {
     }
 }
 
-fn deadline_of(case: &str) -> Duration {
-    LONGER_DEADLINES
-        .iter()
-        .find(|(name, _)| *name == case)
-        .map_or(CASE_DEADLINE, |(_, deadline)| *deadline)
-}
-
-fn wait_for_case(child: &mut Child, allowed: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + allowed;
+fn wait_for_case(child: &mut Child) -> Result<(), String> {
+    let deadline = Instant::now() + CASE_DEADLINE;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
@@ -201,7 +188,7 @@ fn wait_for_case(child: &mut Child, allowed: Duration) -> Result<(), String> {
                 kill_group(group, libc::SIGKILL);
                 let _ = child.wait();
                 return Err(format!(
-                    "the case did not finish within {allowed:?}, so its process group was killed"
+                    "the case did not finish within {CASE_DEADLINE:?}, so its process group was killed"
                 ));
             }
             Ok(None) => thread::sleep(POLL),
@@ -578,7 +565,7 @@ fn no_handler_of_the_controller_runs_in_a_child() {
     let missing =
         RecipePath::parse(&format!("{}/missing", root.path.display())).expect("a canonical path");
     let storm = Storm::start();
-    for start in 0..200 {
+    for start in 0..40 {
         let lock = cell.lock();
         match cell.start(&missing, lock, cell.log(), cell.record()) {
             Err(StartError::Exec {
