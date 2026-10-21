@@ -17,6 +17,7 @@ pub mod fake;
 pub mod lifetime;
 pub mod paging;
 pub mod recipe;
+pub mod snapshot;
 pub mod software;
 pub mod universe;
 mod wire;
@@ -42,6 +43,7 @@ pub use recipe::{
     BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,
     RecipeError, SessionFileRecipe, UdsRecipe,
 };
+pub use snapshot::{EnforcementSnapshot, IncompleteEffect};
 pub use universe::{
     CellId, CellOwner, Diff, GrantId, MockMode, OsObject, OsState, PluginId, ResidueReport,
     UniverseClass, UniverseOp, UniverseRemoval,

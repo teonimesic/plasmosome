@@ -8,7 +8,7 @@ use plasmosome_testkit::builders::{GrantClosure, proxy_map, session_file, uds_so
 fn attach_detach(
     (mut ledger, mut backend): (Ledger, FakeBackend),
 ) -> (SealedLedger, FakeBackend, DetachReport) {
-    let before = backend.snapshot_os_state();
+    let before = backend.snapshot_os_state().unwrap();
     let prepared = GrantClosure::for_owner(CellOwner {
         cell: CellId::from("attach-detach-cell"),
         plugin: PluginId::from("attach-detach"),
@@ -33,9 +33,11 @@ fn attach_detach(
             DrainSpec::forcing(),
         )
         .unwrap();
-    let after = backend.snapshot_os_state();
-    let residue = ResidueReport::from_diff(Diff::between(&before, &after), Vec::new());
+    let after = backend.snapshot_os_state().unwrap();
+    let residue =
+        ResidueReport::from_diff(Diff::between(before.state(), after.state()), Vec::new());
     assert_eq!(residue, ResidueReport::Empty, "{residue}");
+    assert!(after.grants().is_empty() && after.incomplete().is_empty());
     (sealed, backend, report)
 }
 
