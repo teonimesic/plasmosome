@@ -73,9 +73,21 @@ enum Defect {
     GrantMintsItsOwnId,
     RetryRewritesTheIssuedRecord,
     DirectApplyPromotesToGrant,
+    PlantedResiduePromotesToGrant,
+    RetryIsRefused,
+    RetryIgnores(Field),
+    LiveGrantLosesItsRecordTo(Call),
     RecordsItsOwnRecoveryLog,
     AcceptsInvalidOperations(Call),
     RefusesAnotherLaunchAtAnOccupiedEndpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Kind,
+    Plugin,
+    Cell,
+    Recipe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +161,13 @@ impl DefectiveBackend {
                 self.freed.pop().unwrap_or_else(|| operation.handle())
             }
             _ => operation.handle(),
+        }
+    }
+
+    fn loses_a_live_record_to(&mut self, call: Call, handle: Handle) {
+        if self.defect == Defect::LiveGrantLosesItsRecordTo(call) {
+            self.ledger.remove(&handle);
+            self.grant_order.retain(|held| *held != handle);
         }
     }
 
@@ -547,7 +566,11 @@ impl EnforcementBackend for DefectiveBackend {
             kind,
         };
         if let Some(issued) = self.ledger.get(&handle) {
-            if *issued == entry {
+            let retried = match self.defect {
+                Defect::RetryIgnores(field) => same_ignoring(issued, &entry, field),
+                _ => *issued == entry,
+            };
+            if retried && self.defect != Defect::RetryIsRefused {
                 return Ok(issued.clone());
             }
             if self.defect != Defect::RetryRewritesTheIssuedRecord {
@@ -561,8 +584,12 @@ impl EnforcementBackend for DefectiveBackend {
             .objects()
             .any(|held| held.class() == handle.class && held.id == handle.id)
         {
-            let promotes = self.defect == Defect::DirectApplyPromotesToGrant
-                && observed.objects().any(|held| *held == entry.object());
+            let applied = self.applied.iter().any(|op| op.handle() == handle);
+            let promotes = match self.defect {
+                Defect::DirectApplyPromotesToGrant => applied,
+                Defect::PlantedResiduePromotesToGrant => !applied,
+                _ => false,
+            } && observed.objects().any(|held| *held == entry.object());
             if !promotes {
                 return Err(identity_conflict(handle));
             }
@@ -689,7 +716,9 @@ impl EnforcementBackend for DefectiveBackend {
             self.applied.push(op);
             return Ok(());
         }
-        self.state.insert(object)?;
+        if !self.state.insert(object)? {
+            self.loses_a_live_record_to(Call::Apply, op.handle());
+        }
         self.applied.push(op);
         Ok(())
     }
@@ -752,7 +781,11 @@ impl EnforcementBackend for DefectiveBackend {
             }
             return Ok(());
         }
-        self.state.insert(object).map(|_| ())
+        let handle = object.operation().handle();
+        if !self.state.insert(object)? {
+            self.loses_a_live_record_to(Call::Plant, handle);
+        }
+        Ok(())
     }
 }
 
@@ -761,6 +794,21 @@ fn removal_of(object: &OsObject) -> UniverseRemoval {
         id: object.id,
         capability: object.capability.clone(),
     }
+}
+
+fn same_ignoring(issued: &LedgerEntry, retried: &LedgerEntry, field: Field) -> bool {
+    let mut relaxed = retried.clone();
+    match field {
+        Field::Kind => relaxed.kind = issued.kind,
+        Field::Plugin => relaxed.owner.plugin = issued.owner.plugin.clone(),
+        Field::Cell => relaxed.owner.cell = issued.owner.cell.clone(),
+        Field::Recipe => {
+            if selection_of(&relaxed.capability) == selection_of(&issued.capability) {
+                relaxed.capability = issued.capability.clone();
+            }
+        }
+    }
+    relaxed == *issued
 }
 
 fn identity_conflict(handle: Handle) -> BackendError {
@@ -1602,11 +1650,106 @@ fn the_retry_clause_rejects_a_rewritten_record() {
 
 #[test]
 fn the_retry_clause_rejects_a_grant_that_promotes_an_applied_or_planted_object() {
+    for defect in [
+        Defect::DirectApplyPromotesToGrant,
+        Defect::PlantedResiduePromotesToGrant,
+    ] {
+        assert_rejected(|| conformance::grant_retry_returns_the_original_entry(carrying(defect)));
+    }
+}
+
+#[test]
+fn the_retry_clause_rejects_a_refused_retry_and_a_retry_that_ignores_any_field() {
     assert_rejected(|| {
-        conformance::grant_retry_returns_the_original_entry(carrying(
-            Defect::DirectApplyPromotesToGrant,
-        ))
+        conformance::grant_retry_returns_the_original_entry(carrying(Defect::RetryIsRefused))
     });
+    for field in [Field::Kind, Field::Plugin, Field::Cell, Field::Recipe] {
+        assert_rejected(|| {
+            conformance::grant_retry_returns_the_original_entry(carrying(Defect::RetryIgnores(
+                field,
+            )))
+        });
+    }
+}
+
+#[test]
+fn the_retry_clause_rejects_an_apply_or_plant_that_drops_a_live_grants_record() {
+    for call in [Call::Apply, Call::Plant] {
+        assert_rejected(|| {
+            conformance::grant_retry_returns_the_original_entry(carrying(
+                Defect::LiveGrantLosesItsRecordTo(call),
+            ))
+        });
+    }
+}
+
+#[test]
+fn a_retry_defect_relaxes_only_its_own_field() {
+    let first = conformance::hot_grant(conformance::conformance_owner(), &broker("egressd"));
+    let mut relaunched = broker("egressd");
+    if let Capability::Broker { launch, .. } = &mut relaunched {
+        launch.data_socket = format!("{}.changed", launch.data_socket);
+    }
+    let changes = [
+        (
+            Field::Kind,
+            first.operation.clone(),
+            GrantKind::GenerationBound,
+        ),
+        (
+            Field::Plugin,
+            conformance::op_for(
+                first.operation.id(),
+                conformance::second_owner(),
+                broker("egressd"),
+            ),
+            GrantKind::Hot,
+        ),
+        (
+            Field::Cell,
+            conformance::op_for(
+                first.operation.id(),
+                conformance::other_cell(&conformance::conformance_owner()),
+                broker("egressd"),
+            ),
+            GrantKind::Hot,
+        ),
+        (
+            Field::Recipe,
+            conformance::op_for(
+                first.operation.id(),
+                conformance::conformance_owner(),
+                relaunched,
+            ),
+            GrantKind::Hot,
+        ),
+    ];
+    for (relaxed, _, _) in &changes {
+        let mut backend = DefectiveBackend::carrying(Defect::RetryIgnores(*relaxed));
+        let entry = backend.grant(first.operation.clone(), first.kind).unwrap();
+        for (field, operation, kind) in &changes {
+            let outcome = backend.grant(operation.clone(), *kind);
+            if field == relaxed {
+                assert_eq!(outcome, Ok(entry.clone()), "{relaxed:?}");
+            } else {
+                assert_eq!(
+                    outcome,
+                    Err(identity_conflict(entry.handle)),
+                    "{relaxed:?} must still compare {field:?}"
+                );
+            }
+        }
+        let renamed = conformance::op_for(
+            first.operation.id(),
+            conformance::conformance_owner(),
+            broker("renamed"),
+        );
+        assert_eq!(
+            backend.grant(renamed, first.kind),
+            Err(identity_conflict(entry.handle)),
+            "{relaxed:?} must still compare the name"
+        );
+    }
 }
 
 #[test]
