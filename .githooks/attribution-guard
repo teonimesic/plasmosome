@@ -13,10 +13,9 @@
 # Fails closed: anything it cannot read is a refusal, never a pass.
 set -uo pipefail
 
-# Every check here reads bytes in the C locale, as git does. In a UTF-8 locale the shell's
-# `[:space:]` also holds U+3000 and U+2003, so a line of either would end a paragraph that git reads
-# as one. And GNU grep would fold the long s (U+017F) onto `s` under `-i`, which would make a
-# look-alike domain match a listed one.
+# Every check here runs in the C locale, so it reads bytes, as git does. In a UTF-8 locale GNU grep
+# folds the long s (U+017F) onto `s` under `-i`, which would make a look-alike domain match a
+# listed one.
 export LC_ALL=C
 
 # Takes rev-list arguments as separate words, so a caller can pass a range, or a tip plus
@@ -155,17 +154,19 @@ record_offending_trailers() {
 
 # Splits the message on $1 into paragraphs and offers each to `record_offending_trailers`.
 #
-# A paragraph ends at any line holding no non-whitespace, not only at an empty one. Git reads a
-# break that way too, and a message written on Windows separates its paragraphs with a line that
-# still holds a carriage return. Splitting only on an empty line collapsed such a message into one
-# paragraph, which git then read as prose, so a mid-body trailer in it went unseen.
+# A paragraph ends at a line holding nothing but spaces, tabs and carriage returns, not only at an
+# empty one. That is the set git's own parser calls blank, and a message written on Windows
+# separates its paragraphs with a line that still holds a carriage return. Splitting only on an
+# empty line collapsed such a message into one paragraph, which git then read as prose, so a
+# mid-body trailer in it went unseen. Splitting at any other line, such as one holding only a
+# vertical tab, cuts a trailer block git reads whole, and the trailers above the cut go unseen.
 record_offending_trailers_in_message() {
   local message=$1 line paragraph=''
   matches "$nominate" "$message" || return 0
   while IFS= read -r line; do
     line=${line%$'\r'}
     case $line in
-      *[![:space:]]*)
+      *[!$' \t\r']*)
         paragraph+="$line"$'\n'
         continue
         ;;
