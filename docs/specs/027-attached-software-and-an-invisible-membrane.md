@@ -206,10 +206,12 @@ step it observes, is `not run`, even when every lane fails it the same way, and 
 the verdict `not run`. So a harness that stops early, the same way in every lane, is `not run`, not
 a pass. A reach probe equal in the open and absent lanes fails the run. A manifest that breaks a
 measurement rule is refused before any run, and the results record that refusal, like any other
-refusal of the runs, as a failed run.
+refusal of the runs, as a failed run. The reader of the transcript also refuses the runs, naming the
+lane, when the fixture endpoint refused a request the recorded session does not hold: that lane's
+harness saw something the session did not, which is a difference, not a run that did not happen.
 Amended on 2026-10-21: this defined noise and the completion marker for probes only, though the
-transcript is judged the same way, and it did not say what the transcript's marker shows or what a
-manifest that breaks these rules gives.
+transcript is judged the same way, and it did not say what the transcript's marker shows, what a
+request the session does not hold gives, or what a manifest that breaks these rules gives.
 
 **The verdict** passes when every probe ran in every lane, every reach probe discriminated, and the
 cell lane equals the absent lane: after normalization on every probe, and exactly on the harness's
@@ -227,7 +229,8 @@ recorded as its path from the workspace root, its type and, for a regular file, 
 bytes, and nothing else. A file's mode, owner, times and inode are left to probes, where §7's
 allowances reach: the cell lane creates files 0600 and shows every workspace file as the workload's,
 and the system chooses times and inodes. For the same reason, a path that a §5.3 operation probe
-creates or acts on is left out of files left behind: the probe declares the path in the manifest,
+creates or acts on is left out of files left behind, with everything under it: the probe declares
+the path in the manifest, no tool call of the recorded session touches it or anything under it,
 and its own fields judge it.
 Amended on 2026-10-21: this said the transcript is compared after normalization, which no rule can
 reach. Amended on 2026-10-21: this did not say what is recorded of a file left behind.
@@ -500,13 +503,15 @@ cell, not run until one boots).
 12. **Measurement rules and results, outside.** A staged suite has a reach probe that crashes, one
     whose setup fails the same way in every lane, a reach probe that never discriminates, and a
     probe that reads a random value. The first two make the verdict `not run`, and the others fail
-    the run. Three more suites stage the transcript: one with no marker and one whose harness stops
-    early the same way in every lane, which make the verdict `not run`, not a pass, and one whose
-    two runs differ, which fails the run. A manifest of its own with a channel one probe short is
-    refused before any run and recorded as a failed run. The results hold every field §6 names,
-    enough for a stranger to rerun every lane. Catches: dropped probes, a transcript that is never
-    judged, a marker written before the harness reached its end, noise counted as reach, a refusal
-    recorded as a pass, and results that cannot tell no probes from no differences.
+    the run. Four more suites stage the transcript: one with no marker and one whose harness stops
+    early the same way in every lane, which make the verdict `not run`, not a pass, one whose two
+    runs differ, which fails the run, and one whose harness sends, in one lane only, a request the
+    session does not hold, which refuses the runs. A manifest of its own with a channel one probe
+    short is refused before any run and recorded as a failed run. The results hold every field §6
+    names, enough for a stranger to rerun every lane. Catches: dropped probes, a transcript that is
+    never judged, a marker written before the harness reached its end, a harness that diverged
+    reported as `not run`, noise counted as reach, a refusal recorded as a pass, and results that
+    cannot tell no probes from no differences.
     Corrected on 2026-10-21: this staged the short channel in one suite with the other cases and
     said it fails the run, but such a manifest is refused before any run, so the other cases could
     not run. It also had no transcript case.
@@ -517,14 +522,17 @@ cell, not run until one boots).
     the membrane, or `ro` (`EROFS` where the absent lane gives `EACCES`); a withheld host answered
     with `ECONNREFUSED` or a hang; a denied call answered with `SIGSYS`; an extra `PATH` directory;
     a `/proc/self/status` line that differs; a file left behind whose bytes differ, a path left
-    behind in one lane only, such as an empty directory, and a path that is a directory in one lane
-    and a regular file in the other, each of which fails on the transcript. A mutant whose files
-    left behind differ only in mode, as the cell lane's 0600 files do, does not fail the transcript.
+    behind in one lane only, such as an empty directory, a path that is a directory in one lane and
+    a regular file in the other, and a symbolic link in one lane where the other has a copy of its
+    target, each of which fails on the transcript. A mutant whose files left behind differ only in
+    mode, as the cell lane's 0600 files do, or only at a path a §5.3 probe declares, does not fail
+    the transcript.
     With §7's allowances in force, a new difference in a probe they name, such as a second entry
     beside `/.plasmosome`, a second resolver line or a workspace whose files show uid 0, still
     fails, on that probe and not on the transcript. Catches: a comparator that cannot fail, one that
-    excuses a whole probe, a transcript that records a file's mode or misses its bytes, a path or
-    its type, an owner nothing judges, and a mutant that fails only because its lane crashed.
+    excuses a whole probe, a transcript that records a file's mode or a path a probe declares, or
+    misses a file's bytes, a path or its type, an owner nothing judges, and a mutant that fails
+    only because its lane crashed.
     Amended on 2026-10-21: this had no case for files left behind or for the owner a workspace file
     shows.
 14. **Normalization keeps relations, outside.** These mutants must fail: a 64-hex token as an
