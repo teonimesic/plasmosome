@@ -6,21 +6,23 @@ reason = """\
   """
 write_it_instead.lines = 1865
 write_it_instead.how = """\
-  On 2026-10-20, at main 78b056f, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 5 files, and `git \
+  On 2026-10-20, at main f93ff9a, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 6 files, and `git \
   grep -h -o -E 'toml::(from_str|to_string|Value|Table|de::Error|map::Map)' -- '*.rs' | sort | \
-  uniq -c` gives Value 82, from_str 15, Table 6, to_string 5, Error 1 and Map 1. Reading the code \
+  uniq -c` gives Value 82, from_str 18, Table 9, to_string 6, Error 1 and Map 1. Reading the code \
   shows that the declaration reader in crates/plasmosome-core/src/manifest.rs parses text into a \
   Value, walks it with get, as_str, as_array and as_table, and turns a credential entry into a \
   typed struct with Value::try_into. Its tests parse with str::parse, change a Value and write it \
   back with to_string. Two test files in crates/plasmosome-guards parse Cargo manifests with \
   str::parse, and tests in crates/plasmosome-backend and crates/plasmosome-ledger read serde types \
-  with from_str and match serde's error text. A replacement, using serde for the typed part, \
-  needs: a TOML 1.0 reader into a tree, with tables, arrays of tables, inline tables, dotted keys \
-  and the refusal of a key or table defined twice (500 lines); the four string forms with their \
-  escapes (200); integers in four bases, and floats with inf and nan (150); the four datetime \
-  forms, read and written (250); errors that give line and column (100); Value and Table, with the \
-  accessors, FromStr, Display and indexing used here (300); a serde Deserializer over the tree for \
-  from_str and try_into, with structs, enums, options and sequences, that hands each value to \
+  with from_str and match serde's error text. A test file in crates/plasmid parses a declaration \
+  into a Table with from_str, adds a fix's keys to it with extend, writes it back with to_string \
+  and parses the result again. A replacement, using serde for the typed part, needs: a TOML 1.0 \
+  reader into a tree, with tables, arrays of tables, inline tables, dotted keys and the refusal of \
+  a key or table defined twice (500 lines); the four string forms with their escapes (200); \
+  integers in four bases, and floats with inf and nan (150); the four datetime forms, read and \
+  written (250); errors that give line and column (100); Value and Table, with the accessors, \
+  keys, extend, FromStr, Display and indexing used here (300); a serde Deserializer over the tree \
+  for from_str and try_into, with structs, enums, options and sequences, that hands each value to \
   deserialize_any through serde's MapDeserializer and SeqDeserializer and a one-key enum access, \
   so that the target type refuses what it does not take; going through serde_json's Value instead \
   would refuse an array for a struct variant itself, and a test in the backend exists to show that \

@@ -6,7 +6,7 @@ reason = """\
   """
 write_it_instead.lines = 75
 write_it_instead.how = """\
-  On 2026-10-20, at main 78b056f, `git grep -l 'uuid::' -- '*.rs' | wc -l` gives 4 files, \
+  On 2026-10-20, at main f93ff9a, `git grep -l 'uuid::' -- '*.rs' | wc -l` gives 4 files, \
   crates/plasmosome-backend/src/universe.rs, crates/plasmosome-backend/src/lifetime.rs, \
   crates/plasmosome-backend/src/clock.rs and crates/plasmosome-ledger/src/artifact.rs, where \
   clock.rs uses it only in its tests. `git grep -h -o -E \
