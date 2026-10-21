@@ -2,6 +2,7 @@ use std::fmt;
 use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use plasmosome_backend::Digest;
@@ -42,6 +43,9 @@ pub enum ArtifactFault {
     /// Off macOS, this build cannot verify that the file is immutable, so every Artifact is
     /// refused this way.
     ImmutabilityUnverifiable,
+    /// The file's size, modification time or change time moved between the check and the end of
+    /// the hash.
+    ChangedWhileHashing,
     /// The file's bytes hash to `found`, not to the pinned digest.
     Digest { found: Digest },
 }
@@ -76,7 +80,14 @@ fn verify_walk(walk: Walk, artifact: &Artifact) -> Result<(), ArtifactRefusal> {
 
 struct Checked {
     file: File,
+    stamp: Stamp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
     size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
 }
 
 fn open_checked(walk: Walk, path: &Path) -> Result<Checked, ArtifactFault> {
@@ -91,18 +102,45 @@ fn open_checked(walk: Walk, path: &Path) -> Result<Checked, ArtifactFault> {
         .map_err(|error| io_fault("fstat", path, &error))?;
     judge_immutability(&metadata)?;
     Ok(Checked {
-        size: metadata.len(),
+        stamp: stamp(&metadata),
         file,
     })
 }
 
 fn hash_checked(checked: Checked, path: &Path, pinned: &Digest) -> Result<(), ArtifactFault> {
-    let found = digest_within(&checked.file, checked.size)
-        .map_err(|error| io_fault("read", path, &error))?;
+    let found = digest_checked(&checked, path)?;
+    let after = checked
+        .file
+        .metadata()
+        .map_err(|error| io_fault("fstat", path, &error))?;
+    judge_unchanged(checked.stamp, stamp(&after))?;
     if found != *pinned {
         return Err(ArtifactFault::Digest { found });
     }
     Ok(())
+}
+
+fn digest_checked(checked: &Checked, path: &Path) -> Result<Digest, ArtifactFault> {
+    digest_within(&checked.file, checked.stamp.size).map_err(|error| io_fault("read", path, &error))
+}
+
+fn stamp(metadata: &Metadata) -> Stamp {
+    Stamp {
+        size: metadata.size(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+    }
+}
+
+fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
+    let unchanged = before.size == after.size
+        && before.modified == after.modified
+        && before.changed == after.changed;
+    if unchanged {
+        Ok(())
+    } else {
+        Err(ArtifactFault::ChangedWhileHashing)
+    }
 }
 
 fn judge(reached: &Reached<'_>, euid: u32) -> Result<(), ArtifactFault> {
@@ -214,6 +252,9 @@ impl fmt::Display for ArtifactFault {
             ArtifactFault::ImmutabilityUnverifiable => f.write_str(
                 "this build can verify immutability only on macOS, through uchg or schg",
             ),
+            ArtifactFault::ChangedWhileHashing => {
+                f.write_str("its size or times moved while it was hashed")
+            }
             ArtifactFault::Digest { found } => {
                 write!(f, "its SHA-256 is {found}, not the pinned digest")
             }
