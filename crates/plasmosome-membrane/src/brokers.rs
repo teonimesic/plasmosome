@@ -346,14 +346,38 @@ mod tests {
         }
     }
 
-    struct ExpiryAwaitingProbe;
+    #[derive(Default)]
+    struct ExpiryAwaitingProbe {
+        budgets: Mutex<Vec<Option<Duration>>>,
+    }
+
+    impl ExpiryAwaitingProbe {
+        fn budgets_handed_out(&self) -> Vec<Option<Duration>> {
+            self.budgets
+                .lock()
+                .expect("the record of probe budgets is uncontended")
+                .clone()
+        }
+    }
 
     impl Probe for ExpiryAwaitingProbe {
         fn probe(&self, _socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
-            while let Ok(left) = budget.remaining() {
-                std::thread::sleep(left);
+            let mut left = budget.remaining();
+            self.budgets
+                .lock()
+                .expect("the record of probe budgets is uncontended")
+                .push(left.ok());
+            while let Ok(before) = left {
+                std::thread::sleep(before);
+                left = budget.remaining();
             }
             Ok(ready())
+        }
+    }
+
+    impl Probe for Rc<ExpiryAwaitingProbe> {
+        fn probe(&self, socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            ExpiryAwaitingProbe::probe(self, socket, budget)
         }
     }
 
@@ -668,17 +692,37 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
         let flag = AtomicBool::new(false);
         let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let prober = Rc::new(ExpiryAwaitingProbe::default());
         let set =
-            BrokerSet::spawn(specs, forking(), ExpiryAwaitingProbe).expect("every broker forks");
+            BrokerSet::spawn(specs, forking(), Rc::clone(&prober)).expect("every broker forks");
+        let deadline = Duration::from_millis(20);
 
-        assert_eq!(
-            set.status(Duration::from_millis(20), &flag),
-            Ok(SetStatus::NotReady {
-                broker: "egressd".to_string(),
-                reason: NotReady::TimedOut,
-            }),
-            "`egressd` answered only once the real clock had spent the budget, so `status` must judge its ready on that clock and refuse it"
-        );
+        let status = set.status(deadline, &flag);
+
+        let handed = prober.budgets_handed_out();
+        let never_asked = Ok(SetStatus::DeadlineSpent {
+            unreached: "egressd".to_string(),
+            asked: Vec::new(),
+        });
+        if status == never_asked {
+            assert!(
+                handed.is_empty(),
+                "a stall before the first check spent the budget, so no probe may have been asked, but budgets {handed:?} were handed out"
+            );
+        } else {
+            assert_eq!(
+                status,
+                Ok(SetStatus::NotReady {
+                    broker: "egressd".to_string(),
+                    reason: NotReady::TimedOut,
+                }),
+                "`egressd` answered only once the real clock had spent the budget, so `status` must judge its ready on that clock and refuse it. The one other right answer is {never_asked:?}, when a stall spends the budget before the first check"
+            );
+            assert!(
+                matches!(handed.as_slice(), [left] if left.is_none_or(|left| left <= deadline)),
+                "`egressd` must be asked once and handed at most the {deadline:?} its caller allowed, got {handed:?}"
+            );
+        }
     }
 
     #[test]
