@@ -197,21 +197,6 @@ pub(crate) fn mount_rules(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Grant {
-    pub owner: CellOwner,
-    pub capability: Capability,
-    pub kind: GrantKind,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "Grant", deny_unknown_fields)]
-struct GrantShape {
-    owner: CellOwner,
-    capability: Capability,
-    kind: GrantKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerEntry {
     pub handle: Handle,
     pub owner: CellOwner,
@@ -316,7 +301,6 @@ struct DrainSpecShape {
 
 object_serde!(
     Handle through HandleShape,
-    Grant through GrantShape,
     DrainSpec through DrainSpecShape
 );
 validated_object_serde!(Capability through CapabilityShape);
@@ -429,7 +413,19 @@ impl fmt::Display for BackendError {
 impl std::error::Error for BackendError {}
 
 pub trait EnforcementBackend {
-    fn grant(&mut self, grant: Grant) -> LedgerEntry;
+    /// Creates the holding `operation` describes at the address its caller chose and prepared,
+    /// and returns the issued entry: that address, the operation's owner and capability, and
+    /// `kind`. The backend never changes or allocates the address. An operation whose
+    /// `validate` fails returns `InvalidOperation` before any change. A retry of the same
+    /// standing issued operation and kind returns the original entry and changes nothing.
+    /// Another owner, capability or kind at an issued address, or a grant at the address of an
+    /// object that was applied or planted rather than granted, returns `IdentityConflict` and
+    /// changes nothing: a grant never promotes an object into an issued record.
+    fn grant(
+        &mut self,
+        operation: UniverseOp,
+        kind: GrantKind,
+    ) -> Result<LedgerEntry, BackendError>;
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError>;
     fn snapshot_os_state(&self) -> OsState;
     /// Records `op` under the identity and owner it names. An operation whose `validate` fails
@@ -718,17 +714,6 @@ pub(crate) mod tests {
                 "kind": "Hot",
             });
             assert_refused(&entry, entry_json, &expected);
-            let grant = Grant {
-                owner: owner(),
-                capability: capability.clone(),
-                kind: GrantKind::Hot,
-            };
-            let grant_json = json!({
-                "owner": owner(),
-                "capability": capability_json(&capability),
-                "kind": "Hot",
-            });
-            assert_refused(&grant, grant_json, &expected);
         }
     }
 

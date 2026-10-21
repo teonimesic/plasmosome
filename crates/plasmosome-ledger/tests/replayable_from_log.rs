@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use plasmosome_backend::{
     BrokerLaunch, Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend,
-    FileAccess, Grant, GrantId, GrantKind, LedgerEntry, MountRecipe, PluginId, ProxyRecipe,
+    FileAccess, GrantId, GrantKind, LedgerEntry, MountRecipe, PluginId, ProxyRecipe,
     ProxyTransport, SessionFileRecipe, UdsRecipe, UniverseClass, UniverseOp, UniverseRemoval,
 };
 use plasmosome_ledger::{Closure, Effect, Inverse, InverseVia, Ledger, LogRecord, Reversibility};
@@ -119,6 +119,15 @@ fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
     }
 }
 
+fn grant(backend: &mut FakeBackend, plugin: &str, capability: Capability) -> LedgerEntry {
+    backend
+        .grant(
+            op(GrantId::new(), cell_owner(plugin), capability),
+            GrantKind::Hot,
+        )
+        .unwrap()
+}
+
 fn file_removal(path: &str) -> UniverseRemoval {
     UniverseRemoval {
         id: GrantId::new(),
@@ -144,11 +153,11 @@ fn populate(backend: &mut FakeBackend) -> (PluginId, Vec<Effect>) {
     );
     let removal = op.removal();
     backend.apply(op).unwrap();
-    let entry = backend.grant(Grant {
-        owner: cell_owner("network"),
-        capability: uds_socket("/run/plasmosome/egressd.uds"),
-        kind: GrantKind::Hot,
-    });
+    let entry = grant(
+        backend,
+        "network",
+        uds_socket("/run/plasmosome/egressd.uds"),
+    );
     let effects = vec![
         Effect::exact("injected skill file", InverseVia::Universe(removal)),
         Effect::exact("bound egress socket", InverseVia::Backend(entry.handle)),
@@ -239,11 +248,11 @@ fn a_log_rebuilt_in_a_fresh_process_round_trips_through_serde_only() {
 #[test]
 fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
     let mut backend = FakeBackend::new();
-    backend.grant(Grant {
-        owner: cell_owner("network"),
-        capability: proxy_map("api.github.com", "splice"),
-        kind: GrantKind::Hot,
-    });
+    grant(
+        &mut backend,
+        "network",
+        proxy_map("api.github.com", "splice"),
+    );
     let state = backend.snapshot_os_state();
     let encoded = serde_json::to_string(&state).unwrap();
     let round_trip: plasmosome_backend::OsState = serde_json::from_str(&encoded).unwrap();
@@ -295,11 +304,7 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
 #[test]
 fn ledger_entry_refuses_serializing_a_class_capability_mismatch() {
     let mut backend = FakeBackend::new();
-    let entry = backend.grant(Grant {
-        owner: cell_owner("network"),
-        capability: session_file("/skills/pr.md"),
-        kind: GrantKind::Hot,
-    });
+    let entry = grant(&mut backend, "network", session_file("/skills/pr.md"));
     let encoded = serde_json::to_string(&entry).unwrap();
     assert_eq!(
         serde_json::from_str::<LedgerEntry>(&encoded).unwrap(),
@@ -508,16 +513,8 @@ fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
     let log = dir.path().join("ledger.ndjson");
     let capability = uds_socket("/run/plasmosome/egressd.uds");
     let mut backend = FakeBackend::new();
-    let first = backend.grant(Grant {
-        owner: cell_owner("network"),
-        capability: capability.clone(),
-        kind: GrantKind::Hot,
-    });
-    let second = backend.grant(Grant {
-        owner: cell_owner("network"),
-        capability,
-        kind: GrantKind::Hot,
-    });
+    let first = grant(&mut backend, "network", capability.clone());
+    let second = grant(&mut backend, "network", capability);
     backend.mark_stuck(first.handle);
     let mut ledger = Ledger::new("network");
     ledger.push(Effect::exact(
@@ -559,16 +556,8 @@ fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
     let log = dir.path().join("ledger.ndjson");
     let capability = broker("egressd");
     let mut source = FakeBackend::new();
-    let first = source.grant(Grant {
-        owner: cell_owner("network"),
-        capability: capability.clone(),
-        kind: GrantKind::Hot,
-    });
-    let second = source.grant(Grant {
-        owner: cell_owner("network"),
-        capability,
-        kind: GrantKind::Hot,
-    });
+    let first = grant(&mut source, "network", capability.clone());
+    let second = grant(&mut source, "network", capability);
     let encoded = serde_json::to_string(&source.snapshot_os_state()).unwrap();
     let restored: plasmosome_backend::OsState = serde_json::from_str(&encoded).unwrap();
     let mut fresh = FakeBackend::new();

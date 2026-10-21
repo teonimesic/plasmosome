@@ -28,12 +28,18 @@ questions, and neither comparison may silently substitute for the other.
 
 The UUID/exact-object model, its complete recipes and broker launch description, and the
 version-3 single-plugin log are implemented in the model and the ledger, which writes and reads
-format3 only. Caller-prepared fallible grants, complete fallible observation and exact
+format3 only. The model's grant is caller-prepared and fallible: it takes the operation and kind
+its caller prepared, keeps that address, mints no identity, and every refusal it has today comes
+before any effect. Complete fallible observation and exact
 incomplete-effect cleanup below are their next contract, not claims that the current code or a
-real OS adapter implements them; no real OS adapter implements the recipes or the launch yet.
+real OS adapter implements them; no real OS adapter implements the recipes, the launch or the
+fallible grant yet.
 Amended on 2026-10-20, when plasmosome-8pr4 shipped the first format3 writer. Until then this
 paragraph named the version-2 log as implemented, and the launch and the version-3 cutover as
 next contract.
+Amended on 2026-10-21, when plasmosome-kpm shipped the caller-prepared fallible grant in the
+model. Until then this paragraph listed it as next contract, beside complete fallible
+observation and exact incomplete-effect cleanup.
 Spec008 supplies the cell-qualified owner and durable ordering; its live-recovery acceptance
 is not replaced by the model conformance here.
 

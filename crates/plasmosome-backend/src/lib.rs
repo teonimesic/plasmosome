@@ -25,7 +25,7 @@ mod wire;
 mod fixtures;
 
 pub use backend::{
-    BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantKind, Handle, LedgerEntry,
+    BackendError, Capability, DrainSpec, EnforcementBackend, GrantKind, Handle, LedgerEntry,
     RevokePolicy,
 };
 pub use clock::{Clock, ClockReading, ManualClock};
