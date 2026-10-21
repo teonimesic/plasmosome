@@ -3,8 +3,10 @@
 
 Each case runs the README's own block against a base made here. A stub stands in for the build,
 so a base that passes the check stops there and nothing compiles. Run it as a user other than
-root, because root can write a 0555 directory. Set QUICKSTART_NOEXEC_BASE to a private base on a
-noexec mount to add the case that uses a real mount.
+root, because root can write a 0555 directory. Set QUICKSTART_NOEXEC_BASE to an empty private
+base on a noexec mount to add the case that uses a real mount. The base must be empty, because
+every refusal case checks that it left the base empty; a base that already holds files fails as
+"<base> was changed".
 """
 
 import errno
