@@ -30,6 +30,11 @@ run's results come only from the guest console, and anything short of a complete
 | `run` | host | `run_lane`: spawn in a new process group, wait up to a timeout, kill the group and reap, parse |
 | `selfcheck` | host | The four confinement checks `lane-vmm` runs after applying an SBPL profile |
 | `probe` | host and guest | The probe observations that need no Linux system call |
+| `steps` | host | `run_lane_with_steps`: `run_lane` while host steps run as named probes report |
+| `holding` | host | `move_to_holding`: move a tree into a holding directory, deepest first, directories included |
+| `overlap` | host | `overlaps`: whether two paths are one or nest, by the device and inode of every ancestor |
+| `gate` | host | The probe lists and judges of spec 027's Q1(a) gate and of the re-runs of its claims |
+| `results` | host | The results file: each row's verdict over its runs and mutants, the observations, and every run's record |
 
 `lane-vmm` refuses off macOS with exit 2. `lane-init` and `lane-probe` refuse off Linux with exit
 2, and `lane-init` refuses with exit 3 when it is not process 1.
@@ -127,8 +132,8 @@ cannot keep it waiting.
 
 ## Probes
 
-`lane-probe <subcommand>` prints one JSON line with `probe` and `ok`; a failed operation names its
-errno symbolically, such as `"errno": "EACCES"`.
+`lane-probe <subcommand>` prints one JSON line with `probe`, `ok` and `id_u`, the effective uid it
+ran as; a failed operation names its errno symbolically, such as `"errno": "EACCES"`.
 
 | Subcommand | Observation |
 | --- | --- |
@@ -140,7 +145,17 @@ errno symbolically, such as `"errno": "EACCES"`.
 | `hold-fd <name> <path>` | start a holder with the file open |
 | `hold-map <name> <path>` | start a holder with the file mapped private and read-only, and its descriptor closed |
 | `hold-exec <name> <path>` | execute `path`, a copy of `lane-probe`, as a holder |
-| `release <name>` | ask holder `name` to read its object back, then exit; reports its SHA-256 |
+| `hold-cwd <name> <dir>` | start a holder whose working directory is `dir`, recording every name under it |
+| `hold-watch <name> <path>` | start a holder that looks `path` up now, and again on release |
+| `hold-thread <name> <file> <dir>` | start a holder with a thread that calls `unshare(CLONE_FS \| CLONE_FILES)`, opens `file` and enters `dir`; its ready line gives the thread's ID |
+| `hold-inflight <name> <file>` | start a holder that sends `file`'s descriptor over `SCM_RIGHTS` to its own socket, then closes it |
+| `release <name>` | ask holder `name` to read its object back, then exit; reports its SHA-256. A `cwd` holder instead lists `.` and looks up each name it recorded, a `watch` holder looks its path up, a `thread` holder reads through its thread, and an `inflight` holder receives the descriptor first |
+| `await <path> <ms>` | wait up to `ms` milliseconds for `path` to exist, checking every 5 ms |
+| `sleep <ms>` | sleep, and report how long it slept |
+| `mount <source> <target> <fstype>` | create `target` and mount `source` there |
+| `umount-detach <target>` | `umount2(target, MNT_DETACH)` |
+| `scan <path>...` | every `/proc/<pid>/` and `/proc/<pid>/task/<tid>/` whose `fd`, `cwd`, `root`, `exe` or `maps` names a path's device and inode, the scanner's own process left out |
+| `stage <config>` | as guest root, bind a file into a workload mount namespace for `visible`, `private` or `unreachable`, and report the mount's result and the workload's `stat` as uid 1000 |
 | `mountinfo` | each mount's point, root within its filesystem, optional fields such as `shared:N`, type, source and options |
 | `id` | real and effective uid and gid, and the supplementary groups |
 | `devices` | each virtio device's name and device ID, and whether each block device is read-only |
@@ -151,6 +166,24 @@ A holder listens on `/run/lane-hold/<name>.sock`. Its name starts with a letter 
 only letters, digits, `.`, `_` and `-`, so the socket stays in that directory. A `release` whose holder died while reading,
 for example from `SIGBUS` on a mapping the file no longer backs, reports that the holder closed
 without a reply. `lane-init` kills and reaps every remaining process before it powers off.
+
+## Gate lanes
+
+`tests/q1a_gate.rs` measures spec 027's Q1(a) gate (item 17) on these lanes, and `tests/rerun.rs`
+re-runs four claims 027 measured elsewhere (items 2, 4 and 9). A gate lane has a software
+directory holding the exported share (tag `sw`, mounted at `/mnt/sw`), the holding directory
+beside it, and a read-only flag share (tag `ctl`, at `/mnt/ctl`).
+
+The host acts during a run through `steps::run_lane_with_steps`. A thread reads the console every
+5 ms. Once a named probe's result line is complete, it runs that step's action, such as moving a
+tree to the holding directory, and then writes the step's flag file into the flag share. A guest
+`await` probe waits for that file, so guest processes hold their references while the host acts.
+The flag is written after a failed action too, so the guest is never left waiting.
+
+Each test writes a JSON record to `target/tmp/q1a-records`, or to `LANES_RECORDS`, and
+`write_the_results_file` turns the records into the results file, beside the records or at
+`LANES_RESULTS`. The results of 2026-10-20 are in
+`docs/benchmarks/2026-10-20-spec027-q1a-gate.md`.
 
 ## Building the guest binaries
 
@@ -177,6 +210,14 @@ cannot give, so they are ignored. On a Mac with the bundle:
 
 ```shell
 cargo test -p plasmosome-lanes --test boot -- --ignored
+```
+
+The gate lanes run the same way, one at a time, and the results file is written last:
+
+```shell
+cargo test -p plasmosome-lanes --test q1a_gate --test rerun -- --ignored --test-threads=1 \
+  --skip write_the_results_file
+cargo test -p plasmosome-lanes --test q1a_gate write_the_results_file -- --ignored
 ```
 
 They read the bundle from `/usr/local/var/plasmosome/runtime/bundles/eed141b574337d99` unless
@@ -230,6 +271,9 @@ the bundle's `base/rootfs.raw` as its writable root image.
   included. This Homebrew `mke2fs` cannot read a tarball either: it was built without libarchive.
   A caller that needs root-owned files must set the owners itself, for example with
   `debugfs -w` and `set_inode_field`.
+- A host step runs on the console watcher's thread, so a slow action delays every later step. A
+  result line that lands in the run's last 5 ms is seen only by the final read, which takes no
+  step.
 - `lane-init`'s final wait blocks while any child is alive after the kill. A process stuck in an
   uninterruptible sleep, for example on a virtio-fs request, keeps the guest running until
   `run_lane`'s timeout, and the run is `TimedOut`.
