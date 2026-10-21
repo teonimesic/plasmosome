@@ -5382,9 +5382,17 @@ mod tests {
             );
             let before = names_under(&root.join("cells"));
             expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Exhausted { path }) => {
-                assert_eq!(path, root.join(place), "{place}")
+                assert_eq!(path, root.join("cells"), "{place}")
             });
             assert_eq!(names_under(&root.join("cells")), before, "{place}");
+        }
+        for place in ["cells", "retired"] {
+            let (_dir, root) = temp_root();
+            entries(&root, place, &["cell-9999999999"]);
+            let (instance, lock) = locked(&root);
+            expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Exhausted { path }) => {
+                assert_eq!(path, root.join(place), "{place}")
+            });
         }
     }
 
