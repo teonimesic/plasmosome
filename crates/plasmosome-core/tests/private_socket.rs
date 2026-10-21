@@ -973,9 +973,109 @@ fn accept_refuses_a_peer_whose_uid_is_not_trusted_before_reading() {
     assert_eq!(end.expect("EOF"), 0);
     #[cfg(target_os = "linux")]
     assert_eq!(
-        end.expect_err("the server closed with the request unread")
+        end.expect_err("the server closed with the request still queued")
             .kind(),
         std::io::ErrorKind::ConnectionReset
+    );
+}
+
+#[test]
+fn accept_refuses_a_peer_that_sent_one_byte_without_taking_it_from_the_queue() {
+    let root = private_root();
+    let trusted = effective_uid().wrapping_add(1);
+    let listener = PrivateListener::bind(private_dir(&root), "sock", trusted).expect("bind");
+    let mut client = UnixStream::connect(&listener.entry().path).expect("connect");
+    client.set_read_timeout(Some(PATIENCE)).expect("timeout");
+    client.write_all(b"{").expect("send one byte");
+    assert!(
+        matches!(accept_one(&listener), Accepted::Refused(_)),
+        "a peer with an untrusted UID was accepted"
+    );
+    let mut reply = Vec::new();
+    let end = client.read_to_end(&mut reply);
+    assert!(reply.is_empty(), "the refused client got a reply");
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        end.expect("macOS ends a refused connection with end of file"),
+        0
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        end.expect_err(
+            "the refused peer read end of file: its one byte was taken from the queue before \
+             the close, which left nothing queued to reset it"
+        )
+        .kind(),
+        std::io::ErrorKind::ConnectionReset,
+        "a reset shows the peer's one byte was still queued when the stream closed"
+    );
+}
+
+const WAITING_PEERS: usize = 200;
+
+#[test]
+fn a_refused_peer_whose_reader_has_started_sees_one_end_every_time() {
+    let root = private_root();
+    let trusted = effective_uid().wrapping_add(1);
+    let listener = PrivateListener::bind(private_dir(&root), "sock", trusted).expect("bind");
+    let ends: Vec<(std::io::Result<usize>, Vec<u8>)> = (0..WAITING_PEERS)
+        .map(|peer| {
+            let mut client = UnixStream::connect(&listener.entry().path).expect("connect");
+            client.set_read_timeout(Some(PATIENCE)).expect("timeout");
+            client
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"plasmosome.status\"}\n")
+                .expect("send");
+            let (reading, started) = mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                reading.send(()).expect("the test waits for the reader");
+                let mut reply = Vec::new();
+                let end = client.read_to_end(&mut reply);
+                (end, reply)
+            });
+            started.recv().expect("the reader starts");
+            std::thread::sleep(Duration::from_millis(2));
+            assert!(
+                matches!(accept_one(&listener), Accepted::Refused(_)),
+                "a peer with an untrusted UID was accepted"
+            );
+            let (end, reply) = reader.join().expect("the reader finishes");
+            if let Err(error) = &end {
+                assert!(
+                    !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ),
+                    "the refused stream was left open: peer {peer}'s read timed out"
+                );
+            }
+            (end, reply)
+        })
+        .collect();
+    assert!(
+        ends.iter().all(|(_, reply)| reply.is_empty()),
+        "a refused peer got a reply"
+    );
+    #[cfg(target_os = "macos")]
+    let unexpected: Vec<String> = ends
+        .iter()
+        .filter(|(end, _)| !matches!(end, Ok(0)))
+        .map(|(end, _)| format!("{end:?}"))
+        .collect();
+    #[cfg(target_os = "linux")]
+    let unexpected: Vec<String> = ends
+        .iter()
+        .filter(|(end, _)| {
+            !matches!(end, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset)
+        })
+        .map(|(end, _)| format!("{end:?}"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "{} of {WAITING_PEERS} refused peers, each with its reader started before the refusal, \
+         saw another end than the platform's (end of file on macOS, a reset on Linux, which shows \
+         the request was still queued when the stream closed): {:?}",
+        unexpected.len(),
+        unexpected
     );
 }
 
