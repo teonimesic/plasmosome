@@ -525,20 +525,32 @@ These need the owner. Where this spec needs an answer to work, it sets a conserv
 ## Acceptance
 
 Each item names the broken implementation it catches, and its minimum level: **model** (PID1's
-bookkeeping in isolation, or the controller and membrane against a 4090 test double), or
-**guest** (the Darwin pinned runtime with a booted repo-built guest, which needs O-1, O-6 and
-O-7). Items marked **mount** also need the Mount adapter and its guest filesystem server.
+bookkeeping or its `PATH` search in isolation, or the controller and membrane against a 4090 test
+double), or **guest** (the Darwin pinned runtime with a booted repo-built guest, which needs O-1,
+O-6 and O-7). Items marked **mount** also need the Mount adapter and its guest filesystem server.
 
 1. **Guest.** `["true"]` ends `exited` 0, `["false"]` `exited` 1, `["sh", "-c", "kill -TERM $$"]`
    `signaled` 15, and `["sh", "-c", "kill -ABRT $$"]` `signaled` 6. Catches: folding signals into
    exit codes, or the reverse.
-2. **Guest.** `["no-such-program"]` replies `running`, then ends `exited` 127. A file in the image
-   without execute permission, a script whose interpreter is missing, a text file with no `#!`,
-   and a single argument of 200 KiB each end `exited` 126. A program reached through an absolute
-   symlink inside the image runs, and so does an executable `/usr/bin/x` behind a non-executable
-   `/usr/local/bin/x`. Catches: refusing at `cell.exec`, searching `PATH` from PID1's root, a
-   missing interpreter reported as a missing program, a shell fallback, and a search that stops
-   at the first file.
+2. **Guest, and model for the search order.** `["no-such-program"]` replies `running`, then ends
+   `exited` 127. A file in the image without execute permission, a script whose interpreter is
+   missing, a text file with no `#!`, and a single argument of 200 KiB each end `exited` 126. A
+   program reached through an absolute symlink inside the image runs. At model level, PID1's
+   `PATH` search runs over a fixture tree in place of the workload root, with nothing under
+   `/opt` or `/usr/local/bin` and with `/bin` a directory of its own. It takes an executable
+   `/bin/x` behind a regular `/usr/bin/x` with no execute bit, and behind a directory
+   `/usr/bin/x` with mode 0755. It takes `/usr/bin/x` when both are executable. When the only
+   `x` is a regular `/usr/bin/x` with no execute bit, it takes that file, so the child's `execve`
+   fails and it exits 126, not 127 as for no file. Catches: refusing at `cell.exec`, searching
+   `PATH` from PID1's root, a missing interpreter reported as a missing program, a shell
+   fallback, and a search that stops at the first file, takes the last, takes a directory, or
+   reports a file it found as missing.
+   Corrected on 2026-10-21: this staged an executable `/usr/bin/x` behind a non-executable `x` in
+   the image's `/usr/local/bin`. Spec 027 §2 refuses an image with any entry under
+   `/usr/local/bin`, its §3 refuses an attached command whose name the image resolves on `PATH`,
+   and on a merged-usr image such as `debian:bookworm-slim` `/bin` is a link to `/usr/bin`. So on
+   that base neither the image nor an attach can put two files for one name on `PATH`, and the
+   order is tested at model level.
 3. **Guest.** A probe exits 0 only when all of these hold: uid and gid 1000, no supplementary
    groups, and `getpwuid(1000)` gives `/home/workload`; all five capability sets empty and
    no-new-privs set; the environment exactly the three variables; its directory
