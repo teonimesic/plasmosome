@@ -478,6 +478,41 @@ mod tests {
     }
 
     #[test]
+    fn a_size_modification_time_or_change_time_that_moved_while_hashing_is_refused() {
+        let before = Stamp {
+            size: 10,
+            modified: (100, 1),
+            changed: (200, 2),
+        };
+        assert_eq!(judge_unchanged(before, before), Ok(()));
+        for after in [
+            Stamp { size: 11, ..before },
+            Stamp {
+                modified: (100, 2),
+                ..before
+            },
+            Stamp {
+                modified: (101, 1),
+                ..before
+            },
+            Stamp {
+                changed: (200, 3),
+                ..before
+            },
+            Stamp {
+                changed: (201, 2),
+                ..before
+            },
+        ] {
+            assert_eq!(
+                judge_unchanged(before, after),
+                Err(ArtifactFault::ChangedWhileHashing),
+                "{after:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_hash_reads_at_most_one_byte_past_the_size_that_was_checked() {
         let bytes = b"0123456789";
         assert_eq!(
@@ -552,6 +587,10 @@ mod tests {
                 "this build can verify immutability only on macOS, through uchg or schg".to_owned(),
             ),
             (
+                ArtifactFault::ChangedWhileHashing,
+                "its size or times moved while it was hashed".to_owned(),
+            ),
+            (
                 ArtifactFault::Digest {
                     found: Digest::of(b""),
                 },
@@ -577,6 +616,8 @@ mod tests {
         use crate::nofollow::fixtures::{add_acl, set_flags, set_mode};
         use std::fs::{self, OpenOptions};
         use std::io::Write;
+        use std::os::unix::fs::FileExt;
+        use std::time::Duration;
 
         fn with_immutable_file(mode: u32) -> TestRoot {
             let root = with_file(mode);
@@ -693,27 +734,80 @@ mod tests {
             }
         }
 
+        fn grow_by_two_bytes(path: &Path) {
+            set_flags(path, 0);
+            set_mode(path, 0o644);
+            OpenOptions::new()
+                .append(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(b"XY"))
+                .expect("the file grows by two bytes");
+        }
+
+        fn after_the_clock_moves() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
         #[test]
         fn the_hash_reads_the_checked_descriptor_and_stops_one_byte_past_the_checked_size() {
             let root = with_immutable_file(0o444);
             let path = root.join("lib/membraned");
             let checked =
                 open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
-            set_flags(&path, 0);
-            set_mode(&path, 0o644);
-            OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .and_then(|mut file| file.write_all(b"XY"))
-                .expect("the file grows by two bytes");
+            grow_by_two_bytes(&path);
             write_file(&root.join("lib/other"), b"another file", 0o444);
             fs::rename(root.join("lib/other"), &path).expect("another file takes the path");
             assert_eq!(
-                hash_checked(checked, &path, &Digest::of(BYTES)),
-                Err(ArtifactFault::Digest {
-                    found: Digest::of(&[BYTES, b"X"].concat())
-                })
+                digest_checked(&checked, &path),
+                Ok(Digest::of(&[BYTES, b"X"].concat()))
             );
+        }
+
+        #[test]
+        fn a_held_writer_rewriting_the_same_bytes_after_the_check_is_refused_as_changed() {
+            let root = with_file(0o644);
+            let path = root.join("lib/membraned");
+            let writer = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("a writer opened before the file is locked");
+            set_mode(&path, 0o444);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            let checked = open_checked(root.walk("lib/membraned"), &path)
+                .expect("the locked file passes the rule");
+            after_the_clock_moves();
+            writer
+                .write_all_at(BYTES, 0)
+                .expect("the held writer still writes under uchg");
+            assert_eq!(
+                hash_checked(checked, &path, &Digest::of(BYTES)),
+                Err(ArtifactFault::ChangedWhileHashing)
+            );
+        }
+
+        #[test]
+        fn a_file_that_grew_after_the_check_is_refused_as_changed_before_its_digest_is_compared() {
+            let root = with_immutable_file(0o444);
+            let path = root.join("lib/membraned");
+            let checked =
+                open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
+            grow_by_two_bytes(&path);
+            assert_eq!(
+                hash_checked(checked, &path, &Digest::of(BYTES)),
+                Err(ArtifactFault::ChangedWhileHashing)
+            );
+        }
+
+        #[test]
+        fn a_path_that_names_another_file_after_the_check_leaves_the_checked_file_verified() {
+            let root = with_immutable_file(0o444);
+            let path = root.join("lib/membraned");
+            let checked =
+                open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
+            fs::rename(root.join("lib"), root.join("lib.old")).expect("the directory moves away");
+            make_dir(&root.join("lib"), 0o755);
+            write_file(&path, b"another file", 0o444);
+            assert_eq!(hash_checked(checked, &path, &Digest::of(BYTES)), Ok(()));
         }
     }
 }
