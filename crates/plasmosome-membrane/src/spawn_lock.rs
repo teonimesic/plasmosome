@@ -295,6 +295,15 @@ mod tests {
         }
     }
 
+    impl OwnsDescriptor for RecordsWhereItCloses<'_> {
+        fn descriptor(&self) -> RawFd {
+            self.fd
+                .as_ref()
+                .expect("the descriptor is still held")
+                .as_raw_fd()
+        }
+    }
+
     impl From<RecordsWhereItCloses<'_>> for OwnedFd {
         fn from(mut held: RecordsWhereItCloses<'_>) -> OwnedFd {
             held.fd.take().expect("the descriptor is still held")
@@ -366,6 +375,34 @@ mod tests {
             write_side_held,
             "creation ran holding the write side of the spawn lock"
         );
+    }
+
+    #[test]
+    fn each_owning_value_lends_the_descriptor_it_owns() {
+        let file = close_on_exec_null().expect("/dev/null opens");
+        assert_eq!(file.descriptor(), file.as_raw_fd());
+
+        let [mine, _peer] = with_each_descriptor_held(|_held| {
+            let (mine, peer) = UnixStream::pair()?;
+            Ok([mine.into(), peer.into()])
+        })
+        .expect("a close-on-exec socket pair");
+        let stream = UnixStream::from(mine);
+        assert_eq!(stream.descriptor(), stream.as_raw_fd());
+
+        let root = crate::runtime::test_fixtures::private_root();
+        let dir = plasmosome_core::private_socket::PrivateDir::open(root.path())
+            .expect("the test root is private");
+        let listener = with_descriptors_held(|_held| {
+            PrivateListener::bind(
+                dir,
+                "lent.sock",
+                plasmosome_core::private_socket::effective_uid(),
+            )
+            .map_err(|refusal| std::io::Error::other(refusal.to_string()))
+        })
+        .expect("a free name binds");
+        assert_eq!(listener.descriptor(), listener.as_raw_fd());
     }
 
     #[test]
