@@ -184,8 +184,8 @@ fn instance_under_a_restrictive_umask_child() {
     let Some(root) = child_root() else {
         return;
     };
-    let umask = std::env::var(UMASK_VARIABLE).expect("the umask is set");
-    let umask = libc::mode_t::from_str_radix(&umask, 8).expect("the umask is octal");
+    let text = std::env::var(UMASK_VARIABLE).expect("the umask is set");
+    let umask = libc::mode_t::from_str_radix(&text, 8).expect("the umask is octal");
     // SAFETY: umask takes no pointer and cannot fail.
     let _restore = RestoreUmask(unsafe { libc::umask(umask) });
     let instance = InstanceRoot::open(&root).expect("the instance root opens");
@@ -213,6 +213,16 @@ fn instance_under_a_restrictive_umask_child() {
     instance
         .retire(&lock, ended)
         .expect("the second cell retires");
+    let probe = root.join("umask-probe");
+    fs::write(&probe, b"").expect("the probe is written");
+    assert_eq!(
+        fs::symlink_metadata(&probe)
+            .expect("the probe exists")
+            .mode()
+            & 0o777,
+        0o666 & !u32::from_str_radix(&text, 8).expect("the umask is octal"),
+        "umask {text} was not in effect for the child's work"
+    );
 }
 
 #[test]
