@@ -724,11 +724,18 @@ enum Verdict {
 }
 
 impl Verdict {
-    fn reason(self) -> Option<&'static str> {
-        match self {
-            Verdict::Model => Some("credits a model"),
-            Verdict::Untraceable => Some("is untraceable"),
-            Verdict::Cleared => None,
+    fn refusal(self, position: Position) -> Option<&'static str> {
+        match (self, position) {
+            (Verdict::Model, Position::CoAuthoredBy) => {
+                Some("credits a model: GitHub shows it on main as a co-author.")
+            }
+            (Verdict::Model, Position::SignedOffBy) => Some(
+                "credits a model: a sign-off certifies where a change came from, which a tool cannot do.",
+            ),
+            (Verdict::Untraceable, _) => Some(
+                "is untraceable: no account can be found for it, so the record on main names somebody no reader can trace.",
+            ),
+            (Verdict::Cleared, _) => None,
         }
     }
 }
@@ -827,12 +834,12 @@ fn assert_each_identity_judged_in(root: &Path, position: Position) {
                 .lines()
                 .filter(|line| line.starts_with(&naming))
                 .collect();
-            match verdict.reason() {
-                Some(reason) => {
+            match verdict.refusal(position) {
+                Some(refusal) => {
                     let expected =
-                        format!("{naming}{} \"{identity}\" {reason}: ", position.as_printed());
-                    (!lines.iter().any(|line| line.starts_with(&expected))).then(|| {
-                        format!("{identity:?} must be refused by a line starting `{expected}`; the lines naming its commit are {lines:?}")
+                        format!("{naming}{} \"{identity}\" {refusal}", position.as_printed());
+                    (lines != [expected.as_str()]).then(|| {
+                        format!("{identity:?} must be refused by exactly one line, `{expected}`; the lines naming its commit are {lines:?}")
                     })
                 }
                 None => (!lines.is_empty()).then(|| {
