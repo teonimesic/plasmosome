@@ -425,7 +425,7 @@ impl VmmChild {
             errno: libc::EPROTO,
             observed: None,
         })?;
-        record_reap(operation, reported);
+        record_reap(options, reported);
         Ok(Some(state))
     }
 
@@ -669,30 +669,40 @@ fn leader_signal_withheld(_pid: libc::pid_t) -> bool {
 
 #[cfg(test)]
 std::thread_local! {
-    static LAST_REAPED_PID: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static REAPED_PIDS: std::cell::RefCell<Vec<libc::pid_t>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
-fn record_reap(operation: SupervisionOperation, pid: i32) {
-    if operation == SupervisionOperation::Reap {
-        LAST_REAPED_PID.set(pid);
+fn record_reap(options: libc::c_int, pid: libc::pid_t) {
+    if options & libc::WNOWAIT == 0 {
+        REAPED_PIDS.with_borrow_mut(|pids| pids.push(pid));
     }
 }
 
 #[cfg(not(test))]
-fn record_reap(_operation: SupervisionOperation, _pid: i32) {}
+fn record_reap(_options: libc::c_int, _pid: libc::pid_t) {}
 
 #[cfg(test)]
-fn reset_reap_record() {
-    LAST_REAPED_PID.set(0);
+pub(crate) fn reset_reap_record() {
+    REAPED_PIDS.with_borrow_mut(Vec::clear);
 }
 
 #[cfg(test)]
-fn assert_reaped_by_handle(pid: i32) {
-    assert_eq!(
-        LAST_REAPED_PID.get(),
-        pid,
-        "the consuming exact-child wait returned the owned leader"
+pub(crate) fn reaped_by_a_handle(pid: libc::pid_t) -> bool {
+    REAPED_PIDS.with_borrow(|pids| pids.contains(&pid))
+}
+
+#[cfg(test)]
+pub(crate) fn take_reap_record() -> Vec<libc::pid_t> {
+    REAPED_PIDS.take()
+}
+
+#[cfg(test)]
+fn assert_reaped_by_handle(pid: libc::pid_t) {
+    assert!(
+        reaped_by_a_handle(pid),
+        "no consuming exact-child wait of a handle on this thread returned pid {pid}"
     );
 }
 
