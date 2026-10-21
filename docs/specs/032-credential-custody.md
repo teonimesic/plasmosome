@@ -845,11 +845,13 @@ that commit.
 
 **Spec 023** (words read at main `f3b7511c`).
 
-- §4, the config record: in "has exactly these keys:" (`023:183`), replace "and
-  `boot_deadline_ms` (the remaining start budget at spawn)." (`023:184`) with
-  "`boot_deadline_ms` (the remaining start budget at spawn) and `credential_authority`: the paths
-  of spec 032's instance authority certificate and key, never the key, or null when the
-  controller's configuration has none."
+- §4, the config record: replace the whole sentence "It has exactly these keys: `cell`,
+  `instance_root`, `runtime_recipe` (the template plus the three per-cell paths) and
+  `boot_deadline_ms` (the remaining start budget at spawn)." (`023:182-184`) with "It has exactly
+  these keys: `cell`, `instance_root`, `runtime_recipe` (the template plus the three per-cell
+  paths), `boot_deadline_ms` (the remaining start budget at spawn) and `credential_authority`
+  (spec 032's instance authority, as the paths of its certificate and key, never the key, or null
+  when the controller's configuration has none)."
 
 ## Open questions
 
