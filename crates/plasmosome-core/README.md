@@ -351,8 +351,8 @@ rules are spec 025 §6's. Exits 2 and 1 are unchanged.
     belongs to no cell, so nothing can launch it;
   - an `instance_root` that makes that cell's `membrane.uds`, `runtime/data.uds` or
     `runtime/control.uds` longer than 103 bytes, spec 023's Darwin bound. The bound is the same
-    on every host, so the socket paths of a config that starts the daemon on Linux, whose
-    `sun_path` holds 107, fit on a Mac too. Of several, the refusal names the shortest;
+    on every host, so when a config starts the daemon on Linux, whose `sun_path` holds 107, these
+    three socket paths fit on a Mac too. Of several, the refusal names the shortest;
   - a template Artifact under `<instance_root>/cells/`, where it could be some cell's own path
     and that cell's recipe would be refused after its directory exists;
   - a template whose largest config record, for that cell with the largest boot deadline, is
@@ -614,14 +614,19 @@ is the 108 `cell.new` answers, with that path and a message that names an untrus
 The read stops one byte past the size `fstat` reported at the check, so it ends even if the file
 grows. That bound is the apparent size: a huge sparse file is read, zeros included, for as long
 as it claims to be, so its check is slow. Only root or the controller's UID can place such a file
-at an artifact path, because every directory above it must be theirs.
+at an artifact path, because every directory above it must be theirs. A process that opened the
+file for writing before it was made 0444 and `uchg` can also make the check slow, because the
+mode and `uchg` refuse only new opens: it can extend the file in place. In a review probe on
+macOS, through such a descriptor, `pwrite` at 1 TiB succeeded, and so did `ftruncate` to 2 TiB.
 
 The check records the file's size, modification time and change time when it passes, and again
 after the hash. If any of them moved, the file is refused as `ChangedWhileHashing` before its
-digest is compared. That catches a write through a descriptor opened before the file was locked:
-the mode and `uchg` refuse only new opens. It cannot catch every change. On macOS a write through
-a shared writable mapping that existed before the file was locked changes the bytes and moves
-none of the three, so neither this check nor the membrane's sees it.
+digest is compared. That catches a `write` made between the check and the end of the hash
+through a descriptor opened before the file was locked: the mode and `uchg` refuse only new opens.
+It cannot catch every change. A `MAP_SHARED` mapping made before the file was locked, from a
+descriptor opened for writing, can change the bytes whatever protection it had when the file was
+locked, because `mprotect` can add write later. Such a write moves the times only at `msync` or
+`munmap`, if at all, so neither this check nor the membrane's sees it.
 
 `CellRuntime::artifacts` lists what to verify: `membraned`, then the template's Artifacts in
 recipe order, read from the recipe the startup check completed. Unlike `TrustedFile`, the file and

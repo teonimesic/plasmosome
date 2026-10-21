@@ -66,10 +66,12 @@ pub enum ArtifactFault {
 ///
 /// The check records the file's size, modification time and change time when it passes, and
 /// again after the hash, and refuses `ChangedWhileHashing` if any moved, before the digest is
-/// compared. That catches a write through a descriptor opened before the file was locked, since
-/// the mode and `uchg` refuse only new opens. On macOS a change through a shared writable mapping
-/// that existed before the file was locked moves none of the three, so neither this check nor
-/// the membrane's sees it.
+/// compared. That catches a `write` made between the check and the end of the hash through a
+/// descriptor opened before the file was locked, since the mode and `uchg` refuse only new opens.
+/// A `MAP_SHARED` mapping made before the file was locked, from a descriptor opened for writing,
+/// can change the bytes whatever protection it had when the file was locked, because `mprotect`
+/// can add write later. Such a write moves the times only at `msync` or `munmap`, if at all, so
+/// neither this check nor the membrane's sees it.
 ///
 /// A pass describes the file as it was during the check. Whoever opens it later by path must
 /// guard its own open.

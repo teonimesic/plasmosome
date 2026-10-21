@@ -25,9 +25,9 @@ const REQUIRED: [&str; 3] = ["membraned", "template", "start_deadline_ms"];
 
 const DEFAULT_STOP_DEADLINE: Duration = Duration::from_millis(30_000);
 
-/// Spec 023 §1's bound on each socket path of the longest cell ID: 103 bytes, the Darwin
-/// `AF_UNIX` limit. It holds on every host, so the socket paths of a config that starts the
-/// daemon on Linux, whose `sun_path` holds 107, fit on a Mac too.
+/// Spec 023 §1's bound on each of the three socket paths of the longest cell ID: 103 bytes, the
+/// Darwin `AF_UNIX` limit. It holds on every host, so when a config starts the daemon on Linux,
+/// whose `sun_path` holds 107, these three socket paths fit on a Mac too.
 const MAX_SOCKET_PATH_BYTES: usize = 103;
 
 /// Spec 023 §1's `cell_runtime`: what the controller needs to start a cell's supervisor. Only
