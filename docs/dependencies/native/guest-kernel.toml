@@ -28,15 +28,16 @@ sources = [
   """\
   make olddefconfig turned the config used into the built config, SHA-256 \
   1166d66b42f33425601a8b1ac604f51dce895f3d8f50ea3c7b4c6408fa9e91af, the .config that make Image \
-  built from. plasmosome-itt's build script kept it after make Image. It changes 34 options. It \
-  sets the 16 options that come with CONFIG_BLK_DEV_INITRD, by the tarball's init/Kconfig and \
-  usr/Kconfig: CONFIG_INITRAMFS_SOURCE, CONFIG_INITRAMFS_PRESERVE_MTIME, CONFIG_RD_GZIP, \
-  CONFIG_RD_BZIP2, CONFIG_RD_LZMA, CONFIG_RD_XZ, CONFIG_RD_LZO, CONFIG_RD_LZ4, CONFIG_RD_ZSTD, \
-  CONFIG_DECOMPRESS_GZIP, CONFIG_DECOMPRESS_BZIP2, CONFIG_DECOMPRESS_LZMA, \
-  CONFIG_DECOMPRESS_XZ, CONFIG_DECOMPRESS_LZO, CONFIG_DECOMPRESS_LZ4 and \
-  CONFIG_DECOMPRESS_ZSTD. The other 18 follow from the toolchain: the version lines, now for the \
-  compiler and linker the next entry names, and options that probe it, such as CONFIG_RELR, \
-  CONFIG_RUST_IS_AVAILABLE and CONFIG_CC_HAS_COUNTED_BY, which are no longer set.\
+  built from. plasmosome-itt's build script kept it after make Image. It changes the value of 33 \
+  options, and drops the line for CONFIG_RUST, whose value stays unset. It sets the 16 options \
+  that come with CONFIG_BLK_DEV_INITRD, by the tarball's init/Kconfig and usr/Kconfig: \
+  CONFIG_INITRAMFS_SOURCE, CONFIG_INITRAMFS_PRESERVE_MTIME, CONFIG_RD_GZIP, CONFIG_RD_BZIP2, \
+  CONFIG_RD_LZMA, CONFIG_RD_XZ, CONFIG_RD_LZO, CONFIG_RD_LZ4, CONFIG_RD_ZSTD, \
+  CONFIG_DECOMPRESS_GZIP, CONFIG_DECOMPRESS_BZIP2, CONFIG_DECOMPRESS_LZMA, CONFIG_DECOMPRESS_XZ, \
+  CONFIG_DECOMPRESS_LZO, CONFIG_DECOMPRESS_LZ4 and CONFIG_DECOMPRESS_ZSTD. The other 17 follow \
+  from the toolchain: the version lines, now for the compiler and linker the next entry names, and \
+  options that probe it, such as CONFIG_RELR, CONFIG_RUST_IS_AVAILABLE and \
+  CONFIG_CC_HAS_COUNTED_BY, which are no longer set.\
   """,
   """\
   Built by plasmosome-itt on 2026-09-18 with make olddefconfig and make Image, inside a Debian \
