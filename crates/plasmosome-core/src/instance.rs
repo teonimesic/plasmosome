@@ -5602,7 +5602,8 @@ mod tests {
 
     #[test]
     fn a_probe_racing_the_creation_never_takes_the_new_lock_first() {
-        const CREATES: u32 = 2000;
+        const CREATES: u32 = 500;
+        const PROBERS: usize = 4;
         let (_dir, root) = temp_root();
         let (mut instance, lock) = locked(&root);
         instance.sync = no_sync;
@@ -5612,14 +5613,18 @@ mod tests {
         let path = lock_path(&root);
         let creating = AtomicBool::new(true);
         let (lost, probes) = thread::scope(|scope| {
-            let prober = scope.spawn(|| {
-                let mut probes = 0_u32;
-                while creating.load(Ordering::Relaxed) {
-                    drop(dir.probe_supervisor_lock());
-                    probes += 1;
-                }
-                probes
-            });
+            let probers: Vec<_> = (0..PROBERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut probes = 0_u32;
+                        while creating.load(Ordering::Relaxed) {
+                            drop(dir.probe_supervisor_lock());
+                            probes += 1;
+                        }
+                        probes
+                    })
+                })
+                .collect();
             let mut lost = 0_u32;
             for _ in 0..CREATES {
                 match dir.create_supervisor_lock() {
@@ -5634,11 +5639,16 @@ mod tests {
                 fs::remove_file(&path).expect("the lock file is removed");
             }
             creating.store(false, Ordering::Relaxed);
-            (lost, prober.join().expect("the prober finishes"))
+            let probes: u32 = probers
+                .into_iter()
+                .map(|prober| prober.join().expect("a prober finishes"))
+                .sum();
+            (lost, probes)
         });
         assert_eq!(
             lost, 0,
-            "{lost} of {CREATES} creations lost their new lock to a probe that ran {probes} times"
+            "{lost} of {CREATES} creations lost their new lock to {PROBERS} probers that ran \
+             {probes} times"
         );
     }
 
