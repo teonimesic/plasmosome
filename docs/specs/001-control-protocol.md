@@ -456,14 +456,34 @@ replies.
 ```
 
 - `genome` is optional; without it the cell starts empty (plasmids attach later).
+- Optional `request_key` is 1 to 64 characters from `A-Z a-z 0-9 . _ -`, as in `cell.exec`; anything
+  else, `null` and numbers included, is `-32602`. A key belongs to the instance and is shared by
+  every client of it. While a cell holds the key, from its creation until it is retired, a
+  `cell.new` with that key and the same other parameters, `kernel` aside, creates nothing.
+  Parameters are compared as JSON values (spec 023 §3): key order, spacing and string escapes do not
+  matter, but a member left out differs from one sent at its default value. Such a repeat gets that
+  cell's `ready` result, `{cell, state: "ready", plasmids}`, once the cell's `created` file is
+  synced; or, at once, 105 `{from: <state>, to: "ready", cell, detail: {kind: "repeat"}}` while the
+  cell is `germinating`, `draining` or `dead`; or 101 `{target: "cell <id>"}` while it is
+  quarantined, or set aside and not adopted by the check the repeat runs. The same key with other
+  parameters is 102 `{target: "request <key>"}`. The 101 and the 102 carry no `cell` member, and
+  none of these replies ends a cell. Spec 023 §4 step 1's host refusals and this spec's §3.4 stop
+  gate come before the key is looked up, so a repeat can get them. The key is held with no time
+  limit until the cell is retired. Then it is forgotten, and the same request starts a new cell.
+  While a cell's key record cannot be read after a restart, every `cell.new` with a key is 105
+  `{from: "request_unreadable", to: "germinating", cell}`. Spec 023 §3, §4 and §8 say where the key
+  is kept and how it survives a restart. `repeat` is the 105 `detail` kind of this case. Amended on
+  2026-10-21: this bullet is new; `cell.new` had no request key, so a repeat after a lost reply made
+  a second cell.
 - With a genome, optional `lease_ms` and `idle_ms` only shorten the lifetime of each attachment
   the request creates (spec 028). `exec_id` is `-32602`.
 - The controller allocates the cell ID and starts its supervisor as spec 023 says. It replies only
   when the guest is up and the genome is attached; until then the cell is `germinating` and refuses
   `cell.exec`. Resolution refusals come before any cell directory exists; every later refusal
-  carries `cell`, and its cell is ended first. On a host other than Darwin arm64, or without
-  `cell_runtime`, cell.new is 105 `{from: "unsupported_host" | "no_cell_runtime", to:
-  "germinating"}`.
+  other than a repeat's reply (above) carries `cell`, and its cell is ended first. On a host other
+  than Darwin arm64, or without `cell_runtime`, cell.new is 105 `{from: "unsupported_host" |
+  "no_cell_runtime", to: "germinating"}`. Amended on 2026-10-21: this read "every later refusal
+  carries `cell`, and its cell is ended first", and a repeat's reply ends no cell.
 - Optional `artifact: {registry_id,release:ReleaseRef}` selects the exact already imported
   spec020 genome, with required digest and a matching required `genome` name. It does not fetch,
   authorize widening or bypass normal closure checks. Missing import is101; corrupt/mismatched
