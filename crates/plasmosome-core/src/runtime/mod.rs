@@ -1,4 +1,5 @@
 pub mod cell_id;
+pub mod cell_paths;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub(crate) mod line;

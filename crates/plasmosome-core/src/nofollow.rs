@@ -953,6 +953,11 @@ pub(crate) mod fixtures {
         let Ok(metadata) = fs::symlink_metadata(path) else {
             return;
         };
+        if metadata.file_type().is_symlink() {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        chflags(path, 0);
         if !metadata.is_dir() {
             return;
         }
@@ -1024,6 +1029,25 @@ pub(crate) mod fixtures {
                 .open(fifo);
         }
         outcome
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_flags(path: &Path, flags: libc::c_uint) {
+        let error = (chflags(path, flags) != 0).then(std::io::Error::last_os_error);
+        assert!(
+            error.is_none(),
+            "chflags {flags:#x} {}: {error:?}",
+            path.display()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn chflags(path: &Path, flags: libc::c_uint) -> libc::c_int {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL");
+        // SAFETY: `name` is a CString that outlives the call, and chflags keeps no pointer to it.
+        unsafe { libc::chflags(name.as_ptr(), flags) }
     }
 
     #[cfg(target_os = "macos")]
