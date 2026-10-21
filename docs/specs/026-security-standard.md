@@ -312,8 +312,8 @@ check on each.
 - **A lint attribute naming `unsafe_code` in any form but a plain outer `#[allow(unsafe_code)]`
   (N3a to N3c).** That covers an inner `#![...]`, one behind `cfg_attr`, `expect` in place of
   `allow`, `unsafe_code` listed with other lints, and the raw name `r#unsafe_code`. Each lifts the
-  deny over its whole item. On a `mod` or the crate root, it is the package-wide allow this section
-  refuses.
+  deny over its whole item. On the crate root, or on a module the crate's `AGENTS.md` does not
+  name, it is the wider allow this section refuses.
 - **An item nested inside an allowed item (N9).** It inherits the allow. The reviewer reads the
   body of each allowed item for nested items that hold `unsafe`, and asks for the allow on the
   nested item instead.
@@ -328,11 +328,11 @@ git grep -n -P '(?<![A-Za-z0-9_])safe\s+(fn|static)\b|\bunsafe\s*\(|\b(no_mangle
 
 Its control is main. On 2026-10-21 it printed exactly two lines there: the `safe fn` declarations
 of `_dyld_image_count` and `_dyld_get_image_name` in lanes' `krun.rs`. While those stay, a run at
-main that prints neither is broken. It needs `-P`: Apple Git's `-E` reads `\b` and `\s` as matching
-nothing, so the same pattern there prints nothing and reports no error. It reads one line at a
-time, so an attribute that rustfmt wraps over two lines escapes it, and so does one a macro writes.
-It also prints prose that names a `safe fn`. It cannot see nesting, so N9 is the reviewer's reading
-alone.
+main that prints neither is broken. It needs `-P`. Apple Git's `-E` refuses the lookarounds, and
+reads `\b` and `\s` as matching nothing with no error, so an `-E` rewrite of the pattern prints
+nothing. It reads one line at a time, so an attribute that rustfmt wraps over two lines escapes it,
+and so does one a macro writes. It also prints prose that names a `safe fn`. It cannot see nesting,
+so N9 is the reviewer's reading alone.
 
 No check refuses these forms, for three reasons. No clippy lint reaches them: with clippy's
 restriction, pedantic, nursery and cargo groups all on, no lint fired on a `safe` declaration, an
