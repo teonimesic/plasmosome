@@ -447,6 +447,19 @@ replies.
 ```
 
 - `genome` is optional; without it the cell starts empty (plasmids attach later).
+- Optional `request_key` is 1 to 64 characters from `A-Z a-z 0-9 . _ -`, as in `cell.exec`;
+  anything else is `-32602`. A key belongs to the instance and is shared by every client of it.
+  While a cell holds the key, from its creation until it is retired, a `cell.new` with that key
+  and the same other parameters, `kernel` aside, creates nothing. It gets that cell's `ready`
+  result; or, at once, 105 `{from: <state>, to: "ready", cell, detail: {kind: "repeat"}}` while
+  the cell is `germinating`, `draining` or `dead`; or 101 `cell <id>` while it is quarantined, or
+  set aside and not adopted by the check the repeat runs. The same key with other parameters is
+  102 `{target: "request <key>"}`. None of these replies ends a cell. Once the cell is retired its
+  key is forgotten, and the same request starts a new cell. While a cell's key record cannot be
+  read after a restart, every `cell.new` with a key is 105 `{from: "request_unreadable", to:
+  "germinating", cell}`. Spec 023 §3, §4 and §8 say where the key is kept and how it survives a
+  restart. `repeat` is the 105 `detail` kind of this case. Amended on 2026-10-21: this bullet is
+  new; `cell.new` had no request key, so a repeat after a lost reply made a second cell.
 - With a genome, optional `lease_ms` and `idle_ms` only shorten the lifetime of each attachment
   the request creates (spec 028). `exec_id` is `-32602`.
 - The controller allocates the cell ID and starts its supervisor as spec 023 says. It replies only
