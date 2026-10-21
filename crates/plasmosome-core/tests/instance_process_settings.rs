@@ -213,6 +213,14 @@ fn instance_under_a_restrictive_umask_child() {
     instance
         .retire(&lock, ended)
         .expect("the second cell retires");
+    drop(
+        created
+            .create_supervisor_lock()
+            .expect("the supervisor lock is created"),
+    );
+    drop(created.open_supervisor_log().expect("the log is created"));
+    let allocated = instance.allocate_cell(&lock).expect("a cell is allocated");
+    assert_eq!(allocated.cell(), &CellId::from("cell-3"));
     let probe = root.join("umask-probe");
     fs::write(&probe, b"").expect("the probe is written");
     assert_eq!(
@@ -235,6 +243,9 @@ fn modes_are_private_whatever_the_umask() {
         "cells/cell-1/launched",
         "cells/cell-1/created",
         "cells/cell-1/runtime",
+        "cells/cell-1/supervisor.lock",
+        "cells/cell-1/membraned.log",
+        "cells/cell-3",
         "retired",
         "retired/cell-2",
         "retired/cell-2/launched",
@@ -255,6 +266,7 @@ fn modes_are_private_whatever_the_umask() {
             "cells",
             "cells/cell-1",
             "cells/cell-1/runtime",
+            "cells/cell-3",
             "retired",
             "retired/cell-2",
         ] {
@@ -272,6 +284,9 @@ fn modes_are_private_whatever_the_umask() {
                 Some(0o700),
                 Some(0o700),
                 Some(0o600),
+                Some(0o600),
+                Some(0o600),
+                Some(0o700),
                 Some(0o600),
                 Some(0o600),
                 Some(0o700),

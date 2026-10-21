@@ -582,6 +582,7 @@ that its complete runtime role is delivered.
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 cargo fmt --all -- --check
 ```
 
@@ -616,7 +617,7 @@ failure. After the build container runs, the tool reads only two things it left 
 the read-back in `check/`, which must still be a directory and is read through a bound.
 
 The images root above is the lab location, next to the runtime bundles. It is gated. Spec 001
-refuses an artifact with a replaceable parent (001:1043), and `/usr/local/var` is admin-writable,
+refuses an artifact with a replaceable parent (001:1119), and `/usr/local/var` is admin-writable,
 so product verification cannot accept an image from there. Owner gate O-1 (spec 027) is about the
 instance root, not the image, so answering O-1 alone does not admit an image there.
 

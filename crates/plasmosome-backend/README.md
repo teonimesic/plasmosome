@@ -28,12 +28,17 @@ by position, so two paths of one type could swap unnoticed; `ObjectOnly` refuses
 each record here and in the ledger, `ObservationPage` included. Every record also refuses a field
 it does not name. Why the crate names no VMM or broker process is covered in `AGENTS.md`.
 
-Each successful grant gets a canonical RFC 4122 UUID-v4 identity and an exact handle made from
-its universe class and that identity. Equal capabilities remain separate holdings. Recorded
-operations and planted observations keep caller-supplied identities, while identity conflicts fail
-without replacing state. `FakeBackend::plant_residue`, the trait's `plant`, and
-`CompositeBackend::new` are fallible; the composite rejects initial observations assigned to the
-wrong leaf.
+A grant keeps the identity its caller chose, as recorded operations and planted observations do.
+Under spec 017 the caller draws a fresh UUID-v4 `GrantId`, builds the complete `UniverseOp` and
+its inverse, records them durably, and only then calls `grant(operation, kind)`. Its handle is the
+operation's class and that identity, so the caller knows it before anything happens; the backend
+never chooses or changes it. `grant` can fail. A retry of the same standing issued operation and
+kind returns the original entry and changes nothing. Another owner, capability or kind at an
+issued address returns `IdentityConflict`, and so does a grant at the address of an object that
+was applied or planted: a grant never turns such an object into an issued record. Equal
+capabilities remain separate holdings, and identity conflicts fail without replacing state.
+`FakeBackend::plant_residue`, the trait's `plant`, and `CompositeBackend::new` are fallible; the
+composite rejects initial observations assigned to the wrong leaf.
 
 Spec 017 gives every capability a complete, nonsecret recipe: what an adapter needs to create
 the holding. The `recipe` module holds those records — `SessionFileRecipe`, `UdsRecipe`,
@@ -71,9 +76,9 @@ neither read from nor written to a log. Decoding names the first rule it meets i
 and launch checks itself while it decodes, so decoding names a broken recipe before a broken path
 or name of the same capability, and a zero port before a NUL in its host. The value is refused on
 every path either way.
-The trait's `apply` and `plant` refuse an invalid value before any change, with
-`BackendError::InvalidOperation` naming the address and the broken rule; `FakeBackend` does.
-`grant` does not check yet.
+The trait's `grant`, `apply` and `plant` refuse an invalid value before any change, with
+`BackendError::InvalidOperation` naming the address and the broken rule; `FakeBackend` does, at a
+fresh address and at an issued one alike.
 
 A software tree is a plasmid's files, pinned before attach has any effect. `software::pin`
 reads a directory against every file the verified package lists, as spec 020's
@@ -133,11 +138,12 @@ on by a normal or build dependency, for any target. A `--workspace` build merges
 every member it selects, so one crate's edge would turn the fixture on for product code too, and
 every gate builds that way. No crate needs the fixture yet. A crate that does must add, in the
 same change, a `cargo check -p` for each product crate, and change the guard.
-Core maps a `Conflict` to code 102 and a `PinRefusal` to code 108. The 102 does not carry spec
-027's `fix` yet, and neither does the 108 for `CommandNotInTree`, because the declaration field
-they would name does not exist. plasmosome-tbru adds both. No product path reaches
-`CommandNotInTree` today, since no product tree declares a command. The other 108s are faults in
-the files, not in a declaration, so under spec 001 they carry no `fix`.
+Core maps a `Conflict` to code 102 and a `PinRefusal` to code 108. No 102 carries a `fix`. Spec 027
+§3 item 1 says so for a name another plasmid or the image holds; no spec names the 102 for two
+commands of one tree. The 108 for `CommandNotInTree` has no `fix` yet, because the declaration field
+it would name does not exist. plasmosome-tbru adds that `fix`, and none on the 102. No product path
+reaches `CommandNotInTree` today, since no product tree declares a command. The other 108s are
+faults in the files, not in a declaration, so under spec 001 they carry no `fix`.
 
 Every holding is owned by a `CellOwner { cell, plugin }`: the same plugin attached to two cells is
 two owners, and no comparison looks at the plugin alone. It decodes only from a JSON object with
@@ -149,7 +155,8 @@ that times out returns `DrainTimedOut` and keeps the holding, its issued record 
 policy, also retires its handle. A zero graceful deadline checks once: a drained holding is
 released, an undrained one times out, and zero never forces. `revoke` follows the same rule.
 `FakeBackend::mark_stuck` and `stall_graceful_drains_for_owner` make graceful withdrawals of one
-address or one owner time out.
+address or one owner time out. `fail_before_effect_for_owner` makes every later `grant` and
+`apply` of a valid operation owned by one owner return `Fault` before any change.
 
 `DrainSpec::shutdown_deadline` is the deadline `membraned` sends with the 4090 `shutdown` when it
 stops a guest under that drain (spec 023 §7). It is a tenth of the drain deadline, and at least

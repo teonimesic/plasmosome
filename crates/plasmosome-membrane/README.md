@@ -21,7 +21,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. Nothing here verifies an artifact or boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
 
 ## Use
 
@@ -189,20 +189,72 @@ or keep forking. `mem::forget` leaks an unfinished handle.
 Darwin cannot create a pipe, a socket or an accepted connection already close-on-exec, so each one
 exists for a moment before `FD_CLOEXEC` is set, and a fork in that moment hands it to the child.
 `VmmChild::spawn` forks holding the read side of one process-wide lock. The readiness probe
-creates its socket holding the write side, and `HelperExec::prepare` creates the helper's two pipes
-the same way, so a spawn waits while either is created; on Linux both are close-on-exec from the
-start, so the wait matters only on Darwin. Creation under the write side returns the values that
+creates its socket holding the write side, `HelperExec::prepare` creates the helper's two pipes the
+same way, and so does `RuntimeListener` for its socket and each connection it accepts. A spawn
+waits while any of them is created; on Linux all are close-on-exec from the start, so the wait
+matters only on Darwin. Creation under the write side returns the values that
 own its descriptors, and only those descriptors are checked: if any is not already close-on-exec,
-all of them are closed before the lock is released and creation fails. A descriptor created under
-the lock and kept anywhere else is not checked, so the code that creates it must mark it
-close-on-exec before the lock is released. A spawn from the thread that holds the write side returns
-`SpawnError::DescriptorLockHeld` instead of waiting on itself.
+all of them are closed before the lock is released and creation fails. A value lends the lock its
+descriptor through `OwnsDescriptor`, as a raw descriptor, so making a copy of it needs `unsafe`.
+A descriptor created under the lock and kept anywhere else is not checked, so the code that
+creates it must mark it close-on-exec before the lock is released. A spawn from the thread that
+holds the write side returns `SpawnError::DescriptorLockHeld` instead of waiting on itself.
 
-The lock covers only those three paths. Forks that do not go through `VmmChild::spawn`, such as
+The lock covers only those paths. Forks that do not go through `VmmChild::spawn`, such as
 `std::process::Command`, do not take it, and neither do the standard library's `bind` in
 `daemon.rs` and `accept` in `control.rs`. Those two are safe only because `membraned` binds its
 control socket, spawns its brokers and serves requests on one thread, so none of them can overlap
 a fork. Code that creates descriptors or forks on a second thread must take the lock first.
+
+## Verifying the pinned artifacts
+
+Spec 001 §4.2 refuses a replaceable parent or a mutable artifact rather than trust it after hashing,
+and asks that verification keep the selected inode and bytes, because the helper and libkrun open
+artifacts by path. `runtime::artifacts::verify_artifact` checks one artifact that way, and
+`verify_recipe_artifacts` checks all of a recipe's in field order, stopping at the first refusal.
+
+The path is walked from `/` with core's no-follow walk, `plasmosome_core::nofollow`. No component
+may be a symlink. Every directory on the way must be owned by root or the effective uid and writable
+by neither group nor other, with no sticky-bit exception and, on macOS, no ACL allow entry that
+grants a right to replace its entries, whoever the entry names. On macOS no directory may sit on a
+volume mounted with ownership ignored (`noowners`), where owner and mode keep no one out. The file
+must be a regular file owned by root or the effective uid, with no write bit, no set-id bit and no
+ACL entry granting write, and on macOS `uchg` or `schg` must be set. Off macOS immutability cannot
+be shown, so every artifact that passes the other rules is refused with `ImmutabilityUnverifiable`.
+Only then are the bytes hashed, through the same descriptor with positioned reads, and compared with
+the pin. The hash reads at most one byte past the size the file was checked at. Nothing bounds that
+size: a process that opened the file for writing before it was locked can extend it first, and in a
+review probe on macOS 26.6.2, in the dev profile, a writer that kept extending a 64 MiB file made
+its verification take 43 to 340 s, against 3.9 to 5.5 s alone. The file's size, modification time
+and change time must be the same after the hash as before it, or it is refused as
+`ChangedWhileHashing`.
+
+On macOS pass the canonical path: `/var` is a symlink, so `/var/folders/...` is refused at `/var`.
+Measured on macOS 26.6.2 on 2026-10-21, the qualified bundle's kernel is refused at
+`/usr/local/var`, which has mode 0775; that is owner gate O-1 on `plasmosome-qep`.
+
+A `VerifiedArtifact` keeps the descriptor, the file's device and inode, its size and times, and its
+digest. `file()` still reads the verified inode after the path is made to name another file.
+`reconfirm()` opens the path again under the same checks. It refuses another inode as `Replaced`,
+and a file whose size or times moved since it was verified as `ChangedSinceVerification`. Call it
+just before the launch that relies on the path. Root and the effective uid can still clear `uchg`
+and change a file, or replace a directory they own; that is owner gate O-4. A process that opened
+the file for writing before it was locked can still write it too, because the mode and `uchg`
+refuse only new opens. Measured on macOS 26.6.2, such a write moves the file's times, so
+`reconfirm()` refuses a change made before it runs, but not one made after.
+
+`reconfirm()` sees a change to the file's bytes only if the change moves the device, inode, size,
+modification time or change time. A shared mapping made before the file was locked, from a
+descriptor opened for writing, can change the bytes whatever protection it had when the file was
+locked, because `mprotect` can add write later. Such a write moves the times only at `msync` or
+`munmap`, if at all, so neither `reconfirm()` nor verification sees it. Measured on macOS 26.6.2 on
+APFS on 2026-10-21, a write through such a mapping, writable at the lock or made writable after it,
+changes what `pread` and a fresh open read at once, while the size and times stay as they were until
+`msync` or `munmap`; at `munmap` of the mapping made writable after the lock, only the change time
+moved. A mapping made from a descriptor opened read-only cannot gain write (`mprotect` fails with
+`EACCES`), and neither can a mapping made after the lock: `mmap` with `PROT_WRITE` fails with
+`EPERM`, and adding write with `mprotect` fails with `EACCES`. Hashing again in `reconfirm()` would
+only narrow the window, because the mapping can write after any hash, so it does not.
 
 ## Launching the VMM helper
 
@@ -239,9 +291,59 @@ with the machine lightly loaded and up to about 680 ms under heavy load.
 An empty environment and the working directory `/` mean no `DYLD_*` or `LD_*` variable and no
 relative path can add to where the helper's loader looks for libraries. They do not remove a search
 path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
-names in the qualified libkrun. The launch checks no artifact either, and nothing in this crate
-verifies one yet: the cell, plasmosome-7em, which is not built yet, must verify the helper and its
-libraries before it prepares the launch.
+names in the qualified libkrun. The launch checks no artifact either: the cell, plasmosome-7em,
+which is not built yet, must verify the helper and its libraries with `runtime::artifacts` before it
+prepares the launch. That checks only the files the recipe lists. plasmosome-vev, also not built,
+audits the helper's Mach-O load names against those verified libraries.
+
+## The runtime's listeners and diagnostics
+
+Spec 001 §4.2 has the supervisor create the control and data listeners before it launches the
+helper, and keep them. `runtime::endpoints::RuntimeListener::bind` makes one at a recipe path with
+core's `private_socket`, the boundary `plasmosomed` binds its control socket with; core's README,
+"Private recovery sockets", describes it. `PrivateDir::open` walks the parent from `/` without
+following a symlink, and requires every ancestor owned by root or this uid and writable by neither
+group nor other, and the parent itself owned by this uid with no group or other bits.
+`PrivateListener::bind` then binds the name inside that held directory. It refuses any entry
+already there with `AddressInUse` and leaves it as it was: a live or stale socket, a file, a
+directory, a FIFO or a symlink, dangling or not. It sets the socket to 0600 before it listens, so no
+connection lands while the umask's mode holds. A path too long for a socket address is
+`PathTooLong`. Each refusal comes back as `EndpointRefusal::Private` with core's error, which names
+the rule broken and the component that broke it. The bind holds the spawn lock's write side,
+because on Darwin core makes the socket close-on-exec in a second call. Closing the listener closes
+it, then removes the socket file only while the entry at that name in the held directory is still
+that socket, and says what it found as a `RemoveOutcome`. Dropping it does the same. A child that
+another thread is spawning holds a copy of the listener until its exec, so the socket can take
+connections until then. The cell, plasmosome-7em, which is not built yet, is to create that
+private directory.
+
+`accept_ready` takes one pending connection without blocking, holding the same write side. Core
+reads the peer's effective uid from the kernel and closes a peer of another uid unread: that is
+`Connection::Refused` with core's refusal. A trusted stream is made nonblocking, and the peer's
+process id is read right after the accept. What that pid names differs by platform. On Linux it is
+`SO_PEERCRED`'s: the process that called `connect`, recorded then. On Darwin it is
+`LOCAL_PEERPID`'s: the last process that created, connected or sent on the peer's socket before the
+read. A process that inherited the connection and sent one byte before the accept is the one
+reported (measured on macOS 26.6.2). So on Darwin a match with the helper's pid shows that the
+helper was the last process to use that socket, not that it connected, and a genuine helper whose
+child sent first does not match.
+
+When the peer's credentials or pid cannot be read, the connection is `Refused` with
+`PeerCredentials` and closed. On Darwin a peer that connected and exited before the accept is that
+case, with `ENOTCONN`; on Linux the same peer is `Identified` with the pid it had. So a process
+that connects and leaves gets a result of its own and cannot make the listener look broken.
+`accept_ready` returns an error when the listener's accept fails, and in two cases after it took a
+connection: core cannot put a trusted stream back into blocking mode, or the spawn lock finds the
+accepted stream not close-on-exec. That stream is then closed.
+
+`DiagnosticTranscript` reads the read end of the diagnostic pipe that `HelperExec::prepare` returns,
+on a thread of its own, so a helper that writes a lot never blocks on descriptor 2. Start it before
+`VmmChild::spawn`, so a thread that cannot start refuses the launch before anything forks. It keeps
+the first 1,048,576 bytes and counts the rest. `finish(wait)` waits up to `wait` for end of file,
+then tells the thread to stop. The thread then reads what the pipe holds without waiting, so bytes
+written before `finish` are kept even with no wait. It checks for the stop every 25 ms, so `finish`
+typically returns within `wait` plus 25 ms; on a loaded machine the scheduler adds to that. `eof` is
+true only when every holder of the write end has closed it.
 
 ## Control-socket ownership
 

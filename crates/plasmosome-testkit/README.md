@@ -9,25 +9,51 @@ Three things live here. The first is the **conformance suite** — the behaviora
 is held to the same functions, unchanged; a backend that fails one is the thing that is wrong.
 That is what makes the fake a model of enforcement rather than a hope about it.
 
-`FakeBackend` and `CompositeBackend` over three fake leaves both pass all eleven clauses. The
+`FakeBackend` and `CompositeBackend` over three fake leaves both pass all thirteen clauses. The
 composite failed three of the original clauses when it was first wired in, because it lost the
 handle its leaf issued; task 008 fixed the backend rather than the clauses, which is the point of
 holding every backend to the same functions.
 
-The exact-grant clauses build expected objects from each request plus the issued identity, never
-from a backend's returned owner or capability. Applied-object withdrawal keeps observations from
-every other universe class standing. Dedicated defective backends alter each colliding resource
-field, substitute an owner, remove cross-class state, and choose the wrong exact instance. Three
-change only a recipe or launch, in the returned entry, in the recorded object, or in both, and
-`snapshot_never_invents_objects` must reject each. A fourth, `RevokeReturnsAnotherRecipe`, makes a
-revoke return the issued entry with another recipe, and `grant_is_replayable` must reject it.
+The exact-grant clauses build expected objects from each prepared operation, never from a
+backend's returned entry, and the returned handle must be the address the caller prepared.
+Applied-object withdrawal keeps observations from every other universe class standing. Dedicated
+defective backends alter each colliding resource field, substitute an owner, remove cross-class
+state, and choose the wrong exact instance. Three change only a recipe or launch, in the
+returned entry, in the recorded object, or in both, and `snapshot_never_invents_objects` must
+reject each. A fourth, `RevokeReturnsAnotherRecipe`, makes a revoke return the issued entry with
+another recipe, and `grant_is_replayable` must reject it.
 
-Six defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
-`GrantReturnsAnotherRecipe`, `GrantRecordsAnotherRecipe`, `RevokeReturnsAStranger` and
-`RevokeReturnsAnotherRecipe`. Their witnesses run each of them once for each of the five classes,
-against `snapshot_never_invents_objects` or `grant_is_replayable`. So those two clauses fail a
-witness if they check only their first grant. Every other defect runs once, and no other clause
-is held to that.
+Nine defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
+`GrantReturnsAnotherRecipe`, `GrantRecordsAnotherRecipe`, `RevokeReturnsAStranger`,
+`RevokeReturnsAnotherRecipe`, `AcceptsInvalidOperationsOf`, `LeaksAnInvalidOperationOf` and
+`RefusalRollsBackTheAddressOf`. The last three also name the call. Their witnesses run each of
+them once for each of the five classes, against `snapshot_never_invents_objects` or
+`grant_is_replayable`. So those two clauses fail a witness if they check only their first grant,
+or only one class of invalid operation at a fresh or at an issued address. Every other defect runs
+once, and no other clause is held to that.
+
+Callers prepare grants. `GrantClosure` collects one owner's capabilities in attach order. Each
+`PreparedGrant` knows its handle and its inverse, `backend_effect`, before `grant` runs. An
+identity source that fails panics inside `prepare`, before anything is recorded or granted.
+`grant_retry_returns_the_original_entry` holds a backend to spec 017's retry rules. The same
+standing operation and kind returns the original entry. Another kind, owner or capability at an
+issued address returns `IdentityConflict` and changes nothing. A grant at an applied or planted
+address returns `IdentityConflict`, changes nothing and issues no record, whether it carries the
+same payload, another owner or another capability. `fresh_backends_share_no_authority`, and the
+last step of `snapshot_never_invents_objects`, check that a backend fresh from the factory
+observes nothing an earlier instance did, so a backend that keeps its own durable record of grants
+fails both. The first instance then revokes its grants in both orders.
+
+`snapshot_never_invents_objects` also sends an invalid operation of every class through `grant`,
+`apply` and `plant`, each at a fresh address and at an issued one. Each call must return
+`InvalidOperation` and leave the state as it was just before that call. So must each revoke of
+the handle of a grant refused at a fresh address, which returns `UnknownHandle`. The state must not
+change between two of those calls either, so a refusal whose effect lands after it returned fails.
+A later check therefore cannot hide what an earlier refusal changed. A refusal that clears or swaps
+what stands at its address fails, and so does a revoke that tidies away residue. A private backend
+that refuses another launch at an occupied broker endpoint, as spec 017 allows a real adapter to
+do, passes every clause, so the relaunched broker in `repeated_grants_are_independently_removable`
+must keep its own command and sockets.
 
 A clause earns its place by being watched failing against a backend built to carry the defect it
 names. The suite started at five, and the three added by task 009 came from asking what a broken
@@ -118,57 +144,75 @@ not run, and does not depend on the order of a lane's runs:
 - a field in which the cell lane differs from the absent lane, unless an allowance names that
   probe and field and the cell holds exactly its value.
 
-The harness transcript is compared the same way, with no allowances and no rules.
+The harness transcript is compared the same way, with no allowances and no rules. No rule
+reaches it, because rules name probes, so a transcript key with the name of a ruled probe field is
+still compared exactly. Spec 027 §6's verdict says why.
 
 All three comparisons see each completed observation after normalization. A rule names a probe,
 a field and a kind. In each run, `judge` replaces every value of that field with a placeholder
-such as `<pid:2>`, numbered within that probe, field and run: by first appearance, or by order
-for system times and durations. Equal JSON values stay equal, distinct ones stay distinct, times
-keep their order, and an extra value in one field shifts no other. Every field no rule names is
-compared exactly, so nothing is normalized for how it looks, and a field the workload set can
-have no rule. The field must hold one value of the rule's kind or a list of them, or the runs
-are refused, naming the lane, probe, field and kind:
+such as `<pid:2>`, numbered within that probe and run, so an extra value in one probe shifts no
+other probe. How a kind is numbered decides which relations its placeholders keep:
+
+- A value that names something, a process ID, boot ID, mount ID, device, inode, ephemeral port or
+  resolved address, is numbered by first appearance across every field of the probe that has a
+  rule of its kind. The fields are taken in the byte order of their names, and a list's values in
+  their order. So equal values stay equal and distinct ones distinct, even in two fields: a leader
+  that names another process of its list fails, and so do two files that report one inode in two
+  fields. A parent mount ID is numbered with the mount IDs, and its placeholder is
+  `<mount_id:N>`. Apart from that pair, two kinds never share numbers.
+- A system time is numbered by rank within its field, earliest first, and equal times share a
+  number, so time placeholders keep their order.
+- A memory or load counter is numbered by first appearance within its field, so counters in two
+  fields are not related.
+- Every duration becomes `<duration>`, so durations keep no relation. A reach probe whose lanes
+  differ only in the order of its durations or in which of them are equal does not discriminate,
+  since timing is spec 006's.
+
+A relation that changes can show as a difference in a later field of the same probe, instead of
+or as well as the field that changed. In `a_leader_that_names_another_process_of_its_list_fails`,
+only `leader` changes, and `pids` is the field that differs. In
+`two_distinct_files_that_report_one_inode_fail`, the cell's two files in `distinct` share an
+inode, and both `distinct` and `linked` differ: `linked`'s inodes did not change, but its numbers
+moved. Times or counters whose relation matters go in one list field. A relation between two
+probes is never compared, so a probe that needs one reports both values.
+
+Every field no rule names is compared exactly, so nothing is normalized for how it looks, and a
+field the workload set can have no rule. A ruled field must hold one value of the rule's kind or
+a list of them, or the runs are refused, naming the lane, probe, field and kind:
 
 - a process ID, mount ID, parent mount ID, device, inode or memory counter is a whole number;
 - an ephemeral port is a whole number up to 65535;
-- a system time, duration or load counter is any number, but a list of system times or of
-  durations must not mix integers with numbers serde_json holds as floats, since the two do not
-  compare exactly. Floats are the numbers written with a fraction or an exponent, such as `5.0`,
-  and, when serde_json reads JSON text, also `-0` and integers beyond `u64::MAX` or below
-  `i64::MIN`. So `[5, 5.0]` and `[0, -0]` are both refused. A load counter list may mix, since it
-  is not ranked, but `5` and `5.0` are not equal JSON values, so `[5, 5.0]` gets two
-  placeholders;
+- a system time, duration or load counter is any number, but a list of system times must not mix
+  integers with numbers serde_json holds as floats, since the two do not compare exactly. Floats
+  are the numbers written with a fraction or an exponent, such as `5.0`, and, when serde_json
+  reads JSON text, also `-0` and integers beyond `u64::MAX` or below `i64::MIN`. So `[5, 5.0]`,
+  `[-0, 5]` and `[1e3, 1001]` are all refused. A duration or load counter list may mix, since it
+  is not ranked. `5` and `5.0` are not equal JSON values, so in a load counter list `[5, 5.0]`
+  gets two placeholders;
 - a boot ID is a UUID, and a resolved address an IPv4 or IPv6 address.
 
-Integer times and durations rank exactly across the whole `i64` and `u64` range, and the others
-by their total order. No kind holds an object, so no field the workload set lists can sit under a
-ruled field. A number the workload set, such as a time set with `utimensat`, can still sit in a
-ruled list, and keeping it out is the manifest author's job. A rule checks a value's shape, not
-its meaning: a `pid` rule on a numeric `errno` field makes 13 and 2 equal.
+Integer system times rank exactly across the whole `i64` and `u64` range, and the others as
+`f64` values. Times that are equal JSON numbers share a number, so `-0.0` and `0.0` are one time.
+No kind holds an object, so no field the workload set lists can sit under a ruled field. A number
+the workload set, such as a time set with `utimensat`, can still sit in a ruled list, and keeping
+it out is the manifest author's job. A rule checks a value's shape, not its meaning: a `pid` rule
+on a numeric `errno` field makes 13 and 2 equal.
 
-Relations hold only within one field of one run. Two fields are numbered apart, so a relation
-between them is not compared: a process list in `pids` and its leader in `leader`, or two files'
-inodes in two fields, can change which values are equal and still pass. Values whose relation
-matters go in one list field. Within a field, placeholders keep relations, so a reach probe whose
-open and absent lanes differ only in a ruled field still discriminates when the relation differs,
-such as two equal process IDs in one lane and two distinct ones in the other, and does not when
-only the numbers differ.
-
-Durations are ranked on purpose, like system times. Spec 027 §6 lists "times and durations the
-system chose" together and says time placeholders keep their order. So a probe's verdict can turn
-on timing order alone: a reach probe whose only difference is `[a, b]` in the open lane and
-`[b, a]` in the absent lane discriminates. And a relation that changes between a lane's two runs,
-such as two durations that swap order, is reported as noise.
+Within a probe, placeholders keep the relations above. So a reach probe whose open and absent
+lanes differ only in a ruled field still discriminates when a relation differs, such as two equal
+process IDs in one lane and two distinct ones in the other, and does not when only the numbers
+differ.
 
 `judge` takes typed runs and parses no bytes. A reader of the probe output a guest writes
-belongs with the code that runs the lanes.
+belongs with the code that runs the lanes, and spec 027 §6 says which numbers that reader must
+refuse.
 
 ## What's inside
 
 | Module | Holds |
 | --- | --- |
-| `builders` | `PlasmidManifest`, capabilities, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
-| `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
+| `builders` | `PlasmidManifest`, capabilities, prepared grants (`GrantClosure`, `PreparedGrant`), `Effect`s and `DesiredState` — a test states only what it is about |
+| `conformance` | Thirteen clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
 | `differential` | Spec 027 §6's probe manifest for the membrane differential, its refusals, and `judge`, which compares the lanes' runs and gives the verdict |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |

@@ -10,6 +10,7 @@ mod commands;
 mod envelope;
 mod help;
 pub mod json;
+mod refusal;
 pub mod reply;
 
 pub use cli::{Invocation, Reading, handle, main_with, read};
@@ -18,3 +19,4 @@ pub use commands::{COMMANDS, Command};
 pub use envelope::{
     ClientError, EmitError, Envelope, ErrorBody, Form, Instance, KernelError, Stream, emit,
 };
+pub use refusal::{PathOrigin, map_refusal};

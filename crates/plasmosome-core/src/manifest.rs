@@ -47,9 +47,12 @@ pub struct NetworkSpec {
     pub pin_cidrs: Vec<String>,
 }
 
+/// The `[workspace].mount` a declaration writes. `dst` is the guest path, `/workspace` when the
+/// declaration leaves it out (spec 022 §6). A written `backend` is not kept: it selects nothing
+/// (spec 011), so nothing here can choose how the Mount is realized.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceMount {
-    pub backend: String,
+    /// The guest path the Mount appears at.
     pub dst: String,
 }
 
@@ -319,11 +322,6 @@ impl PlasmidManifest {
             .get("workspace")
             .and_then(|w| w.get("mount"))
             .map(|m| WorkspaceMount {
-                backend: m
-                    .get("backend")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or("virtiofs")
-                    .to_string(),
                 dst: m
                     .get("dst")
                     .and_then(toml::Value::as_str)
@@ -1491,7 +1489,7 @@ description = "Make the workspace available to the cell."
 version = "0.1.0"
 
 [workspace]
-mount = { backend = "virtiofs", dst = "/workspace" }
+mount = { dst = "/workspace" }
 "#;
 
     const GITHUB_PR_WITH_MOCK: &str = r#"
@@ -1796,7 +1794,45 @@ subject = "git"
     #[test]
     fn workspace_manifest_parses_the_mount() {
         let manifest = PlasmidManifest::parse(WORKSPACE).unwrap();
-        assert_eq!(manifest.workspace.as_ref().unwrap().backend, "virtiofs");
+        assert_eq!(manifest.workspace.as_ref().unwrap().dst, "/workspace");
+    }
+
+    fn workspace_declaration(mount: &str) -> String {
+        format!(
+            "id = \"workspace-bind\"\n\
+             description = \"Make the workspace available to the cell.\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [workspace]\n\
+             mount = {mount}\n"
+        )
+    }
+
+    #[test]
+    fn a_written_backend_changes_nothing_in_the_parsed_declaration() {
+        for (dst, parsed) in [("dst = \"/srv/work\"", "/srv/work"), ("", "/workspace")] {
+            let without =
+                PlasmidManifest::parse(&workspace_declaration(&format!("{{ {dst} }}"))).unwrap();
+            let only_dst = WorkspaceMount {
+                dst: parsed.to_string(),
+            };
+            assert_eq!(without.workspace, Some(only_dst));
+            for backend in ["virtiofs", "fuse"] {
+                let mount = if dst.is_empty() {
+                    format!("{{ backend = \"{backend}\" }}")
+                } else {
+                    format!("{{ backend = \"{backend}\", {dst} }}")
+                };
+                let written = PlasmidManifest::parse(&workspace_declaration(&mount))
+                    .unwrap_or_else(|error| panic!("{mount} was refused: {error:?}"));
+                assert_eq!(written, without, "{mount}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_mount_with_no_dst_gets_the_workspace_path() {
+        let manifest = PlasmidManifest::parse(&workspace_declaration("{}")).unwrap();
         assert_eq!(manifest.workspace.as_ref().unwrap().dst, "/workspace");
     }
 

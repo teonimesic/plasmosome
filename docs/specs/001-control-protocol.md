@@ -351,6 +351,70 @@ Spec017 gives each residue object an exact grant ID and complete capability; spe
 its owner to `{cell, plugin}`. These embedded wire changes do not change the residue variants
 or authorize removing a different holding with an equal resource description.
 
+**Parameters.** `name` is optional, as for `plasmosome.status`: a different name is 101 with
+`target` `plasmosome <name>`, and nothing stops. `force` is optional. `operator` and `reason` are
+nonblank strings, required when `force` is true and refused with `-32602` when `force` is not
+true. `deadline_ms` is an optional positive integer that bounds the whole stop from the request's
+arrival; its default is `cell_runtime.stop_deadline_ms`, or 30,000 without `cell_runtime`.
+
+**Order.** From the moment a stop is admitted until it replies, every other request that would
+change state is refused at once with 105 `{from: "stopping", to: "running"}`, a second
+`plasmosome.stop` included. `cell.exec` is refused the same way. This 105 carries no `cell`, at
+admission or at a mutation's turn: it concerns the instance, not a cell. Reads are answered. The
+stop then takes the cells one at a time, in byte order of the cell ID (so `cell-10` comes before
+`cell-9`), each in its place in that cell's arrival order behind the mutations admitted before it
+(spec 023 §6). A cell is `draining` while the stop works on it.
+
+**Drain.** A cell's drain is spec 023 §7's step 2: a committed but unfinished transaction of the
+cell is resumed first, then every attachment is withdrawn in one removal transaction under spec
+008, `Graceful`, or `Force` when `force` is true, with the `force` event spec 008 requires before
+the first forced withdrawal. Under `force` too, a resumed transaction that does not finish in time
+is 106: the stop never takes step 2's `now` path, which goes on to stop the guest. No
+`membrane.workload.stop` and no `membrane.cell.kill` is sent. The cell keeps running with no
+attachment after the controller exits, and a later startup adopts it (spec 008). This is spec 023
+open question 5's default; that question stays open.
+
+**Residue.** After its drain, each cell's `membrane.residue.snapshot` is diffed against its
+settled DesiredCell. `residue` is `empty` only when the diff of every cell in `drained` and `forced`
+is empty; otherwise `residue_items` holds the named leaked, lost and asserted objects of every
+cell's report, cell by cell in that order. Residue `items` does not keep the controller running: the
+cells that hold it keep running, and the next startup observes them.
+
+`drained` lists, in the order above, each cell whose removal ran `Graceful` or that had nothing
+to withdraw. `forced` lists each cell whose removal ran under `Force`. So a graceful stop always
+has `forced: []`.
+
+**Refusals.** A cell that spec 023's check set aside, or that spec 008 quarantined, cannot be
+drained, so the stop refuses before draining anything, `force` included, with 105 `{from:
+"set_aside" | "quarantined", to: "stopped", cell}` naming the first such cell in the order above;
+`plasmosome.recovery` names the rest. A cell set aside or quarantined after the stop was admitted
+refuses it the same way at its turn, after the cells before it have drained. A cell retired before
+its turn, by a `cell.kill` admitted earlier, is skipped and is in neither `drained` nor `forced`. A
+drain or publication that does not settle within the deadline is 106 `{handle, deadline_ms}`, with
+`handle` the cell's ID and `deadline_ms` the stop's deadline. So is a residue snapshot that fails or
+does not answer in time, since the stop cannot then say what the cell holds. So is a `force` event
+that cannot be appended; nothing is forced on that cell (spec 008). Outstanding external effects
+without `force` are §3.11's 105, with `cell`, found for every cell before draining anything, and
+again at each cell's turn. A request that changes state checks the gate again once it has its turn
+on a cell, so a mutation admitted just before the stop cannot run on a cell the stop has drained. A
+`cell.new` checks the gate again under spec 023 §2's allocation mutex, before it creates a cell
+directory, and the stop reads its list of cells under that mutex once the gate is closed, so no cell
+is created that the stop does not take. After any refusal the controller keeps serving: cells
+already drained stay drained, a cell whose drain or snapshot ended in 106 stays `draining` for a
+later `plasmosome.stop` or `cell.kill`, every other cell is in the state it had before the stop, and
+mutations are admitted again.
+
+**After the reply.** Once the reply is written, the controller accepts no new connection, reads
+no further request on any connection, removes its socket as §1 says, releases `controller.lock`
+and exits 0. The instance's directory stays, with no socket entry, which spec 025 §5 reads as a
+stopped instance. A reply that does not reach the client does not undo the stop. SIGTERM or
+SIGINT ends the controller without draining, as today: its cells keep their attachments, and the
+next startup recovers them.
+
+Amended on 2026-10-21: this section gave the request and the result but no deadline, no order
+against other mutations, no refusal, and no account of what the controller does after it
+replies.
+
 ### 3.5 `plasmosome.cell.new` — wire method `cell.new`
 
 ```json
@@ -730,6 +794,18 @@ no-follow device-and-inode identity. The subset this spec covers:
 - `membrane.cell.observe` — the supervisor's observed state (cells, broker readiness, VMM
   liveness). This is the only source the controller trusts for liveness; `sessions.status`-style
   requested state is lifecycle, not liveness.
+- `membrane.cell.denials` — `{cell, book?, after: u64}`, answered from the membrane's memory with
+  no wait and not paged, like `membrane.cell.desired`, as `{cell, book, lines, entries}`. `book`
+  is a UUID the membrane draws when it starts. `lines` are the spec 011 report lines the membrane
+  holds with a number above `after`, at most 64, in order. `entries` are every entry that names a
+  plasmid, as `{plasmid, denials}` with spec 011's `denials` shape, in the order first seen. A
+  request whose `book` equals the membrane's drops the lines numbered `after` and below, so a
+  line is dropped only after the controller has appended it; a request with no `book` or another
+  one drops nothing and is answered as if `after` were 0, so a restarted membrane never drops a
+  line the controller has not seen. The membrane keeps the counts and lines for its own life, and
+  forgets a plasmid's entries when a published DesiredCell no longer has that plasmid. Spec 011
+  gives the bounds. Amended on 2026-10-21: this method is new. §4 named no method that carries
+  spec 011's denial report from the membrane to the controller.
 - `membrane.residue.snapshot` — the F9-universe observation taken **from the supervisor/broker
   side** at diff time (86 §4 rule 4). The controller diffs snapshots, never its intentions.
 - `membrane.cell.kill` — drain-then-kill with `DrainSpec { deadline, policy }` carried
@@ -1589,15 +1665,22 @@ is a claim that the text above may not be corrected.
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
 8. Spec017's PID-free BrokerLaunch and single-plugin format3 cutover are **delivered** in the
-   exact-ID model and the ledger. Its caller-prepared fallible grant API, complete fallible
-   snapshot, typed incomplete effects and drain-aware exact cleanup are **not yet implemented**.
+   exact-ID model and the ledger, and its caller-prepared fallible grant API is **delivered** in
+   the exact-ID model. Its complete fallible snapshot, typed incomplete effects and drain-aware
+   exact cleanup are **not yet implemented**.
    Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
-   format3 records, and still has infallible backend-minted grants. The new contract permits
+   format3 records. Its grant takes the operation and kind its caller prepared, keeps that
+   address, mints no identity and can fail; every failure it has today comes before any effect.
+   No product code calls grant yet. In tests, the testkit's attach-detach fixture writes the
+   inverse of every prepared grant to a format3 log before the first grant. The new contract permits
    complete prepare/inverse before fork and defines cleanup after partial launch; it does not
    deliver an independent observer, workload confinement or all five real adapters.
    Amended on 2026-10-20, when plasmosome-8pr4 shipped the launch and the format3 cutover. Until
    then this item listed both as not yet implemented, and said the model code carried
    PID-bearing capabilities and format2 records.
+   Amended on 2026-10-21, when plasmosome-kpm shipped the caller-prepared fallible grant. Until
+   then this item listed it as not yet implemented, and said the model code still had
+   infallible backend-minted grants.
 9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
    **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
    recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest

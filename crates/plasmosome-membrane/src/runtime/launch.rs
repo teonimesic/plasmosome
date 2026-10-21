@@ -482,7 +482,7 @@ impl std::error::Error for LaunchRefusal {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::test_fixtures::{artifact, recipe, recipe_value};
+    use crate::runtime::test_fixtures::{artifact, fake, recipe, recipe_value};
     use crate::vmm::{VmmChild, VmmState};
     use std::collections::BTreeMap;
     use std::io::{Read, Seek, SeekFrom};
@@ -491,10 +491,6 @@ mod tests {
     use std::sync::LazyLock;
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::{Duration, Instant};
-
-    mod fake {
-        include!("../../tests/support/runtime_fake.rs");
-    }
 
     const DEADLINE: Duration = Duration::from_secs(10);
     const HOLD: Duration = Duration::from_millis(250);

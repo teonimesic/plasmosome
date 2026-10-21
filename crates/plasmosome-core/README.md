@@ -22,15 +22,16 @@ one.
 | `kill_budget` | `cell.kill`'s deadlines under spec 023 §7, with no IO. The lock reserve is a tenth of the kill's deadline D, from 1 ms to 3 s, fixed for the request and not rounded. Each step's share is measured from what is left of D past that reserve when the step starts: the workload stop, which is `Skipped` with `now`, the withdrawal with its drain, effect and publication parts, and the guest stop's `DrainSpec` and answer wait. Each share is whole milliseconds and at least 1 ms, or `NoBudget`. `Incomplete` is the reply's closed set, and a reply is a retirement exactly when it lacks `teardown`. With `now` it records only `teardown` |
 | `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
-| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
+| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's cell ID allocation, `supervisor.lock` and `membraned.log`, its `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
 | `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. Callers gather the facts and carry out the outcome |
 | `closure` | What removing a plugin takes, with no IO. `AttachmentGraph` holds one cell's attached plugins, the providers each one directly requires, and which ones were asked for by name; a provider is attached before its requirers. `stranded_by` lists the plugins that directly require a given one, which `plasmid.remove` must refuse to strand. `removal_closure` gives that plugin, every plugin that transitively requires it, and every unnamed provider required only by plugins it takes, followed down the chain. Spec 011's `plasmid.remove` and spec 028's expiry are to share it, so the two cannot take different sets; nothing calls it yet |
-| `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
+| `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary. Its config may carry spec 023's `cell_runtime`, read as `CellRuntime` |
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
 | `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4 |
-| `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
+| `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell |
+| `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
 
@@ -169,6 +170,10 @@ and spec 026 §2 allows `unsafe` only in register packages.
   Its values are checked only when `complete` adds one cell's three paths and reads the result as
   a recipe, so a caller that must refuse a bad template at startup completes it once there.
 - `cell_id::parse_cell_id` accepts exactly `cell-` and one to ten ASCII digits, the first not `0`.
+- `cell_paths::CellPaths::new` builds one cell's `membrane.uds` and the three per-cell paths
+  the template lacks, `runtime/root.img`, `runtime/control.uds` and `runtime/data.uds`, under
+  `<root>/cells/<cell>/`. The startup check of `cell_runtime` and `cell.new` both build them
+  here. It refuses an ID that `state::validate_cell_id` refuses, and a path that is too long.
 - `SupervisorConfig` is spec 023 §4's record, one line:
   `{"cell":…,"instance_root":…,"runtime_recipe":{…},"boot_deadline_ms":…}` and a newline. The
   recipe is a nested object, not a string holding JSON, so its escapes are not doubled. `decode`
@@ -241,6 +246,69 @@ cell directory get the same treatment.
   an existing `retired/<cell>` is `AlreadyRetired`. Nothing is unlinked: the journal, the markers,
   a stale `membrane.uds` and `runtime/root.img` move with the directory.
 
+## Cell IDs and the supervisor lock
+
+Spec 023 §2 has the controller choose each new cell's ID, and §3 and §4 give every cell a
+`supervisor.lock` that is held without a gap from its creation until `membraned` exits.
+`InstanceRoot` and `CellDir` provide both, and open `membraned.log`. Like the markers, they
+open everything through opened directories, never by path and never through a symlink. Nothing
+calls them yet.
+
+- `InstanceRoot::allocate_cell` needs the writer lock. It lists `cells/` and `retired/` by name
+  and creates `cell-<n>`, where `n` is one more than the largest number it found, or 1 when
+  there is none. Any entry named `cell-<n>` counts, whatever it is, so an ID in either directory
+  is never allocated again. A name `parse_cell_id` refuses, such as `cell-07`, does not count.
+  A name whose `cell-` prefix differs only in case, such as `CELL-3`, counts as that ID: APFS
+  folds case by default, so there `CELL-3` and `cell-3` are one name. The listing creates
+  neither directory, and sets each one it finds to mode 0700. A `cells` or `retired` that is a
+  symlink is `Symlink`, one that is not a directory is `NotADirectory`, and nothing is created.
+- The directory itself is made by `create_cell_dir`: exclusive, mode 0700 and synced. If the
+  chosen name is already taken, the call lists again and tries the next number, the larger of
+  the new listing's and one above the taken one, up to 64 times, and is then `Contended`. When no
+  number up to `cell-9999999999` is left it is `Exhausted`, naming the directory that holds the
+  largest. A failure from `create_cell_dir` is `Create`, which carries the cell ID: if the sync of
+  `cells` failed after the `mkdir`, that cell's directory exists.
+- Allocations run one at a time, under a mutex held from the listing until the directory exists.
+  The mutex lives in the `WriterLock`, not in the `InstanceRoot`, because two opens of one root
+  can share one writer lock, and only one writer lock exists per root. A panic during an
+  allocation does not block the next one. `retire` does not take this mutex, so it can move a
+  cell during an allocation. `cells/` is listed before `retired/` so that a cell moved between
+  the two listings is seen in the second one.
+- `CellDir::create_supervisor_lock` creates the lock as `supervisor.lock.tmp`, exclusively with
+  mode 0600 and close-on-exec, takes `flock(LOCK_EX | LOCK_NB)` on it, renames it to
+  `supervisor.lock` without replacing anything and syncs the cell directory. With one creator at
+  a time, the lock is held from the moment the name exists, so a probe sees no lock file and
+  then a held one. A leftover temporary is removed first, and every failure before the rename
+  removes it. An entry already at `supervisor.lock` is left as it is and reported as what it is:
+  `Symlink`, `NotARegularFile` or, for a file, `AlreadyExists`. Two creators of one cell's lock at
+  once can move each other's file into place, so after the rename the call checks, without following
+  a symlink, that `supervisor.lock` names the file it holds. If not, it is `LockNotNamed` and
+  returns no lock, so `Ok` always means the name holds the returned lock. If the name is gone by
+  then, the error is `Io` naming `supervisor.lock`. A directory at `supervisor.lock.tmp` cannot be
+  unlinked, so every create is then an `Io` error naming it; only a writer under the root can plant
+  one. The returned `SupervisorLock` holds the lock. `into_owned_fd` gives up its descriptor, still
+  locked, to become `membraned`'s descriptor 4.
+- `CellDir::probe_supervisor_lock` tries the lock on a fresh read-only descriptor. `Held` means
+  another open of the file holds it, even one in this process. `Free` keeps the lock it took
+  until the returned `SupervisorLock` is dropped. `Missing` means no entry is there, and nothing
+  is created. A symlink is refused, and so is anything but a regular file.
+- Nothing here calls `LOCK_UN`. An `flock` lock belongs to the open file, so it is released only
+  when every descriptor of that open file is closed: the copy handed to `membraned` keeps it
+  held after the controller drops its own. A forked child that has not called `exec` keeps it
+  alive too, as it does the writer lock.
+- `CellDir::supervisor_lock_identity` gives the device and inode of the file at the name, so
+  `membraned` can check that its descriptor 4 is this cell's lock (spec 023 §5, step 2).
+  `SupervisorLock::identity` gives the same for the file it holds.
+- `CellDir::open_supervisor_log` opens `membraned.log` for appending, `membraned`'s stderr. It
+  creates the log if it is missing and never truncates it, sets it to mode 0600 whatever the
+  umask, and returns it close-on-exec and in blocking mode.
+
+`InstanceRoot::retire` still does not check the supervisor lock its caller must hold. A caller
+holds it when it has a `SupervisorLock` whose `identity()` equals the cell's
+`supervisor_lock_identity()`: one from `create_supervisor_lock` that it has not handed over, or
+one from a `Free` probe. `retire` does not take one yet. Nothing calls `retire`, and its first
+caller is where the shape of that call will be known.
+
 ## Command line
 
 `plasmosomed <config.json>` runs the daemon in the foreground. A sole `-h` or `--help` prints
@@ -268,11 +336,39 @@ rules are spec 025 §6's. Exits 2 and 1 are unchanged.
 - `recovery_deadline_ms` is required: a whole number of milliseconds, at least 1.
 - `registry_root` is optional and absolute when given. Without it the daemon is purely local;
   no other path, `HOME` or request supplies a default.
+- `cell_runtime` is optional. It is spec 023 §1's input for starting a cell's supervisor: an
+  object with exactly `membraned`, an Artifact `{"path": …, "sha256": …}`; `template`, a runtime
+  recipe without `writable_root`, `control_path` and `data_path`; `start_deadline_ms`; and an
+  optional `stop_deadline_ms`, 30,000 when absent. Both deadlines are whole numbers of
+  milliseconds, at least 1. Without `cell_runtime`, nothing else changes. With it, startup also
+  refuses:
+  - an `instance_root` a recipe would refuse: one with a trailing `/`, an empty, `.` or `..`
+    component, or `/` itself;
+  - a template that carries one of the three per-cell paths, lacks or adds a key, or holds a
+    value this host refuses, such as `vcpus: 0` or `architecture: "sparc"`. The template is
+    completed once, with the paths of the longest cell ID, `cell-9999999999`. That recipe is kept
+    privately, as the source `CellRuntime::artifacts` lists the template's Artifacts from, and
+    belongs to no cell, so nothing can launch it;
+  - an `instance_root` that makes that cell's `membrane.uds`, `runtime/data.uds` or
+    `runtime/control.uds` longer than 103 bytes, spec 023's Darwin bound. The bound is the same
+    on every host, so when a config starts the daemon on Linux, whose `sun_path` holds 107, these
+    three socket paths fit on a Mac too. Of several, the refusal names the shortest;
+  - a template Artifact under `<instance_root>/cells/`, where it could be some cell's own path
+    and that cell's recipe would be refused after its directory exists;
+  - a template whose largest config record, for that cell with the largest boot deadline, is
+    over 1,048,576 bytes.
+
+  So a `cell_runtime` that starts the daemon cannot make a later `cell.new` refuse its recipe or
+  its config record, while the host reports the same limits: `CellRuntime` does not keep the ones
+  it was checked under. A key repeated anywhere inside `cell_runtime` is refused, as is `null`. The
+  host's limits are read only when the key is present. None of this opens a file: `cell.new`
+  verifies the Artifacts, and this build does not serve it.
 
 The config must be one JSON object: an array is refused rather than read by position. An unknown
 key, a key given twice, or an explicit `null` refuses the config, and the refusal names the key.
-The binary prints it and exits 2. This build checks these keys for shape only: it does not open
-the instance root, recover cells or read registry imports (spec 001 §6, item 7).
+The binary prints it and exits 2. This build checks the other keys for shape only: it does not
+open the instance root, recover cells, read registry imports (spec 001 §6, item 7) or start
+cells.
 
 ## Socket ownership
 
@@ -340,7 +436,8 @@ reads its replies can hold the daemon open past shutdown.
 It refuses every peer whose kernel-reported effective UID is not the trusted one. It also keeps
 other UIDs from reaching the socket path. That second property has not yet been shown with a
 second UID: the distinct-UID test waits on owner decision O-8. `plasmosomed` binds its control
-socket through it too, as [Socket ownership](#socket-ownership) says.
+socket through it too, as [Socket ownership](#socket-ownership) says, and so do
+`plasmosome-membrane`'s runtime listeners.
 
 - `PrivateDir::open` walks the socket's parent directory from `/`, without following symlinks.
   The path must be absolute and normal: no `.` or `..` component, no empty component and no
@@ -375,8 +472,18 @@ socket through it too, as [Socket ownership](#socket-ownership) says.
     glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
     `EOPNOTSUPP` without it. The socket is then matched by device and inode and set with
     `fchmodat` without that flag.
-  - On drop, it removes only the socket it created, matched by device and inode, through the
-    held directory.
+  - `close` closes the socket, then removes only the socket it created, matched by device and
+    inode, through the held directory, and says what it found as a `RemoveOutcome`: `Removed`,
+    `AlreadyGone`, `LeftReplacement` or `Failed` with the errno. Dropping it does the same and
+    discards the outcome. A child that another thread is spawning holds a copy of every
+    descriptor until its exec, so the socket can take connections until then. On macOS 26.6.2,
+    with another thread spawning `/usr/bin/true` in a loop, 10 of 150 closed listeners still took
+    a connection right after the close. Beside another test whose teardown spawns `/bin/chmod`,
+    the longest such window in 25 runs was 4.5 ms.
+  - It lends its descriptor only through `as_raw_fd`, for polling, and does not implement `AsFd`.
+    Safe code therefore cannot copy it. A copy could accept a peer the UID check refuses, clear
+    `O_NONBLOCK` so that `accept` blocks, or keep the socket listening after `close`.
+    `plasmosome-membrane` reads its close-on-exec flag through `as_raw_fd` under its spawn lock.
 - `PrivateListener::accept` reads the peer's effective UID from the kernel: `getpeereid` on
   macOS, `SO_PEERCRED` on Linux. It closes an untrusted peer before reading a byte.
 - A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`
@@ -497,3 +604,43 @@ that is the per-user temp directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, w
 says. On Linux it tries `XDG_RUNTIME_DIR` when it is set, then the test binary's directory. If no
 base passes, the test fails and names each base with the ancestor that refused it. The test that
 `/etc/hosts` is `parent` skips as root, because root owns `/etc`.
+
+## Artifacts
+
+`artifact::verify_artifact` is the controller's check of one spec 001 §4.2 Artifact under spec
+023 §1's rule, which `cell.new` runs before it allocates anything. Nothing calls it yet. It walks
+the path from `/` with `nofollow`, so a symlink anywhere on the path is refused. Every directory
+above the file, its own directory included, meets [the walk's](#the-no-follow-walk) ancestor
+rule. It is owned by root or the effective UID and writable by neither group nor other. On macOS
+it carries no ACL allow entry that grants a right to replace its entries, whoever the entry
+names, and is on no volume mounted with ownership ignored. The file must be a regular file owned
+by root or the effective UID, with no write bit at all, no set-user-ID or set-group-ID bit, no
+ACL allow entry that grants write, and `uchg` or `schg` set. Off macOS, a file that passes every
+earlier rule is then refused as `ImmutabilityUnverifiable`, so no Artifact passes there. Spec 023
+§1 has the membrane repeat these file rules at launch. A FIFO is refused at once. Only then is the
+file hashed, through the descriptor that was checked, so a file that breaks a rule is refused even
+when its digest matches. An `ArtifactRefusal` names the path and the broken rule, and its `wire`
+is the 108 `cell.new` answers, with that path and a message that names an untrusted artifact.
+
+The read stops one byte past the size `fstat` reported at the check, so it ends even if the file
+grows. That bound is the apparent size: a huge sparse file is read, zeros included, for as long
+as it claims to be, so its check is slow. Only root or the controller's UID can place such a file
+at an artifact path, because every directory above it must be theirs. A process that opened the
+file for writing before it was made 0444 and `uchg` can also make the check slow, because the
+mode and `uchg` refuse only new opens: it can extend the file in place. In a review probe on
+macOS, through such a descriptor, `pwrite` at 1 TiB succeeded, and so did `ftruncate` to 2 TiB.
+
+The check records the file's size, modification time and change time when it passes, and again
+after the hash. If any of them moved, the file is refused as `ChangedWhileHashing` before its
+digest is compared. That catches a `write` made between the check and the end of the hash
+through a descriptor opened before the file was locked: the mode and `uchg` refuse only new opens.
+It cannot catch every change. A `MAP_SHARED` mapping made before the file was locked, from a
+descriptor opened for writing, can change the bytes whatever protection it had when the file was
+locked, because `mprotect` can add write later. Such a write moves the times only at `msync` or
+`munmap`, if at all, so neither this check nor the membrane's sees it.
+
+`CellRuntime::artifacts` lists what to verify: `membraned`, then the template's Artifacts in
+recipe order, read from the recipe the startup check completed. Unlike `TrustedFile`, the file and
+its own directory may be root's as well as the effective UID's, there is no link-count rule, and
+there is no size cap: a root image can be large. Spec 001 §4.2 also has `membraned` check the
+files it launches. That check belongs to `plasmosome-membrane` and is separate from this one.

@@ -99,6 +99,10 @@ stream open.
 
 An `exec_id` that is not of the form `e-<n>` is `-32602`. One the cell never issued, or no longer
 retains, is 101 `exec <id>`. Output that is no longer retained is 101 `output <id>`.
+On 4090, PID1 reports both with the `not_retained` detail below. Its `what` is exactly `exec` when
+PID1 retains no entry with that ID, and `output` when it retains the entry but not its output.
+The membrane answers 101 `<what> <exec_id>`, so no client sees that detail.
+Amended on 2026-10-21: PID1 had no detail with which to report either case.
 
 **Refusals carrying `detail`.** These are 105 with `from: "guest_request"` and exactly one of
 these `detail` records. `to` is `"refused"`, except for `no_reply`.
@@ -112,6 +116,7 @@ these `detail` records. `to` is `"refused"`, except for `no_reply`.
 | `{kind: "key_conflict"}` | The `request_key` is retained with a different `argv`. |
 | `{kind: "stopped"}` | The workload has been stopped (§7). |
 | `{kind: "workload_remains", count: u32}` | `workload_stop` killed and reaped, and `count` processes still remain. |
+| `{kind: "not_retained", exec_id: String, what: String}` | PID1 keeps no such entry or output. |
 | `{kind: "no_reply"}`, with `to: "unknown"` | A request was sent to the guest and no reply came within the deadline. An `exec` may have started; a retry with the same `request_key` learns its ID, or starts it once. |
 
 None of the three verbs writes a journal record or takes part in spec 008's transactions.
@@ -237,11 +242,20 @@ namespace, on purpose: a started process sees PID1 as pid 1 and sees other guest
 - The network namespace holds only loopback until a ProxyMap is installed. The resolver at
   127.0.0.53 and the synthetic-prefix device of spec 001 §4.2 live in it, so a running process can
   reach a newly attached host without restarting.
+  Its loopback device is up, as on an ordinary machine. PID1 writes 1 to
+  `net.core.fb_tunnels_only_for_init_net` in the initial network namespace, where it runs, before
+  it creates this one, so a kernel with tunnel drivers built in adds no fallback tunnel device to
+  the new namespace. PID1 checks the devices before hello, and any other device refuses the boot.
+  Amended on 2026-10-21: this did not say loopback is up, and "only loopback" failed on a kernel
+  that adds fallback tunnels to every new namespace.
 
 **The image contract.** The workload root image must provide a passwd entry `workload` with uid
 and gid 1000 and home `/home/workload`, that directory owned by 1000 with mode 0700, a group entry
 for gid 1000, and a writable `/tmp` with mode 1777. PID1 checks these before hello. A root image
 without them refuses the boot as a launch failure, and the cell never reaches ready.
+The image must also hold `/proc` and `/dev` as directories, not symbolic links, for the mounts
+above; a root image without them refuses the boot the same way. The product image leaves both
+empty. Amended on 2026-10-21: this did not list `/proc` and `/dev`, which those mounts need.
 
 ### 6. The workload control group
 
@@ -249,9 +263,15 @@ Before hello, PID1 creates one cgroup v2 group for the workload. Every started p
 it (§4); PID1 stays outside it and runs no helper process. The guest kernel must provide the pids
 and memory controllers; PID1 checks them before hello and refuses the boot without them. The pinned
 kernel's configuration has both.
+The group is `/workload` below the cgroup v2 root, so `/proc/self/cgroup` in a started process
+reads `0::/workload`. Amended on 2026-10-21: this gave the group no path.
 
 - `pids.max` is 4,096 and `memory.max` is the guest's memory less a reserve for PID1, the larger
   of 128 MiB and a tenth of the guest's memory. These are provisional defaults the task may tune.
+  The guest's memory is what its kernel reports, `MemTotal`. A guest of 128 MiB or less would
+  get a `memory.max` of zero or less, so PID1 refuses its boot as a launch failure, before hello.
+  This floor is the reserve's 128 MiB, and is provisional with it. Amended on 2026-10-21: this
+  set no floor.
 - What does not change: the reserve covers PID1's own worst case, which includes its output
   buffers (up to (256 + 128) × 2 × 64 KiB = 48 MiB), the guest file server and the proxy flows.
 
@@ -266,10 +286,19 @@ included. When the group is empty, or at the deadline less a reply reserve of th
 1,000 ms and half the deadline, it writes 1 to the group's `cgroup.kill`, reaps every process,
 and replies before the deadline. If processes remain after that reap, it refuses with
 `workload_remains`. A process that ignores SIGTERM therefore cannot make the reply late.
+The reap ends once the group is empty and every process in it has been reaped, or when half the
+reply reserve is left, a provisional bound. An IO failure on the group's files also refuses with
+`workload_remains`, never with `stopped: true`, and `count` is then the last number of processes
+PID1 read, at least 1. PID1 still writes `cgroup.kill` and reaps where it can.
+Amended on 2026-10-21: this set no bound on the reap after `cgroup.kill`, and gave no reply for an
+IO failure.
 
 **`shutdown`.** PID1 stops the workload as `workload_stop` does, ending early enough to sync the
 root disk before the shutdown deadline, then syncs and powers off. The host enforces the deadline
 from outside (spec 023): if the guest has not ended by then, the helper is killed.
+The sync keeps the smaller of 2,000 ms and half the shutdown deadline, a provisional default, and
+the workload stop gets the rest. PID1 syncs and powers off whatever the stop's outcome.
+Amended on 2026-10-21: this did not say how much of the deadline the sync keeps.
 
 ### 8. What a started process cannot do
 
@@ -335,8 +364,8 @@ removal has completed, the binding is exempt only from host-authority associatio
 drift and readiness: no host authority remains to match it, and it never blocks readiness or a
 later attach at the same target. The host side is checked against the supervisor's own inventory
 keyed by GrantId (gates, source roots, handles, listeners and flows), as spec 001 §4.2's absence
-check requires (`001:1284-1285`). It must hold nothing for that grant; a holding found there has
-no journal record and is an unknown holding (`008:496-497`). The amendments to spec 001 and spec 008
+check requires (`001:1360-1361`). It must hold nothing for that grant; a holding found there has
+no journal record and is an unknown holding (`008:501-502`). The amendments to spec 001 and spec 008
 below say the same.
 
 **A binding that stands while the host refuses it.** A grant can stop serving while its guest
@@ -351,7 +380,7 @@ the pinned runtime and records it here, as for Mount above.
 | --- | --- | --- |
 | Mount | An operation through a reference bound to the grant: `ENOTCONN`, as above. A fresh lookup when the only grant at the target is refused: `ENOENT`. | Each operation, a fresh lookup included, fails at once with `ENOTCONN`, so a file that still stands never looks deleted. A failed operation destroys nothing, so after a restore new operations succeed. |
 | UdsSocket or Broker stream | The stream is closed: a read returns end-of-file, and a write fails with `EPIPE`. A new connection is closed the same way as soon as it is accepted. | Nothing is closed, since the pause may be undone. Data waits, and a blocked read or write returns when the pause is restored, or gets the outcome on the left when the removal goes ahead. |
-| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED` when no other eligible grant covers its host, port and transport, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN when no grant of that host, on any port or transport, is eligible (`001:1314-1316`). Corrected on 2026-10-20: this refused every new connect and DNS lookup, even one that another eligible grant still serves under spec 001 §4.2. | As for a stream. |
+| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED` when no other eligible grant covers its host, port and transport, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN when no grant of that host, on any port or transport, is eligible (`001:1390-1392`). Corrected on 2026-10-20: this refused every new connect and DNS lookup, even one that another eligible grant still serves under spec 001 §4.2. | As for a stream. |
 
 Two outcomes have kernel caveats. A Unix stream read can fail with `ECONNRESET` instead of
 returning end-of-file, when PID1 closes its end while the workload's bytes sit unread. An
@@ -371,7 +400,7 @@ within a bound:
 - one that starts after the gate closed fails at once, except on a paused stream or flow;
 - one on a paused stream or flow waits, and returns by the pause's deadline at the latest, when
   the pause is restored or the removal goes ahead. A pause expires at its original host deadline
-  (`001:1215-1217`), so the guest needs no deadline of its own;
+  (`001:1291-1293`), so the guest needs no deadline of its own;
 - one already in progress when its grant is revoked or refused returns by that removal's
   deadline.
 
@@ -525,20 +554,41 @@ These need the owner. Where this spec needs an answer to work, it sets a conserv
 ## Acceptance
 
 Each item names the broken implementation it catches, and its minimum level: **model** (PID1's
-bookkeeping in isolation, or the controller and membrane against a 4090 test double), or
-**guest** (the Darwin pinned runtime with a booted repo-built guest, which needs O-1, O-6 and
-O-7). Items marked **mount** also need the Mount adapter and its guest filesystem server.
+bookkeeping or its `PATH` search in isolation, or the controller and membrane against a 4090 test
+double), or **guest** (the Darwin pinned runtime with a booted repo-built guest, which needs O-1,
+O-6 and O-7). Items marked **mount** also need the Mount adapter and its guest filesystem server.
+
+Items 3, 13 and 17 may run on a test-only build. The trusted PID1's cargo feature `test-hooks`,
+off by default, adds one normal-lane verb, `test_workload_view`, for item 3's hook. The
+membrane's feature of the same name gives a test that owns a cell that cell's normal 4090 lane,
+for items 3 and 17. A default PID1 build answers `test_workload_view` with 105, as any unknown
+method, and a default membrane build gives no test that lane. A runtime bundle's manifest
+records the cargo features its PID1 was built with, and a product bundle whose PID1 has
+`test-hooks` is refused. Amended on 2026-10-21: this defined no test-only build, though item 3
+needs a hook.
 
 1. **Guest.** `["true"]` ends `exited` 0, `["false"]` `exited` 1, `["sh", "-c", "kill -TERM $$"]`
    `signaled` 15, and `["sh", "-c", "kill -ABRT $$"]` `signaled` 6. Catches: folding signals into
    exit codes, or the reverse.
-2. **Guest.** `["no-such-program"]` replies `running`, then ends `exited` 127. A file in the image
-   without execute permission, a script whose interpreter is missing, a text file with no `#!`,
-   and a single argument of 200 KiB each end `exited` 126. A program reached through an absolute
-   symlink inside the image runs, and so does an executable `/usr/bin/x` behind a non-executable
-   `/usr/local/bin/x`. Catches: refusing at `cell.exec`, searching `PATH` from PID1's root, a
-   missing interpreter reported as a missing program, a shell fallback, and a search that stops
-   at the first file.
+2. **Guest, and model for the search order.** `["no-such-program"]` replies `running`, then ends
+   `exited` 127. A file in the image without execute permission, a script whose interpreter is
+   missing, a text file with no `#!`, and a single argument of 200 KiB each end `exited` 126. A
+   program reached through an absolute symlink inside the image runs. At model level, PID1's
+   `PATH` search runs over a fixture tree in place of the workload root, with nothing under
+   `/opt` or `/usr/local/bin` and with `/bin` a directory of its own. It takes an executable
+   `/bin/x` behind a regular `/usr/bin/x` with no execute bit, and behind a directory
+   `/usr/bin/x` with mode 0755. It takes `/usr/bin/x` when both are executable. When the only
+   `x` is a regular `/usr/bin/x` with no execute bit, it takes that file, so the child's `execve`
+   fails and it exits 126, not 127 as for no file. Catches: refusing at `cell.exec`, searching
+   `PATH` from PID1's root, a missing interpreter reported as a missing program, a shell
+   fallback, and a search that stops at the first file, takes the last, takes a directory, or
+   reports a file it found as missing.
+   Corrected on 2026-10-21: this staged an executable `/usr/bin/x` behind a non-executable `x` in
+   the image's `/usr/local/bin`. Spec 027 §2 refuses an image with any entry under
+   `/usr/local/bin`, its §3 refuses an attached command whose name the image resolves on `PATH`,
+   and on a merged-usr image such as `debian:bookworm-slim` `/bin` is a link to `/usr/bin`. So on
+   that base neither the image nor an attach can put two files for one name on `PATH`, and the
+   order is tested at model level.
 3. **Guest.** A probe exits 0 only when all of these hold: uid and gid 1000, no supplementary
    groups, and `getpwuid(1000)` gives `/home/workload`; all five capability sets empty and
    no-new-privs set; the environment exactly the three variables; its directory
@@ -624,6 +674,10 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
     membrane, and a 4090 `exec` sent to PID1 directly is 105 `stopped`. Catches: an entry that
     waits for descendants, an end of output a client cannot see, and an exec admitted after the
     stop at either layer.
+    The test owns the cell, and with it the original 4090 association, through the membrane
+    library rather than `membraned`. It sends that direct `exec` on the association's normal
+    lane, past the membrane's state gate, with the membrane's `test-hooks` feature (above).
+    Amended on 2026-10-21: this did not say who can send it; only the association's owner can.
 18. **Model.** PID1's startup sends hello only after the workload namespaces, the control group and
     the image checks succeeded. A fake that fails any of them gets no hello. Catches: readiness
     before the workload can run.
@@ -679,7 +733,7 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
 - Signalling one started process, and environment variables or image entries beyond §4 and §5;
   a later spec may add them.
 - Subject spawns and attestation.
-- How attached software becomes visible inside a cell (`011:558-562`). It is bound by two rules
+- How attached software becomes visible inside a cell (`011:666-670`). It is bound by two rules
   here: `PATH` is fixed to three directories, and spec 017 forbids executing a managed file. So a
   plasmid's software can be found by name only if it lands, as files that are not managed files, in
   one of those directories.

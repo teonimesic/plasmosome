@@ -65,7 +65,8 @@ The controller's strict JSON configuration gains an optional key, `cell_runtime`
 - `start_deadline_ms` is a positive integer: the budget for `cell.new` to reach ready with its
   genome attached.
 - `stop_deadline_ms` is optional, a positive integer, default 30,000: the default budget of
-  `cell.kill`, and the cleanup budget after a failed start.
+  `cell.kill` and of a whole `plasmosome.stop` (spec 001 §3.4), and the cleanup budget after a
+  failed start. Amended on 2026-10-21: this did not name `plasmosome.stop`.
 - A cell ID has at most ten digits. With such an ID, `<root>/cells/<cell>/membrane.uds` and the two
   bridge socket paths must each fit in 103 bytes, the Darwin `AF_UNIX` limit; otherwise
   `cell_runtime` is invalid configuration.
@@ -75,11 +76,33 @@ recovery, `cell.kill` and every observation still work; only `cell.new` refuses 
 cell never needs its deployment input again: `membraned` keeps the recipe it was given.
 
 Spec 001 §4.2's immutability rule for the helper applies to `membraned` and to every Artifact in
-the template. Each file and every directory above it must be owned by root or the controller's
-UID, not writable by group or others, and carry no ACL entry granting write to another principal.
-A file that fails this is refused, not trusted after hashing. The controller verifies the rule and
-each SHA256 before allocating anything; a failure refuses `cell.new` with 108, `path` the
-artifact, and no cell directory exists. Spec 022 keeps every Mount source away from these files.
+the template. The controller walks the file's path from `/` and follows no symlink: a symlink
+anywhere on the path is refused. Every directory on the way must be owned by root or the
+controller's UID and not writable by group or others. On macOS it must also carry no ACL allow
+entry, whoever it names, for `add_file`, `add_subdirectory`, `delete_child`, `delete`,
+`writesecurity`, `chown`, or the generic write or all right, and must not be on a volume mounted
+with ownership ignored. The file itself must be a regular file owned by root or the controller's
+UID, with no write bit at all and no set-user-ID or set-group-ID bit. On macOS it must carry no ACL
+allow entry, whoever it names, for `write`, `append`, `writeattr`, `writeextattr`, `writesecurity`,
+`chown`, `delete`, or the generic write or all right, and must have `uchg` or `schg` set. Off macOS
+the rule cannot be verified, so every Artifact is refused. The hash reads the checked descriptor, at
+most one byte past the size `fstat` reported at the check. If the file's size, modification time or
+change time moved between the check and the end of the hash, the file is refused before its digest
+is compared. This is the check the membrane repeats at launch, so a file the controller admits is
+one the membrane admits. Neither check sees every change: a `MAP_SHARED` mapping made before the
+file was locked, from a descriptor opened for writing, can change its bytes whatever protection it
+had then, since `mprotect` can add write later, and it moves the file's times only at `msync` or
+`munmap`, if at all. A file that fails this is refused, not trusted after hashing. The controller
+verifies the rule and each SHA256 before allocating anything; a failure refuses `cell.new` with 108,
+`path` the artifact, and no cell directory exists. A template Artifact under
+`<instance_root>/cells/` is invalid configuration, because it could be some cell's own path. Spec
+022 keeps every Mount source away from these files. Corrected on 2026-10-21: this held the file to
+its directories' rule, so the controller admitted a file its owner can write, a set-id file and a
+file without `uchg` or `schg`, which the membrane refuses at launch, after a cell is allocated. It
+also left out the symlink rule, the rule against a volume mounted with ownership ignored, the read
+bound and the check that the file did not change while it was hashed, and its ACL rule refused only
+an entry granting write to another principal. Amended on 2026-10-21: this did not refuse a template
+Artifact under `<instance_root>/cells/`.
 
 ### 2. Cell IDs
 
@@ -206,16 +229,20 @@ cell visible and does not clean it.
 ### 6. Readiness
 
 **From the controller.** A cell whose `cell.new` has not replied is `germinating`, whatever its
-supervisor says. A cell whose `cell.kill` has started is `draining` until it is retired. A kill
+supervisor says. A cell whose `cell.kill` has started is `draining` until it is retired.
+A `plasmosome.stop` makes a cell `draining` as spec 001 §3.4 says. A kill
 that gives up leaves it `draining` after a 106, and otherwise in the state its supervisor
 reports. `cell.list` and `cell.status` show these states. `cell.exec` and every plasmid
 verb on a `germinating` or `draining` cell refuse at once with 105 `{from: <state>, to:
 "ready"}`, before any wait. Mutations of one cell (`cell.new`, `plasmid.add`, `plasmid.remove`,
-`plasmid.reload`, `plasmid.renew`, `cell.kill`, the check of §8 and spec 028's expiry) run one
+`plasmid.reload`, `plasmid.renew`, `cell.kill`, a `plasmosome.stop`'s drain of the cell
+(spec 001 §3.4), the check of §8 and spec 028's expiry) run one
 at a time, in arrival order. Requests for other cells are not blocked. Reads never wait for
 mutations, except a read whose own query failed, which waits for the check it queued.
 `plasmid.list` is a read. Corrected on 2026-10-20: this listed "plasmid verbs" among the
 mutations, which read as including `plasmid.list`, and left out spec 028's expiry.
+Amended on 2026-10-21: this list did not name a `plasmosome.stop`'s drain of the cell, and only
+`cell.kill` made a cell `draining`.
 
 **From the supervisor.** A cell-configured membrane's `membrane.status` answers `{ready: true,
 state: "serving"}` exactly when its guest has said hello, no `membrane.workload.stop` or

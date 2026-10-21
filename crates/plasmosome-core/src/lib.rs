@@ -5,6 +5,9 @@
 //! the frozen control protocol on an ndjson connection, which its binary
 //! `plasmosomed` serves on the control socket its config names.
 
+/// The controller's check of one spec 001 §4.2 Artifact before it allocates a cell (spec 023 §1).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod artifact;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod clock;
 pub mod closure;
@@ -42,12 +45,15 @@ pub mod version;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub use clock::{ClockError, SystemClock, boot_session};
 pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
-pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
+pub use daemon::{
+    CellRuntime, CellRuntimeError, ConfigError, DaemonConfig, DaemonError, parse_config, run,
+};
 pub use gatekeeper::Gatekeeper;
 pub use instance::{
-    CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
-    InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LaunchedMarker, LockError,
-    MarkerFault, MarkerRead, NotACell, RetireError, WriterLock,
+    AllocateError, CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass,
+    FileIdentity, InstanceRoot, InstanceRootError, JournalAppend, JournalOpen, JournalRefusal,
+    LaunchedMarker, LockError, LockProbe, MarkerFault, MarkerRead, NotACell, RetireError,
+    SupervisorLock, WriterLock,
 };
 pub use kill_budget::{
     GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, WorkloadStop,
