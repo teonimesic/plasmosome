@@ -437,6 +437,24 @@ fn refuses_a_cell_directory_reached_through_a_symlink() {
 }
 
 #[test]
+fn refuses_another_roots_cell_reached_through_a_symlink() {
+    let instance = Instance::new();
+    let _other = instance.cell(2);
+    let elsewhere = Instance::new();
+    let controller = elsewhere.cell(1);
+    std::os::unix::fs::symlink(elsewhere.cell_path(1), instance.cell_path(1))
+        .expect("the symlink is made");
+    let refusal = refused_lock(&instance, handed_over(&controller), &instance.config(1));
+    assert!(
+        matches!(
+            refusal,
+            CellStartRefusal::CellDirectory(CellDirError::Symlink { .. })
+        ),
+        "{refusal:?}"
+    );
+}
+
+#[test]
 fn refuses_a_cell_whose_lock_file_is_gone() {
     let instance = Instance::new();
     let controller = instance.cell(1);
