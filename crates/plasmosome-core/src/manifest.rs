@@ -1391,9 +1391,15 @@ mod tests {
             "{PROVIDER}[provides.\"a:tools\".tools]\n\"a.read\" = \"Read a.\"\n\
              [provides.\"\".tools]\n\"b.read\" = \"Read b.\"\n\
              [provides.\" \".tools]\n\"c.read\" = \"Read c.\"\n\
-             [provides.\"\\t\".tools]\n\"d.read\" = \"Read d.\"\n"
+             [provides.\"\\t\".tools]\n\"d.read\" = \"Read d.\"\n\
+             [provides.\"\u{3000}\".tools]\n\"e.read\" = \"Read e.\"\n"
         );
-        let blank = [String::new(), " ".to_string(), raw(0x09).to_string()];
+        let blank = [
+            String::new(),
+            " ".to_string(),
+            raw(0x09).to_string(),
+            "\u{3000}".to_string(),
+        ];
         let fixture: toml::Table = toml::from_str(&declaration).unwrap();
         let bindings: std::collections::BTreeSet<String> = fixture["provides"]
             .as_table()
@@ -1404,7 +1410,7 @@ mod tests {
         let expected = blank.iter().cloned().chain(["a:tools".to_string()]);
         assert_eq!(bindings, expected.collect());
         let mut refused: Vec<String> = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..5 {
             if PlasmidManifest::parse(&declaration).is_ok() {
                 break;
             }
@@ -1424,7 +1430,7 @@ mod tests {
             refused.push(key.clone());
             declaration = with_fix(&declaration, &field, &fix);
         }
-        assert_eq!(refused.len(), 3, "{refused:?}");
+        assert_eq!(refused.len(), 4, "{refused:?}");
         assert_eq!(
             PlasmidManifest::parse(&declaration).unwrap().provides_tools,
             vec![ToolDeclaration {
@@ -1437,11 +1443,18 @@ mod tests {
     #[test]
     fn a_blank_binding_key_is_refused_before_anything_inside_it() {
         let ideographic = format!("\"{}\"", concat!("\\", "u3000"));
+        let mixed = format!(
+            "\"{}{}{}\"",
+            concat!("\\", "u00A0"),
+            concat!("\\", "u0085"),
+            concat!("\\", "u2028")
+        );
         for (key, decoded) in [
             ("\"\"".to_string(), String::new()),
             ("\" \"".to_string(), " ".to_string()),
             ("\"\\t\"".to_string(), raw(0x09).to_string()),
             (ideographic, raw(0x3000).to_string()),
+            (mixed, "\u{a0}\u{85}\u{2028}".to_string()),
         ] {
             for tail in [
                 format!("[provides]\n{key} = false"),
@@ -1463,6 +1476,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_key_that_is_not_only_whitespace_parses_with_its_tools() {
+        let keys = [
+            " a",
+            "a ",
+            "\u{3000}a",
+            "\ta",
+            "a b",
+            "\u{feff}",
+            "\u{200b}",
+            "\u{180e}",
+        ];
+        let mut declaration = PROVIDER.to_string();
+        for (index, key) in keys.iter().enumerate() {
+            declaration.push_str(&format!(
+                "[provides.\"{key}\".tools]\n\"t{index}.read\" = \"Read {index}.\"\n"
+            ));
+        }
+        let fixture: toml::Table = toml::from_str(&declaration).unwrap();
+        let bindings: std::collections::BTreeSet<&str> = fixture["provides"]
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(bindings, keys.into_iter().collect());
+        let mut tools = PlasmidManifest::parse(&declaration).unwrap().provides_tools;
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        let expected: Vec<ToolDeclaration> = (0..keys.len())
+            .map(|index| ToolDeclaration {
+                name: format!("t{index}.read"),
+                description: format!("Read {index}."),
+            })
+            .collect();
+        assert_eq!(tools, expected);
     }
 
     #[test]
