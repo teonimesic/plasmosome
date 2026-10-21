@@ -101,6 +101,13 @@ impl RuntimeListener {
     /// mode admits can connect, and its connection stays queued after the
     /// chmod. Pass a path under a directory no other principal can search.
     pub fn bind(path: &RecipePath) -> Result<RuntimeListener, EndpointRefusal> {
+        Self::bind_trusting(path, plasmosome_core::private_socket::effective_uid())
+    }
+
+    fn bind_trusting(
+        path: &RecipePath,
+        _trusted_uid: u32,
+    ) -> Result<RuntimeListener, EndpointRefusal> {
         let bind_failed = |error: std::io::Error| EndpointRefusal::Bind {
             path: path.clone(),
             errno: errno_of(&error),
