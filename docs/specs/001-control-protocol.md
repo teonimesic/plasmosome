@@ -1589,15 +1589,22 @@ is a claim that the text above may not be corrected.
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
 8. Spec017's PID-free BrokerLaunch and single-plugin format3 cutover are **delivered** in the
-   exact-ID model and the ledger. Its caller-prepared fallible grant API, complete fallible
-   snapshot, typed incomplete effects and drain-aware exact cleanup are **not yet implemented**.
+   exact-ID model and the ledger, and its caller-prepared fallible grant API is **delivered** in
+   the exact-ID model. Its complete fallible snapshot, typed incomplete effects and drain-aware
+   exact cleanup are **not yet implemented**.
    Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
-   format3 records, and still has infallible backend-minted grants. The new contract permits
+   format3 records. Its grant takes the operation and kind its caller prepared, keeps that
+   address, mints no identity and can fail; every failure it has today comes before any effect.
+   No product code calls grant yet. In tests, the testkit's attach-detach fixture writes the
+   inverse of every prepared grant to a format3 log before the first grant. The new contract permits
    complete prepare/inverse before fork and defines cleanup after partial launch; it does not
    deliver an independent observer, workload confinement or all five real adapters.
    Amended on 2026-10-20, when plasmosome-8pr4 shipped the launch and the format3 cutover. Until
    then this item listed both as not yet implemented, and said the model code carried
    PID-bearing capabilities and format2 records.
+   Amended on 2026-10-21, when plasmosome-kpm shipped the caller-prepared fallible grant. Until
+   then this item listed it as not yet implemented, and said the model code still had
+   infallible backend-minted grants.
 9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
    **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
    recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest
