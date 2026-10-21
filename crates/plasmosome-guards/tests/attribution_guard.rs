@@ -943,12 +943,28 @@ fn rule_2_whitespace() -> Vec<char> {
     characters
 }
 
+fn owned(rows: &[(&str, Verdict)]) -> Vec<(String, Verdict)> {
+    rows.iter()
+        .map(|&(identity, verdict)| (identity.to_owned(), verdict))
+        .collect()
+}
+
+const RULE_2_ROWS_BEYOND_ACCEPTANCE_1: &[(&str, Verdict)] = &[
+    ("Probe <claude@>", Verdict::Untraceable),
+    ("Probe <noreply@anthropic.com >", Verdict::Untraceable),
+    ("Claudette Roe <@laptop.local>", Verdict::Untraceable),
+    ("Probe <probe@@corp.locale.io>", Verdict::Cleared),
+    ("Probe <@@corp.locale.io>", Verdict::Cleared),
+    ("Probe <probe@corp@.locale.io>", Verdict::Untraceable),
+];
+
+fn rule_2_rows() -> Vec<(String, Verdict)> {
+    let mut rows = malformed_addresses();
+    rows.extend(owned(RULE_2_ROWS_BEYOND_ACCEPTANCE_1));
+    rows
+}
+
 fn malformed_addresses() -> Vec<(String, Verdict)> {
-    let owned = |rows: &[(&str, Verdict)]| -> Vec<(String, Verdict)> {
-        rows.iter()
-            .map(|&(identity, verdict)| (identity.to_owned(), verdict))
-            .collect()
-    };
     let no_break_space = char::from_u32(0xa0).expect("setup: U+00A0 is a Unicode scalar value");
     let mut rows = owned(&[
         ("Claude <@>", Verdict::Model),
@@ -1027,14 +1043,14 @@ fn judges_each_identity_as_a_sign_off() {
 #[test]
 fn judges_each_malformed_address_as_a_co_author() {
     check_workspace(|root| {
-        assert_each_identity_judged_in(root, Position::CoAuthoredBy, &malformed_addresses())
+        assert_each_identity_judged_in(root, Position::CoAuthoredBy, &rule_2_rows())
     });
 }
 
 #[test]
 fn judges_each_malformed_address_as_a_sign_off() {
     check_workspace(|root| {
-        assert_each_identity_judged_in(root, Position::SignedOffBy, &malformed_addresses())
+        assert_each_identity_judged_in(root, Position::SignedOffBy, &rule_2_rows())
     });
 }
 
