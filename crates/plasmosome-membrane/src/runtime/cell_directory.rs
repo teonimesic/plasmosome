@@ -303,10 +303,20 @@ fn stat_at(dir: BorrowedFd<'_>, name: &CStr) -> Result<Found, i32> {
     Ok(Found {
         regular: stat.st_mode & libc::S_IFMT == libc::S_IFREG,
         identity: FileIdentity {
-            dev: stat.st_dev as u64,
+            dev: device(&stat),
             ino: stat.st_ino,
         },
     })
+}
+
+#[cfg(target_os = "macos")]
+fn device(stat: &libc::stat) -> u64 {
+    stat.st_dev as u64
+}
+
+#[cfg(not(target_os = "macos"))]
+fn device(stat: &libc::stat) -> u64 {
+    stat.st_dev
 }
 
 fn gone_or_failed(errno: i32) -> RemoveOutcome {
