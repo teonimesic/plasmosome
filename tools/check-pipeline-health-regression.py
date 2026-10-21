@@ -700,19 +700,29 @@ def a_failed_row_fails_the_run_whatever_rows_skip():
     def crashes():
         raise RuntimeError("crashed")
 
+    def exits():
+        raise SystemExit(0)
+
     def skips():
         raise Skipped("macOS only: a probe reason")
 
+    def run(rows):
+        try:
+            return run_rows(rows)
+        except SystemExit as error:
+            return f"ended by {error!r}"
+
     printed, errors = io.StringIO(), io.StringIO()
     with redirect_stdout(printed), redirect_stderr(errors):
-        statuses = [run_rows([skips, fails]), run_rows([crashes, skips]), run_rows([passes, skips])]
-    assert statuses == [1, 1, 0], statuses
+        statuses = [run([skips, fails]), run([crashes, skips]), run([passes, skips]), run([exits, passes])]
+    assert statuses == [1, 1, 0, 1], statuses
     assert printed.getvalue().splitlines() == [
         "skip skips: macOS only: a probe reason", "FAIL fails: AssertionError: broken", "0 passed, 1 failed, 1 skipped",
         "FAIL crashes: RuntimeError: crashed", "skip skips: macOS only: a probe reason", "0 passed, 1 failed, 1 skipped",
         "ok passes", "skip skips: macOS only: a probe reason", "1 passed, 0 failed, 1 skipped",
+        "FAIL exits: SystemExit: exit code 0", "ok passes", "1 passed, 1 failed, 0 skipped",
     ], printed.getvalue()
-    assert errors.getvalue().count("Traceback") == 2, errors.getvalue()
+    assert errors.getvalue().count("Traceback") == 3, errors.getvalue()
 
 
 def run_rows(rows):
