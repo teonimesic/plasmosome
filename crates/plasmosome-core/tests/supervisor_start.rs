@@ -784,7 +784,14 @@ struct LowDescriptors([Option<OwnedFd>; 2]);
 impl LowDescriptors {
     #[allow(unsafe_code)]
     fn reserve() -> LowDescriptors {
-        let null = File::open("/dev/null").expect("/dev/null opens");
+        let null = inheritable_null(|null| {
+            // SAFETY: fcntl with F_DUPFD_CLOEXEC takes integers only, and `null` is open for the
+            // call.
+            unsafe { libc::fcntl(null, libc::F_DUPFD_CLOEXEC, 10) }
+        });
+        assert!(null >= 10, "/dev/null is copied to 10 or above");
+        // SAFETY: fcntl made `null` a new descriptor, which nothing else owns.
+        let null = unsafe { OwnedFd::from_raw_fd(null) };
         let held = [3, 4].map(|target| {
             // SAFETY: dup2 takes integers only, and `null` keeps its descriptor open. This case
             // runs in its own process, so whatever it replaces at 3 or 4 is no other test's.
@@ -1045,6 +1052,12 @@ mod standin {
 
     fn report(arguments: &[OsString], root: &Path, open_above_four: Vec<RawFd>) -> Value {
         let inherited = INHERITED.get().copied();
+        let descriptors: Vec<Value> = inherited.map_or_else(Vec::new, |inherited| {
+            (0..5)
+                .zip(inherited.open)
+                .map(|(fd, open)| described(fd, open))
+                .collect()
+        });
         let record = read_descriptor_three();
         let decoded = PlatformLimits::host()
             .ok()
@@ -1059,9 +1072,7 @@ mod standin {
             "sid": session_id(),
             "pgid": group_id(),
             "ppid": ppid,
-            "descriptors": inherited.map_or_else(Vec::new, |inherited| {
-                (0..5).zip(inherited.open).map(|(fd, open)| described(fd, open)).collect()
-            }),
+            "descriptors": descriptors,
             "record": String::from_utf8_lossy(&record),
             "decoded": decoded,
             "lock_taken": lock_four(),
