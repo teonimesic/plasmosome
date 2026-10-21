@@ -45,7 +45,7 @@ pub fn read_reply(reader: &mut dyn BufRead) -> Result<Vec<u8>, ReadFailure> {
     }
 }
 
-fn failure_of(error: &io::Error) -> ReadFailure {
+pub(crate) fn failure_of(error: &io::Error) -> ReadFailure {
     match error.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => ReadFailure::TimedOut,
         _ => ReadFailure::Transport {

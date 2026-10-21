@@ -90,12 +90,20 @@ pub fn map_refusal(
         ClientCode::Internal => format!("the client failed: {error}"),
         _ => error.to_string(),
     };
+    refusal(code, message, fields)
+}
+
+pub(crate) fn refusal(
+    code: ClientCode,
+    message: String,
+    fields: Vec<(&'static str, Json)>,
+) -> ClientError {
     let fields = fields
         .into_iter()
         .map(|(key, value)| (key.to_string(), value))
         .collect();
     ClientError::new(code, message, fields)
-        .expect("each arm names distinct fields, none of them domain, code or message")
+        .expect("each caller names distinct fields, none of them domain, code or message")
 }
 
 fn unsafe_socket(path: &Path, rule: &str) -> (ClientCode, Vec<(&'static str, Json)>) {
@@ -105,7 +113,7 @@ fn unsafe_socket(path: &Path, rule: &str) -> (ClientCode, Vec<(&'static str, Jso
     )
 }
 
-fn at(path: &Path) -> (&'static str, Json) {
+pub(crate) fn at(path: &Path) -> (&'static str, Json) {
     ("path", text(&path.to_string_lossy()))
 }
 
@@ -113,7 +121,7 @@ fn text(value: &str) -> Json {
     Json::String(value.to_string())
 }
 
-fn number(value: impl ToString) -> Json {
+pub(crate) fn number(value: impl ToString) -> Json {
     Json::Number(Number::new(value.to_string()).expect("a decimal integer is a JSON number"))
 }
 

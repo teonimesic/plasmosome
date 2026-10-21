@@ -685,6 +685,10 @@ fn print(
     else {
         return Exit::Done;
     };
+    refuse(command.to_string(), local_io(&error), form, stdout, stderr)
+}
+
+pub(crate) fn local_io(error: &io::Error) -> ClientError {
     let fields = error
         .raw_os_error()
         .map(|errno| {
@@ -694,12 +698,11 @@ fn print(
             )]
         })
         .unwrap_or_default();
-    let error = client(
+    client(
         ClientCode::LocalIo,
         format!("could not write to stdout: {error}"),
         fields,
-    );
-    refuse(command.to_string(), error, form, stdout, stderr)
+    )
 }
 
 pub(crate) fn refuse(
