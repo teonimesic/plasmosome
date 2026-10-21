@@ -1,6 +1,8 @@
 use crate::vmm::SpawnError;
+use plasmosome_core::private_socket::PrivateListener;
 use std::cell::Cell;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::{PoisonError, RwLock};
 
 static SPAWN_LOCK: RwLock<()> = RwLock::new(());
@@ -19,16 +21,50 @@ pub(crate) enum Forked {
 /// function that takes it can run only inside descriptor creation.
 pub(crate) struct DescriptorsHeld(());
 
+/// A value that owns one descriptor, which `with_descriptors_held` checks for
+/// close-on-exec.
+///
+/// Implement it only for a type that owns its descriptor, so that dropping
+/// the value closes it: `with_descriptors_held` closes an inheritable
+/// descriptor before the lock is released only by dropping the value. The
+/// descriptor is lent for that check alone. Never close it, accept on it,
+/// change its flags or keep a copy of it. It is lent as a `RawFd`, not a
+/// `BorrowedFd`, so making a copy needs `unsafe`.
+pub(crate) trait OwnsDescriptor {
+    /// The descriptor this value owns.
+    fn descriptor(&self) -> RawFd;
+}
+
+impl OwnsDescriptor for OwnedFd {
+    fn descriptor(&self) -> RawFd {
+        self.as_raw_fd()
+    }
+}
+
+impl OwnsDescriptor for UnixStream {
+    fn descriptor(&self) -> RawFd {
+        self.as_raw_fd()
+    }
+}
+
+impl OwnsDescriptor for PrivateListener {
+    fn descriptor(&self) -> RawFd {
+        PrivateListener::as_raw_fd(self)
+    }
+}
+
 /// Runs `create` while no `VmmChild::spawn` in this process can fork.
 ///
 /// Use it only to create a descriptor and mark it close-on-exec, where the
 /// platform needs two calls for that. `create` receives the `DescriptorsHeld`
 /// proof, so a function that takes one cannot be called outside. `create`
 /// returns the value that owns the descriptor, and only that descriptor is
-/// checked: if it is not close-on-exec when `create` returns, it is closed
-/// before the lock is released, and an error is returned instead. A
-/// descriptor created inside `create` and kept anywhere else is not checked,
-/// so the caller must make it close-on-exec before `create` returns.
+/// checked: if it is not close-on-exec when `create` returns, the value is
+/// dropped before the lock is released, and an error is returned instead.
+/// That drop closes the descriptor only because the value owns it, which is
+/// the rule every `OwnsDescriptor` type must keep. A descriptor created inside
+/// `create` and kept anywhere else is not checked, so the caller must make it
+/// close-on-exec before `create` returns.
 ///
 /// Never hold it across a blocking call such as `accept`: every
 /// `VmmChild::spawn` in the process waits until `create` returns. A spawn on
@@ -37,7 +73,7 @@ pub(crate) struct DescriptorsHeld(());
 /// already held. Only descriptors created inside `create` are held back from
 /// a fork, and forks that bypass this lock, such as `std::process::Command`,
 /// are not held back.
-pub(crate) fn with_descriptors_held<T: AsFd + Into<OwnedFd>>(
+pub(crate) fn with_descriptors_held<T: OwnsDescriptor>(
     create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<T>,
 ) -> std::io::Result<T> {
     write_held(&SPAWN_LOCK, || {
@@ -58,7 +94,7 @@ pub(crate) fn with_each_descriptor_held<const N: usize>(
 ) -> std::io::Result<[OwnedFd; N]> {
     write_held(&SPAWN_LOCK, || {
         create(&DescriptorsHeld(())).and_then(|created| {
-            if created.iter().all(|fd| is_close_on_exec(fd.as_fd())) {
+            if created.iter().all(|fd| is_close_on_exec(fd.as_raw_fd())) {
                 Ok(created)
             } else {
                 Err(not_close_on_exec())
@@ -68,10 +104,10 @@ pub(crate) fn with_each_descriptor_held<const N: usize>(
 }
 
 #[allow(unsafe_code)]
-fn is_close_on_exec(fd: std::os::fd::BorrowedFd<'_>) -> bool {
-    // SAFETY: fcntl with F_GETFD takes no pointer, and the borrow keeps the descriptor open for the
-    // call.
-    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+fn is_close_on_exec(fd: RawFd) -> bool {
+    // SAFETY: fcntl with F_GETFD takes no pointer, and the caller holds the value that owns `fd`
+    // for the call.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     flags != -1 && flags & libc::FD_CLOEXEC != 0
 }
 
@@ -86,8 +122,16 @@ pub(crate) fn hold_fork_side() -> std::sync::RwLockReadGuard<'static, ()> {
     SPAWN_LOCK.read().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
-    if is_close_on_exec(created.as_fd()) {
+#[cfg(test)]
+pub(crate) fn waits_for_the_write_side(thread: std::thread::ThreadId) -> bool {
+    WAITING_FOR_THE_WRITE_SIDE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&thread)
+}
+
+fn close_on_exec_or_closed<T: OwnsDescriptor>(created: T) -> std::io::Result<T> {
+    if is_close_on_exec(created.descriptor()) {
         Ok(created)
     } else {
         Err(not_close_on_exec())
@@ -115,9 +159,46 @@ fn write_held<T>(lock: &RwLock<()>, create: impl FnOnce() -> T) -> T {
     if CREATING_DESCRIPTORS.get() {
         return create();
     }
-    let _held = lock.write().unwrap_or_else(PoisonError::into_inner);
+    let _held = write_side(lock);
     let _creating = Creating::mark();
     create()
+}
+
+fn write_side(lock: &RwLock<()>) -> std::sync::RwLockWriteGuard<'_, ()> {
+    #[cfg(test)]
+    let _waiting = WaitsForTheWriteSide::mark();
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+static WAITING_FOR_THE_WRITE_SIDE: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+struct WaitsForTheWriteSide(std::thread::ThreadId);
+
+#[cfg(test)]
+impl WaitsForTheWriteSide {
+    fn mark() -> WaitsForTheWriteSide {
+        let waiting = std::thread::current().id();
+        WAITING_FOR_THE_WRITE_SIDE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(waiting);
+        WaitsForTheWriteSide(waiting)
+    }
+}
+
+#[cfg(test)]
+impl Drop for WaitsForTheWriteSide {
+    fn drop(&mut self) {
+        let mut waiting = WAITING_FOR_THE_WRITE_SIDE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = waiting.iter().position(|thread| *thread == self.0) {
+            waiting.swap_remove(at);
+        }
+    }
 }
 
 struct Creating;
@@ -158,7 +239,7 @@ mod tests {
     use super::*;
     use crate::vmm::{Launch, SpawnError, VmmChild, VmmState};
     use std::cell::Cell;
-    use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::sync::{Arc, TryLockError};
@@ -207,18 +288,12 @@ mod tests {
         closed_under_lock: &'a Cell<Option<bool>>,
     }
 
-    impl AsFd for RecordsWhereItCloses<'_> {
-        fn as_fd(&self) -> BorrowedFd<'_> {
+    impl OwnsDescriptor for RecordsWhereItCloses<'_> {
+        fn descriptor(&self) -> RawFd {
             self.fd
                 .as_ref()
                 .expect("the descriptor is still held")
-                .as_fd()
-        }
-    }
-
-    impl From<RecordsWhereItCloses<'_>> for OwnedFd {
-        fn from(mut held: RecordsWhereItCloses<'_>) -> OwnedFd {
-            held.fd.take().expect("the descriptor is still held")
+                .as_raw_fd()
         }
     }
 
@@ -287,6 +362,34 @@ mod tests {
             write_side_held,
             "creation ran holding the write side of the spawn lock"
         );
+    }
+
+    #[test]
+    fn each_owning_value_lends_the_descriptor_it_owns() {
+        let file = close_on_exec_null().expect("/dev/null opens");
+        assert_eq!(file.descriptor(), file.as_raw_fd());
+
+        let [mine, _peer] = with_each_descriptor_held(|_held| {
+            let (mine, peer) = UnixStream::pair()?;
+            Ok([mine.into(), peer.into()])
+        })
+        .expect("a close-on-exec socket pair");
+        let stream = UnixStream::from(mine);
+        assert_eq!(stream.descriptor(), stream.as_raw_fd());
+
+        let root = crate::runtime::test_fixtures::private_root();
+        let dir = plasmosome_core::private_socket::PrivateDir::open(root.path())
+            .expect("the test root is private");
+        let listener = with_descriptors_held(|_held| {
+            PrivateListener::bind(
+                dir,
+                "lent.sock",
+                plasmosome_core::private_socket::effective_uid(),
+            )
+            .map_err(|refusal| std::io::Error::other(refusal.to_string()))
+        })
+        .expect("a free name binds");
+        assert_eq!(listener.descriptor(), listener.as_raw_fd());
     }
 
     #[test]
