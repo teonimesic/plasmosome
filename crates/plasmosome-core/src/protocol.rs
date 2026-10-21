@@ -401,6 +401,18 @@ impl WireError {
         error
     }
 
+    /// Code 108 for a pinned artifact the controller does not trust, as spec 023 §1 says:
+    /// `path` is the artifact and `detail` the rule it broke. It carries no `fix`.
+    pub fn untrusted_artifact(detail: String, path: String) -> WireError {
+        let mut error = WireError::bare(
+            ErrorCode::ManifestInvalid,
+            format!("`{path}` is not a trusted artifact: {detail}"),
+        );
+        error.detail = Some(detail);
+        error.path = Some(path);
+        error
+    }
+
     /// Code 108 for a declaration `PlasmidManifest` refused: `path` is the
     /// declaration file and `detail` the refusal's text. `fix` is present only
     /// when the refusal names a field, in one of three forms: the TOML to
