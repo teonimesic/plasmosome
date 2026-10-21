@@ -471,13 +471,14 @@ mod tests {
         }
     }
 
-    struct ConnectsAndPauses {
+    struct Connects {
         address: libc::sockaddr_un,
+        pauses: bool,
     }
 
-    impl ConnectsAndPauses {
+    impl Connects {
         #[allow(unsafe_code)]
-        fn to(path: &RecipePath) -> ConnectsAndPauses {
+        fn to(path: &RecipePath) -> Connects {
             // SAFETY: sockaddr_un is a plain C struct, for which all zeroes is a valid value.
             let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
             assert!(
@@ -488,11 +489,21 @@ mod tests {
             for (slot, byte) in address.sun_path.iter_mut().zip(path.as_str().bytes()) {
                 *slot = byte as libc::c_char;
             }
-            ConnectsAndPauses { address }
+            Connects {
+                address,
+                pauses: true,
+            }
+        }
+
+        fn and_exits(self) -> Connects {
+            Connects {
+                pauses: false,
+                ..self
+            }
         }
     }
 
-    impl Launch for ConnectsAndPauses {
+    impl Launch for Connects {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
@@ -501,9 +512,12 @@ mod tests {
             unsafe {
                 let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
                 if fd >= 0 && libc::connect(fd, (&raw const self.address).cast(), length) == 0 {
-                    loop {
-                        libc::pause();
+                    if self.pauses {
+                        loop {
+                            libc::pause();
+                        }
                     }
+                    libc::_exit(0)
                 }
                 libc::_exit(1)
             }
@@ -693,12 +707,47 @@ mod tests {
         );
         assert!(nonblocking_and_close_on_exec(stream.as_fd()));
 
-        let child = VmmChild::spawn(ConnectsAndPauses::to(&path)).expect("the fork succeeds");
+        let child = VmmChild::spawn(Connects::to(&path)).expect("the fork succeeds");
         let (_stream, pid) = accepted_within(&listener);
         assert_eq!(
             pid,
             child.pid(),
             "a forked connector reports its own pid, not this process's"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_left_before_the_accept_is_one_connection_never_pid_0() {
+        let scratch = Scratch::new();
+        let path = scratch.path("data.sock");
+        let listener = RuntimeListener::bind(&path).unwrap();
+        let mut child =
+            VmmChild::spawn(Connects::to(&path).and_exits()).expect("the fork succeeds");
+        assert_eq!(
+            child.wait_terminal(PATIENCE),
+            Ok(VmmState::Exited { code: 0 }),
+            "the child connected, then exited"
+        );
+        let taken = listener.accept_ready();
+        if cfg!(target_os = "linux") {
+            assert!(
+                matches!(&taken, Ok(Some(Connection::Identified { pid, .. })) if *pid == child.pid()),
+                "Linux keeps the pid of a peer that exited: {taken:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    &taken,
+                    Ok(Some(Connection::Unidentified {
+                        errno: libc::ENOTCONN
+                    }))
+                ),
+                "Darwin cannot read the pid of a peer that exited: {taken:?}"
+            );
+        }
+        assert!(
+            matches!(listener.accept_ready(), Ok(None)),
+            "that connection was taken from the queue, and the listener still accepts"
         );
     }
 
