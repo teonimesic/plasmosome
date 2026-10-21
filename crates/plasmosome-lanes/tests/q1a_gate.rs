@@ -878,9 +878,35 @@ fn command_text(program: &str, args: &[&str]) -> String {
         .unwrap_or_else(|error| format!("{program} failed: {error}"))
 }
 
+fn records_written() -> String {
+    let mut times: Vec<u64> = fs::read_dir(records_dir())
+        .expect("the records directory lists")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| fs::metadata(path).and_then(|found| found.modified()).ok())
+        .filter_map(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_secs())
+        .collect();
+    times.sort_unstable();
+    let utc = |secs: &u64| {
+        command_text(
+            "date",
+            &["-u", "-r", &secs.to_string(), "+%Y-%m-%d %H:%M:%S UTC"],
+        )
+    };
+    match (times.first(), times.last()) {
+        (Some(first), Some(last)) => format!("{} to {}", utc(first), utc(last)),
+        _ => "no record".to_string(),
+    }
+}
+
 fn preamble(records: &[Record]) -> String {
     let commit = one_commit(records)
         .unwrap_or_else(|why| panic!("the records are not one run of one commit: {why}"));
+    let written = records_written();
     let host = format!(
         "macOS {} ({}), {}",
         command_text("sw_vers", &["-productVersion"]),
@@ -888,7 +914,7 @@ fn preamble(records: &[Record]) -> String {
         command_text("uname", &["-m"])
     );
     format!(
-        "# Spec 027's Q1(a) gate on the pinned guest, 2026-10-20
+        "# Spec 027's Q1(a) gate on the pinned guest
 
 This file holds the measurements behind spec 027's Q1(a) gate (acceptance item 17), and re-runs of
 four claims 027 measured outside this repository (items 2, 4 and 9). Each ran on this repository's
@@ -913,7 +939,8 @@ neither directory was changed. Nothing here needed root on the host or a second 
 gate O-8).
 
 - Host: {host}.
-- Test commit: `{commit}`. The writer refuses records from more than one commit, or from a
+- Test commit: `{commit}`.
+- Records written: {written}. The writer refuses records from more than one commit, or from a
   tree with uncommitted changes.
 - Re-run: build the guest binaries as `crates/plasmosome-lanes/README.md` says, then
   `cargo test -p plasmosome-lanes --test q1a_gate --test rerun -- --ignored --test-threads=1 --skip write_the_results_file`.

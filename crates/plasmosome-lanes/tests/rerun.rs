@@ -107,7 +107,7 @@ fn r2_mount_returns_0_while_the_workloads_stat_fails_enoent() {
             "a workload namespace is unshared from it: slave for visible and unreachable, private for private, and left as unshare made it for private-parent and late-directory",
             "visible, private, private-parent and late-directory: the initial namespace binds /run/r2-source-<config>/p onto /run/r2-<config>/opt/p after the workload namespace exists",
             "unreachable: the initial namespace binds /run/r2-hidden-unreachable over the source, then the workload namespace binds the source's p onto opt/p",
-            "the stat of opt/p/bin/x runs in the initial namespace as guest root, and in the workload namespace as uid 1000",
+            "guest root stats the staged file in the initial namespace: opt/p/bin/x, or for unreachable the hidden source's p/bin/x through the source; the workload stats opt/p/bin/x as uid 1000 inside the workload namespace",
         ],
         &run,
         Shown {
