@@ -214,7 +214,29 @@ fn run_names(rows: &[RowSpec], records: &[Record]) -> Vec<String> {
     names
 }
 
-fn section(name: &str, records: &[Record]) -> String {
+fn unread_mark(rows: &[RowSpec], id: &str, run: &str) -> String {
+    let read: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.id == id)
+        .flat_map(|row| row.runs.iter())
+        .filter(|spec| spec.expect != Expect::Observe)
+        .map(|spec| spec.run.as_str())
+        .collect();
+    if read.contains(&run) {
+        return String::new();
+    }
+    let names: Vec<String> = read.iter().map(|run| format!("`{run}`")).collect();
+    match names.split_last() {
+        None => " (no row reads this verdict)".to_string(),
+        Some((last, [])) => format!(" (no row reads this verdict; {id} reads {last})"),
+        Some((last, rest)) => format!(
+            " (no row reads this verdict; {id} reads {} and {last})",
+            rest.join(", ")
+        ),
+    }
+}
+
+fn section(name: &str, rows: &[RowSpec], records: &[Record]) -> String {
     let Some(record) = records.iter().find(|record| record.run == name) else {
         return format!("### {name}\n\nNot run: this run left no record.\n\n");
     };
@@ -235,8 +257,9 @@ fn section(name: &str, records: &[Record]) -> String {
         for (row, verdict) in &record.verdicts {
             let count: Vec<&String> = record.counts.get(row).into_iter().collect();
             text.push_str(&format!(
-                "- {row}: {}\n",
-                counted(verdict_text(verdict), &count)
+                "- {row}: {}{}\n",
+                counted(verdict_text(verdict), &count),
+                unread_mark(rows, row, &record.run)
             ));
         }
         text.push('\n');
@@ -296,7 +319,8 @@ fn observation_table(rows: &[RowSpec], records: &[Record]) -> String {
 
 /// The results file: `preamble`, then the row verdicts, then a table of what each observation
 /// saw, then one section per run with its configuration, digests, notes and every result line. A
-/// run a row reads with no record reads `not run`, never omitted.
+/// run a row reads with no record reads `not run`, never omitted. A section marks each verdict no
+/// row reads, and names the runs that verdict's row does read.
 pub fn render(preamble: &str, rows: &[RowSpec], records: &[Record]) -> String {
     let mut text = preamble.to_string();
     text.push_str("\n## Verdicts\n\n| Row | Claim | Verdict |\n| --- | --- | --- |\n");
@@ -327,7 +351,7 @@ pub fn render(preamble: &str, rows: &[RowSpec], records: &[Record]) -> String {
     }
     text.push_str("\n## Runs\n\n");
     for name in run_names(rows, records) {
-        text.push_str(&section(&name, records));
+        text.push_str(&section(&name, rows, records));
     }
     text
 }
