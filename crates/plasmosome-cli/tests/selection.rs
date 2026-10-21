@@ -506,6 +506,17 @@ fn assert_unsafe(home: &Home, rule: &str, path: &Path) -> Value {
     error.clone()
 }
 
+fn refused_beside_a(home: &Home, rule: &str, path: &Path, what: &str, wrong: &mut Vec<String>) {
+    let a = home.listening("a");
+    let ran = run(&["status", "--deadline-ms", "1000"], home.vars());
+    if ran.exit != Exit::Refused {
+        wrong.push(format!("{what}: {}", String::from_utf8_lossy(&ran.stderr)));
+        return;
+    }
+    assert_unsafe(home, rule, path);
+    assert_never_reached(&a, &format!("a selection beside {what}"));
+}
+
 #[test]
 fn a_symbolic_link_in_instances_refuses_the_selection() {
     let elsewhere = Home::new();
@@ -521,23 +532,11 @@ fn a_symbolic_link_in_instances_refuses_the_selection() {
     let mut not_refused = Vec::new();
     for (what, pointee) in pointees {
         let home = Home::new();
-        let a = home.live("a", 1);
+        home.empty_instances();
         let link = home.instances().join("l");
         std::os::unix::fs::symlink(&pointee, &link).expect("a symlink");
-        let ran = run(&["status"], home.vars());
-        if ran.exit != Exit::Refused {
-            not_refused.push(format!(
-                "a link to {what}: {}",
-                String::from_utf8_lossy(&ran.stderr)
-            ));
-            continue;
-        }
-        assert_unsafe(&home, "symlink", &link);
-        assert_eq!(
-            a.connections(),
-            0,
-            "a selection beside a link to {what} reached a"
-        );
+        let what = format!("a link to {what}");
+        refused_beside_a(&home, "symlink", &link, &what, &mut not_refused);
     }
     assert!(not_refused.is_empty(), "{not_refused:#?}");
     assert_never_reached(&target, "a selection with a symbolic link");
@@ -593,6 +592,30 @@ fn a_failing_candidate_refuses_the_selection() {
             .is_some_and(|fix| fix.starts_with("chmod 700 "))
     );
     assert_never_reached(&a, "a selection with a failing candidate");
+
+    let mut not_refused = Vec::new();
+    for what in ["a file", "a FIFO", "a symbolic link"] {
+        let home = Home::new();
+        let a = home.socket("a");
+        home.dir("b");
+        let entry = home.socket("b");
+        match what {
+            "a file" => fs::write(&entry, b"not a socket").expect("a file"),
+            "a FIFO" => mkfifo(&entry),
+            _ => std::os::unix::fs::symlink(&a, &entry).expect("a symlink"),
+        }
+        let what = format!("{what} at a candidate's socket entry");
+        refused_beside_a(&home, "not_socket", &entry, &what, &mut not_refused);
+    }
+    assert!(not_refused.is_empty(), "{not_refused:#?}");
+}
+
+fn mkfifo(path: &Path) {
+    let made = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo {}", path.display());
 }
 
 #[test]
