@@ -412,6 +412,10 @@ def outcomes():
         assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
         assert "IsADirectoryError" in result.stdout, result.stdout
 
+        unencodable = Path(directory) / "missing" / os.fsdecode(bytes([0xFF])) / "findings.json"
+        result, calls, summary = repository.run("report", "--json-out", str(unencodable), "--event", "push", plan=QUIET)
+        assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
+
         result, calls, summary = repository.run("sources", plan=plan("sources", {"fuzz/Cargo.toml": "git-source"}))
         assert result.returncode == 1 and "gitdep 0.1.0" in result.stdout, result.stdout
 
