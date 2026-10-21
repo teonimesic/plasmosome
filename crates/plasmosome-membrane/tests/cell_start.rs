@@ -3,6 +3,7 @@ use std::io::{self, PipeWriter, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use plasmosome_backend::CellId;
 use plasmosome_core::runtime::cell_id::format_cell_id;
@@ -20,6 +21,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 const FLOOD_BYTES: usize = 8 << 20;
+const READER_BUDGET: Duration = Duration::from_secs(30);
 
 struct Instance {
     root: InstanceRoot,
@@ -203,6 +205,27 @@ fn flood(mut writer: PipeWriter, total: usize) -> usize {
 }
 
 #[allow(unsafe_code)]
+fn unread_bytes(fd: BorrowedFd<'_>) -> usize {
+    let mut count: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one c_int through the pointer, which points at `count` and is live
+    // for the call, and the BorrowedFd keeps `fd` open for the call.
+    let outcome = unsafe { libc::ioctl(fd.as_raw_fd(), libc::FIONREAD, &raw mut count) };
+    assert_eq!(outcome, 0, "FIONREAD: {}", io::Error::last_os_error());
+    usize::try_from(count).expect("the unread count is not negative")
+}
+
+fn wait_until_read(read_end: BorrowedFd<'_>) {
+    let deadline = Instant::now() + READER_BUDGET;
+    while unread_bytes(read_end) > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the reader took what was written"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[allow(unsafe_code)]
 fn inheritable_copy(fd: BorrowedFd<'_>) -> OwnedFd {
     // SAFETY: fcntl with F_DUPFD takes integers only, and the BorrowedFd keeps `fd` open for the
     // call.
@@ -305,6 +328,37 @@ fn a_second_line_after_the_record_is_refused() {
         ),
         "{refusal:?}"
     );
+}
+
+#[test]
+fn bytes_written_after_the_record_has_been_read_are_refused() {
+    for later in [b"x\n".as_slice(), b"x".as_slice()] {
+        let instance = Instance::new();
+        let _held = instance.cell(1);
+        let before = instance.tree();
+        let (reader, mut writer) = io::pipe().expect("a pipe");
+        let watched = reader.try_clone().expect("the read end is duplicated");
+        let record = encoded(&instance.config(1));
+        let later = later.to_vec();
+        let writing = thread::spawn(move || {
+            writer.write_all(&record)?;
+            wait_until_read(watched.as_fd());
+            writer.write_all(&later)
+        });
+        let read = read_config(OwnedFd::from(reader), &argv(1), &limits());
+        writing
+            .join()
+            .expect("the writer does not panic")
+            .expect("the writer writes both parts");
+        assert!(
+            matches!(
+                read,
+                Err(CellStartRefusal::Record(ConfigRecordRefusal::NotOneLine))
+            ),
+            "{read:?}"
+        );
+        assert_eq!(instance.tree(), before, "the instance root is unchanged");
+    }
 }
 
 #[test]
