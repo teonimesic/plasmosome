@@ -2304,3 +2304,30 @@ fn the_relaunched_broker_has_its_own_command_and_sockets() {
     }
     assert_ne!(relaunched.control_socket, relaunched.data_socket);
 }
+
+#[test]
+fn a_request_that_changes_both_owner_and_capability_is_no_single_change() {
+    let id = GrantId::new();
+    let standing = conformance::op_for(
+        id,
+        conformance::conformance_owner(),
+        mount("/src", "/workspace"),
+    );
+    let requested = conformance::op_for(id, conformance::second_owner(), mount("/src", "/other"));
+    assert_eq!(change_between(&standing.object(), &standing.object()), None);
+    assert_eq!(
+        change_between(&standing.object(), &requested.object()),
+        None
+    );
+}
+
+#[test]
+fn a_changed_writable_mount_keeps_its_key_and_becomes_read_only() {
+    let mut writable = mount("/src", "/workspace");
+    if let Capability::Mount { recipe, .. } = &mut writable {
+        recipe.access = FileAccess::ReadWrite;
+    }
+    let [key_changed, recipe_changed] = conformance::changed_capabilities(&writable);
+    assert_eq!(recipe_changed, mount("/src", "/workspace"));
+    assert_ne!(selection_of(&key_changed), selection_of(&writable));
+}
