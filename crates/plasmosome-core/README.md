@@ -343,6 +343,8 @@ and creates the lock.
   waits past the deadline: a full pipe at the deadline is `RecordNotTaken`, and a closed reader is
   `SupervisorClosedPipe`. On Darwin the pipe is set not to raise `SIGPIPE`; on Linux the start
   relies on a Rust `main` ignoring it. The wait for the exec is not bounded by the deadline.
+  Once the whole record is written, the controller closes the pipe: that is the end of file
+  `membraned`'s `cell_start::read_config` reads to.
 - On Darwin a new pipe is close-on-exec only after a second call. A process the controller starts
   at that moment by a spawn that does not close every other descriptor can inherit a pipe end,
   and the start then waits until that process execs or exits. Spec 023 has every start close
