@@ -237,7 +237,7 @@ mod tests {
     use super::*;
     use crate::vmm::{Launch, SpawnError, VmmChild, VmmState};
     use std::cell::Cell;
-    use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::sync::{Arc, TryLockError};
@@ -286,27 +286,12 @@ mod tests {
         closed_under_lock: &'a Cell<Option<bool>>,
     }
 
-    impl AsFd for RecordsWhereItCloses<'_> {
-        fn as_fd(&self) -> BorrowedFd<'_> {
-            self.fd
-                .as_ref()
-                .expect("the descriptor is still held")
-                .as_fd()
-        }
-    }
-
     impl OwnsDescriptor for RecordsWhereItCloses<'_> {
         fn descriptor(&self) -> RawFd {
             self.fd
                 .as_ref()
                 .expect("the descriptor is still held")
                 .as_raw_fd()
-        }
-    }
-
-    impl From<RecordsWhereItCloses<'_>> for OwnedFd {
-        fn from(mut held: RecordsWhereItCloses<'_>) -> OwnedFd {
-            held.fd.take().expect("the descriptor is still held")
         }
     }
 
