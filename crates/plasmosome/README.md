@@ -21,10 +21,16 @@ API and no binary. Nothing about the interface is promised, and `cargo install p
 rather than putting a command on your PATH that does nothing. The first release with something in
 it picks its own version number.
 
-A checkout of the repository builds a `plasmosome` binary from this crate. It drives no instance
-yet. `plasmosome --help` lists every command, each marked not served, and running any of them
-exits 2 with one JSON line on stderr whose error code is `not_served`. `plasmosome --version`
-prints `plasmosome 0.0.0`. A wrong command line exits 64, also with one JSON line on stderr.
+A checkout of the repository builds a `plasmosome` binary from this crate. It serves one command:
+`plasmosome status --socket PATH` asks the controller at that socket for its status and prints
+one JSON line, the controller's answer inside an envelope, on stdout. Before it connects, it
+checks that the socket and every directory above it are private to you. Before it writes, it
+checks that the daemon runs as you. A failure is one JSON line on stderr, with an exit code that
+says whether the command can be repeated safely. `status` needs `--socket` in this build: it does
+not find an instance by name yet. `plasmosome --help` lists every other command as not served,
+and running one exits 2 with one JSON line on stderr whose error code is `not_served`.
+`plasmosome --version` prints `plasmosome 0.0.0`. A wrong command line exits 64, also with one
+JSON line on stderr.
 
 To follow the work, read the repository. Nothing for building a capability module is ready yet:
 [`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk), the

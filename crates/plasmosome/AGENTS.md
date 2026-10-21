@@ -29,9 +29,11 @@ package now (spec 010, decision 010).
 
 ## Testing
 
-`cargo test -p plasmosome` runs `tests/binary.rs` against the built binary: help, the version,
-`not_served`, usage errors and a closed stdout, through a real process. A live socket under a test
-`HOME` checks that neither help nor an unserved command connects. The rules themselves are
-tested in `plasmosome-cli`. `plasmosome-guards` checks this package's targets in
-`the_plasmosome_binary_is_in_the_held_package` and its publishing metadata in
-`only_the_held_names_are_publishable_to_a_registry`.
+`cargo test -p plasmosome` runs `tests/binary.rs` and `tests/status.rs` against the built binary,
+through a real process. `tests/binary.rs` covers help, the version, `not_served`, usage errors and
+a closed stdout. A live socket under a test `HOME` checks that neither help nor an unserved
+command connects. `tests/status.rs` runs `plasmosome status --socket` against `plasmosome-core`'s
+daemon loop on a thread, at a private path, and checks unsafe paths and usage errors with a
+listening socket that sees no connection. The rules themselves are tested in `plasmosome-cli`.
+`plasmosome-guards` checks this package's targets in `the_plasmosome_binary_is_in_the_held_package`
+and its publishing metadata in `only_the_held_names_are_publishable_to_a_registry`.

@@ -5,12 +5,15 @@ published.
 
 Spec 025 makes the command line's output a contract: one compact JSON line, an envelope around
 the daemon's answer, and an exit code that says which of six things happened. This crate holds
-the parts of that contract that need no socket. It reads the command line, reads one reply line
-through spec 025's bound, judges it without decoding it, gives each answer its exit, writes JSON
-that never carries a raw terminal control, builds the envelopes, and lists the client's own error
-codes with their exits. The `plasmosome` binary in `crates/plasmosome` is a thin `main` over
-`main_with`. No command is served yet, so every command refuses with `not_served`; the socket
-client arrives in later tasks.
+that contract. It reads the command line, checks a socket path and the peer behind it, sends one
+request, reads one reply line through spec 025's bound, judges it without decoding it, gives each
+answer its exit, writes JSON that never carries a raw terminal control, builds the envelopes, and
+lists the client's own error codes with their exits. The `plasmosome` binary in
+`crates/plasmosome` is a thin `main` over `main_with`.
+
+One command is served: `plasmosome status --socket PATH`. Every other command refuses with
+`not_served`. `status` without `--socket` is a usage error until default selection lands, so
+this build reaches an instance only through `--socket`.
 
 ## Reading the command line
 
@@ -87,9 +90,12 @@ before `--`, a flag's value aside, hold `--human` once and `--json` not at all, 
 included. So `cell exec --human -- tool --human` answers in the human form: what follows `--` is a
 workload's argv, and its `--human` is not this client's.
 
-`handle` reads a line and writes the outcome. A failure to write help or the version to stdout is
-`local_io`, exit 1, with `errno` when the system gave one, under `command` `--help` or
-`--version`, a failed flush included. A panic prints nothing of its own: it ends in one
+`handle` reads a line against a `Context` and writes the outcome. The `Context` holds the
+version, the command table, the trusted UID and the clock. `main_with` passes the package
+version, `COMMANDS`, the process's own effective UID and `SystemClock`. No flag, variable or file
+reaches the trusted UID, so `--trusted-uid 0` is an unknown flag. A failure to write help or the
+version to stdout is `local_io`, exit 1, with `errno` when the system gave one, under `command`
+`--help` or `--version`, a failed flush included. A panic prints nothing of its own: it ends in one
 `internal` envelope on stderr, in the form the line chose, and exit 70. The first call to `handle`
 installs a panic hook for the whole process. The hook is silent on a thread while it runs
 `handle`, and passes every other panic to the hook set before it, a panic on a helper thread
@@ -195,7 +201,9 @@ trusted UID it passed to the check. The path is the socket path for `check_priva
 `check_peer_uid`, and `instances/` for `list_trusted_dir`. `PathOrigin::SocketFlag` says the path
 is `--socket`'s value, and `PathOrigin::Home` says it was built from `$HOME`. Only `BadPath` reads
 the origin: from `--socket` it is `invalid_argument`, exit 64, with `argument` `--socket`; from
-`$HOME` it is `invalid_home`, exit 2.
+`$HOME` it is `invalid_home`, exit 2. `status` never reaches the `--socket` arm: `BadPath` means a
+path that is not absolute and normal, and the parse refuses every such `--socket` value first,
+naming the value.
 
 Each code carries only the fields spec 025's client-code table lists for it. `path` is the
 component the check reports. `BadName`, `PeerCredentials` and `PeerMismatch` report none, so their
@@ -212,6 +220,48 @@ Every path is written by lossy UTF-8 conversion, so the caller passes only UTF-8
 would then name another path. `list_trusted_dir`'s `Io` refusal for an entry it cannot `fstatat`
 joins `instances/` with the entry's raw name, so on Linux its `path` can hold U+FFFD whatever the
 caller passed.
+
+## Serving status
+
+`status::run` serves `plasmosome status --socket PATH`. The deadline, `--deadline-ms` or 10,000
+ms, is counted on the `Context`'s clock from the start of `handle`. In order:
+
+1. Without `--socket`, it is a usage error whose message names `--socket`, with no `argument`.
+   `--kernel` beside `--socket` only adds the `name` param.
+2. It builds the request line and measures it. A line over 1,048,576 bytes before its newline,
+   spec 001's request limit, is a usage error whose `argument` is `--kernel`'s name, the one
+   argument the line holds. With `--socket` alone the line is a fixed 49 bytes before its
+   newline. A name is written with each `"` as two bytes, so half a megabyte of quotes passes the
+   bound. Through a process, macOS's `ARG_MAX` of 1,048,576 bytes covers every argument and the
+   environment together, and Linux caps one argument at 131,072 bytes, so on Linux only a
+   library caller reaches the bound.
+3. A path longer than `sun_path` holds, 103 bytes on macOS and 107 on Linux, is
+   `socket_path_too_long` with `path` and `max_bytes`, exit 2, before any system call.
+4. `check_private_path` with the trusted UID. A refusal goes through `map_refusal` with
+   `PathOrigin::SocketFlag`.
+5. It connects. A refused connection is `unreachable` with `path`, exit 1, and the entry stays
+   where it is, with no `fix`: on macOS a live daemon whose backlog is full refuses connections
+   too. No entry is `not_running`. Any other failure is `transport` with `path` and `errno`.
+6. `exchange` checks the peer, writes the request and reads the reply, below.
+7. The reply goes through `judge_reply` and `kernel_exit`, and a missing one through
+   `unanswered`, with `changes_state` false.
+8. It writes the envelope. From step 3 on, every envelope has `instance` with `socket`, and
+   `name` when `--kernel` was given. A failed write to stdout is `local_io` with `errno`, exit 1,
+   on stderr. Rust ignores `SIGPIPE`, so a closed pipe returns `EPIPE`.
+
+`exchange` takes a connected stream, the path it connected to, the trusted UID, the request and
+the deadline. It calls `check_peer_uid` before writing a byte. A peer that runs as another UID,
+or whose UID cannot be read, is `peer_mismatch`, and the stream is closed unread. With no time
+left it is `deadline` with `deadline_ms`, and nothing is written. Each write and each read then
+waits only the time left. A write that fails before any byte is `transport`. After part of the
+request is written the command still changes nothing, so a failure is `unanswered`'s, with
+cause `transport` or `deadline`. On macOS a socket whose peer has closed refuses a new timeout
+with `EINVAL` (measured on Darwin 25.6), so the read or write is then made without blocking; such
+a socket can receive nothing more.
+
+On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it block, and std's
+`UnixStream::connect` takes no timeout, so there the deadline does not bound the connect. Spec
+025 defers Linux as a host, and this is one of the things that waits for it.
 
 ## What's inside
 
@@ -236,5 +286,8 @@ caller passed.
 | `Command`, `COMMANDS` | Spec 025 §2's command table: words, operands, wire method or registry name, whether it changes state, whether this build serves it |
 | `read`, `Reading`, `Invocation` | One command line read in spec 025's order, and a served command's checked flags |
 | `handle`, `main_with` | Read a line, write its outcome and return the exit, with a panic ending as `internal`; `main_with` does it on the process's own streams |
+| `Context` | What `handle` reads a line against and runs a command with: the version, the table, the trusted UID and the clock |
+| `Clock`, `SystemClock`, `Deadline` | The monotonic clock a command's deadline is counted on, the production one, and the time left on it |
+| `exchange`, `Unreplied` | One request and one reply line on a connected stream: the peer check first, each write and read bounded by the time left |
 
 Tests: `cargo test -p plasmosome-cli`

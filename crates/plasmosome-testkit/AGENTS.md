@@ -40,6 +40,8 @@ Every place the kernel touches the world outside the process, and the seam that 
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 | Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`; writers that refuse every write, fail only on flush, or fail only their first write; one that records the largest piece; all in plasmosome-cli's tests |
 | Time (lifetime bounds, the fence, expiry scheduling) | `Clock` (`plasmosome-backend::clock`), `SystemClock` in `plasmosome-core::clock` | `ManualClock` |
+| The command line's deadline (`--deadline-ms`) | `Clock` and `Deadline` (`plasmosome-cli::clock`), passed in `plasmosome_cli::Context`; the binary passes `SystemClock` | a clock whose later readings are an hour past its first, in plasmosome-cli's tests |
+| A daemon's control socket (the command line's request and reply) | the socket path and the trusted UID, injected as arguments to `plasmosome_cli::handle` and `exchange` | `FakeDaemon` on a private socket in a `TempDir`, socket pairs, and `plasmosome-core`'s daemon loop on a thread; in plasmosome-cli's and plasmosome's tests |
 | A daemon's reply line (the command line's socket read) | the reader injected as an argument to `plasmosome_cli::reply::read_reply` | a `&[u8]`; readers that give a script of chunks and errors, serve a fixed chunk size, or send no newline, stop after a set length and count what was taken; all in plasmosome-cli's tests |
 | The pinned guest (`plasmosome-lanes`) | the bundle directory and the e2fsprogs tool directory injected as paths, and the VMM launcher path given to `run_lane` | a `TempDir` bundle, and launcher scripts that hang or write a console |
 
