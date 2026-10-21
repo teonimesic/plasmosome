@@ -843,13 +843,13 @@ mod tests {
         set_nonblocking(writer.as_fd()).expect("the write end is nonblocking");
         let record: Vec<u8> = (0..1_048_576u32).map(|at| (at % 251) as u8).collect();
         let slow = std::thread::spawn(move || {
-            let mut got = Vec::new();
+            let mut got: Vec<u8> = Vec::new();
             let mut chunk = [0u8; 4096];
             loop {
                 std::thread::sleep(Duration::from_micros(200));
                 match reader.read(&mut chunk).expect("the reader reads") {
                     0 => return got,
-                    count => got.extend_from_slice(&chunk[..count]),
+                    count => got.extend(&chunk[..count]),
                 }
             }
         });

@@ -1103,13 +1103,12 @@ fn own_pgid() -> u32 {
     u32::try_from(unsafe { libc::getpgid(0) }).expect("a process group id")
 }
 
-/// The names in this process's environment, less `__LLVM_PROFILE_RT_INIT_ONCE`, which a coverage
-/// build's profile runtime sets in its own process as it starts. So a stand-in in a coverage run
-/// reports the environment its `execve` gave it.
+const SET_BY_A_COVERAGE_RUNTIME_AT_START: &str = "__LLVM_PROFILE_RT_INIT_ONCE";
+
 fn given_environment() -> Vec<String> {
     std::env::vars_os()
         .map(|(name, _)| name.to_string_lossy().into_owned())
-        .filter(|name| name != "__LLVM_PROFILE_RT_INIT_ONCE")
+        .filter(|name| name != SET_BY_A_COVERAGE_RUNTIME_AT_START)
         .collect()
 }
 
@@ -1132,10 +1131,10 @@ struct Inherited {
 
 static INHERITED: OnceLock<Inherited> = OnceLock::new();
 
-/// Runs before `main`, where the standard library's start-up has not yet set SIGPIPE to be
-/// ignored or reopened a closed descriptor 0, 1 or 2 on `/dev/null`. So it records what the
-/// process inherited across `execve`: which of descriptors 0 to 4 are open, the signal mask and
-/// the ignored signals.
+// SAFETY: The loader calls each function in this section once, before `main` and before the
+// standard library's start-up ignores SIGPIPE or reopens a closed 0, 1 or 2 on /dev/null, so
+// `record_inherited` sees what `execve` handed over. It needs nothing that start-up sets: it
+// makes plain libc calls and sets a OnceLock.
 #[used]
 #[allow(unsafe_code)]
 #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
