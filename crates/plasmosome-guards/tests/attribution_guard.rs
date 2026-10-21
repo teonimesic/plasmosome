@@ -688,8 +688,19 @@ fn judges_whether_there_is_an_address_through_the_matcher_it_checks() {
     check_workspace(|root| {
         assert_refused_when_grep_fails_on_the_address(
             root,
-            "  *localdomain*) ;;\n  *) [ \"$input\" = me@laptop.local ] && exit 2 ;;",
-            "the check that the address holds an `@`, the one check other than the domain's that the guard runs on the bare address",
+            r#"  '-qiE @') [ "$input" = me@laptop.local ] && exit 2 ;;"#,
+            "the check that the address holds an `@`, which grep runs with the pattern `@` alone (if the guard asks that question another way, point the stub at it; that alone is not a guard bug)",
+        )
+    });
+}
+
+#[test]
+fn judges_a_malformed_address_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_on_the_address(
+            root,
+            r#"  *'\.\.'*) [ "$input" = me@laptop.local ] && exit 2 ;;"#,
+            "the check that the address is malformed (if the guard's malformed pattern no longer holds two escaped dots in a row, point the stub at a fragment only that pattern holds; that alone is not a guard bug)",
         )
     });
 }
@@ -723,12 +734,12 @@ enum Verdict {
     Cleared,
 }
 
+const CO_AUTHOR_MODEL: &str = "credits a model: the squash keeps the line, and GitHub shows a co-author for it when it can resolve the address to an account.";
+
 impl Verdict {
     fn refusal(self, position: Position) -> Option<&'static str> {
         match (self, position) {
-            (Verdict::Model, Position::CoAuthoredBy) => {
-                Some("credits a model: GitHub shows it on main as a co-author.")
-            }
+            (Verdict::Model, Position::CoAuthoredBy) => Some(CO_AUTHOR_MODEL),
             (Verdict::Model, Position::SignedOffBy) => Some(
                 "credits a model: a sign-off certifies where a change came from, which a tool cannot do.",
             ),
@@ -914,16 +925,94 @@ fn assert_each_probe_judged(root: &Path, what: &str, probes: &[Probe]) {
     );
 }
 
-fn assert_each_identity_judged_in(root: &Path, position: Position) {
-    let probes: Vec<Probe> = IDENTITIES
+fn rule_2_whitespace() -> Vec<char> {
+    let characters: Vec<char> = [0x20, 0x09, 0x0d, 0x0b, 0x0c, 0x85, 0xa0, 0x1680]
+        .into_iter()
+        .chain(0x2000..=0x200a)
+        .chain([0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff])
+        .map(|point| {
+            char::from_u32(point)
+                .unwrap_or_else(|| panic!("setup: {point:#x} is a Unicode scalar value"))
+        })
+        .collect();
+    assert_eq!(
+        characters.len(),
+        25,
+        "setup: spec 029 section 4 rule 2 lists 25 whitespace characters"
+    );
+    characters
+}
+
+fn malformed_addresses() -> Vec<(String, Verdict)> {
+    let no_break_space = char::from_u32(0xa0).expect("setup: U+00A0 is a Unicode scalar value");
+    let mut rows: Vec<(String, Verdict)> = [
+        ("Claude <@>", Verdict::Model),
+        ("Claude <noreply@anthropic.com >", Verdict::Model),
+    ]
+    .into_iter()
+    .map(|(identity, verdict)| (identity.to_owned(), verdict))
+    .collect();
+    rows.push((
+        format!("Claude <noreply@anthropic.com{no_break_space}>"),
+        Verdict::Model,
+    ));
+    rows.extend(
+        [
+            ("Claude <@laptop.local>", Verdict::Model),
+            ("Probe <probe@>", Verdict::Untraceable),
+            ("Probe <probe@.>", Verdict::Untraceable),
+            ("Probe <@>", Verdict::Untraceable),
+            ("Probe <@corp.locale.io>", Verdict::Untraceable),
+            ("Probe < probe@corp.locale.io>", Verdict::Untraceable),
+            ("Probe <probe @corp.locale.io>", Verdict::Untraceable),
+            ("Jane Doe <jane doe@corp.locale.io>", Verdict::Untraceable),
+            ("Probe <probe@corp .locale.io>", Verdict::Untraceable),
+        ]
+        .into_iter()
+        .map(|(identity, verdict)| (identity.to_owned(), verdict)),
+    );
+    rows.extend(rule_2_whitespace().into_iter().map(|blank| {
+        (
+            format!("Probe <probe@corp.locale.io{blank}>"),
+            Verdict::Untraceable,
+        )
+    }));
+    rows.extend(
+        [
+            ("Probe <probe@corp.locale.io..>", Verdict::Untraceable),
+            ("Probe <probe@.corp.locale.io>", Verdict::Untraceable),
+            ("Probe <probe@corp..locale.io>", Verdict::Untraceable),
+            ("Probe <probe@corp.locale.io.>", Verdict::Cleared),
+            ("Jane Doe <jane.doe@corp.locale.io>", Verdict::Cleared),
+        ]
+        .into_iter()
+        .map(|(identity, verdict)| (identity.to_owned(), verdict)),
+    );
+    assert_eq!(
+        rows.len(),
+        42,
+        "setup: spec 029 Acceptance 1 lists 42 malformed address rows"
+    );
+    rows
+}
+
+fn assert_each_identity_judged_in<Identity: AsRef<str>>(
+    root: &Path,
+    position: Position,
+    identities: &[(Identity, Verdict)],
+) {
+    let probes: Vec<Probe> = identities
         .iter()
         .enumerate()
-        .map(|(index, (identity, verdict))| Probe {
-            label: format!("{identity:?}"),
-            message: format!("probe {index}\n\n{}: {identity}\n", position.as_written()),
-            refusal: verdict
-                .refusal(position)
-                .map(|refusal| format!("{} \"{identity}\" {refusal}", position.as_printed())),
+        .map(|(index, (identity, verdict))| {
+            let identity = identity.as_ref();
+            Probe {
+                label: format!("{identity:?}"),
+                message: format!("probe {index}\n\n{}: {identity}\n", position.as_written()),
+                refusal: verdict
+                    .refusal(position)
+                    .map(|refusal| format!("{} \"{identity}\" {refusal}", position.as_printed())),
+            }
         })
         .collect();
     assert_each_probe_judged(root, &format!("as {}", position.as_written()), &probes);
@@ -931,18 +1020,34 @@ fn assert_each_identity_judged_in(root: &Path, position: Position) {
 
 #[test]
 fn judges_each_identity_as_a_co_author() {
-    check_workspace(|root| assert_each_identity_judged_in(root, Position::CoAuthoredBy));
+    check_workspace(|root| {
+        assert_each_identity_judged_in(root, Position::CoAuthoredBy, IDENTITIES)
+    });
 }
 
 #[test]
 fn judges_each_identity_as_a_sign_off() {
-    check_workspace(|root| assert_each_identity_judged_in(root, Position::SignedOffBy));
+    check_workspace(|root| assert_each_identity_judged_in(root, Position::SignedOffBy, IDENTITIES));
+}
+
+#[test]
+fn judges_each_malformed_address_as_a_co_author() {
+    check_workspace(|root| {
+        assert_each_identity_judged_in(root, Position::CoAuthoredBy, &malformed_addresses())
+    });
+}
+
+#[test]
+fn judges_each_malformed_address_as_a_sign_off() {
+    check_workspace(|root| {
+        assert_each_identity_judged_in(root, Position::SignedOffBy, &malformed_addresses())
+    });
 }
 
 #[test]
 fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
     check_workspace(|root| {
-        let model = "Co-authored-by \"Gemini <probe@corp.locale.io>\" credits a model: GitHub shows it on main as a co-author.";
+        let model = format!("Co-authored-by \"Gemini <probe@corp.locale.io>\" {CO_AUTHOR_MODEL}");
         let lines: &[(&str, &str, bool)] = &[
             ("U+3000, an ideographic space", "\u{3000}", true),
             ("U+2003, an em space", "\u{2003}", true),
@@ -959,7 +1064,7 @@ fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
             .map(|(index, (name, line, git_reads_text))| Probe {
                 label: format!("a line holding only {name}"),
                 message: format!("probe {index}\n\nProse A\nProse B\nProse C\nCo-authored-by: Gemini <probe@corp.locale.io>\n{line}\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n"),
-                refusal: git_reads_text.then(|| model.to_owned()),
+                refusal: git_reads_text.then(|| model.clone()),
             })
             .collect();
         assert_each_probe_judged(
@@ -974,7 +1079,8 @@ fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
 fn reads_a_paragraph_both_ways_when_a_line_is_blank_only_to_another_reader() {
     check_workspace(|root| {
         let model = "Co-authored-by: Gemini <probe@corp.locale.io>";
-        let refused = "Co-authored-by \"Gemini <probe@corp.locale.io>\" credits a model: GitHub shows it on main as a co-author.";
+        let refused: &str =
+            &format!("Co-authored-by \"Gemini <probe@corp.locale.io>\" {CO_AUTHOR_MODEL}");
         let person = "Co-authored-by: A Colleague <colleague@corp.locale.io>";
         let sign_off = "Signed-off-by: A Colleague <colleague@corp.locale.io>";
         let untraceable = "Co-authored-by: Probe <me@laptop.local>";
@@ -1080,7 +1186,7 @@ fn clears_a_look_alike_domain_when_the_caller_sets_lc_all() {
 #[test]
 fn prints_both_offences_when_a_line_git_reads_as_blank_parts_two_model_co_authors() {
     check_workspace(|root| {
-        let harm = "credits a model: GitHub shows it on main as a co-author.";
+        let harm = CO_AUTHOR_MODEL;
         std::thread::scope(|scope| {
             for (name, line) in [
                 ("a space", " "),
