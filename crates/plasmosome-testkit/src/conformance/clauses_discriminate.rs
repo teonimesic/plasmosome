@@ -87,6 +87,8 @@ enum Defect {
     AcceptsInvalidOperationsOf(UniverseClass, Call),
     RefusalRollsBackItsAddress(Call),
     ChecksTheAddressBeforeValidating(Call),
+    AnInvalidGrantKeepsARecord,
+    AConflictingGrantKeepsARecord,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,13 +568,21 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::GrantPanics {
             std::panic::panic_any(InfrastructureFailure::Grant);
         }
-        if !self.validated(&operation, Call::Grant)? {
-            return Ok(LedgerEntry {
-                handle: operation.handle(),
-                owner: operation.owner().clone(),
-                capability: operation.capability(),
-                kind,
-            });
+        let requested = LedgerEntry {
+            handle: operation.handle(),
+            owner: operation.owner().clone(),
+            capability: operation.capability(),
+            kind,
+        };
+        let valid = match self.validated(&operation, Call::Grant) {
+            Err(refusal) if self.defect == Defect::AnInvalidGrantKeepsARecord => {
+                self.ledger.insert(requested.handle, requested);
+                return Err(refusal);
+            }
+            outcome => outcome?,
+        };
+        if !valid {
+            return Ok(requested);
         }
         let mut owner = operation.owner().clone();
         let mut capability = operation.capability();
@@ -666,6 +676,9 @@ impl EnforcementBackend for DefectiveBackend {
                 self.drop_address(handle);
                 self.state.insert(entry.object())?;
             } else if !promotes {
+                if self.defect == Defect::AConflictingGrantKeepsARecord {
+                    self.ledger.insert(handle, entry);
+                }
                 return Err(identity_conflict(handle));
             }
             self.ledger.insert(handle, entry.clone());
@@ -897,7 +910,7 @@ fn change_between(standing: &OsObject, requested: &OsObject) -> Option<Change> {
         Some(Change::Owner)
     } else if standing.owner != requested.owner {
         None
-    } else if standing.capability.key() != requested.capability.key() {
+    } else if selection_of(&standing.capability) != selection_of(&requested.capability) {
         Some(Change::Key)
     } else {
         Some(Change::Recipe)
@@ -1842,6 +1855,49 @@ fn a_replacing_grant_takes_over_only_its_own_change_to_an_object_of_its_own_orig
             }
         }
     }
+}
+
+#[test]
+fn the_retry_clause_rejects_a_conflicting_grant_that_keeps_a_record() {
+    assert_rejected(|| {
+        conformance::grant_retry_returns_the_original_entry(carrying(
+            Defect::AConflictingGrantKeepsARecord,
+        ))
+    });
+}
+
+#[test]
+fn the_snapshot_clause_rejects_an_invalid_grant_that_keeps_a_record() {
+    assert_rejected(|| {
+        conformance::snapshot_never_invents_objects(carrying(Defect::AnInvalidGrantKeepsARecord))
+    });
+}
+
+#[test]
+fn a_refused_grant_that_keeps_a_record_changes_no_state_and_returns_the_refusal() {
+    let invalid = invalid_of_every_class().remove(0);
+    let mut backend = DefectiveBackend::carrying(Defect::AnInvalidGrantKeepsARecord);
+    assert!(matches!(
+        backend.grant(invalid.clone(), GrantKind::Hot),
+        Err(BackendError::InvalidOperation { .. })
+    ));
+    assert!(backend.snapshot_os_state().is_empty());
+    assert!(backend.ledger.contains_key(&invalid.handle()));
+
+    let standing = conformance::op_for(
+        GrantId::new(),
+        conformance::conformance_owner(),
+        mount("/src", "/work"),
+    );
+    let mut backend = DefectiveBackend::carrying(Defect::AConflictingGrantKeepsARecord);
+    backend.apply(standing.clone()).unwrap();
+    let before = backend.snapshot_os_state();
+    assert_eq!(
+        backend.grant(standing.clone(), GrantKind::Hot),
+        Err(identity_conflict(standing.handle()))
+    );
+    assert_eq!(backend.snapshot_os_state(), before);
+    assert!(backend.ledger.contains_key(&standing.handle()));
 }
 
 #[test]
