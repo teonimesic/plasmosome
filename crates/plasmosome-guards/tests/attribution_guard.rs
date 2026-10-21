@@ -685,6 +685,20 @@ fn refuses_a_message_whose_trailers_it_cannot_parse() {
 }
 
 #[test]
+fn refuses_a_folded_trailer_git_cannot_print_as_written() {
+    check_workspace(|root| {
+        let repository = repository_with_commit(
+            "docs: a change\n\nSome body prose.\n\nCo-authored-by: A Colleague\n <colleague@corp.locale.io>\n",
+        );
+        assert_refused_saying(
+            &run_guard_with_git_refusing(root, repository.path(), "--only-trailers"),
+            "cannot parse the trailers",
+            "a commit whose trailer goes on over two lines while `git interpret-trailers` cannot print its trailers as they are written, which leaves the guard unable to tell that the trailer was folded",
+        );
+    });
+}
+
+#[test]
 fn clears_a_body_larger_than_a_pipe_buffer_whose_first_line_is_trailer_shaped() {
     check_workspace(|root| {
         let mut message = String::from("ci(guard): a body that outgrows a pipe buffer\n\n");
@@ -829,6 +843,22 @@ fn judges_a_tool_login_through_the_matcher_it_checks() {
             ("81847+claude@users.noreply.github.com", "credits a model"),
             r#"  *'users\.noreply\.github\.com'*) [ "$input" = 81847+claude@users.noreply.github.com ] && exit 2 ;;"#,
             "the tool login list, the one pattern holding `users\\.noreply\\.github\\.com` (if the logins are matched another way, point the stub at it; that alone is not a guard bug)",
+        );
+    });
+}
+
+#[test]
+fn judges_a_line_break_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_judging(
+            root,
+            "docs: a change\n\nSome body prose.\n\nCo-authored-by: Claude <noreply@anthropic.com>\r<jane@corp.locale.io>\n",
+            (
+                "Claude <noreply@anthropic.com>, a carriage return, then <jane@corp.locale.io>",
+                "credits a model",
+            ),
+            r#"  *"$(printf '[\r\v\f]')"*) [ "$input" = "$(printf 'Claude <noreply@anthropic.com>\r<jane@corp.locale.io>')" ] && exit 2 ;;"#,
+            "the line-break check, the one pattern holding a carriage return, a vertical tab and a form feed alone in one bracket (if the guard asks that question another way, point the stub at it; that alone is not a guard bug)",
         );
     });
 }
@@ -1040,6 +1070,19 @@ const IDENTITIES: &[(&str, Verdict)] = &[
         "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
         Verdict::Cleared,
     ),
+    (
+        "noreply@anthropic.com <jane@corp.locale.io>",
+        Verdict::Cleared,
+    ),
+    (
+        "81847+claude@users.noreply.github.com <jane@corp.locale.io>",
+        Verdict::Cleared,
+    ),
+    (
+        "Probe <81847+claude@users.noreply.github.com.>",
+        Verdict::Cleared,
+    ),
+    ("Probe <+claude@users.noreply.github.com>", Verdict::Cleared),
 ];
 
 fn identities() -> Vec<(String, Verdict)> {
@@ -1209,6 +1252,39 @@ const RULE_2_ROWS_BEYOND_ACCEPTANCE_1: &[(&str, Verdict)] = &[
     ("Probe <probe@corp@.locale.io>", Verdict::Untraceable),
     ("Jane Doe <jane..doe@corp.locale.io>", Verdict::Cleared),
     ("Probe <.probe.@corp.locale.io>", Verdict::Cleared),
+    (
+        "Claude <noreply@anthropic.com>\r<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\x0b<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\x0c<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\u{85}<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\u{2028}<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\u{2029}<jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "Claude <noreply@anthropic.com>\rCo-authored-by: A Colleague <colleague@corp.locale.io>",
+        Verdict::Model,
+    ),
+    ("Jane <jane@corp.locale.io\r>", Verdict::Untraceable),
+    (
+        "Jane Doe\rProbe <noreply@anthropic.com>",
+        Verdict::Untraceable,
+    ),
 ];
 
 fn rule_2_rows() -> Vec<(String, Verdict)> {
@@ -1307,6 +1383,86 @@ fn judges_each_malformed_address_as_a_sign_off() {
     check_workspace(|root| {
         assert_each_identity_judged_in(root, Position::SignedOffBy, &rule_2_rows())
     });
+}
+
+const FOLDED_TRAILERS: &[(&str, &str, &str, Verdict)] = &[
+    (
+        "a model's trailer that a line starting with a space ends with a person's address",
+        "KEY: Claude <noreply@anthropic.com>\n <jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a model's trailer that a line starting with a tab ends with a person's address",
+        "KEY: Claude <noreply@anthropic.com>\n\t<jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a model's trailer that a line starting with a carriage return ends with a person's address",
+        "KEY: Claude <noreply@anthropic.com>\n\r<jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a person's trailer whose address goes on a line of its own",
+        "KEY: Jane Doe\n <jane@corp.locale.io>\n",
+        "Jane Doe <jane@corp.locale.io>",
+        Verdict::Untraceable,
+    ),
+    (
+        "a folded trailer above a person's trailer on one line",
+        "KEY: A Colleague\n <colleague@corp.locale.io>\nKEY: Jane Doe <jane@corp.locale.io>\n",
+        "A Colleague <colleague@corp.locale.io>",
+        Verdict::Untraceable,
+    ),
+    (
+        "a person's trailer on one line above a folded trailer",
+        "KEY: Jane Doe <jane@corp.locale.io>\nKEY: A Colleague\n <colleague@corp.locale.io>\n",
+        "A Colleague <colleague@corp.locale.io>",
+        Verdict::Untraceable,
+    ),
+    (
+        "a folded trailer under another key above a person's trailer on one line",
+        "Reviewed-by: A Reviewer\n <reviewer@corp.locale.io>\nKEY: Jane Doe <jane@corp.locale.io>\n",
+        "",
+        Verdict::Cleared,
+    ),
+];
+
+fn assert_each_folded_trailer_judged_in(root: &Path, position: Position) {
+    let probes: Vec<Probe> = FOLDED_TRAILERS
+        .iter()
+        .enumerate()
+        .map(|(index, &(label, block, value, verdict))| Probe {
+            label: label.to_owned(),
+            message: format!(
+                "probe {index}\n\n{}",
+                block.replace("KEY", position.as_written())
+            ),
+            refusal: verdict
+                .refusal(position)
+                .map(|refusal| format!("{} \"{value}\" {refusal}", position.as_printed())),
+        })
+        .collect();
+    assert_each_probe_judged(
+        root,
+        &format!(
+            "git unfolds a trailer that goes on over lines starting with whitespace into one value, which a reader of the message sees as more than one line, so it counts as no address and its name decides the refusal. As {}",
+            position.as_written()
+        ),
+        &probes,
+    );
+}
+
+#[test]
+fn judges_each_folded_trailer_as_a_co_author() {
+    check_workspace(|root| assert_each_folded_trailer_judged_in(root, Position::CoAuthoredBy));
+}
+
+#[test]
+fn judges_each_folded_trailer_as_a_sign_off() {
+    check_workspace(|root| assert_each_folded_trailer_judged_in(root, Position::SignedOffBy));
 }
 
 #[test]
