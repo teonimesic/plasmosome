@@ -262,11 +262,8 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         "the residue fixture must plant"
     );
     expected.push(residue);
-    assert_exact_state(
-        &backend.snapshot_os_state(),
-        &expected,
-        "the snapshot lost or invented an object",
-    );
+    let mut seen = backend.snapshot_os_state();
+    assert_exact_state(&seen, &expected, "the snapshot lost or invented an object");
     let at_issued: Vec<UniverseOp> = issued
         .iter()
         .map(|standing| {
@@ -279,22 +276,23 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         .collect();
     let fresh = invalid_operations();
     for invalid in fresh.iter().chain(&at_issued) {
-        let before = backend.snapshot_os_state();
+        let before = unchanged_since(&backend, &seen);
         contract_assert_eq!(
             backend.grant(invalid.clone(), GrantKind::Hot),
             Err(invalid_refusal(invalid)),
             "a grant of an invalid {} operation must be refused before any change",
             invalid.class().as_str()
         );
+        seen = backend.snapshot_os_state();
         contract_assert_eq!(
-            backend.snapshot_os_state(),
+            seen,
             before,
             "a refused invalid {} grant changed the state",
             invalid.class().as_str()
         );
     }
     for invalid in &fresh {
-        let before = backend.snapshot_os_state();
+        let before = unchanged_since(&backend, &seen);
         contract_assert_eq!(
             backend.revoke(invalid.handle(), DrainSpec::forcing()),
             Err(BackendError::UnknownHandle {
@@ -303,38 +301,41 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             "a refused invalid {} grant must issue no record",
             invalid.class().as_str()
         );
+        seen = backend.snapshot_os_state();
         contract_assert_eq!(
-            backend.snapshot_os_state(),
+            seen,
             before,
             "a revoke of a refused invalid {} grant's handle changed the state",
             invalid.class().as_str()
         );
     }
     for invalid in invalid_operations().iter().chain(&at_issued) {
-        let before = backend.snapshot_os_state();
+        let before = unchanged_since(&backend, &seen);
         contract_assert_eq!(
             backend.apply(invalid.clone()),
             Err(invalid_refusal(invalid)),
             "an apply of an invalid {} operation must be refused before any change",
             invalid.class().as_str()
         );
+        seen = backend.snapshot_os_state();
         contract_assert_eq!(
-            backend.snapshot_os_state(),
+            seen,
             before,
             "a refused invalid {} apply changed the state",
             invalid.class().as_str()
         );
     }
     for invalid in invalid_operations().iter().chain(&at_issued) {
-        let before = backend.snapshot_os_state();
+        let before = unchanged_since(&backend, &seen);
         contract_assert_eq!(
             backend.plant(invalid.object()),
             Err(invalid_refusal(invalid)),
             "a plant of an invalid {} object must be refused before any change",
             invalid.class().as_str()
         );
+        seen = backend.snapshot_os_state();
         contract_assert_eq!(
-            backend.snapshot_os_state(),
+            seen,
             before,
             "a refused invalid {} plant changed the state",
             invalid.class().as_str()
@@ -1451,6 +1452,16 @@ fn remove_expected(expected: &mut Vec<OsObject>, removed: &OsObject) {
         .position(|object| object == removed)
         .expect("the removed exact object must be expected");
     expected.remove(index);
+}
+
+fn unchanged_since<B: EnforcementBackend>(backend: &B, seen: &OsState) -> OsState {
+    let now = backend.snapshot_os_state();
+    contract_assert_eq!(
+        now,
+        *seen,
+        "the state changed after a refused call returned"
+    );
+    now
 }
 
 fn assert_exact_state(actual: &OsState, expected: &[OsObject], context: &str) {
