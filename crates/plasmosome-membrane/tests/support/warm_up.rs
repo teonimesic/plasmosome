@@ -118,7 +118,18 @@ fn shell(script: &str) -> Command {
 
 #[test]
 fn the_usage_exit_passes_the_warm_up() {
-    assert_eq!(run_once("membraned", shell("exit 2"), BOUND), Ok(()));
+    assert_eq!(run_once("membraned", shell("exit 64"), BOUND), Ok(()));
+}
+
+#[test]
+fn the_old_usage_exit_fails_the_warm_up() {
+    assert_eq!(
+        run_once("membraned", shell("exit 2"), BOUND),
+        Err(
+            "warm-up of membraned exits with its usage status 64, not exit status: 2; its stderr: \"\""
+                .to_string()
+        )
+    );
 }
 
 #[test]
@@ -161,7 +172,7 @@ fn a_warm_up_that_exits_with_another_code_fails_setup() {
     assert_eq!(
         run_once("membraned", shell("exit 3"), BOUND),
         Err(
-            "warm-up of membraned exits with its usage status 2, not exit status: 3; its stderr: \"\""
+            "warm-up of membraned exits with its usage status 64, not exit status: 3; its stderr: \"\""
                 .to_string()
         )
     );
@@ -173,7 +184,7 @@ fn a_warm_up_killed_by_a_signal_fails_setup() {
         .expect_err("a death by signal fails the warm-up");
 
     assert!(
-        failure.starts_with("warm-up of membraned exits with its usage status 2, not signal: 9"),
+        failure.starts_with("warm-up of membraned exits with its usage status 64, not signal: 9"),
         "{failure}"
     );
 }
