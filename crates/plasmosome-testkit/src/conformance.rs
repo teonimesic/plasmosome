@@ -167,7 +167,8 @@ pub fn grant_is_replayable<B: EnforcementBackend>(make: impl Fn() -> B) {
     }
 }
 
-/// Checks that a never-issued exact address is refused without changing live state.
+/// Checks that a never-issued exact address is refused without changing the live grant or its
+/// issued record.
 pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
@@ -182,15 +183,17 @@ pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> 
             BackendError::UnknownHandle { handle: unknown },
             "revoking the never-granted handle must return UnknownHandle"
         );
-        assert_exact_state(
-            observe(&mut backend).state(),
+        assert_account(
+            &observe(&mut backend),
             &[live_object],
-            "a failed revoke must preserve the live grant",
+            std::slice::from_ref(&live),
+            "a failed revoke must preserve the live grant and its issued record",
         );
     }
 }
 
-/// Checks that either successful revoke policy removes the exact granted object.
+/// Checks that either successful revoke policy removes the exact granted object and its issued
+/// record.
 pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
@@ -204,17 +207,25 @@ pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B
                     entry.handle
                 )
             });
+            let snapshot = observe(&mut backend);
             contract_assert!(
-                !holds_exact(observe(&mut backend).state(), &object),
+                !holds_exact(snapshot.state(), &object),
                 "a {} revoke left {} standing",
                 policy_of(drain),
                 object.describe()
+            );
+            contract_assert!(
+                !issues_record(&snapshot, entry.handle),
+                "a {} revoke kept the issued record of {}",
+                policy_of(drain),
+                entry.handle
             );
         }
     }
 }
 
-/// Checks that revoking grants never removes an unrelated planted observation.
+/// Checks that revoking grants never removes an unrelated planted observation, and that the
+/// planted observation issues no record.
 pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
@@ -234,28 +245,32 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
                 residue.describe()
             );
         }
-        assert_exact_state(
-            observe(&mut backend).state(),
+        assert_account(
+            &observe(&mut backend),
             &[residue],
-            "only planted residue may remain",
+            &[],
+            "only planted residue may remain, with no issued record",
         );
     }
 }
 
-/// Checks that snapshots contain every and only requested grant or planted object; that a
-/// grant, apply or plant of an invalid operation of any class, at a fresh address or at an issued
-/// one, returns `InvalidOperation` and leaves the state as it was just before that call; that a
-/// revoke of the handle of a grant refused at a fresh address returns `UnknownHandle` and changes
-/// nothing; that the state does not change between two of those calls either, so an effect that
-/// lands after its refusal returned is seen; and that a backend fresh from the factory, made
-/// after another instance was used, observes nothing.
+/// Checks that snapshots contain every and only requested grant or planted object, with an
+/// issued record for each grant and none for the planted object; that a grant, apply or plant of
+/// an invalid operation of any class, at a fresh address or at an issued one, returns
+/// `InvalidOperation` and leaves the account as it was just before that call; that a revoke of
+/// the handle of a grant refused at a fresh address returns `UnknownHandle` and changes nothing;
+/// that the account does not change between two of those calls either, so an effect that lands
+/// after its refusal returned is seen; and that a backend fresh from the factory, made after
+/// another instance was used, observes nothing.
 pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut backend = make();
     let mut expected = Vec::new();
+    let mut records = Vec::new();
     let mut issued = Vec::new();
     for prepared in sample_grants() {
         let entry = grant_prepared(&mut backend, &prepared);
         expected.push(requested_object(&entry, &prepared));
+        records.push(entry);
         issued.push(prepared.operation);
     }
     let residue = residue_objects().remove(0);
@@ -264,8 +279,13 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         "the residue fixture must plant"
     );
     expected.push(residue);
-    let mut seen = observe(&mut backend).state().clone();
-    assert_exact_state(&seen, &expected, "the snapshot lost or invented an object");
+    let mut seen = observe(&mut backend);
+    assert_account(
+        &seen,
+        &expected,
+        &records,
+        "the snapshot lost or invented an object or an issued record",
+    );
     let at_issued: Vec<UniverseOp> = issued
         .iter()
         .map(|standing| {
@@ -285,11 +305,11 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             "a grant of an invalid {} operation must be refused before any change",
             invalid.class().as_str()
         );
-        seen = observe(&mut backend).state().clone();
+        seen = observe(&mut backend);
         contract_assert_eq!(
             seen,
             before,
-            "a refused invalid {} grant changed the state",
+            "a refused invalid {} grant changed the account",
             invalid.class().as_str()
         );
     }
@@ -303,11 +323,11 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             "a refused invalid {} grant must issue no record",
             invalid.class().as_str()
         );
-        seen = observe(&mut backend).state().clone();
+        seen = observe(&mut backend);
         contract_assert_eq!(
             seen,
             before,
-            "a revoke of a refused invalid {} grant's handle changed the state",
+            "a revoke of a refused invalid {} grant's handle changed the account",
             invalid.class().as_str()
         );
     }
@@ -319,11 +339,11 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             "an apply of an invalid {} operation must be refused before any change",
             invalid.class().as_str()
         );
-        seen = observe(&mut backend).state().clone();
+        seen = observe(&mut backend);
         contract_assert_eq!(
             seen,
             before,
-            "a refused invalid {} apply changed the state",
+            "a refused invalid {} apply changed the account",
             invalid.class().as_str()
         );
     }
@@ -335,16 +355,16 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             "a plant of an invalid {} object must be refused before any change",
             invalid.class().as_str()
         );
-        seen = observe(&mut backend).state().clone();
+        seen = observe(&mut backend);
         contract_assert_eq!(
             seen,
             before,
-            "a refused invalid {} plant changed the state",
+            "a refused invalid {} plant changed the account",
             invalid.class().as_str()
         );
     }
     contract_assert!(
-        observe(&mut make()).state().is_empty(),
+        observe(&mut make()).is_empty(),
         "a backend fresh from the factory must observe nothing an earlier instance did"
     );
 }
@@ -365,6 +385,7 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
             live.push((entry.clone(), entry.object()));
         }
         let mut expected: Vec<OsObject> = live.iter().map(|(_, object)| object.clone()).collect();
+        let mut records: Vec<LedgerEntry> = live.iter().map(|(entry, _)| entry.clone()).collect();
         for (entry, object) in order.arrange(live) {
             backend
                 .revoke(entry.handle, DrainSpec::graceful(DRAIN))
@@ -376,10 +397,12 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
                     )
                 });
             remove_expected(&mut expected, &object);
-            assert_exact_state(
-                observe(&mut backend).state(),
+            remove_expected(&mut records, &entry);
+            assert_account(
+                &observe(&mut backend),
                 &expected,
-                "a revoke must withdraw its own exact object and preserve all survivors",
+                &records,
+                "a revoke must withdraw its own exact object and record and preserve all survivors",
             );
         }
     }
@@ -427,10 +450,11 @@ where
                 contract_unwrap!(backend.apply(first.clone()));
                 contract_unwrap!(backend.apply(second.clone()));
                 expected.extend([first.object(), second.object()]);
-                assert_exact_state(
-                    observe(&mut backend).state(),
+                assert_account(
+                    &observe(&mut backend),
                     &expected,
-                    "applied operations must coexist with all unrelated observations",
+                    &[],
+                    "applied operations must coexist with all unrelated observations and issue no record",
                 );
                 let arranged = order.arrange_ops(vec![first, second]);
                 for (index, op) in arranged.into_iter().enumerate() {
@@ -449,10 +473,11 @@ where
                             object.describe(),
                             order.name()
                         );
-                        assert_exact_state(
-                            observe(&mut backend).state(),
+                        assert_account(
+                            &observe(&mut backend),
                             &expected,
-                            "a refused removal naming another owner changed the state",
+                            &[],
+                            "a refused removal naming another owner changed the account",
                         );
                     }
                     backend
@@ -466,25 +491,27 @@ where
                             )
                         });
                     remove_expected(&mut expected, &object);
-                    let state = observe(&mut backend).state().clone();
-                    assert_exact_state(
-                        &state,
+                    let snapshot = observe(&mut backend);
+                    assert_account(
+                        &snapshot,
                         &expected,
+                        &[],
                         "an applied removal selected the wrong instance or damaged unrelated state",
                     );
+                    let state = snapshot.state();
                     contract_assert!(
-                        !holds_exact(&state, &object),
+                        !holds_exact(state, &object),
                         "an applied removal left its exact object standing"
                     );
                     let owner_still_holds_key =
-                        owner_holds_key(&state, &object.owner, object.class(), &object.key());
+                        owner_holds_key(state, &object.owner, object.class(), &object.key());
                     contract_assert_eq!(
                         owner_still_holds_key,
                         index == 0,
                         "owner key membership must remain only while that owner has another holding"
                     );
                     for residue in &residues {
-                        contract_assert!(holds_exact(&state, residue));
+                        contract_assert!(holds_exact(state, residue));
                     }
                 }
             }
@@ -512,11 +539,16 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
                 },
                 "revoking the already-revoked handle must return UnknownHandle"
             );
-            let state = observe(&mut backend).state().clone();
-            contract_assert!(!holds_exact(&state, &spent_object));
+            let snapshot = observe(&mut backend);
+            contract_assert!(!holds_exact(snapshot.state(), &spent_object));
             contract_assert!(
-                holds_exact(&state, &live.object()),
+                holds_exact(snapshot.state(), &live.object()),
                 "a refused spent-handle revoke took the live neighbour"
+            );
+            contract_assert_eq!(
+                snapshot.grants(),
+                std::slice::from_ref(&live),
+                "a refused spent-handle revoke changed the issued records"
             );
         }
     }
@@ -540,6 +572,7 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
                     let second = grant_prepared(&mut backend, &second_request);
                     let second_object = requested_object(&second, &second_request);
                     let mut expected = vec![first_object.clone(), second_object.clone()];
+                    let mut records = vec![first.clone(), second.clone()];
                     for (entry, object) in
                         order.arrange(vec![(first, first_object), (second, second_object)])
                     {
@@ -551,10 +584,12 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
                             )
                         });
                         remove_expected(&mut expected, &object);
-                        assert_exact_state(
-                            observe(&mut backend).state(),
+                        remove_expected(&mut records, &entry);
+                        assert_account(
+                            &observe(&mut backend),
                             &expected,
-                            "revoke took another owner's object",
+                            &records,
+                            "revoke took another owner's object or record",
                         );
                     }
                 }
@@ -592,10 +627,12 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                 let second_object = requested_object(&second, &second_request);
                 contract_assert_ne!(first.handle, second.handle);
                 let mut expected = vec![first_object.clone(), second_object.clone()];
-                assert_exact_state(
-                    observe(&mut backend).state(),
+                let mut records = vec![first.clone(), second.clone()];
+                assert_account(
+                    &observe(&mut backend),
                     &expected,
-                    "two requested holdings must coexist with their complete requested payloads",
+                    &records,
+                    "two requested holdings must coexist with their complete requested payloads and records",
                 );
                 for (entry, object) in
                     order.arrange(vec![(first, first_object), (second, second_object)])
@@ -608,9 +645,11 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                         )
                     });
                     remove_expected(&mut expected, &object);
-                    assert_exact_state(
-                        observe(&mut backend).state(),
+                    remove_expected(&mut records, &entry);
+                    assert_account(
+                        &observe(&mut backend),
                         &expected,
+                        &records,
                         "repeated-grant revoke selected the wrong instance",
                     );
                 }
@@ -630,16 +669,18 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         let live_request = hot_grant(residue.owner.clone(), &capability);
         let live = grant_prepared(&mut backend, &live_request);
         let live_object = requested_object(&live, &live_request);
-        assert_exact_state(
-            observe(&mut backend).state(),
+        assert_account(
+            &observe(&mut backend),
             &[residue.clone(), live_object],
-            "live broker and equal residue must coexist exactly",
+            std::slice::from_ref(&live),
+            "live broker and equal residue must coexist exactly, with a record for the grant only",
         );
         contract_unwrap!(backend.revoke(live.handle, drain));
-        assert_exact_state(
-            observe(&mut backend).state(),
+        assert_account(
+            &observe(&mut backend),
             std::slice::from_ref(&residue),
-            "live broker revoke must preserve equal residue",
+            &[],
+            "live broker revoke must preserve equal residue and take its own record",
         );
         contract_unwrap!(backend.apply_removal(
             plasmosome_backend::UniverseRemoval {
@@ -649,10 +690,14 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             &residue.owner,
             drain,
         ));
-        contract_assert!(observe(&mut backend).state().is_empty());
+        contract_assert!(observe(&mut backend).is_empty());
         let removed = grant_prepared(&mut backend, &hot_grant(residue.owner.clone(), &capability));
         contract_unwrap!(backend.apply_removal(removed.removal(), &removed.owner, drain));
-        contract_assert!(observe(&mut backend).state().is_empty());
+        contract_assert!(
+            observe(&mut backend).is_empty(),
+            "a successful {} apply_removal of a granted holding must take its holding and record",
+            policy_of(drain)
+        );
         contract_assert_eq!(
             backend.revoke(removed.handle, DrainSpec::forcing()),
             Err(BackendError::UnknownHandle {
@@ -690,10 +735,11 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                     "a retry of the standing {} grant must return the original entry",
                     capability.class_str()
                 );
-                assert_exact_state(
-                    observe(&mut backend).state(),
+                assert_account(
+                    &observe(&mut backend),
                     &expected,
-                    "a retry changed the state",
+                    std::slice::from_ref(&entry),
+                    "a retry changed the account",
                 );
                 let conflict = BackendError::IdentityConflict {
                     class: first.operation.class().as_str(),
@@ -732,10 +778,11 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                         Err(conflict.clone()),
                         "a grant with {change} at an issued address must conflict"
                     );
-                    assert_exact_state(
-                        observe(&mut backend).state(),
+                    assert_account(
+                        &observe(&mut backend),
                         &expected,
-                        "a conflicting grant changed the state",
+                        std::slice::from_ref(&entry),
+                        "a conflicting grant changed the account",
                     );
                 }
                 let applied = op_for(GrantId::new(), conformance_owner(), capability.clone());
@@ -775,10 +822,11 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                             }),
                             "a grant of {payload} at an {origin} address must conflict"
                         );
-                        assert_exact_state(
-                            observe(&mut backend).state(),
+                        assert_account(
+                            &observe(&mut backend),
                             &expected,
-                            "a refused grant at a standing address changed the state",
+                            std::slice::from_ref(&entry),
+                            "a refused grant at a standing address changed the account",
                         );
                         contract_assert_eq!(
                             backend.revoke(operation.handle(), DrainSpec::forcing()),
@@ -791,9 +839,10 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                 }
                 contract_unwrap!(backend.apply(first.operation.clone()));
                 contract_unwrap!(backend.plant(issued_object.clone()));
-                assert_exact_state(
-                    observe(&mut backend).state(),
+                assert_account(
+                    &observe(&mut backend),
                     &expected,
+                    std::slice::from_ref(&entry),
                     "applying or planting a live grant's own object must change nothing",
                 );
                 contract_assert_eq!(
@@ -807,10 +856,11 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
                     "revoking a retried grant must return the original entry and its kind"
                 );
                 remove_expected(&mut expected, &issued_object);
-                assert_exact_state(
-                    observe(&mut backend).state(),
+                assert_account(
+                    &observe(&mut backend),
                     &expected,
-                    "revoking the retried grant must take only its own holding",
+                    &[],
+                    "revoking the retried grant must take only its own holding and record",
                 );
             }
         }
@@ -833,27 +883,29 @@ pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() 
         let earlier_objects: Vec<OsObject> = earlier.iter().map(LedgerEntry::object).collect();
         let mut second = make();
         contract_assert!(
-            observe(&mut second).state().is_empty(),
+            observe(&mut second).is_empty(),
             "a backend fresh from the factory must observe nothing an earlier instance did"
         );
         assert_unknown_everywhere(&mut second, &earlier);
         let mut own = Vec::new();
+        let mut own_records = Vec::new();
         for entry in &earlier {
             let equal = hot_grant(entry.owner.clone(), &entry.capability);
-            own.push(requested_object(
-                &grant_prepared(&mut second, &equal),
-                &equal,
-            ));
+            let issued = grant_prepared(&mut second, &equal);
+            own.push(requested_object(&issued, &equal));
+            own_records.push(issued);
         }
         assert_unknown_everywhere(&mut second, &earlier);
-        assert_exact_state(
-            observe(&mut second).state(),
+        assert_account(
+            &observe(&mut second),
             &own,
-            "a fresh backend must hold exactly its own grants",
+            &own_records,
+            "a fresh backend must hold exactly its own grants and records",
         );
-        assert_exact_state(
-            observe(&mut first).state(),
+        assert_account(
+            &observe(&mut first),
             &earlier_objects,
+            &earlier,
             "a later instance changed what the earlier one holds",
         );
         for (entry, _) in order.arrange(earlier.into_iter().zip(earlier_objects).collect()) {
@@ -872,7 +924,7 @@ pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() 
             );
         }
         contract_assert!(
-            observe(&mut first).state().is_empty(),
+            observe(&mut first).is_empty(),
             "the earlier instance kept a holding after the {} pass",
             order.name()
         );
@@ -948,9 +1000,19 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     elsewhere.clone(),
                     neighbour.clone(),
                 ];
-                assert_exact_state(
-                    observe(&mut backend).state(),
+                let records: Vec<LedgerEntry> = [
+                    Some(peer.clone()),
+                    stalled_entry.clone(),
+                    elsewhere_entry.clone(),
+                    neighbour_entry.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                assert_account(
+                    &observe(&mut backend),
                     &all,
+                    &records,
                     "a stalled holding must coexist with its equal peers",
                 );
                 let address = Handle {
@@ -967,10 +1029,11 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         matches!(refused, Err(BackendError::DrainTimedOut { handle, .. }) if handle == address),
                         "a graceful apply_removal of the stalled grant must time out at its address on the {pass}, not {refused:?}"
                     );
-                    assert_exact_state(
-                        observe(&mut backend).state(),
+                    assert_account(
+                        &observe(&mut backend),
                         &all,
-                        "a timed-out apply_removal of a grant must keep the holding and every peer",
+                        &records,
+                        "a timed-out apply_removal of a grant must keep the holding, its issued record and every peer",
                     );
                 }
                 for deadline in [DRAIN, Duration::ZERO] {
@@ -989,10 +1052,11 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         }),
                         "a graceful withdrawal of the stalled holding with a {deadline:?} deadline must time out, its handle still issued, on the {pass}"
                     );
-                    assert_exact_state(
-                        observe(&mut backend).state(),
+                    assert_account(
+                        &observe(&mut backend),
                         &all,
-                        "a graceful timeout must keep the selected holding and every peer",
+                        &records,
+                        "a graceful timeout must keep the selected holding, its issued record and every peer",
                     );
                 }
                 for (holding, wrong_owner) in [
@@ -1014,10 +1078,11 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         "a removal of {} naming {wrong_owner} must be refused before any drain on the {pass}",
                         holding.describe()
                     );
-                    assert_exact_state(
-                        observe(&mut backend).state(),
+                    assert_account(
+                        &observe(&mut backend),
                         &all,
-                        "a refused wrong-owner removal changed the state",
+                        &records,
+                        "a refused wrong-owner removal changed the account",
                     );
                 }
                 let forced_stalled = (&stalled, stalled_entry.as_ref(), DrainSpec::forcing());
@@ -1047,6 +1112,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     ],
                 };
                 let mut remaining = all.to_vec();
+                let mut remaining_records = records;
                 for (object, entry, drain) in steps {
                     withdraw(&mut backend, object, entry, granted, drain).unwrap_or_else(|error| {
                         contract_panic!(
@@ -1056,10 +1122,14 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                         )
                     });
                     remove_expected(&mut remaining, object);
-                    assert_exact_state(
-                        observe(&mut backend).state(),
+                    if let Some(entry) = entry {
+                        remove_expected(&mut remaining_records, entry);
+                    }
+                    assert_account(
+                        &observe(&mut backend),
                         &remaining,
-                        "a withdrawal must take only its own holding",
+                        &remaining_records,
+                        "a withdrawal must take only its own holding and record",
                     );
                 }
             }
@@ -1448,11 +1518,18 @@ fn owner_holds_key(state: &OsState, owner: &CellOwner, class: UniverseClass, key
         .any(|object| &object.owner == owner && object.class() == class && object.key() == key)
 }
 
-fn remove_expected(expected: &mut Vec<OsObject>, removed: &OsObject) {
+fn issues_record(snapshot: &EnforcementSnapshot, handle: Handle) -> bool {
+    snapshot
+        .grants()
+        .iter()
+        .any(|record| record.handle == handle)
+}
+
+fn remove_expected<T: PartialEq>(expected: &mut Vec<T>, removed: &T) {
     let index = expected
         .iter()
-        .position(|object| object == removed)
-        .expect("the removed exact object must be expected");
+        .position(|item| item == removed)
+        .expect("the removed exact item must be expected");
     expected.remove(index);
 }
 
@@ -1463,24 +1540,34 @@ fn observe<B: EnforcementBackend>(backend: &mut B) -> EnforcementSnapshot {
     )
 }
 
-fn unchanged_since<B: EnforcementBackend>(backend: &mut B, seen: &OsState) -> OsState {
-    let now = observe(backend).state().clone();
+fn unchanged_since<B: EnforcementBackend>(
+    backend: &mut B,
+    seen: &EnforcementSnapshot,
+) -> EnforcementSnapshot {
+    let now = observe(backend);
     contract_assert_eq!(
         now,
         *seen,
-        "the state changed after a refused call returned"
+        "the account changed after a refused call returned"
     );
     now
 }
 
-fn assert_exact_state(actual: &OsState, expected: &[OsObject], context: &str) {
-    let mut expected_state = OsState::new();
-    for object in expected {
-        expected_state
+fn assert_account(
+    actual: &EnforcementSnapshot,
+    standing: &[OsObject],
+    grants: &[LedgerEntry],
+    context: &str,
+) {
+    let mut state = OsState::new();
+    for object in standing {
+        state
             .insert(object.clone())
             .expect("expected conformance objects must have unique addresses");
     }
-    contract_assert_eq!(actual, &expected_state, "{context}");
+    let expected = EnforcementSnapshot::new(state, grants.to_vec(), Vec::new())
+        .expect("the expected conformance account must be valid");
+    contract_assert_eq!(actual, &expected, "{context}");
 }
 
 #[cfg(test)]
