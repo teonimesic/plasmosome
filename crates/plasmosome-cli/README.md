@@ -14,33 +14,49 @@ refuses with `not_served`; the socket client arrives in later tasks.
 ## Reading the command line
 
 `read` reads the arguments after the program name against a command table, `COMMANDS` in the
-binary, and the first rule that applies decides, as spec 025 §2 orders them:
+binary, and the first rule that applies decides, as spec 025 §2 orders them. All three rules that
+need the command words read them the same way: left to right, skipping each flag's value, up to
+`--` or the first unknown flag that holds no `=`. A command's own flags are fixed by the task that
+serves it, so until then the argument after an unknown `--cell` may be its value or a word, and
+nothing after it counts as a command word. An unknown `--mock=simulate` cannot take the next
+argument, so the reading goes on past it.
 
 1. `-h` or `--help` anywhere before `--` prints help and exits 0, whatever else is on the line.
    With no command words it is the binary's help: every command with the verb it sends and
    whether this build serves it, the global flags, `PLASMOSOME_KERNEL` and the exit codes. Words
    that name a group, such as `cell` or `registry source`, list the group. Words that name a
    command, followed by at most its operands, give that command's help, so `germinate --help` and
-   `germinate g --help` both work. Any other words are a usage error. Help reads words only up to
-   the first flag it does not know. A command's own flags are fixed by the task that serves it, so
-   until then the argument after an unknown flag may be its value or a word.
-   `exec status --cell c1 --help` gives `exec status`'s help, and `--frob cell list --help` gives
-   the binary's.
+   `germinate g --help` both work. Any other words are a usage error.
+   `exec status --cell c1 --help` gives `exec status`'s help, `--frob cell list --help` gives the
+   binary's, `--frob=x cell list --help` gives `cell list`'s, and `status --frob=x extra --help` is
+   a usage error naming `extra`.
 2. `--version` as the sole argument prints `plasmosome VERSION`. Anywhere else before `--` it is a
    usage error.
-3. Leading words that name a command this build does not serve exit 2 with `not_served`. Its
+3. Command words that name a command this build does not serve exit 2 with `not_served`. Its
    `command` is the wire method, or spec 020's name for a registry command, and `method` is there
    when the command has one. Nothing else on the line is read except `--json` and `--human`:
-   either given twice, or both given, is a usage error.
-4. Everything else is the full parse. Its first fault, in this order, is the usage error: an
-   argument that is not UTF-8, anywhere; an unknown flag, a flag given twice, a value flag with
-   no value, or `--json` with `--human`, whichever comes first; no command words; words that name
-   no command, or only a group; `--`, since no served command takes one; a word past the
-   command's operands; `--kernel`, `--socket` or `--deadline-ms` on a registry command, which
-   reaches no control socket; then a bad value. `--kernel` takes a name that `plasmosome-core`'s
-   `InstanceName` accepts and that holds no terminal control. `--socket` takes an absolute path
-   with no empty, `.` or `..` component. `--deadline-ms` takes an integer from 1 to 3,600,000,
-   and a longer digit string is refused, never parsed. A clean line gives an `Invocation`.
+   either given twice, or both given, is a usage error. `cell list --frob` is `not_served`;
+   `--frob cell list` has no command words, so it goes to the full parse.
+4. Everything else is the full parse. It reads the arguments before `--` once, left to right, and
+   the first one at fault is the usage error, so one run names the first thing to fix:
+   - an argument that is not UTF-8;
+   - a flag that is unknown, given twice, `--json` with `--human`, `--kernel`, `--socket` or
+     `--deadline-ms` on a registry command, which reaches no control socket, or a value flag
+     with no value;
+   - a bad value, judged where it stands. `--kernel` takes a name that `plasmosome-core`'s
+     `InstanceName` accepts and that holds no terminal control. `--socket` takes an absolute
+     path with no empty, `.` or `..` component. `--deadline-ms` takes an integer from 1 to
+     3,600,000, and a longer digit string is refused, never parsed;
+   - a command word that names no command, the last word of a group with no command, or a word
+     past the command's operands.
+
+   The command is the one the command words name, read as above before the scan starts. A flag
+   the command does not take is at fault where the flag stands, so
+   `--kernel ../x registry search` names `--kernel`. A group with no command is at fault at its
+   last word, so `cell --kernel ../x` names `cell`. With no fault before `--`, a line with no
+   command words names an argument after `--` that is not UTF-8, or else asks for a command. A
+   line with a command refuses `--` itself, since no served command takes anything after it:
+   `status --` and `status -- a<0xff>` both name `--`. A clean line gives an `Invocation`.
 
 A word is an argument before `--` that does not begin with `-` and is not a value. `--kernel`,
 `--socket` and `--deadline-ms` take the next argument before `--` as their value, even one that
@@ -48,11 +64,11 @@ begins with `-`, and a value is never read as a flag. So `cell list --kernel --h
 JSON form, and `status --kernel --socket /x/control.uds` names the instance `--socket` and refuses
 `/x/control.uds` as a word past the operands. `-h`, `--help` and `--version` are the exception:
 spec 025 looks for them anywhere before `--`, a value's place included. `--` is never a value, so
-`status --kernel -- x` is refused because `--kernel` has none. A usage
-error is `invalid_argument` under `command: "invalid"`, exit 64, with `argument` holding the
-argument at fault, made UTF-8 with replacement characters when it was not. Its message names the
-argument too, so the human form shows it, each terminal control as `<U+XXXX>`. The human form is
-used when `--human` is given once and `--json` is not, usage errors included.
+`status --kernel -- x` is refused because `--kernel` has none. A usage error is `invalid_argument`
+under `command: "invalid"`, exit 64, with `argument` holding the argument at fault, made UTF-8
+with replacement characters when it was not. Its message names the argument too, so the human
+form shows it, each terminal control as `<U+XXXX>`. The human form is used when `--human` is
+given once and `--json` is not, usage errors included.
 
 `handle` reads a line and writes the outcome. A failure to write help or the version to stdout is
 `local_io`, exit 1, with `errno` when the system gave one, under `command` `--help` or

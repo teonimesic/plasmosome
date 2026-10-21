@@ -36,6 +36,10 @@ ships on its own.
   and never earlier, so `--help` stays true.
 - **Help, the version and `not_served` read nothing more.** They read no environment variable,
   select no socket and connect nowhere. Help comes before every other rule.
+- **The full parse names the leftmost fault.** It judges each argument where it stands, in one
+  scan from left to right. A check that runs over the whole line for one kind of fault, before or
+  after that scan, names a fault further right first. Help, `not_served` and the full parse read
+  the command words through one function, so the three rules agree on what the command is.
 - **Names are checked with `plasmosome-core`'s `InstanceName`.** A copy of its rules here would
   drift from the rules the daemons use.
 - **A panic ends as `internal`.** `handle` runs the command under `catch_unwind`. Its hook is
