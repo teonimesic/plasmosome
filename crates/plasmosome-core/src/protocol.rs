@@ -798,7 +798,7 @@ mod tests {
     fn every_author_refusal_spec_011_lists_carries_its_own_field_fix_and_plasmid_on_the_wire() {
         let described = "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n";
         let built = format!("{described}impl.wasm = \"pr.wasm\"\n");
-        let secret =
+        let reference_row =
             |entry: &str| format!("{built}[secrets]\nrefs = [{{ id = \"token\", {entry} }}]\n");
         let rows = [
             (
@@ -810,27 +810,27 @@ mod tests {
                 "provides.\"github:tools\".tools.\"pr.read\"",
             ),
             (
-                secret("consumer = \"git\", delivery = [\"handle\"]"),
+                reference_row("consumer = \"git\", delivery = [\"handle\"]"),
                 "secrets.refs[0].delivery",
             ),
             (
-                secret("consumer = \"git\", delivery = []"),
+                reference_row("consumer = \"git\", delivery = []"),
                 "secrets.refs[0].delivery",
             ),
             (
-                secret("consumer = \"http\", delivery = [\"teleport\"]"),
+                reference_row("consumer = \"http\", delivery = [\"teleport\"]"),
                 "secrets.refs[0].delivery",
             ),
             (
-                secret("consumer = \"http\", delivery = [\"inject\"]"),
+                reference_row("consumer = \"http\", delivery = [\"inject\"]"),
                 "secrets.refs[0].scope.path_scope",
             ),
             (
-                secret("consumer = \"http\", scope = { path_scope = [] }"),
+                reference_row("consumer = \"http\", scope = { path_scope = [] }"),
                 "secrets.refs[0].scope.path_scope",
             ),
             (
-                secret("consumer = \"process\", scope = { path_scope = [\"relative\"] }"),
+                reference_row("consumer = \"process\", scope = { path_scope = [\"relative\"] }"),
                 "secrets.refs[0].scope.path_scope",
             ),
             (
