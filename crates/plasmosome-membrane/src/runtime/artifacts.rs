@@ -270,14 +270,23 @@ pub fn verify_artifact(
     let walk =
         Walk::from_root(artifact.path().as_path()).map_err(|refusal| refuse(refusal.into()))?;
     let checked = open_checked(&walk).map_err(refuse)?;
-    let digest = hash(&checked).map_err(refuse)?;
-    let after = stamp(&stat(&checked.file).map_err(refuse)?);
-    judge_unchanged(checked.stamp, after).map_err(refuse)?;
+    verify_checked(role, artifact, walk, checked).map_err(refuse)
+}
+
+fn verify_checked(
+    role: ArtifactRole,
+    artifact: &Artifact,
+    walk: Walk,
+    checked: Checked,
+) -> Result<VerifiedArtifact, ArtifactFault> {
+    let digest = hash(&checked)?;
+    let after = stamp(&stat(&checked.file)?);
+    judge_unchanged(checked.stamp, after)?;
     if digest != *artifact.sha256() {
-        return Err(refuse(ArtifactFault::DigestMismatch {
+        return Err(ArtifactFault::DigestMismatch {
             expected: *artifact.sha256(),
             actual: digest,
-        }));
+        });
     }
     Ok(VerifiedArtifact {
         role,
