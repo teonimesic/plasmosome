@@ -1334,11 +1334,8 @@ fn descriptor_limit() -> libc::rlimit {
         rlim_max: 0,
     };
     // SAFETY: `limit` is a local that getrlimit writes.
-    assert_eq!(
-        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
-        0,
-        "the descriptor limit is readable"
-    );
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
+    assert_eq!(read, 0, "the descriptor limit is readable");
     limit
 }
 
