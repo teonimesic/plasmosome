@@ -567,8 +567,11 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
                 .and_then(toml::Value::as_array)
                 .and_then(|names| names.first())
                 .and_then(toml::Value::as_str);
-            let (fix, detail) = if let Some(tool) = first_tool {
-                (
+            let (fix, detail) = match first_tool {
+                Some(tool) if tool.trim().is_empty() => {
+                    return field_error(id, format!("{field}[0]"), REMOVE_ENTRY.into(), BLANK_TOOL);
+                }
+                Some(tool) => (
                     format!(
                         "[{field}]\n{} = \"Describe what this tool does.\"",
                         diagnostic_key(tool)
@@ -577,16 +580,19 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
                         "tool {} needs a description; replace the names list with a table",
                         toml_string(tool)
                     ),
-                )
-            } else {
-                (
+                ),
+                None => (
                     format!("[{field}]"),
                     "expected a tools table; an empty table declares no tools until entries are written".into(),
-                )
+                ),
             };
             field_error(id, field, fix, &detail)
         })?;
         for (name, description) in declarations {
+            if name.trim().is_empty() {
+                let field = format!("{}.tools.{}", binding_path(), diagnostic_key(name));
+                return Err(field_error(id, field, REMOVE_ENTRY.into(), BLANK_TOOL));
+            }
             let description = description
                 .as_str()
                 .filter(|description| !description.trim().is_empty())
@@ -1118,6 +1124,8 @@ fn declared_string_list(
 }
 
 const REMOVE_ENTRY: &str = "remove this entry";
+
+const BLANK_TOOL: &str = "a tool name must not be empty or only whitespace";
 
 fn declared_ports(
     id: &str,
