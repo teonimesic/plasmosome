@@ -21,6 +21,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const CASE: &str = "PLASMOSOME_SUPERVISOR_START_CASE";
 const CONTROLLER: &str = "PLASMOSOME_SUPERVISOR_START_CONTROLLER";
 const DEADLINE: &str = "PLASMOSOME_SUPERVISOR_START_DEADLINE";
+const SCRATCH: &str = "PLASMOSOME_SUPERVISOR_START_SCRATCH";
+const PIDS: &str = "pids";
 const CASE_DEADLINE: Duration = Duration::from_secs(20);
 const DEADLINE_MARGIN: Duration = Duration::from_secs(2);
 const STANDIN_PATIENCE: Duration = Duration::from_secs(30);
@@ -126,30 +128,79 @@ fn run_every_case(arguments: &[OsString]) -> ExitCode {
 }
 
 fn run_case(name: &str) -> Result<(), String> {
+    let scratch = tempfile::Builder::new()
+        .prefix("supervisor-start-")
+        .tempdir()
+        .map_err(|error| format!("the case's scratch directory is not made: {error}"))?;
+    let pids = scratch.path().join(PIDS);
+    std::fs::create_dir(&pids)
+        .map_err(|error| format!("the case's pid directory is not made: {error}"))?;
     let mut child = Command::new(this_executable())
         .env(CASE, name)
         .env(
             DEADLINE,
             (epoch_millis() + CASE_DEADLINE.as_millis()).to_string(),
         )
+        .env(SCRATCH, scratch.path())
         .process_group(0)
         .stdin(Stdio::null())
         .spawn()
         .map_err(|error| format!("the case process does not start: {error}"))?;
+    let outcome = wait_for_case(&mut child);
+    let left = stop_what_the_case_left(&pids);
+    drop(scratch);
+    match (outcome, left.is_empty()) {
+        (Ok(()), true) => Ok(()),
+        (Ok(()), false) => Err(format!("the case passed but left {left:?} running")),
+        (Err(failure), true) => Err(failure),
+        (Err(failure), false) => Err(format!("{failure}, and it left {left:?} running")),
+    }
+}
+
+fn wait_for_case(child: &mut Child) -> Result<(), String> {
     let deadline = Instant::now() + CASE_DEADLINE;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => return Err(format!("the case process ended with {status}")),
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
+                let group = libc::pid_t::try_from(child.id()).expect("a pid fits pid_t");
+                kill_group(group, libc::SIGKILL);
                 let _ = child.wait();
-                return Err(format!("the case did not finish within {CASE_DEADLINE:?}"));
+                return Err(format!(
+                    "the case did not finish within {CASE_DEADLINE:?}, so its process group was killed"
+                ));
             }
             Ok(None) => thread::sleep(POLL),
             Err(error) => return Err(format!("the case process cannot be waited for: {error}")),
         }
     }
+}
+
+fn stop_what_the_case_left(pids: &Path) -> Vec<String> {
+    let mut left = Vec::new();
+    let Ok(entries) = std::fs::read_dir(pids) else {
+        return left;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((role, pid)) = name
+            .split_once('-')
+            .and_then(|(role, pid)| Some((role.to_owned(), pid.parse::<libc::pid_t>().ok()?)))
+        else {
+            continue;
+        };
+        let ours = match role.as_str() {
+            "standin" => is_our_standin(pid),
+            "controller" => is_our_controller(pid),
+            _ => false,
+        };
+        if ours {
+            kill_and_wait(pid);
+            left.push(format!("{role} {pid}"));
+        }
+    }
+    left
 }
 
 fn starts_detached_with_only_0_to_4() {
@@ -234,24 +285,25 @@ fn lock_never_free_until_exit() {
 fn survives_the_controller_group() {
     let root = Root::new();
     let cell_path = root.path.join("cells").join("cell-102");
-    let _release = Released(cell_path.clone());
-    let mut controller = Command::new(this_executable())
-        .env(CONTROLLER, &root.path)
-        .env_remove(CASE)
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("the child controller starts");
-    let said = first_line(&mut controller);
-    assert_eq!(said.as_deref(), Some(STARTED));
-    let group = libc::pid_t::try_from(controller.id()).expect("a pid fits pid_t");
+    let mut standin = Standin {
+        cell: cell_path.clone(),
+        expected: false,
+    };
+    let mut controller = ChildController::spawn(&root.path);
+    let said = controller.first_line();
     assert_eq!(
-        kill_group(group, libc::SIGKILL),
+        said.as_deref(),
+        Some(STARTED),
+        "the child controller wrote to stderr: {}",
+        controller.stderr()
+    );
+    standin.expected = true;
+    assert_eq!(
+        kill_group(controller.group(), libc::SIGKILL),
         0,
         "the child controller's group is killed"
     );
-    let status = controller.wait().expect("the child controller is reaped");
+    let status = controller.wait();
     assert_eq!(status.signal(), Some(libc::SIGKILL));
     let report = Report::read(&cell_path);
     let pid = libc::pid_t::try_from(report.number("pid")).expect("a pid fits pid_t");
@@ -265,13 +317,60 @@ fn survives_the_controller_group() {
 }
 
 fn child_controller(root: &Path) -> ! {
+    let parent = parent_pid();
     let cell = Cell::create(root, "cell-102");
     let membraned = membraned_in(root);
     started(cell.start(&membraned, cell.lock(), cell.log(), cell.record()));
     println!("{STARTED}");
     std::io::stdout().flush().expect("stdout flushes");
-    loop {
-        thread::sleep(Duration::from_secs(1));
+    while parent_pid() == parent {
+        thread::sleep(Duration::from_millis(50));
+    }
+    drop(cell);
+    std::process::exit(0)
+}
+
+struct ChildController(Child, PathBuf);
+
+impl ChildController {
+    fn spawn(root: &Path) -> ChildController {
+        let stderr = root.join("controller.stderr");
+        let child = Command::new(this_executable())
+            .env(CONTROLLER, root)
+            .env_remove(CASE)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(File::create(&stderr).expect("the child controller's stderr file is made"))
+            .spawn()
+            .expect("the child controller starts");
+        record_pid(root, "controller", child.id());
+        ChildController(child, stderr)
+    }
+
+    fn first_line(&mut self) -> Option<String> {
+        first_line(&mut self.0)
+    }
+
+    fn group(&self) -> libc::pid_t {
+        libc::pid_t::try_from(self.0.id()).expect("a pid fits pid_t")
+    }
+
+    fn wait(&mut self) -> std::process::ExitStatus {
+        self.0.wait().expect("the child controller is reaped")
+    }
+
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.1).unwrap_or_default()
+    }
+}
+
+impl Drop for ChildController {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            kill_group(self.group(), libc::SIGKILL);
+            let _ = self.0.wait();
+        }
     }
 }
 
@@ -317,14 +416,7 @@ fn unread_record_times_out() {
     let lock = cell.lock();
     let log = cell.log();
     let deadline = Instant::now() + Duration::from_millis(200);
-    let start = SupervisorStart {
-        membraned: &root.membraned(),
-        cell: &cell.id,
-        lock,
-        log,
-        record: oversized_record(),
-    };
-    match start_supervisor(start, deadline) {
+    match cell.start_until(&root.membraned(), lock, log, oversized_record(), deadline) {
         Err(StartError::RecordNotTaken) => {}
         other => panic!("an unread record times out, not {other:?}"),
     }
@@ -658,7 +750,11 @@ struct Root {
 
 impl Root {
     fn new() -> Root {
-        let dir = tempfile::tempdir().expect("a temporary directory");
+        let dir = match std::env::var_os(SCRATCH) {
+            Some(scratch) => tempfile::tempdir_in(scratch),
+            None => tempfile::tempdir(),
+        }
+        .expect("a temporary directory");
         let path = dir
             .path()
             .canonicalize()
@@ -680,6 +776,7 @@ struct Cell {
     id: CellId,
     instance: PathBuf,
     path: PathBuf,
+    standin_expected: std::cell::Cell<bool>,
 }
 
 impl Cell {
@@ -698,6 +795,7 @@ impl Cell {
             id,
             instance: root.to_path_buf(),
             path,
+            standin_expected: std::cell::Cell::new(false),
         }
     }
 
@@ -731,6 +829,17 @@ impl Cell {
         log: File,
         record: Vec<u8>,
     ) -> Result<(), StartError> {
+        self.start_until(membraned, lock, log, record, case_deadline())
+    }
+
+    fn start_until(
+        &self,
+        membraned: &RecipePath,
+        lock: SupervisorLock,
+        log: File,
+        record: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<(), StartError> {
         let start = SupervisorStart {
             membraned,
             cell: &self.id,
@@ -738,22 +847,124 @@ impl Cell {
             log,
             record,
         };
-        start_supervisor(start, case_deadline())
+        let result = start_supervisor(start, deadline);
+        let executed = matches!(
+            result,
+            Ok(())
+                | Err(StartError::SupervisorClosedPipe
+                    | StartError::RecordNotTaken
+                    | StartError::Write(_))
+        );
+        if executed && membraned.as_path() == self.instance.join("membraned") {
+            self.standin_expected.set(true);
+        }
+        result
     }
 }
 
 impl Drop for Cell {
     fn drop(&mut self) {
-        release(&self.path);
+        stop_standin(&self.path, self.standin_expected.get());
     }
 }
 
-struct Released(PathBuf);
+struct Standin {
+    cell: PathBuf,
+    expected: bool,
+}
 
-impl Drop for Released {
+impl Drop for Standin {
     fn drop(&mut self) {
-        release(&self.0);
+        stop_standin(&self.cell, self.expected);
     }
+}
+
+fn stop_standin(cell: &Path, expected: bool) {
+    let _ = File::create(cell.join("release"));
+    loop {
+        if let Some(pid) = standin_pid(cell) {
+            if is_our_standin(pid) {
+                kill_and_wait(pid);
+            }
+            return;
+        }
+        if !expected || Instant::now() >= case_deadline() {
+            return;
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn standin_pid(cell: &Path) -> Option<libc::pid_t> {
+    std::fs::read_to_string(cell.join("standin.pid"))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+}
+
+fn record_pid(root: &Path, role: &str, pid: u32) {
+    if let Some(pids) = root.parent().map(|scratch| scratch.join(PIDS))
+        && pids.is_dir()
+    {
+        let _ = File::create(pids.join(format!("{role}-{pid}")));
+    }
+}
+
+#[allow(unsafe_code)]
+fn kill_and_wait(pid: libc::pid_t) {
+    // SAFETY: kill takes integers. The caller checked just before that `pid` is a process this
+    // test binary started.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while is_running(pid) && Instant::now() < deadline {
+        thread::sleep(POLL);
+    }
+}
+
+fn is_our_standin(pid: libc::pid_t) -> bool {
+    runs_this_executable(pid) && session_of(pid) == Some(pid)
+}
+
+fn is_our_controller(pid: libc::pid_t) -> bool {
+    runs_this_executable(pid) && group_of(pid) == Some(pid)
+}
+
+fn runs_this_executable(pid: libc::pid_t) -> bool {
+    is_running(pid) && executable_of(pid).is_some_and(|path| path == this_executable())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn executable_of(pid: libc::pid_t) -> Option<PathBuf> {
+    let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `path` is a local buffer of the length passed, which proc_pidpath fills.
+    let length = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    let length = usize::try_from(length).ok().filter(|length| *length > 0)?;
+    Some(PathBuf::from(
+        <OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path.get(..length)?),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn executable_of(pid: libc::pid_t) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[allow(unsafe_code)]
+fn session_of(pid: libc::pid_t) -> Option<libc::pid_t> {
+    // SAFETY: getsid takes an integer.
+    Some(unsafe { libc::getsid(pid) }).filter(|sid| *sid > 0)
+}
+
+#[allow(unsafe_code)]
+fn group_of(pid: libc::pid_t) -> Option<libc::pid_t> {
+    // SAFETY: getpgid takes an integer.
+    Some(unsafe { libc::getpgid(pid) }).filter(|group| *group > 0)
+}
+
+#[allow(unsafe_code)]
+fn parent_pid() -> libc::pid_t {
+    // SAFETY: getppid takes no arguments.
+    unsafe { libc::getppid() }
 }
 
 fn release(cell: &Path) -> Instant {
@@ -1253,16 +1464,17 @@ mod standin {
     }
 
     fn serve(arguments: &[OsString], cell: &str) {
-        let open_above_four = open_descriptors_from(5);
         let root = Path::new(&arguments[0])
             .parent()
             .expect("the stand-in sits in the instance root");
         let cell_path = root.join("cells").join(cell);
+        record_pid(root, "standin", process_id());
         write_atomically(
             &cell_path,
             "standin.pid",
             process_id().to_string().as_bytes(),
         );
+        let open_above_four = open_descriptors_from(5);
         let number: u64 = cell
             .strip_prefix("cell-")
             .and_then(|digits| digits.parse().ok())
