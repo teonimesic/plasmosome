@@ -390,7 +390,7 @@ attaches a binding's value to a request only when all of these hold.
    as use for the holding's idle limit.
 2. The request reaches the relay through that holding: a component's request at the holding's
    target, or a workload flow whose selected grant is that holding. Spec 001 §4.2 serves each flow
-   from the "smallest currently eligible GrantId among the holdings at that target" (`001:1417`).
+   from the "smallest currently eligible GrantId among the holdings at that target" (`001:1426`).
    A flow through another attachment's grant gets no value.
 3. The holding is at `passthrough`. At `simulate` or `capture` nothing is attached.
 4. The relay itself sends the request to the holding's recorded destination, resolved as spec 017

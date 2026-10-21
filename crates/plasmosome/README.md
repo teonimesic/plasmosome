@@ -22,16 +22,18 @@ rather than putting a command on your PATH that does nothing. The first release 
 it picks its own version number.
 
 A checkout of the repository builds a `plasmosome` binary from this crate. It serves one command:
-`plasmosome status --socket PATH` asks the controller at that socket for its status and prints
-one JSON line, the controller's answer inside an envelope, on stdout. Before it connects, it
-checks that the socket is a socket you own with mode `0600`, in a directory you own that no other
-user can open, and that no user but you or root can replace a directory above it. Before it
-writes, it checks that the daemon runs as you. A failure is one JSON line on stderr, with an exit
-code that says whether the command can be repeated safely. `status` needs `--socket` in this
-build: it does not find an instance by name yet. `plasmosome --help` lists every other command as
-not served, and running one exits 2 with one JSON line on stderr whose error code is
-`not_served`. `plasmosome --version` prints `plasmosome 0.0.0`. A wrong command line exits 64,
-also with one JSON line on stderr.
+`plasmosome status` asks a controller for its status and prints one JSON line, the controller's
+answer inside an envelope, on stdout. It finds the controller's socket by `--socket PATH`, else by
+the instance name in `--kernel NAME` or `PLASMOSOME_KERNEL`, at
+`$HOME/.plasmosome/instances/NAME/control.uds`. With none of them, it takes the one instance under
+`$HOME/.plasmosome/instances/`, and refuses when there are several. Before it connects, it checks
+that the socket is a socket you own with mode `0600`, in a directory you own that no other user can
+open, and that no user but you or root can replace a directory above it. Before it writes, it checks
+that the daemon runs as you. A failure is one JSON line on stderr, with an exit code that says
+whether the command can be repeated safely. `plasmosome --help` lists every other command as not
+served, and running one exits 2 with one JSON line on stderr whose error code is `not_served`.
+`plasmosome --version` prints `plasmosome 0.0.0`. A wrong command line exits 64, also with one JSON
+line on stderr.
 
 To follow the work, read the repository. Nothing for building a capability module is ready yet:
 [`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk), the
