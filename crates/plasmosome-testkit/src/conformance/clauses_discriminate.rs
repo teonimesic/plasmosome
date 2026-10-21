@@ -13,6 +13,7 @@ use plasmosome_backend::{
 enum Defect {
     None,
     RevokeReturnsAStranger(UniverseClass),
+    RevokeReturnsAnotherRecipe(UniverseClass),
     UnknownHandleReportsSuccess,
     RevokeKeepsTheObject,
     RevokeTidiesTheWholeUniverse,
@@ -947,6 +948,15 @@ fn snapshot_clause_rejects_an_object_recorded_with_another_recipe_in_any_class()
 }
 
 #[test]
+fn replay_clause_rejects_a_revoke_that_returns_another_recipe_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAnotherRecipe(class)))
+        });
+    }
+}
+
+#[test]
 fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
     for class in CLASSES {
         for (defect, returns_another, records_another) in [
@@ -956,39 +966,74 @@ fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
         ] {
             let mut backend = DefectiveBackend::carrying(defect);
             for capability in conformance::sample_capabilities() {
-                let entry = backend.grant(Grant {
+                let request = Grant {
                     owner: conformance::conformance_owner(),
                     capability: capability.clone(),
                     kind: GrantKind::Hot,
-                });
+                };
+                let entry = backend.grant(request.clone());
                 let snapshot = backend.snapshot_os_state();
                 let object = snapshot
                     .objects()
                     .find(|held| held.id == entry.handle.id)
                     .expect("the grant must stand");
+                assert_eq!(
+                    (entry.handle.class, &entry.owner, entry.kind, &object.owner),
+                    (
+                        capability.class(),
+                        &request.owner,
+                        request.kind,
+                        &request.owner
+                    ),
+                    "{defect:?}"
+                );
                 let targeted = capability.class() == class;
-                for (changed, observed) in [
-                    (targeted && returns_another, &entry.capability),
-                    (targeted && records_another, &object.capability),
-                ] {
-                    assert_eq!(
-                        *observed != capability,
-                        changed,
-                        "{defect:?} on {capability:?}"
-                    );
-                    assert_eq!(
-                        selection_of(observed),
-                        selection_of(&capability),
-                        "{defect:?}"
-                    );
-                    assert_eq!(observed.validate(), Ok(()), "{defect:?}");
-                }
+                let context = format!("{defect:?} on {capability:?}");
+                only_the_recipe_differs(
+                    &entry.capability,
+                    &capability,
+                    targeted && returns_another,
+                    &context,
+                );
+                only_the_recipe_differs(
+                    &object.capability,
+                    &capability,
+                    targeted && records_another,
+                    &context,
+                );
             }
+        }
+        let mut revoking = DefectiveBackend::carrying(Defect::RevokeReturnsAnotherRecipe(class));
+        for grant in conformance::sample_grants() {
+            let entry = revoking.grant(grant.clone());
+            let returned = revoking.revoke(entry.handle, DrainSpec::forcing()).unwrap();
+            assert_eq!(
+                (returned.handle, &returned.owner, returned.kind),
+                (entry.handle, &entry.owner, entry.kind)
+            );
+            let targeted = grant.capability.class() == class;
+            only_the_recipe_differs(
+                &returned.capability,
+                &entry.capability,
+                targeted,
+                &format!("{grant:?}"),
+            );
         }
     }
     for access in [FileAccess::ReadOnly, FileAccess::ReadWrite] {
         assert_ne!(flipped(access), access);
     }
+}
+
+fn only_the_recipe_differs(
+    observed: &Capability,
+    expected: &Capability,
+    changed: bool,
+    context: &str,
+) {
+    assert_eq!(observed != expected, changed, "{context}");
+    assert_eq!(selection_of(observed), selection_of(expected), "{context}");
+    assert_eq!(observed.validate(), Ok(()), "{context}");
 }
 
 fn selection_of(capability: &Capability) -> (UniverseClass, Vec<&str>) {
