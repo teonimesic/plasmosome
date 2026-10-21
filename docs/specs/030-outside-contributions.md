@@ -148,12 +148,20 @@ they repair.
 
 **Taking over, and closing.** When a contributor stops answering, the steward closes the PR with a
 reason, or takes the change over. It opens a new PR from a branch of this repository, keeping the
-contributor's commits as authored, and closes the original with a link. The squash's author is
+contributor's commits as authored, and closes the original with a link. The separate clone (§3)
+runs no hooks, so before pushing that branch the steward runs `git fetch origin main` there, then
+main's copies of the provenance and attribution guards, each read with
+`git show origin/main:.githooks/<guard>` into a file outside the clone and run from the clone's
+top directory: the provenance guard with the branch checked out, and the attribution guard over
+`origin/main..<branch>`. It pushes only when both pass. Its task commands stay in the owner's
+clone: the task store and the pinned `bd` live under that clone's git directory, so
+`tools/work-state` exits 2 in any other clone. The squash's author is
 then the owner, with the contributor as co-author (spec 029 §1). The task takes `in_progress` while
 the steward writes code, moves its `external_ref` to the new PR with the old one in notes, and
 returns to `review`. The new PR is still an outside PR. No time is promised (Q4). A merged PR's
 task closes on spec 016's merge evidence; one closed unmerged closes as cancelled, naming who
-closed it.
+closed it. Amended on 2026-10-21: until then a take-over branch was public before any guard read
+it.
 
 ### 3. What runs, and when
 
@@ -248,13 +256,17 @@ What it must not say:
 
 ### 6. How each rule refuses
 
-None of these is a guard (spec 013). Each harm is revertible by the next commit, except running a
-PR's code, which spec 026 §7 already gives to the reviewer as a rule about who does what.
+None of these is a guard (spec 013). Each harm is revertible by the next commit, except two.
+Running a PR's code is not, and spec 026 §7 already gives it to the reviewer as a rule about who
+does what. Nor is a take-over branch pushed before main's guards pass on it: its commits are
+public on this repository from that push, and no later commit withdraws them. Amended on
+2026-10-21: this named one exception, and the list below had no take-over branch.
 
 - **The steward and its reviewers, by §1 to §3**, refuse each of these:
   - a merge with no task, or with no review by someone other than the steward;
   - two stewards or two tasks for one PR left standing;
   - a push to the contributor's branch;
+  - a take-over branch pushed before main's provenance and attribution guards pass on it (§2);
   - anything run before the git-only step, or outside the separate clone;
   - a workflow run approved before the git-only step;
   - a cargo command after the step that resolves dependencies without `--locked`;
