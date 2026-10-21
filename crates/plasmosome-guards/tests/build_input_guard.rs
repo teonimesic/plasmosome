@@ -2149,6 +2149,10 @@ fn path_values_are_read_lexically_first() {
 #[test]
 fn a_symlink_to_a_directory_holding_a_manifest_is_refused() {
     check_workspace(|root| {
+        let byte = 0xff_u8;
+        let backslash = char::from(0x5c);
+        let odd_manifest = format!("\"crates/{backslash}{byte:o}x/Cargo.toml\"");
+        let odd_target = [b"../".as_slice(), &[byte], b"x"].concat();
         let outputs = refusals(
             root,
             vec![
@@ -2213,6 +2217,25 @@ fn a_symlink_to_a_directory_holding_a_manifest_is_refused() {
                     ],
                     vec![("crates/l", "(symlink)")],
                 ),
+                (
+                    "the same byte that is not UTF-8 in a directory's name and in a target",
+                    vec![
+                        package(&odd_manifest, "odd", ""),
+                        Plant {
+                            mode: "120000",
+                            ..bytes("crates/a/odd", odd_target)
+                        },
+                    ],
+                    vec![("crates/a/odd", "(symlink)")],
+                ),
+            ],
+        );
+        assert_says(
+            &outputs,
+            "the same byte that is not UTF-8 in a directory's name and in a target",
+            &[
+                "crates/a/odd: (symlink): a symlink to ../",
+                "x; it leads to a directory holding a Cargo.toml",
             ],
         );
         assert_says(
@@ -2514,6 +2537,39 @@ fn a_symlink_leaving_the_repository_is_refused() {
                 run.join().expect("every loop route is judged");
             }
         });
+    });
+}
+
+fn chain(links: usize) -> Vec<Plant> {
+    (1..=links)
+        .map(|link| {
+            let target = if link == links {
+                "crates/b/src".to_string()
+            } else {
+                format!("c{:02}", link + 1)
+            };
+            symlink(&format!("c{link:02}"), &target)
+        })
+        .collect()
+}
+
+#[test]
+fn forty_symlinks_in_a_row_pass_and_forty_one_are_a_loop() {
+    check_workspace(|root| {
+        assert_passes(root, &chain(40));
+        let outputs = refusals(
+            root,
+            vec![(
+                "forty-one symlinks in a row",
+                chain(41),
+                vec![("c01", "(symlink)")],
+            )],
+        );
+        assert_says(
+            &outputs,
+            "forty-one symlinks in a row",
+            &["c01: (symlink): a symlink to c02; it goes through more than 40 symlinks"],
+        );
     });
 }
 
