@@ -1369,6 +1369,52 @@ mod tests {
         }
     }
 
+    fn every_class() -> Vec<Capability> {
+        vec![
+            session_file("/skills/pr.md"),
+            fixtures::uds_socket("/run/plasmosome/egressd.uds"),
+            proxy_map("api.github.com", "splice"),
+            broker("egressd"),
+            mount("/srv/repo", "/workspace"),
+        ]
+    }
+
+    #[test]
+    fn an_operation_names_its_exact_handle_owner_and_capability() {
+        for capability in every_class() {
+            let id = GrantId::new();
+            let owner = cell_owner("cell-7", "audit");
+            let op = fixtures::op(id, owner.clone(), capability.clone());
+            assert_eq!(
+                op.handle(),
+                crate::backend::Handle {
+                    class: capability.class(),
+                    id,
+                }
+            );
+            assert_eq!(op.owner(), &owner);
+            assert_eq!(op.capability(), capability);
+        }
+    }
+
+    #[test]
+    fn an_object_and_the_operation_that_creates_it_invert_each_other() {
+        for capability in every_class() {
+            let object = OsObject {
+                id: GrantId::new(),
+                owner: cell_owner("cell-7", "audit"),
+                capability: capability.clone(),
+            };
+            let op = object.operation();
+            assert_eq!(
+                op,
+                fixtures::op(object.id, object.owner.clone(), capability)
+            );
+            assert_eq!(op.object(), object);
+            assert_eq!(op.object().operation(), op);
+        }
+    }
+
     fn cell_owner(cell: &str, plugin: &str) -> CellOwner {
         CellOwner {
             cell: CellId::from(cell),

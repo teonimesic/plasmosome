@@ -126,7 +126,7 @@ mod tests {
     use super::*;
     use crate::backend::GrantKind;
     use crate::fake::FakeBackend;
-    use crate::fixtures::{self, mount, proxy_map, session_file, uds_socket};
+    use crate::fixtures::{self, broker, mount, proxy_map, session_file, uds_socket};
     use crate::universe::{CellId, CellOwner, GrantId, PluginId};
     use std::time::Duration;
 
@@ -143,6 +143,95 @@ mod tests {
 
     fn composite() -> CompositeBackend {
         CompositeBackend::new(fake(), fake(), fake()).expect("empty leaves are valid")
+    }
+
+    #[test]
+    fn a_prepared_grant_reaches_the_leaf_of_its_class_at_its_own_address() {
+        for (op, leaf) in [
+            (
+                fixtures::op(
+                    GrantId::new(),
+                    cell_owner("network"),
+                    proxy_map("api.github.com", "splice"),
+                ),
+                Leaf::Network,
+            ),
+            (
+                fixtures::op(
+                    GrantId::new(),
+                    cell_owner("network"),
+                    uds_socket("/run/ak/egressd.uds"),
+                ),
+                Leaf::Network,
+            ),
+            (
+                fixtures::op(
+                    GrantId::new(),
+                    cell_owner("github-pr"),
+                    session_file("/skills/pr.md"),
+                ),
+                Leaf::Filesystem,
+            ),
+            (
+                fixtures::op(
+                    GrantId::new(),
+                    cell_owner("workspace"),
+                    mount("/code", "/workspace"),
+                ),
+                Leaf::Filesystem,
+            ),
+            (
+                fixtures::op(GrantId::new(), cell_owner("network"), broker("egressd")),
+                Leaf::Broker,
+            ),
+        ] {
+            let mut backend = composite();
+            let entry = backend.grant(op.clone(), GrantKind::Hot).unwrap();
+            assert_eq!(entry.handle, op.handle());
+            assert_eq!(entry.object(), op.object());
+            assert_eq!(
+                backend.leaf_snapshot(leaf).objects().collect::<Vec<_>>(),
+                vec![&op.object()]
+            );
+            assert_eq!(backend.grant(op.clone(), GrantKind::Hot).unwrap(), entry);
+            assert_eq!(
+                backend.revoke(op.handle(), DrainSpec::forcing()).unwrap(),
+                entry
+            );
+            assert!(backend.snapshot_os_state().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_leafs_refusal_of_a_prepared_grant_comes_back_unchanged() {
+        let owner = cell_owner("workspace");
+        let doomed = cell_owner("doomed");
+        let mut filesystem = FakeBackend::new();
+        filesystem.fail_before_effect_for_owner(doomed.clone(), "leaf refused");
+        let mut backend =
+            CompositeBackend::new(fake(), Box::new(filesystem), fake()).expect("valid leaves");
+        let applied = fixtures::op(GrantId::new(), owner.clone(), mount("/code", "/workspace"));
+        backend.apply(applied.clone()).unwrap();
+        let before = backend.snapshot_os_state();
+        assert_eq!(
+            backend.grant(applied.clone(), GrantKind::Hot),
+            Err(BackendError::IdentityConflict {
+                class: "mount",
+                id: applied.id(),
+            })
+        );
+        let refused = fixtures::op(GrantId::new(), doomed, session_file("/skills/pr.md"));
+        assert_eq!(
+            backend.grant(refused.clone(), GrantKind::Hot),
+            Err(BackendError::Fault("leaf refused".to_string()))
+        );
+        assert_eq!(backend.snapshot_os_state(), before);
+        for handle in [applied.handle(), refused.handle()] {
+            assert_eq!(
+                backend.revoke(handle, DrainSpec::forcing()),
+                Err(BackendError::UnknownHandle { handle })
+            );
+        }
     }
 
     #[test]
