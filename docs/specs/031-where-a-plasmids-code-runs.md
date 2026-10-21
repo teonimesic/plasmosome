@@ -20,7 +20,7 @@ declared.
 
 This is the sibling spec 011 leaves open: "Freezing the world is its sibling spec, and it is the
 larger of the two." (`011:645-646`). Spec 001 defers the same interface: "The plasmid WIT world
-(SDK surface) — deferred by design" (`001:1621`). Spec 011 promises that "A plasmid is reported
+(SDK surface) — deferred by design" (`001:1622`). Spec 011 promises that "A plasmid is reported
 active only when every tool its declaration names resolves." (`011:453`), and spec 020's use
 witness is to "attach it to a real cell and call its declared tool" (`020:508`). Neither can be
 met while nothing runs a component. It serves four intents. Intent 010: anyone may write a
@@ -61,7 +61,7 @@ original owned child" (`017:411-412`).
 
 Why the host and not the guest:
 
-- PID1 stays outside the workload's control group "and runs no helper process" (`024:263`), and
+- PID1 stays outside the workload's control group "and runs no helper process" (`024:264-265`), and
   "There is no PID namespace, on purpose" (`024:227-228`). A runtime in the guest would be a process
   the workload can see, which spec 027 counts as "A hint, a name or value the kernel wrote"
   (`027:159`).
@@ -251,9 +251,9 @@ component that escapes the sandbox runs as the component host process, under G3'
   in the workload's mount namespace, at `/run/tools/<plasmid>.sock`. The path is provisional (Q3).
   It is the guest side of the plasmid's Broker holding, at the target whose key is the Broker's
   name: "key is respectively the recorded guest_path, guest_path, host, host, name or target"
-  (`001:1461-1462`). The Broker's name is the plasmid ID.
+  (`001:1462-1463`). The Broker's name is the plasmid ID.
 - **The path is recorded, not derived.** Today spec 001 says "Broker data is exposed at the
-  reserved guest Unix path" (`001:1277-1278`), a path under `/.plasmosome/` built from the name. A
+  reserved guest Unix path" (`001:1278-1279`), a path under `/.plasmosome/` built from the name. A
   name with `plasmosome` in it is a hint under spec 027. So the Broker capability records its
   guest path, as UdsSocket's recipe does, and nothing derives it. That is spec 017's rule for
   launch paths too: "Paths and arguments are exact payload, not a recipe to be guessed from a
@@ -267,13 +267,13 @@ component that escapes the sandbox runs as the component host process, under G3'
   there. Spec 027 counts file names under `/run` as hints too, so its reference lanes make the same
   directory and serve the same socket (the proposed spec 027 change).
 - **The listener stays while any holding is at it.** As "The shared resolver/TUN/route persist
-  while peer bindings exist" (`001:1418`), the socket at a target stays while any Broker holding
+  while peer bindings exist" (`001:1419`), the socket at a target stays while any Broker holding
   is at it, so a reload's two generations hand over without a moment with no socket.
 - **An ID that cannot be a path.** A component plasmid's ID must be one path component, not `.`
   or `..`, and at most 91 bytes, so that `/run/tools/<id>.sock` fits Linux's 108-byte `sun_path`
   with its terminating NUL. Spec 001 refuses such a name only in the membrane's preflight:
   "Unrepresentable names/paths and cross-class projection collisions refuse in preflight"
-  (`001:1279-1280`). This spec refuses it before prepare, with 108 at field `id` and a `fix` that
+  (`001:1280-1281`). This spec refuses it before prepare, with 108 at field `id` and a `fix` that
   is the line `id = "<name>"`. The name is the ID with each `/` and NUL replaced by `-`, cut to 91
   bytes at a character boundary, and given the prefix `plasmid-` if the result is `.` or `..`
   (the proposed spec 011 change).
@@ -386,7 +386,7 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   a running call make a detach fail.
 - **Lifetime.** A component plasmid holds a Broker grant, so spec 028 applies: "Every plasmid that
   holds a capability grant has a lifetime" (`028:10`). At B the gate closes new connections, as
-  spec 024 says: "A new connection is closed the same way as soon as it is accepted." (`024:382`).
+  spec 024 says: "A new connection is closed the same way as soon as it is accepted." (`024:383`).
   At the same B, and at an earlier B whenever it moves, `membraned` closes the holding's open
   host-side connections by the supervisor's clock (the proposed spec 028 change). That close is
   needed because a call in flight sends nothing until it finishes, so no admission comes to fence
@@ -486,7 +486,7 @@ stream. A new connection to a removed plasmid fails with `ENOENT`, since its pat
 So the relay answers an undeclared host as a name that does not resolve, which the component sees
 as the network import's DNS error. A declared host on an undeclared port fails as connection
 refused, as spec 024 says of a workload's flow: "A new TCP connect fails with `ECONNREFUSED` when
-no other eligible grant covers its host, port and transport" (`024:383`). A certificate that no
+no other eligible grant covers its host, port and transport" (`024:384`). A certificate that no
 trusted root signed fails as the network import's certificate error, and no request byte is sent.
 A request cut by a fence or a removal fails as the network import's `connection-terminated`.
 
