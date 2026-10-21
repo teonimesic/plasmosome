@@ -32,11 +32,13 @@ subprocess.Popen = build
 exec(compile(sys.stdin.read(), "README quickstart", "exec"), {{"__name__": "__main__"}})
 """
 EFFECTIVE_ONLY = """
+os.getuid = lambda: os.geteuid() + 1
 real_access = os.access
 def access(path, mode, *, effective_ids=False, **options):
     return effective_ids and real_access(path, mode, effective_ids=True, **options)
 os.access = access
 """
+STRANGER = 4242
 ROOT = None
 MADE = []
 
@@ -88,10 +90,11 @@ def choose_root():
     sys.exit(f"none of {candidates} is a private directory under {LONGEST_BASE - 2} bytes")
 
 
-def base_of(length, mode=0o700, directory=True):
-    size = length - len(os.fsencode(ROOT)) - 1
+def base_of(length, mode=0o700, directory=True, ending=""):
+    size = length - len(os.fsencode(ROOT)) - 1 - len(ending.encode("utf-8"))
     while True:
-        path = ROOT / "".join(secrets.choice(string.ascii_lowercase) for _ in range(size))
+        letters = "".join(secrets.choice(string.ascii_lowercase) for _ in range(size))
+        path = ROOT / (letters + ending)
         try:
             path.mkdir() if directory else path.touch(exist_ok=False)
         except FileExistsError:
@@ -108,7 +111,8 @@ def run(base, patch=""):
         cwd=REPOSITORY,
         env={**os.environ, "PLASMOSOME_QUICKSTART_DIR": str(base)},
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
         timeout=60,
     )
 
@@ -139,6 +143,31 @@ def a_private_base_of_the_longest_length_reaches_the_build():
 def a_base_one_byte_too_long_is_refused_in_one_line():
     base = base_of(LONGEST_BASE + 1)
     refused(base, f"{base} is too long")
+
+
+def a_base_one_byte_too_long_through_a_two_byte_character_is_refused():
+    base = base_of(LONGEST_BASE + 1, ending="\u00e9")
+    refused(base, f"{base} is too long")
+
+
+def a_base_that_is_not_valid_utf8_is_refused():
+    base = ROOT / os.fsdecode(b"q\xff" + secrets.token_hex(4).encode())
+    try:
+        base.mkdir(mode=0o700)
+    except OSError as error:
+        raise Skipped(f"this file system cannot make a name that is not UTF-8: {error.strerror}")
+    MADE.append(base)
+    shown = os.fsencode(base).decode("utf-8", "backslashreplace")
+    refused(base, f"{shown} is not valid UTF-8")
+
+
+def a_base_whose_owner_is_not_the_effective_uid_is_refused():
+    base = base_of(LONGEST_BASE)
+    chain = [*reversed(base.parents), base]
+    first = next(d for d in chain if os.lstat(d).st_uid not in (0, STRANGER))
+    owner = os.lstat(first).st_uid
+    reason = f"{first} is owned by uid {owner}, not by you or root"
+    refused(base, reason, f"os.geteuid = lambda: {STRANGER}")
 
 
 def a_missing_base_is_refused():
@@ -174,7 +203,7 @@ def a_base_on_a_noexec_mount_is_refused():
 def a_base_on_a_real_noexec_mount_is_refused():
     real = os.environ.get("QUICKSTART_NOEXEC_BASE")
     if not real:
-        raise Skipped("QUICKSTART_NOEXEC_BASE is unset; only Linux reports noexec to Python")
+        raise Skipped("needs a prepared noexec mount named by QUICKSTART_NOEXEC_BASE, unset here")
     base = Path(os.path.realpath(real))
     refused(base, f"{base} is on a noexec mount")
 
@@ -186,6 +215,9 @@ def a_base_only_the_effective_uid_can_write_reaches_the_build():
 TESTS = [
     a_private_base_of_the_longest_length_reaches_the_build,
     a_base_one_byte_too_long_is_refused_in_one_line,
+    a_base_one_byte_too_long_through_a_two_byte_character_is_refused,
+    a_base_that_is_not_valid_utf8_is_refused,
+    a_base_whose_owner_is_not_the_effective_uid_is_refused,
     a_missing_base_is_refused,
     a_file_is_refused,
     a_base_group_can_write_is_refused,
