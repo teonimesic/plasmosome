@@ -368,8 +368,9 @@ needs no root, and detaches it when the test ends.
 `nofollow` is the one walk core uses to open a path it must trust. It is public so that
 `plasmosome-membrane` can use it too.
 `Walk::from_root` walks an absolute, normal path from `/`, one component at a time.
-`Walk::from_dir` walks a relative path from a directory the caller already holds; tests use it
-to start below a sticky `/tmp`.
+`Walk::from_dir` walks a relative path from a directory the caller already holds. It exists for
+core's own tests, which use it to start below a sticky `/tmp`, because it judges nothing above
+its start.
 
 - Every directory the walk passes, the start included, meets the ancestor rule of the private
   sockets above. It is owned by root or the effective UID and writable by neither group nor
@@ -380,7 +381,8 @@ to start below a sticky `/tmp`.
   `O_NOFOLLOW`, `O_NONBLOCK` and `O_NOCTTY` and without `O_DIRECTORY`, so a FIFO or a device
   returns at once. A regular file comes back blocking; any other type stays nonblocking.
 - The caller passes a judge, which decides the object from `fstat` on its descriptor and also
-  sees the directory that holds it. An object that cannot be opened is judged from a no-follow
+  sees the directory that holds it. `open_file` opens whatever is at the name, so its judge must
+  refuse every type the caller does not want. An object that cannot be opened is judged from a no-follow
   `fstatat` in its parent, and the walk reports `Io` only when the judge passes it. Checks that
   need the descriptor, such as an ACL check, are the caller's.
 - `Opened` holds the descriptor, its facts, and the device and inode of every directory passed:
@@ -410,7 +412,7 @@ component or the value found.
 | `parent` | the effective UID does not own the file's own directory |
 | `not_regular` | the file is not a regular file; a FIFO is refused at once |
 | `owner` | the effective UID does not own the file |
-| `links` | the file has more than one link |
+| `links` | the file does not have exactly one link: a second link, or none once it is unlinked |
 | `mode` | group or other can write it, or a macOS ACL allow entry grants write |
 | `size` | it holds more than 1,048,576 bytes, found by reading at most one byte more |
 
