@@ -1598,11 +1598,8 @@ mod signal_pressure {
         fn open() -> Release {
             let mut fds = [0; 2];
             // SAFETY: `fds` is a local array of two c_int, the size pipe writes.
-            assert_eq!(
-                unsafe { libc::pipe(fds.as_mut_ptr()) },
-                0,
-                "a release pipe opens"
-            );
+            let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
+            assert_eq!(opened, 0, "a release pipe opens");
             Release {
                 read: fds[0],
                 write: fds[1],
