@@ -205,3 +205,627 @@ pub(crate) fn judge_immutability(_immutable: Immutability) -> Result<(), Artifac
 pub(crate) fn judge_unchanged(_before: Stamp, _after: Stamp) -> Result<(), ArtifactFault> {
     todo!()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::strict_json;
+    use crate::runtime::test_fixtures::tree::{ArtifactTree, make_fifo};
+    use std::os::unix::fs::{OpenOptionsExt, symlink};
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const EUID: u32 = 501;
+    const OTHER: u32 = 502;
+
+    fn facts(kind: Kind, uid: u32, mode: u32) -> Facts {
+        Facts {
+            kind,
+            uid,
+            mode,
+            dev: 1,
+            ino: 2,
+        }
+    }
+
+    fn artifact_at(path: &Path, sha256: &Digest) -> Artifact {
+        let text = serde_json::json!({
+            "path": path.to_str().expect("test paths are UTF-8"),
+            "sha256": sha256.hex(),
+        })
+        .to_string();
+        let value = strict_json::parse_value(text.as_bytes()).expect("the artifact is JSON");
+        Artifact::from_value(&value, "kernel").expect("the artifact is valid")
+    }
+
+    fn verify_pinned(path: &Path, sha256: &Digest) -> Result<VerifiedArtifact, ArtifactRefusal> {
+        verify_artifact(ArtifactRole::Kernel, &artifact_at(path, sha256))
+    }
+
+    fn fault_of(outcome: Result<VerifiedArtifact, ArtifactRefusal>) -> ArtifactFault {
+        match outcome {
+            Ok(verified) => panic!("{} verified", verified.path().as_str()),
+            Err(refusal) => refusal.fault,
+        }
+    }
+
+    fn walk_fault(path: &Path) -> ArtifactFault {
+        fault_of(verify_pinned(path, &Digest::of(b"kernel")))
+    }
+
+    #[test]
+    fn the_judge_accepts_a_regular_file_of_root_or_the_effective_uid_with_no_write_or_set_id_bit() {
+        for accepted in [
+            facts(Kind::Regular, EUID, 0o444),
+            facts(Kind::Regular, 0, 0o555),
+            facts(Kind::Regular, EUID, 0o400),
+            facts(Kind::Regular, EUID, 0o1555),
+        ] {
+            assert_eq!(judge_artifact(&accepted, EUID), Ok(()), "{accepted:?}");
+        }
+    }
+
+    #[test]
+    fn the_judge_refuses_another_type_a_foreign_owner_a_write_bit_and_a_set_id_bit_in_that_order() {
+        let rows = [
+            (
+                Kind::Directory,
+                EUID,
+                0o555,
+                ArtifactFault::NotRegular {
+                    kind: Kind::Directory,
+                },
+            ),
+            (
+                Kind::Other,
+                EUID,
+                0o444,
+                ArtifactFault::NotRegular { kind: Kind::Other },
+            ),
+            (
+                Kind::Socket,
+                EUID,
+                0o444,
+                ArtifactFault::NotRegular { kind: Kind::Socket },
+            ),
+            (
+                Kind::Symlink,
+                EUID,
+                0o444,
+                ArtifactFault::NotRegular {
+                    kind: Kind::Symlink,
+                },
+            ),
+            (
+                Kind::Other,
+                OTHER,
+                0o666,
+                ArtifactFault::NotRegular { kind: Kind::Other },
+            ),
+            (
+                Kind::Regular,
+                OTHER,
+                0o444,
+                ArtifactFault::ForeignOwner { uid: OTHER },
+            ),
+            (
+                Kind::Regular,
+                OTHER,
+                0o4777,
+                ArtifactFault::ForeignOwner { uid: OTHER },
+            ),
+            (
+                Kind::Regular,
+                EUID,
+                0o644,
+                ArtifactFault::Writable { mode: 0o644 },
+            ),
+            (
+                Kind::Regular,
+                EUID,
+                0o464,
+                ArtifactFault::Writable { mode: 0o464 },
+            ),
+            (
+                Kind::Regular,
+                EUID,
+                0o446,
+                ArtifactFault::Writable { mode: 0o446 },
+            ),
+            (
+                Kind::Regular,
+                0,
+                0o466,
+                ArtifactFault::Writable { mode: 0o466 },
+            ),
+            (
+                Kind::Regular,
+                EUID,
+                0o4755,
+                ArtifactFault::Writable { mode: 0o4755 },
+            ),
+            (
+                Kind::Regular,
+                EUID,
+                0o4555,
+                ArtifactFault::SetIdBits { mode: 0o4555 },
+            ),
+            (
+                Kind::Regular,
+                0,
+                0o2555,
+                ArtifactFault::SetIdBits { mode: 0o2555 },
+            ),
+        ];
+        for (kind, uid, mode, fault) in rows {
+            assert_eq!(
+                judge_artifact(&facts(kind, uid, mode), EUID),
+                Err(fault),
+                "{kind:?} uid {uid} mode {mode:o}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_set_immutable_flag_passes_and_cannot_tell_is_a_refusal() {
+        assert_eq!(judge_immutability(Immutability::Set), Ok(()));
+        assert_eq!(
+            judge_immutability(Immutability::Clear),
+            Err(ArtifactFault::NotImmutable)
+        );
+        assert_eq!(
+            judge_immutability(Immutability::Unverifiable),
+            Err(ArtifactFault::ImmutabilityUnverifiable)
+        );
+    }
+
+    #[test]
+    fn a_size_modification_or_change_time_that_moved_while_hashing_refuses() {
+        let before = Stamp {
+            size: 10,
+            modified: (100, 1),
+            changed: (200, 2),
+        };
+        assert_eq!(judge_unchanged(before, before), Ok(()));
+        for after in [
+            Stamp { size: 11, ..before },
+            Stamp {
+                modified: (100, 2),
+                ..before
+            },
+            Stamp {
+                changed: (201, 2),
+                ..before
+            },
+        ] {
+            assert_eq!(
+                judge_unchanged(before, after),
+                Err(ArtifactFault::ChangedWhileHashing),
+                "{after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlinked_directory_or_a_symlink_at_the_name_refuses_at_that_component() {
+        let tree = ArtifactTree::new();
+        let real = tree.dir("real", 0o700);
+        let file = tree.file("real/kernel", b"kernel", 0o444);
+        symlink(&real, tree.join("link")).expect("symlink");
+        symlink(&file, tree.join("kernel-link")).expect("symlink");
+        assert_eq!(
+            walk_fault(&tree.join("link/kernel")),
+            ArtifactFault::Walk(WalkRefusal::Symlink {
+                path: tree.join("link")
+            })
+        );
+        assert_eq!(
+            walk_fault(&tree.join("kernel-link")),
+            ArtifactFault::Walk(WalkRefusal::Symlink {
+                path: tree.join("kernel-link")
+            })
+        );
+    }
+
+    #[test]
+    fn a_missing_name_refuses_where_the_walk_stopped() {
+        let tree = ArtifactTree::new();
+        assert_eq!(
+            walk_fault(&tree.join("absent/kernel")),
+            ArtifactFault::Walk(WalkRefusal::Missing {
+                path: tree.join("absent")
+            })
+        );
+        assert_eq!(
+            walk_fault(&tree.join("kernel")),
+            ArtifactFault::Walk(WalkRefusal::Missing {
+                path: tree.join("kernel")
+            })
+        );
+    }
+
+    #[test]
+    fn a_group_writable_or_sticky_world_writable_directory_on_the_way_refuses_replaceable() {
+        let tree = ArtifactTree::new();
+        for (name, mode) in [("group", 0o775), ("other", 0o757), ("sticky", 0o1777)] {
+            let dir = tree.dir(name, 0o700);
+            tree.file(&format!("{name}/kernel"), b"kernel", 0o444);
+            crate::runtime::test_fixtures::tree::set_mode(&dir, mode);
+            assert_eq!(
+                walk_fault(&dir.join("kernel")),
+                ArtifactFault::Walk(WalkRefusal::Replaceable { path: dir, mode }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_at_the_artifact_path_refuses_not_regular() {
+        let tree = ArtifactTree::new();
+        let dir = tree.dir("kernel", 0o555);
+        assert_eq!(
+            walk_fault(&dir),
+            ArtifactFault::NotRegular {
+                kind: Kind::Directory
+            }
+        );
+    }
+
+    #[test]
+    fn a_fifo_at_the_artifact_path_refuses_not_regular_within_two_seconds() {
+        let tree = ArtifactTree::new();
+        let fifo = tree.join("kernel");
+        make_fifo(&fifo);
+        let (sender, receiver) = mpsc::channel();
+        let target = fifo.clone();
+        let worker = std::thread::spawn(move || {
+            let _ = sender.send(walk_fault(&target));
+        });
+        let fault = receiver.recv_timeout(Duration::from_secs(2));
+        if fault.is_err() {
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo);
+        }
+        let _ = worker.join();
+        assert_eq!(
+            fault.expect("the verification returns within 2 s"),
+            ArtifactFault::NotRegular { kind: Kind::Other }
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_macos_a_read_only_file_is_refused_as_immutability_unverifiable() {
+        let tree = ArtifactTree::new();
+        let path = tree.file("kernel", b"kernel", 0o444);
+        assert_eq!(
+            fault_of(verify_pinned(&path, &Digest::of(b"kernel"))),
+            ArtifactFault::ImmutabilityUnverifiable
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_its_role_and_path_and_shows_where_the_walk_stopped() {
+        let refusal = ArtifactRefusal {
+            role: ArtifactRole::Library(1),
+            path: RecipePath::parse("/opt/cell/lib/libkrun.dylib").expect("a recipe path"),
+            fault: ArtifactFault::Walk(WalkRefusal::Replaceable {
+                path: "/opt".into(),
+                mode: 0o775,
+            }),
+        };
+        let shown = refusal.to_string();
+        for part in [
+            "libraries[1]",
+            "/opt/cell/lib/libkrun.dylib",
+            "/opt",
+            "0775",
+        ] {
+            assert!(shown.contains(part), "{shown:?} names {part}");
+        }
+    }
+
+    #[test]
+    fn each_fault_says_what_was_found() {
+        let identity = FileIdentity { dev: 7, ino: 8 };
+        let other = FileIdentity { dev: 7, ino: 9 };
+        let rows = [
+            (
+                ArtifactFault::NotRegular { kind: Kind::Other },
+                "not a regular file",
+            ),
+            (ArtifactFault::ForeignOwner { uid: OTHER }, "502"),
+            (ArtifactFault::Writable { mode: 0o644 }, "0644"),
+            (ArtifactFault::SetIdBits { mode: 0o4555 }, "4555"),
+            (ArtifactFault::WriteAcl, "ACL"),
+            (ArtifactFault::NotImmutable, "uchg"),
+            (ArtifactFault::ImmutabilityUnverifiable, "cannot show"),
+            (ArtifactFault::ChangedWhileHashing, "while it was hashed"),
+            (
+                ArtifactFault::DigestMismatch {
+                    expected: Digest::of(b"a"),
+                    actual: Digest::of(b"b"),
+                },
+                &Digest::of(b"b").hex(),
+            ),
+            (
+                ArtifactFault::Replaced {
+                    verified: identity,
+                    found: other,
+                },
+                "inode 9",
+            ),
+            (
+                ArtifactFault::Io {
+                    op: "fstat",
+                    errno: 5,
+                },
+                "fstat",
+            ),
+        ];
+        for (fault, part) in rows {
+            let shown = fault.to_string();
+            assert!(shown.contains(part), "{shown:?} names {part}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use super::*;
+        use crate::runtime::test_fixtures::tree::{add_acl, set_flags};
+        use crate::runtime::test_fixtures::{recipe, recipe_value};
+        use std::fs;
+        use std::io::Seek;
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        use std::path::PathBuf;
+
+        fn identity_of(path: &Path) -> FileIdentity {
+            let metadata = fs::symlink_metadata(path).expect("stat");
+            FileIdentity {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            }
+        }
+
+        fn read_all(file: &File, size: usize) -> Vec<u8> {
+            let mut bytes = vec![0; size];
+            file.read_exact_at(&mut bytes, 0).expect("pread");
+            bytes
+        }
+
+        #[allow(unsafe_code)]
+        fn descriptors_naming(identities: &[FileIdentity]) -> Vec<i32> {
+            fs::read_dir("/dev/fd")
+                .expect("/dev/fd lists this process's descriptors")
+                .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+                .filter(|fd| {
+                    // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid
+                    // value.
+                    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                    // SAFETY: fstat writes only the local `stat`. A descriptor another thread
+                    // closed meanwhile fails with EBADF, which is skipped.
+                    let found = unsafe { libc::fstat(*fd, &mut stat) } == 0;
+                    found
+                        && identities.contains(&FileIdentity {
+                            dev: stat.st_dev as u64,
+                            ino: stat.st_ino,
+                        })
+                })
+                .collect()
+        }
+
+        struct Bundle {
+            tree: ArtifactTree,
+            paths: Vec<(ArtifactRole, PathBuf)>,
+        }
+
+        const ROLES: [(ArtifactRole, &str, &str); 7] = [
+            (ArtifactRole::Kernel, "kernel", "kernel"),
+            (ArtifactRole::Initramfs, "initramfs", "initramfs"),
+            (ArtifactRole::RootImage, "root_image", "rootfs.raw"),
+            (ArtifactRole::Helper, "helper", "krun-helper"),
+            (ArtifactRole::Library(0), "libraries", "libkrun.dylib"),
+            (ArtifactRole::HostPolicy, "host_policy", "host-policy"),
+            (ArtifactRole::GuestPolicy, "guest_policy", "guest-policy"),
+        ];
+
+        fn bundle() -> Bundle {
+            let tree = ArtifactTree::new();
+            let paths = ROLES
+                .iter()
+                .map(|(role, _, name)| (*role, tree.immutable_file(name, name.as_bytes())))
+                .collect();
+            Bundle { tree, paths }
+        }
+
+        fn recipe_pinning(bundle: &Bundle, tampered: Option<ArtifactRole>) -> RuntimeRecipe {
+            let mut value = recipe_value("/opt/cell/helper");
+            for ((role, field, name), (_, path)) in ROLES.iter().zip(&bundle.paths) {
+                let pinned = if Some(*role) == tampered {
+                    Digest::of(b"tampered")
+                } else {
+                    Digest::of(name.as_bytes())
+                };
+                let artifact = serde_json::json!({
+                    "path": path.to_str().expect("UTF-8"),
+                    "sha256": pinned.hex(),
+                });
+                value[*field] = if *field == "libraries" {
+                    serde_json::json!([artifact])
+                } else {
+                    artifact
+                };
+            }
+            recipe(&value)
+        }
+
+        #[test]
+        fn a_read_only_immutable_file_verifies_with_its_identity_size_and_digest() {
+            let tree = ArtifactTree::new();
+            let path = tree.immutable_file("kernel", b"the kernel bytes");
+            let verified =
+                verify_pinned(&path, &Digest::of(b"the kernel bytes")).expect("the file verifies");
+            assert_eq!(verified.role(), ArtifactRole::Kernel);
+            assert_eq!(verified.path().as_path(), path);
+            assert_eq!(verified.identity(), identity_of(&path));
+            assert_eq!(verified.size(), 16);
+            assert_eq!(verified.digest(), &Digest::of(b"the kernel bytes"));
+            assert_eq!(read_all(verified.file(), 16), b"the kernel bytes");
+            let mut file = verified.file();
+            assert_eq!(file.stream_position().expect("the offset"), 0);
+        }
+
+        #[test]
+        fn the_var_alias_of_the_temp_directory_refuses_at_var() {
+            let tree = ArtifactTree::new();
+            let path = tree.immutable_file("kernel", b"kernel");
+            let canonical = path.to_str().expect("UTF-8");
+            let alias = canonical
+                .strip_prefix("/private")
+                .expect("the per-user temp directory is under /private/var");
+            assert_eq!(
+                walk_fault(Path::new(alias)),
+                ArtifactFault::Walk(WalkRefusal::Symlink {
+                    path: "/var".into()
+                })
+            );
+        }
+
+        #[test]
+        fn a_wrong_pin_refuses_with_the_pinned_and_the_actual_digest() {
+            let tree = ArtifactTree::new();
+            let path = tree.immutable_file("kernel", b"kernel");
+            assert_eq!(
+                fault_of(verify_pinned(&path, &Digest::of(b"another kernel"))),
+                ArtifactFault::DigestMismatch {
+                    expected: Digest::of(b"another kernel"),
+                    actual: Digest::of(b"kernel"),
+                }
+            );
+        }
+
+        #[test]
+        fn a_file_without_uchg_a_writable_one_and_a_set_id_one_refuse() {
+            let tree = ArtifactTree::new();
+            let plain = tree.file("plain", b"kernel", 0o444);
+            let writable = tree.file("writable", b"kernel", 0o644);
+            set_flags(&writable, libc::UF_IMMUTABLE);
+            let set_id = tree.file("set-id", b"kernel", 0o4555);
+            set_flags(&set_id, libc::UF_IMMUTABLE);
+            let pin = Digest::of(b"kernel");
+            assert_eq!(
+                fault_of(verify_pinned(&plain, &pin)),
+                ArtifactFault::NotImmutable
+            );
+            assert_eq!(
+                fault_of(verify_pinned(&writable, &pin)),
+                ArtifactFault::Writable { mode: 0o644 }
+            );
+            assert_eq!(
+                fault_of(verify_pinned(&set_id, &pin)),
+                ArtifactFault::SetIdBits { mode: 0o4555 }
+            );
+        }
+
+        #[test]
+        fn an_acl_entry_granting_write_refuses() {
+            let tree = ArtifactTree::new();
+            let path = tree.file("kernel", b"kernel", 0o444);
+            add_acl(&path, "everyone allow write");
+            set_flags(&path, libc::UF_IMMUTABLE);
+            assert_eq!(
+                fault_of(verify_pinned(&path, &Digest::of(b"kernel"))),
+                ArtifactFault::WriteAcl
+            );
+        }
+
+        #[test]
+        fn reconfirm_passes_while_the_path_names_the_verified_file_and_refuses_a_replacement() {
+            let tree = ArtifactTree::new();
+            let path = tree.immutable_file("kernel", b"kernel");
+            let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
+            assert_eq!(verified.reconfirm(), Ok(()));
+            set_flags(&path, 0);
+            fs::rename(&path, tree.join("kernel.old")).expect("rename");
+            let replacement = tree.immutable_file("kernel", b"kernel");
+            assert_eq!(
+                verified.reconfirm(),
+                Err(ArtifactRefusal {
+                    role: ArtifactRole::Kernel,
+                    path: verified.path().clone(),
+                    fault: ArtifactFault::Replaced {
+                        verified: verified.identity(),
+                        found: identity_of(&replacement),
+                    },
+                })
+            );
+        }
+
+        #[test]
+        fn the_file_reads_the_verified_bytes_after_the_path_names_another_file() {
+            let tree = ArtifactTree::new();
+            let path = tree.immutable_file("kernel", b"kernel");
+            let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
+            set_flags(&path, 0);
+            fs::rename(&path, tree.join("kernel.old")).expect("rename");
+            tree.immutable_file("kernel", b"KERNEL");
+            assert_eq!(read_all(verified.file(), 6), b"kernel");
+        }
+
+        #[test]
+        fn the_recipe_verifies_every_role_in_field_order_and_holds_each_file_open() {
+            let bundle = bundle();
+            let verified = verify_recipe_artifacts(&recipe_pinning(&bundle, None))
+                .expect("every artifact verifies");
+            let all: Vec<&VerifiedArtifact> = [
+                &verified.kernel,
+                &verified.initramfs,
+                &verified.root_image,
+                &verified.helper,
+            ]
+            .into_iter()
+            .chain(&verified.libraries)
+            .chain([&verified.host_policy, &verified.guest_policy])
+            .collect();
+            let found: Vec<(ArtifactRole, PathBuf)> = all
+                .iter()
+                .map(|artifact| (artifact.role(), artifact.path().as_path().to_path_buf()))
+                .collect();
+            assert_eq!(found, bundle.paths);
+            let identities: Vec<FileIdentity> = bundle
+                .paths
+                .iter()
+                .map(|(_, path)| identity_of(path))
+                .collect();
+            assert_eq!(descriptors_naming(&identities).len(), 7);
+            drop(verified);
+            assert_eq!(descriptors_naming(&identities), Vec::<i32>::new());
+            drop(bundle.tree);
+        }
+
+        #[test]
+        fn the_recipe_stops_at_a_tampered_root_image_and_leaves_no_descriptor_open() {
+            let bundle = bundle();
+            let refusal =
+                verify_recipe_artifacts(&recipe_pinning(&bundle, Some(ArtifactRole::RootImage)))
+                    .expect_err("the root image is tampered");
+            assert_eq!(refusal.role, ArtifactRole::RootImage);
+            assert_eq!(
+                refusal.fault,
+                ArtifactFault::DigestMismatch {
+                    expected: Digest::of(b"tampered"),
+                    actual: Digest::of(b"rootfs.raw"),
+                }
+            );
+            let identities: Vec<FileIdentity> = bundle
+                .paths
+                .iter()
+                .map(|(_, path)| identity_of(path))
+                .collect();
+            assert_eq!(descriptors_naming(&identities), Vec::<i32>::new());
+        }
+    }
+}
