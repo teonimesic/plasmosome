@@ -29,8 +29,9 @@ pub enum Unreplied {
 /// It first checks that the peer runs as `trusted_uid`. A peer that does not, or whose UID cannot
 /// be read, is `peer_mismatch`, and the stream is closed unread with nothing written. With no
 /// time left it is `deadline`, and nothing is written. Each write and each read then waits only
-/// the time left. A write that fails before any byte is `transport`. `socket` is the path the
-/// stream connected to, which these errors name.
+/// the time left. A write that fails before any byte is `transport`, and one that fails after
+/// some bytes is [`Unreplied::CutOff`]. `socket` is the path the stream connected to, which these
+/// errors name.
 ///
 /// On macOS a socket whose peer has closed refuses a new timeout with `EINVAL` (measured on
 /// Darwin 25.6). Such a socket can receive nothing more, so the read or write is then made
@@ -62,7 +63,7 @@ pub fn exchange(
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
             Err(error) => error,
         };
-        return Err(unsent(written, &error, socket, deadline));
+        return Err(unsent(written, error, socket, deadline));
     }
     let reader = Bounded {
         stream: &stream,
@@ -72,12 +73,11 @@ pub fn exchange(
     read_reply(&mut BufReader::with_capacity(PIECE, reader)).map_err(Unreplied::Unanswered)
 }
 
-fn unsent(written: usize, error: &io::Error, socket: &Path, deadline: &Deadline<'_>) -> Unreplied {
-    let failure = failure_of(error);
+fn unsent(written: usize, error: io::Error, socket: &Path, deadline: &Deadline<'_>) -> Unreplied {
     if written > 0 {
-        return Unreplied::Unanswered(failure);
+        return Unreplied::CutOff(error);
     }
-    if failure == ReadFailure::TimedOut {
+    if failure_of(&error) == ReadFailure::TimedOut {
         return Unreplied::NotSent(refusal(
             ClientCode::Deadline,
             format!(

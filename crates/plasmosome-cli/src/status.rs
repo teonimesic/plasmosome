@@ -13,7 +13,7 @@ use crate::envelope::{ClientError, EmitError, Envelope, ErrorBody, Instance, Str
 use crate::exchange::{Unreplied, exchange};
 use crate::json::Json;
 use crate::refusal::{PathOrigin, at, map_refusal, number, refusal};
-use crate::reply::{Reply, failure_of, judge_reply, kernel_exit, request_line, unanswered};
+use crate::reply::{Reply, cut_off, judge_reply, kernel_exit, request_line, unanswered};
 
 #[cfg(target_os = "macos")]
 const MAX_SOCKET_PATH: usize = 103;
@@ -64,7 +64,17 @@ pub(crate) fn run(
             ),
             vec![("argument".to_string(), Json::String(name.clone()))],
         );
-        return refuse(INVALID.to_string(), error, form, stdout, stderr);
+        let exit = error.code().exit();
+        let envelope = Envelope {
+            command: INVALID.to_string(),
+            instance: Some(Instance {
+                name: kernel,
+                socket,
+            }),
+            outcome: Err(ErrorBody::Client(error)),
+        };
+        let _ = emit(&envelope, form, stdout, stderr);
+        return exit;
     }
     let deadline = Deadline::new(
         context.clock,
@@ -118,7 +128,7 @@ fn answer(
         ErrorBody::Client(match unreplied {
             Unreplied::NotSent(error) => error,
             Unreplied::Unanswered(failure) => unanswered(failure, command.changes_state),
-            Unreplied::CutOff(error) => unanswered(failure_of(&error), command.changes_state),
+            Unreplied::CutOff(error) => cut_off(&error, command.changes_state),
         })
     })?;
     match judge_reply(&line).map_err(ErrorBody::Client)? {
