@@ -20,7 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. Nothing here verifies an artifact or boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. Nothing here boots a cell yet |
 
 ## Use
 
@@ -185,6 +185,33 @@ The lock covers only those three paths. Forks that do not go through `VmmChild::
 control socket, spawns its brokers and serves requests on one thread, so none of them can overlap
 a fork. Code that creates descriptors or forks on a second thread must take the lock first.
 
+## Verifying the pinned artifacts
+
+Spec 001 §4.2 refuses a replaceable parent or a mutable artifact rather than trust it after hashing,
+and asks that verification keep the selected inode and bytes, because the helper and libkrun open
+artifacts by path. `runtime::artifacts::verify_artifact` checks one artifact that way, and
+`verify_recipe_artifacts` checks all of a recipe's in field order, stopping at the first refusal.
+
+The path is walked from `/` with core's no-follow walk, `plasmosome_core::nofollow`. No component
+may be a symlink. Every directory on the way must be owned by root or the effective uid and
+writable by neither group nor other, with no sticky-bit exception and, on macOS, no ACL entry that
+lets another principal replace its entries. The file must be a regular file owned by root or the
+effective uid, with no write bit, no set-id bit and no ACL entry granting write, and on macOS `uchg`
+or `schg` must be set. Off macOS immutability cannot be shown, so every artifact is refused with
+`ImmutabilityUnverifiable`. Only then are the bytes hashed, through the same descriptor with
+positioned reads, and compared with the pin.
+
+On macOS pass the canonical path: `/var` is a symlink, so `/var/folders/...` is refused at `/var`.
+Measured on this Mac on 2026-10-21, the qualified bundle's kernel is refused at `/usr/local/var`,
+which has mode 0775; that is owner gate O-1 on `plasmosome-qep`.
+
+A `VerifiedArtifact` keeps the descriptor, the file's device and inode, its size and its digest.
+`file()` still reads the verified inode after the path is made to name another file. `reconfirm()`
+opens the path again under the same checks and refuses another inode as `Replaced`; call it just
+before the launch that relies on the path. Root and the effective uid can still clear `uchg` and
+change a file, or replace a directory they own. The checks keep out every other principal, which
+is owner gate O-4.
+
 ## Launching the VMM helper
 
 `runtime::launch::HelperExec` runs the pinned VMM helper the way spec 001 §4.2 says: argv is
@@ -220,9 +247,9 @@ with the machine lightly loaded and up to about 680 ms under heavy load.
 An empty environment and the working directory `/` mean no `DYLD_*` or `LD_*` variable and no
 relative path can add to where the helper's loader looks for libraries. They do not remove a search
 path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
-names in the qualified libkrun. The launch checks no artifact either, and nothing in this crate
-verifies one yet: the cell, plasmosome-7em, which is not built yet, must verify the helper and its
-libraries before it prepares the launch.
+names in the qualified libkrun. The launch checks no artifact either: the cell, plasmosome-7em,
+which is not built yet, must verify the helper and its libraries with `runtime::artifacts` before it
+prepares the launch.
 
 ## Control-socket ownership
 
