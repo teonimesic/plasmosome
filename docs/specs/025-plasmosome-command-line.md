@@ -435,16 +435,20 @@ links are refused, `/tmp` and `/var` on macOS do not work; pass the canonical pa
 `/private/var/folders/...`.
 
 The table has one row per variant of `PrivateSocketError`, in the enum's order. A variant added
-later has no client code until this table gives it one. `Replaced`, `AddressInUse` and
-`BindEscaped` come only from `PrivateListener::bind` and `PrivateDir::reconfirm`, which the
-client never calls. If one reaches the client anyway, the client failed.
+later has no client code until this table gives it one. The client's mapping names each variant
+and has no catch-all arm, so such a variant stops the build until this table and the mapping
+both name it. `Replaced`, `AddressInUse` and `BindEscaped` come only from `PrivateListener::bind`
+and `PrivateDir::reconfirm`, which the client never calls. If one reaches the client anyway, the
+client failed. `PathTooLong` also comes only from `bind`; the client's own `sun_path` check,
+below, reports `socket_path_too_long` first, with the same bound.
 
 `BadName` reports a name, not a path, so its `path` is the path the client passed to the check:
 the socket path for `check_private_path`, or `instances/` for `list_trusted_dir`.
 `peer_mismatch`'s `path` is the socket path, and its `uid` is the trusted UID. Its `peer_uid` is
 `PeerMismatch`'s `found`; `PeerCredentials` gives no `peer_uid`, because the UID could not be
 read. `socket_path_too_long`'s `max_bytes` is `PathTooLong`'s `max`. `local_io` carries `Io`'s
-`path` and `errno`. `invalid_argument` names `--socket` as its `argument`.
+`path` and `errno`. `invalid_argument` names `--socket` as its `argument`. Each code carries
+only the fields the client-code table lists for it.
 
 Amended on 2026-10-21: this table was pinned to #124's draft head `33f2eb6`. It named
 `NotAbsolute`, which is now `BadPath`, and `Missing`, which is now `NoDirectory` and `NoSocket`.
