@@ -329,14 +329,16 @@ the PR adds, and the reviewer reads each.
 git grep -n -P '(?<![A-Za-z0-9_])safe\s+(fn|static)\b|\bunsafe\s*\(|\b(no_mangle|export_name|link_section)\b|^(?!\s*#\[allow\(unsafe_code\)\]\s*$).*\b(allow|expect)\s*\([^)]*\bunsafe_code\b' <commit> -- ':(top)*.rs'
 ```
 
-Its control is main. On 2026-10-21 it printed exactly two lines there: the `safe fn` declarations
-of `_dyld_image_count` and `_dyld_get_image_name` in lanes' `krun.rs`. While those stay, a run at
-main that prints neither is broken. It needs `-P`. Apple Git's `-E` refuses the lookarounds, and
-reads `\b` and `\s` as the letters `b` and `s` with no error, so an `-E` rewrite of the pattern
-prints nothing. It reads one line at a time, so an attribute that rustfmt wraps over two lines
-escapes it, and so does one a macro writes. It also prints prose that names a `safe fn`. It does
-not print a plain outer `#[allow(unsafe_code)]`, so one the PR adds on a `mod` shows only in the
-diff. It cannot see nesting, so N9 is the reviewer's reading alone.
+Its control is main. At 607718f4 it printed exactly four lines there: the `safe fn` declarations of
+`_dyld_image_count` and `_dyld_get_image_name` in lanes' `krun.rs`, and the two
+`unsafe(link_section = ...)` attributes on `RECORD_INHERITED` in plasmosome-core's
+`tests/supervisor_start.rs`. While those stay, a run at main that prints none of them is broken. It
+needs `-P`. Apple Git's `-E` refuses the lookarounds, and reads `\b` and `\s` as the letters `b` and
+`s` with no error, so an `-E` rewrite of the pattern prints nothing. It reads one line at a time, so
+an attribute that rustfmt wraps over two lines escapes it, and so does one a macro writes. It also
+prints prose that names a `safe fn`. It does not print a plain outer `#[allow(unsafe_code)]`, so one
+the PR adds on a `mod` shows only in the diff. It cannot see nesting, so N9 is the reviewer's
+reading alone.
 
 No check refuses these forms, for three reasons. No clippy lint reaches them: with clippy's
 restriction, pedantic, nursery and cargo groups all on, no lint fired on a `safe` declaration, an
