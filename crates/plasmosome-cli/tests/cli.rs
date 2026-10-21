@@ -17,6 +17,8 @@ const COMMAND_TABLE_HEADER: &str = "| Command | Wire method | Changes state | Se
 
 const EPIPE: i32 = 32;
 
+const ENOSPC: i32 = 28;
+
 fn args(line: &[&str]) -> Vec<OsString> {
     line.iter().map(OsString::from).collect()
 }
@@ -29,14 +31,23 @@ fn escape_character() -> char {
     char::from_u32(0x1b).expect("ESC is a code point")
 }
 
-fn status_served() -> Vec<Command> {
+fn with_control(code_point: u32) -> String {
+    let control = char::from_u32(code_point).expect("a terminal control is a code point");
+    format!("a{control}b")
+}
+
+fn serving(served: &[&str]) -> Vec<Command> {
     COMMANDS
         .iter()
         .map(|command| Command {
-            served: command.command == "plasmosome.status",
+            served: served.contains(&command.command),
             ..*command
         })
         .collect()
+}
+
+fn status_served() -> Vec<Command> {
+    serving(&["plasmosome.status"])
 }
 
 fn status() -> Command {
@@ -134,6 +145,19 @@ impl Write for Closed {
     }
 }
 
+struct FlushFails(Vec<u8>);
+
+impl Write for FlushFails {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(ENOSPC))
+    }
+}
+
 #[test]
 fn the_command_table_is_spec_025s() {
     let spec = spec_025_commands();
@@ -187,6 +211,67 @@ fn help_comes_before_every_other_rule() {
 }
 
 #[test]
+fn help_reads_words_only_up_to_a_flag_it_does_not_know() {
+    for (line, usage) in [
+        (
+            &["registry", "search", "--source", "main", "--help"][..],
+            "plasmosome registry search",
+        ),
+        (
+            &["registry", "fetch", "REF", "--output", "/x", "--help"],
+            "plasmosome registry fetch REF",
+        ),
+        (
+            &["cell", "exec", "--cell", "c1", "--help"],
+            "plasmosome cell exec",
+        ),
+        (
+            &[
+                "exec",
+                "status",
+                "--cell",
+                "c1",
+                "--exec-id",
+                "e1",
+                "--help",
+            ],
+            "plasmosome exec status",
+        ),
+        (
+            &[
+                "cell", "list", "--kernel", "a", "--frob", "x", "y", "--help",
+            ],
+            "plasmosome cell list",
+        ),
+        (
+            &["--frob", "cell", "list", "--help"],
+            "plasmosome [FLAGS] COMMAND",
+        ),
+    ] {
+        let text = help_text(line, COMMANDS);
+        assert!(
+            text.starts_with(&format!("Usage: {usage} [FLAGS]\n")),
+            "{line:?} gave {text}"
+        );
+    }
+    assert_usage(
+        args(&["status", "extra", "--frob", "x", "--help"]),
+        COMMANDS,
+        Some("extra"),
+    );
+    assert_usage(
+        args(&["cell", "list", "--kernel", "a", "extra", "--help"]),
+        COMMANDS,
+        Some("extra"),
+    );
+    assert_usage(
+        args(&["status", "--help", "extra"]),
+        COMMANDS,
+        Some("extra"),
+    );
+}
+
+#[test]
 fn help_after_words_that_name_no_command_is_a_usage_error() {
     assert_usage(
         args(&["frobnicate", "--help"]),
@@ -214,9 +299,16 @@ fn the_version_is_read_only_alone() {
         &["--version", "--json"],
         &["--version", "--version"],
         &["cell", "list", "--version"],
+        &["--version", "--"],
     ] {
         assert_usage(args(line), COMMANDS, Some("--version"));
     }
+    let reading = read(
+        &args(&["cell", "exec", "--", "python3", "--version"]),
+        COMMANDS,
+    );
+    let (command, code, _) = refused(&reading);
+    assert_eq!((command, code), ("cell.exec", ClientCode::NotServed));
 }
 
 #[test]
@@ -260,12 +352,57 @@ fn an_unserved_command_reads_only_the_form_flags() {
         COMMANDS,
         Some("--human"),
     );
+    assert_usage(
+        args(&["cell", "list", "--json", "--human", "--json"]),
+        COMMANDS,
+        Some("--human"),
+    );
+}
+
+#[test]
+fn a_value_is_never_read_as_a_flag() {
+    let reading = read(&args(&["cell", "list", "--kernel", "--human"]), COMMANDS);
+    let Reading::Refuse { form, .. } = &reading else {
+        panic!("cell list is refused, read {reading:?}");
+    };
+    assert_eq!(form, &Form::Json);
+    assert_eq!(refused(&reading).1, ClientCode::NotServed, "{reading:?}");
+    let commands = status_served();
+    for (line, kernel) in [
+        (&["status", "--kernel", "--human"][..], "--human"),
+        (&["status", "--kernel", "--socket"], "--socket"),
+        (&["status", "--kernel", "--json", "--json"], "--json"),
+    ] {
+        assert_eq!(
+            read(&args(line), &commands),
+            Reading::Run(Invocation {
+                command: status(),
+                kernel: Some(kernel.to_string()),
+                socket: None,
+                deadline_ms: None,
+                form: Form::Json,
+            }),
+            "{line:?}"
+        );
+    }
+    assert_usage(
+        args(&["status", "--kernel", "--socket", "/x/control.uds"]),
+        &commands,
+        Some("/x/control.uds"),
+    );
+    assert_usage(
+        args(&["status", "--kernel", "--", "x"]),
+        &commands,
+        Some("--kernel"),
+    );
 }
 
 #[test]
 fn the_full_parse_refuses_each_fault() {
     let commands = status_served();
     let escaped_name = format!("a{}[31m", escape_character());
+    let overridden_name = with_control(0x202e);
+    let csi_name = with_control(0x9b);
     let forty_digits = "1".repeat(40);
     let lossy = format!("a{}", char::REPLACEMENT_CHARACTER);
     let cases: Vec<(Vec<OsString>, Option<&str>)> = vec![
@@ -294,6 +431,14 @@ fn the_full_parse_refuses_each_fault() {
         (
             args(&["status", "--kernel", &escaped_name]),
             Some(escaped_name.as_str()),
+        ),
+        (
+            args(&["status", "--kernel", &overridden_name]),
+            Some(overridden_name.as_str()),
+        ),
+        (
+            args(&["status", "--kernel", &csi_name]),
+            Some(csi_name.as_str()),
         ),
         (
             args(&["status", "--socket", "relative/control.uds"]),
@@ -345,6 +490,7 @@ fn the_full_parse_refuses_each_fault() {
         (args(&[]), None),
         (args(&["--json"]), None),
         (args(&["frobnicate"]), Some("frobnicate")),
+        (args(&["frobnicate", "--", "x"]), Some("frobnicate")),
         (args(&["cell"]), Some("cell")),
         (args(&["cell", "frob"]), Some("frob")),
         (args(&["registry", "source"]), Some("source")),
@@ -352,6 +498,45 @@ fn the_full_parse_refuses_each_fault() {
     for (line, argument) in cases {
         assert_usage(line, &commands, argument);
     }
+    assert_usage(
+        args(&["germinate", "g", "--json", "--human", "--json"]),
+        &serving(&["cell.new"]),
+        Some("--human"),
+    );
+}
+
+#[test]
+fn a_registry_command_takes_no_socket_flag() {
+    let commands = serving(&["search", "show"]);
+    for (line, argument) in [
+        (&["registry", "search", "--kernel", "a"][..], "--kernel"),
+        (
+            &["registry", "search", "--socket", "/x/control.uds"],
+            "--socket",
+        ),
+        (
+            &["registry", "search", "--deadline-ms", "5"],
+            "--deadline-ms",
+        ),
+        (&["--kernel", "a", "registry", "show", "r"], "--kernel"),
+        (&["registry", "search", "--kernel", "../x"], "--kernel"),
+    ] {
+        assert_usage(args(line), &commands, Some(argument));
+    }
+    let Reading::Run(invocation) = read(&args(&["registry", "show", "r", "--human"]), &commands)
+    else {
+        panic!("registry show is served in this table");
+    };
+    assert_eq!(
+        (
+            invocation.command.command,
+            invocation.kernel,
+            invocation.socket,
+            invocation.deadline_ms,
+            invocation.form
+        ),
+        ("show", None, None, None, Form::Human)
+    );
 }
 
 #[test]
@@ -463,6 +648,25 @@ fn a_failed_stdout_is_local_io() {
     assert_eq!(exit, Exit::Unavailable);
     let text = String::from_utf8(stderr).expect("stderr is UTF-8");
     assert!(text.ends_with("(client local_io)\n"), "{text:?}");
+}
+
+#[test]
+fn a_failed_flush_after_a_good_write_is_local_io() {
+    let mut stdout = FlushFails(Vec::new());
+    let mut stderr = Vec::new();
+    let exit = handle(
+        &args(&["--version"]),
+        "0.0.0",
+        COMMANDS,
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit, Exit::Unavailable);
+    assert_eq!(stdout.0, b"plasmosome 0.0.0\n");
+    let envelope = envelope(&stderr);
+    assert_eq!(envelope["command"], "--version");
+    assert_eq!(envelope["error"]["code"], "local_io");
+    assert_eq!(envelope["error"]["errno"], ENOSPC);
 }
 
 #[test]

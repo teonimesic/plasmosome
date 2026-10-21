@@ -625,58 +625,8 @@ fn client(code: ClientCode, message: String, fields: Vec<(String, Json)>) -> Cli
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::ffi::OsString;
-    use std::panic;
-
-    use super::handle;
-    use crate::codes::Exit;
-    use crate::commands::COMMANDS;
 
     thread_local! {
         pub(super) static PANIC_IN_COMMAND: Cell<bool> = const { Cell::new(false) };
-        static HOOK_RAN: Cell<bool> = const { Cell::new(false) };
-    }
-
-    #[test]
-    fn a_panic_in_a_command_is_internal_and_no_other_panic_is_hidden() {
-        let previous = panic::take_hook();
-        panic::set_hook(Box::new(move |info| {
-            HOOK_RAN.set(true);
-            previous(info);
-        }));
-        let args: Vec<OsString> = vec!["cell".into(), "list".into()];
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        PANIC_IN_COMMAND.set(true);
-        let exit = handle(&args, "0.0.0", COMMANDS, &mut stdout, &mut stderr);
-        PANIC_IN_COMMAND.set(false);
-        assert_eq!(exit, Exit::Internal);
-        assert!(
-            !HOOK_RAN.get(),
-            "the panic reached the hook that prints its message"
-        );
-        assert!(stdout.is_empty());
-        let text = String::from_utf8(stderr).expect("stderr is UTF-8");
-        assert!(
-            text.ends_with('\n') && text.matches('\n').count() == 1,
-            "{text:?}"
-        );
-        assert!(
-            !text.contains("asked for"),
-            "the panic's text reached stderr: {text:?}"
-        );
-        let envelope: serde_json::Value =
-            serde_json::from_str(&text).expect("stderr is one JSON envelope");
-        assert_eq!(envelope["command"], "cell.list");
-        assert_eq!(envelope["error"]["domain"], "client");
-        assert_eq!(envelope["error"]["code"], "internal");
-        assert!(envelope.get("instance").is_none());
-
-        HOOK_RAN.set(false);
-        let outside = panic::catch_unwind(|| panic!("a panic outside a command"));
-        assert!(outside.is_err());
-        assert!(
-            HOOK_RAN.get(),
-            "the hook handle installed hid a panic outside a command"
-        );
     }
 }

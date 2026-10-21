@@ -5,8 +5,11 @@ use std::os::unix::net::UnixListener;
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
+use tempfile::TempDir;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_plasmosome");
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const EPIPE: i64 = 32;
 
@@ -99,6 +102,25 @@ fn assert_usage(output: &Output, argument: Option<&str>) {
     );
 }
 
+fn live_instance() -> (TempDir, UnixListener) {
+    let home = tempfile::tempdir().expect("a test HOME");
+    let instance = home.path().join(".plasmosome/instances/a");
+    std::fs::create_dir_all(&instance).expect("the instance directory");
+    let listener =
+        UnixListener::bind(instance.join("control.uds")).expect("a live socket for instance a");
+    listener
+        .set_nonblocking(true)
+        .expect("the listener does not block");
+    (home, listener)
+}
+
+fn assert_never_reached(listener: &UnixListener, what: &str) {
+    match listener.accept() {
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+        other => panic!("{what} reached the instance's socket: {other:?}"),
+    }
+}
+
 fn listed(help: &str, usage: &str) -> Vec<String> {
     let start = format!("  plasmosome {usage} ");
     help.lines()
@@ -113,28 +135,25 @@ fn version_is_the_sole_argument() {
         command.env("PLASMOSOME_KERNEL", "../x").env_remove("HOME");
     });
     assert_eq!(code(&output), 0, "{output:?}");
-    assert_eq!(text(&output.stdout), "plasmosome 0.0.0\n");
+    assert_eq!(text(&output.stdout), format!("plasmosome {VERSION}\n"));
     assert!(output.stderr.is_empty(), "{output:?}");
     for line in [
         &["status", "--version"][..],
         &["--version", "--json"],
         &["--version", "--version"],
         &["cell", "list", "--version"],
+        &["--version", "--"],
     ] {
         assert_usage(&plasmosome(line), Some("--version"));
     }
+    let workload = plasmosome(&["cell", "exec", "--", "python3", "--version"]);
+    assert_eq!(code(&workload), 2, "{workload:?}");
+    assert_eq!(envelope(&workload)["error"]["code"], "not_served");
 }
 
 #[test]
 fn help_comes_first_and_never_connects() {
-    let home = tempfile::tempdir().expect("a test HOME");
-    let instance = home.path().join(".plasmosome/instances/a");
-    std::fs::create_dir_all(&instance).expect("the instance directory");
-    let listener =
-        UnixListener::bind(instance.join("control.uds")).expect("a live socket for instance a");
-    listener
-        .set_nonblocking(true)
-        .expect("the listener does not block");
+    let (home, listener) = live_instance();
     let with_home = |args: &[&str]| {
         run(args.iter().map(OsString::from).collect(), |command| {
             command.env("HOME", home.path());
@@ -230,14 +249,60 @@ fn help_comes_first_and_never_connects() {
     let germinate = with_home(&["germinate", "--help"]);
     assert_eq!(code(&germinate), 0, "{germinate:?}");
     assert!(text(&germinate.stdout).contains("plasmosome germinate GENOME"));
+    for (line, usage) in [
+        (
+            &["registry", "search", "--source", "main", "--help"][..],
+            "registry search",
+        ),
+        (
+            &["registry", "fetch", "REF", "--output", "/x", "--help"],
+            "registry fetch REF",
+        ),
+        (&["cell", "exec", "--cell", "c1", "--help"], "cell exec"),
+        (
+            &[
+                "exec",
+                "status",
+                "--cell",
+                "c1",
+                "--exec-id",
+                "e1",
+                "--help",
+            ],
+            "exec status",
+        ),
+    ] {
+        let command = with_home(line);
+        assert_eq!(code(&command), 0, "{command:?}");
+        assert!(
+            text(&command.stdout).starts_with(&format!("Usage: plasmosome {usage} [FLAGS]\n")),
+            "{command:?}"
+        );
+    }
 
     assert_usage(&with_home(&["frobnicate", "--help"]), Some("frobnicate"));
     assert_usage(&with_home(&["status", "extra", "--help"]), Some("extra"));
 
-    match listener.accept() {
-        Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-        other => panic!("help reached the instance's socket: {other:?}"),
+    assert_never_reached(&listener, "help");
+}
+
+#[test]
+fn unserved_commands_never_connect() {
+    let (home, listener) = live_instance();
+    for line in [
+        &["cell", "list"][..],
+        &["cell", "list", "--kernel", "a"],
+        &["registry", "search"],
+    ] {
+        let output = run(line.iter().map(OsString::from).collect(), |command| {
+            command
+                .env("HOME", home.path())
+                .env("PLASMOSOME_KERNEL", "a");
+        });
+        assert_eq!(code(&output), 2, "{line:?}: {output:?}");
+        assert_eq!(envelope(&output)["error"]["code"], "not_served", "{line:?}");
     }
+    assert_never_reached(&listener, "an unserved command");
 }
 
 #[test]
@@ -315,6 +380,11 @@ fn usage_errors() {
     assert_usage(&plasmosome(&[]), None);
     assert_usage(&plasmosome(&["--json"]), None);
     assert_usage(&plasmosome(&["frobnicate"]), Some("frobnicate"));
+    assert_usage(&plasmosome(&["frobnicate", "--", "x"]), Some("frobnicate"));
+    assert_usage(
+        &plasmosome(&["cell", "list", "--json", "--human", "--json"]),
+        Some("--human"),
+    );
     assert_usage(&plasmosome(&["--frob"]), Some("--frob"));
     assert_usage(&plasmosome(&["cell"]), Some("cell"));
     assert_usage(&plasmosome(&["--trusted-uid", "0"]), Some("--trusted-uid"));
