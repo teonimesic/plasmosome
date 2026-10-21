@@ -26,8 +26,8 @@ const REQUIRED: [&str; 3] = ["membraned", "template", "start_deadline_ms"];
 const DEFAULT_STOP_DEADLINE: Duration = Duration::from_millis(30_000);
 
 /// Spec 023 §1's bound on each socket path of the longest cell ID: 103 bytes, the Darwin
-/// `AF_UNIX` limit. It holds on every host, so a config that starts the daemon on Linux, whose
-/// `sun_path` holds 107, holds on a Mac too.
+/// `AF_UNIX` limit. It holds on every host, so the socket paths of a config that starts the
+/// daemon on Linux, whose `sun_path` holds 107, fit on a Mac too.
 const MAX_SOCKET_PATH_BYTES: usize = 103;
 
 /// Spec 023 §1's `cell_runtime`: what the controller needs to start a cell's supervisor. Only
@@ -50,8 +50,9 @@ pub struct CellRuntime {
     /// `start_deadline_ms`: the budget for `cell.new` to reach ready with its genome attached.
     /// Never zero.
     pub start_deadline: Duration,
-    /// `stop_deadline_ms`, 30 s when absent: the default budget of `cell.kill`, and the cleanup
-    /// budget after a failed start. Never zero.
+    /// `stop_deadline_ms`, 30 s when absent: the default budget of `cell.kill` and of a whole
+    /// `plasmosome.stop` (spec 001 §3.4), and the cleanup budget after a failed start. Never
+    /// zero.
     pub stop_deadline: Duration,
 }
 

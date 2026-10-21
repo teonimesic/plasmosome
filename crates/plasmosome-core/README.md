@@ -351,8 +351,8 @@ rules are spec 025 §6's. Exits 2 and 1 are unchanged.
     belongs to no cell, so nothing can launch it;
   - an `instance_root` that makes that cell's `membrane.uds`, `runtime/data.uds` or
     `runtime/control.uds` longer than 103 bytes, spec 023's Darwin bound. The bound is the same
-    on every host, so a config that starts the daemon on Linux, whose `sun_path` holds 107, starts
-    it on a Mac too. Of several, the refusal names the shortest;
+    on every host, so the socket paths of a config that starts the daemon on Linux, whose
+    `sun_path` holds 107, fit on a Mac too. Of several, the refusal names the shortest;
   - a template Artifact under `<instance_root>/cells/`, where it could be some cell's own path
     and that cell's recipe would be refused after its directory exists;
   - a template whose largest config record, for that cell with the largest boot deadline, is
@@ -598,12 +598,14 @@ base passes, the test fails and names each base with the ancestor that refused i
 
 `artifact::verify_artifact` is the controller's check of one spec 001 §4.2 Artifact under spec
 023 §1's rule, which `cell.new` runs before it allocates anything. Nothing calls it yet. It walks
-the path from `/` with `nofollow`, so no component is a symlink and every directory above the
-file, its own directory included, meets the ancestor rule: owned by root or the effective UID,
-writable by neither group nor other, and on macOS with no ACL entry that lets another principal
-replace its entries. The file must be a regular file owned by root or the effective UID, with no
-write bit at all, no set-user-ID or set-group-ID bit, no ACL allow entry that grants write, and
-`uchg` or `schg` set. Off macOS every Artifact is refused as `ImmutabilityUnverifiable`. Spec 023
+the path from `/` with `nofollow`, so a symlink anywhere on the path is refused. Every directory
+above the file, its own directory included, meets [the walk's](#the-no-follow-walk) ancestor
+rule. It is owned by root or the effective UID and writable by neither group nor other. On macOS
+it carries no ACL allow entry that grants a right to replace its entries, whoever the entry
+names, and is on no volume mounted with ownership ignored. The file must be a regular file owned
+by root or the effective UID, with no write bit at all, no set-user-ID or set-group-ID bit, no
+ACL allow entry that grants write, and `uchg` or `schg` set. Off macOS, a file that passes every
+earlier rule is then refused as `ImmutabilityUnverifiable`, so no Artifact passes there. Spec 023
 §1 has the membrane repeat these file rules at launch. A FIFO is refused at once. Only then is the
 file hashed, through the descriptor that was checked, so a file that breaks a rule is refused even
 when its digest matches. An `ArtifactRefusal` names the path and the broken rule, and its `wire`
@@ -613,6 +615,13 @@ The read stops one byte past the size `fstat` reported at the check, so it ends 
 grows. That bound is the apparent size: a huge sparse file is read, zeros included, for as long
 as it claims to be, so its check is slow. Only root or the controller's UID can place such a file
 at an artifact path, because every directory above it must be theirs.
+
+The check records the file's size, modification time and change time when it passes, and again
+after the hash. If any of them moved, the file is refused as `ChangedWhileHashing` before its
+digest is compared. That catches a write through a descriptor opened before the file was locked:
+the mode and `uchg` refuse only new opens. It cannot catch every change. On macOS a write through
+a shared writable mapping that existed before the file was locked changes the bytes and moves
+none of the three, so neither this check nor the membrane's sees it.
 
 `CellRuntime::artifacts` lists what to verify: `membraned`, then the template's Artifacts in
 recipe order, read from the recipe the startup check completed. Unlike `TrustedFile`, the file and

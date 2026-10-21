@@ -40,8 +40,8 @@ pub enum ArtifactFault {
     WriteAcl,
     /// On macOS, the file has neither `uchg` nor `schg` set.
     NotImmutable,
-    /// Off macOS, this build cannot verify that the file is immutable, so every Artifact is
-    /// refused this way.
+    /// Off macOS, this build cannot verify that the file is immutable. A file that passes every
+    /// earlier rule is refused this way, so no Artifact passes there.
     ImmutabilityUnverifiable,
     /// The file's size, modification time or change time moved between the check and the end of
     /// the hash.
@@ -53,15 +53,23 @@ pub enum ArtifactFault {
 /// Checks one Artifact before the controller trusts it, as spec 023 §1 says for `membraned` and
 /// every Artifact of the template. Walks its path from `/` without following a symlink, and
 /// refuses unless every directory above the file is owned by root or the effective UID, writable
-/// by neither group nor other and, on macOS, carries no ACL entry that lets anyone replace its
-/// entries. The file, opened without following and without blocking, must be a regular file
-/// owned by root or the effective UID, with no write bit at all, no set-user-ID or set-group-ID
-/// bit, no ACL allow entry granting write, and `uchg` or `schg` set; off macOS it is refused,
-/// because this build cannot verify immutability there. These are the file rules the membrane
-/// repeats at launch. Only then is the file read, through the descriptor that was checked, and
-/// hashed: a file that breaks a rule is refused, never trusted because its digest matches. The
-/// read stops one byte past the size `fstat` reported, so it ends even when the file grows while
-/// it is read.
+/// by neither group nor other and, on macOS, carries no ACL allow entry, whoever it names, that
+/// lets it replace the directory's entries, and is on no volume mounted with ownership ignored.
+/// The file, opened without following and without blocking, must be a regular file owned by root
+/// or the effective UID, with no write bit at all, no set-user-ID or set-group-ID bit, no ACL
+/// allow entry granting write, and `uchg` or `schg` set. Off macOS, a file that passes every
+/// earlier rule is refused as `ImmutabilityUnverifiable`, because this build cannot verify
+/// immutability there. These are the file rules the membrane repeats at launch. Only then is the
+/// file read, through the descriptor that was checked, and hashed: a file that breaks a rule is
+/// refused, never trusted because its digest matches. The read stops one byte past the size
+/// `fstat` reported at the check, so it ends even when the file grows while it is read.
+///
+/// The check records the file's size, modification time and change time when it passes, and
+/// again after the hash, and refuses `ChangedWhileHashing` if any moved, before the digest is
+/// compared. That catches a write through a descriptor opened before the file was locked, since
+/// the mode and `uchg` refuse only new opens. On macOS a change through a shared writable mapping
+/// that existed before the file was locked moves none of the three, so neither this check nor
+/// the membrane's sees it.
 ///
 /// A pass describes the file as it was during the check. Whoever opens it later by path must
 /// guard its own open.
