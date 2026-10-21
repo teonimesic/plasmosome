@@ -5,14 +5,17 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-/// The bundle's libkrun, relative to the bundle directory.
+/// The bundle's libkrun, relative to the bundle directory. Its record, with where it comes from
+/// and its known faults, is `docs/dependencies/native/libkrun.toml`.
 pub const LIBKRUN: &str = "lib/libkrun.1.19.4.dylib";
 
-/// The bundle's guest kernel, relative to the bundle directory.
+/// The bundle's guest kernel, relative to the bundle directory. Its record, with where it comes
+/// from and its known faults, is `docs/dependencies/native/guest-kernel.toml`.
 pub const KERNEL: &str = "boot/kernel";
 
 /// The one runtime bundle these lanes accept: the first 16 hex digits of its manifest's SHA-256,
-/// which is also its directory name.
+/// which is also its directory name. The records of its libkrun and kernel, in
+/// `docs/dependencies/native/`, hold the whole digest as `bundle_manifest_sha256`.
 pub const PINNED_BUNDLE_ID: &str = "eed141b574337d99";
 
 const SUMS: &str = "SHA256SUMS";
