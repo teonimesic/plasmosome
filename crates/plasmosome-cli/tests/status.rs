@@ -339,6 +339,9 @@ fn refused_peer(stream: UnixStream, trusted_uid: u32) -> (ClientCode, Option<u32
 #[test]
 fn a_foreign_peer_gets_no_byte() {
     let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+    theirs
+        .set_read_timeout(Some(PATIENCE))
+        .expect("a read timeout");
     let stranger = effective_uid() + 1;
     assert_eq!(
         refused_peer(ours, stranger),
@@ -348,9 +351,6 @@ fn a_foreign_peer_gets_no_byte() {
             Some(effective_uid())
         )
     );
-    theirs
-        .set_read_timeout(Some(PATIENCE))
-        .expect("a read timeout");
     let mut received = Vec::new();
     theirs
         .read_to_end(&mut received)
