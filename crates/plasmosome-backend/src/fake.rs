@@ -14,6 +14,7 @@ pub struct FakeBackend {
     stalled_owners: BTreeSet<CellOwner>,
     revocations: Vec<Handle>,
     refused_owners: BTreeMap<CellOwner, String>,
+    observation_fault: Option<String>,
 }
 
 impl FakeBackend {
@@ -50,7 +51,9 @@ impl FakeBackend {
 
     /// Makes the next `snapshot_os_state` return `BackendError::Fault(cause)`, once, with no
     /// other effect. The snapshot after it observes normally.
-    pub fn fail_next_observation(&mut self, _cause: &str) {}
+    pub fn fail_next_observation(&mut self, cause: &str) {
+        self.observation_fault = Some(cause.to_string());
+    }
 
     pub fn plant_residue(&mut self, object: OsObject) -> Result<(), BackendError> {
         self.plant(object)
@@ -113,6 +116,9 @@ impl EnforcementBackend for FakeBackend {
     }
 
     fn snapshot_os_state(&mut self) -> Result<EnforcementSnapshot, BackendError> {
+        if let Some(cause) = self.observation_fault.take() {
+            return Err(BackendError::Fault(cause));
+        }
         EnforcementSnapshot::new(
             self.state.clone(),
             self.grants.values().cloned().collect(),

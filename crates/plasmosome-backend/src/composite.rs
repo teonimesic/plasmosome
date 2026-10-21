@@ -16,22 +16,23 @@ pub struct CompositeBackend {
 }
 
 impl CompositeBackend {
+    /// Builds the composite and observes all three leaves once, as every later snapshot does.
+    /// A leaf whose observation fails returns that error. A leaf that reports a standing object,
+    /// issued record or incomplete effect of a class it does not own returns `Fault` naming the
+    /// leaf and the row: the network leaf owns proxy maps and UDS paths, the filesystem leaf
+    /// session files and mounts, and the broker leaf brokers.
     pub fn new(
         network: Box<dyn EnforcementBackend>,
         filesystem: Box<dyn EnforcementBackend>,
         broker: Box<dyn EnforcementBackend>,
     ) -> Result<CompositeBackend, BackendError> {
-        let mut network = network;
-        let mut filesystem = filesystem;
-        let mut broker = broker;
-        validate_leaf(Leaf::Network, network.as_mut())?;
-        validate_leaf(Leaf::Filesystem, filesystem.as_mut())?;
-        validate_leaf(Leaf::Broker, broker.as_mut())?;
-        Ok(CompositeBackend {
+        let mut composite = CompositeBackend {
             network,
             filesystem,
             broker,
-        })
+        };
+        composite.observe_every_leaf()?;
+        Ok(composite)
     }
 
     fn leaf_for_class(&mut self, class: UniverseClass) -> &mut dyn EnforcementBackend {
@@ -42,12 +43,30 @@ impl CompositeBackend {
         }
     }
 
+    /// One leaf's own snapshot, as that leaf reports it: not checked against its classes and not
+    /// joined with the other leaves.
     pub fn leaf_snapshot(&mut self, leaf: Leaf) -> Result<EnforcementSnapshot, BackendError> {
         match leaf {
             Leaf::Network => self.network.snapshot_os_state(),
             Leaf::Filesystem => self.filesystem.snapshot_os_state(),
             Leaf::Broker => self.broker.snapshot_os_state(),
         }
+    }
+
+    fn observe_every_leaf(&mut self) -> Result<EnforcementSnapshot, BackendError> {
+        let mut state = OsState::new();
+        let mut grants = Vec::new();
+        let mut incomplete = Vec::new();
+        for leaf in [Leaf::Network, Leaf::Filesystem, Leaf::Broker] {
+            let observed = self.leaf_snapshot(leaf)?;
+            only_its_own_classes(leaf, &observed)?;
+            for object in observed.state().objects() {
+                state.insert(object.clone())?;
+            }
+            grants.extend_from_slice(observed.grants());
+            incomplete.extend_from_slice(observed.incomplete());
+        }
+        EnforcementSnapshot::new(state, grants, incomplete)
     }
 }
 
@@ -66,18 +85,7 @@ impl EnforcementBackend for CompositeBackend {
     }
 
     fn snapshot_os_state(&mut self) -> Result<EnforcementSnapshot, BackendError> {
-        let mut union: OsState = self.network.snapshot_os_state()?.state().clone();
-        for object in self.filesystem.snapshot_os_state()?.state().objects() {
-            union
-                .insert(object.clone())
-                .expect("validated class ownership keeps leaf addresses disjoint");
-        }
-        for object in self.broker.snapshot_os_state()?.state().objects() {
-            union
-                .insert(object.clone())
-                .expect("validated class ownership keeps leaf addresses disjoint");
-        }
-        EnforcementSnapshot::new(union, Vec::new(), Vec::new())
+        self.observe_every_leaf()
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
@@ -99,14 +107,39 @@ impl EnforcementBackend for CompositeBackend {
     }
 }
 
-fn validate_leaf(leaf: Leaf, backend: &mut dyn EnforcementBackend) -> Result<(), BackendError> {
-    for object in backend.snapshot_os_state()?.state().objects() {
-        if !class_belongs_to(leaf, object.class()) {
-            return Err(BackendError::Fault(format!(
-                "{leaf:?} leaf observes out-of-class {}",
-                object.describe()
-            )));
-        }
+fn only_its_own_classes(leaf: Leaf, observed: &EnforcementSnapshot) -> Result<(), BackendError> {
+    let foreign = |row: String| {
+        Err(BackendError::Fault(format!(
+            "{leaf:?} leaf observes out-of-class {row}"
+        )))
+    };
+    if let Some(entry) = observed
+        .grants()
+        .iter()
+        .find(|entry| !class_belongs_to(leaf, entry.handle.class))
+    {
+        return foreign(format!(
+            "issued record {} owned by `{}`",
+            entry.handle, entry.owner
+        ));
+    }
+    if let Some(object) = observed
+        .state()
+        .objects()
+        .find(|object| !class_belongs_to(leaf, object.class()))
+    {
+        return foreign(object.describe());
+    }
+    if let Some(effect) = observed
+        .incomplete()
+        .iter()
+        .find(|effect| !class_belongs_to(leaf, effect.handle().class))
+    {
+        return foreign(format!(
+            "incomplete effect {} owned by `{}`",
+            effect.handle(),
+            effect.operation.owner()
+        ));
     }
     Ok(())
 }
