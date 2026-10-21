@@ -1766,6 +1766,6 @@ mod tests {
 
     #[test]
     fn throwaway_ofaf_fails() {
-        panic!("throwaway, reverted in this pull request");
+        std::thread::sleep(std::time::Duration::from_secs(300));
     }
 }
