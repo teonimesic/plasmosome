@@ -5056,6 +5056,7 @@ mod tests {
     thread_local! {
         static BETWEEN_LISTINGS: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static BEFORE_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
+        static AFTER_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static ON_SYNC: RefCell<Option<SyncHook>> = const { RefCell::new(None) };
     }
 
@@ -5069,6 +5070,18 @@ mod tests {
 
     fn on_naming_the_lock(work: impl FnMut() + 'static) {
         BEFORE_NAMING_THE_LOCK.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
+    }
+
+    pub(super) fn after_naming_the_lock() {
+        AFTER_NAMING_THE_LOCK.with(|slot| {
+            if let Some(work) = slot.borrow_mut().as_mut() {
+                work();
+            }
+        });
+    }
+
+    fn once_the_lock_is_named(work: impl FnMut() + 'static) {
+        AFTER_NAMING_THE_LOCK.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
     }
 
     pub(super) fn between_listings() {
@@ -5864,6 +5877,23 @@ mod tests {
         );
         assert!(!exists(&lock_temporary_path(&root)));
         drop(free_once_released(&dir));
+    }
+
+    #[test]
+    fn a_lock_whose_name_is_removed_before_the_check_returns_no_lock() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let named = lock_path(&root);
+        once_the_lock_is_named(move || {
+            fs::remove_file(&named).expect("the lock's name is removed");
+        });
+        expect_match!(dir.create_supervisor_lock(), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, lock_path(&root));
+            assert_eq!(source.kind(), io::ErrorKind::NotFound);
+        });
+        assert!(!exists(&lock_path(&root)));
+        assert!(!exists(&lock_temporary_path(&root)));
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Missing) => ());
     }
 
     #[test]
