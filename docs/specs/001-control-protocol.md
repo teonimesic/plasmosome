@@ -790,7 +790,7 @@ request IDs and errors. Responses with a wrong request ID or cell, unknown field
 malformed exact objects, incomplete frames or timeout are failed observations. The controller
 must not operate a quarantine's effects merely because its supervisor answered.
 
-The observation methods `membrane.cell.observe`, `membrane.residue.snapshot`, §4.2's4090
+The observation methods `membrane.cell.observe`, `membrane.residue.snapshot`, §4.2's 4090
 `observe` and public `plasmosome.recovery` return bounded pages of one complete logical result.
 Their request IDs are unsigned64-bit integers. Each params record includes required
 `snapshot:u64` and `offset:u64`: zero/zero starts a capture and returns its first page; later
