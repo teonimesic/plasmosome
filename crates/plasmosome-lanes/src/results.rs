@@ -46,17 +46,36 @@ pub struct Record {
     pub lines: Vec<String>,
 }
 
+fn judged(row: &RowSpec) -> bool {
+    row.runs.iter().any(|run| run.expect != Expect::Observe)
+}
+
+fn observed(record: &Record, row: &str) -> bool {
+    record
+        .observations
+        .get(row)
+        .is_some_and(|seen| !seen.is_empty())
+}
+
 /// A row's verdict over its runs: `NotRun` when any run it reads has no record, when a judged
-/// run has no verdict for the row, or when one is `NotRun`; `Pass` when every `Pass` run passed
-/// and every `Fail` run failed; `Fail` otherwise, naming each run that differs. An `Observe` run
-/// never changes the verdict once its record exists.
+/// run has no verdict for the row, or when one is `NotRun`, a mutant's included; `Pass` when
+/// every `Pass` run passed and every `Fail` run failed; `Fail` otherwise, naming each run that
+/// differs. An `Observe` run never changes a judged row's verdict once its record exists. A row
+/// of observations only is `NotRun` when a run recorded no observation for it.
 pub fn row_verdict(row: &RowSpec, records: &[Record]) -> Verdict {
+    let judged = judged(row);
     let mut differ = Vec::new();
     for spec in &row.runs {
         let Some(record) = records.iter().find(|record| record.run == spec.run) else {
             return Verdict::NotRun(format!("run `{}` has no record", spec.run));
         };
         if spec.expect == Expect::Observe {
+            if !judged && !observed(record, &row.id) {
+                return Verdict::NotRun(format!(
+                    "run `{}` recorded no observation for {}",
+                    spec.run, row.id
+                ));
+            }
             continue;
         }
         let Some(verdict) = record.verdicts.get(&row.id) else {
@@ -95,9 +114,10 @@ fn verdict_text(verdict: &Verdict) -> String {
 }
 
 fn row_text(row: &RowSpec, verdict: &Verdict) -> String {
-    let judged = row.runs.iter().any(|run| run.expect != Expect::Observe);
+    let judged = judged(row);
     match verdict {
         Verdict::Pass if !judged => "**recorded**".to_string(),
+        Verdict::NotRun(why) if !judged => format!("**not recorded**: {why}"),
         Verdict::Pass => "**pass**".to_string(),
         Verdict::Fail(why) => format!("**fail**: {why}"),
         Verdict::NotRun(why) => format!("**not run**: {why}"),
@@ -118,7 +138,10 @@ fn observed_text(row: &RowSpec, spec: &RunSpec, records: &[Record]) -> String {
     };
     match record.verdicts.get(&row.id) {
         Some(verdict) => verdict_text(verdict),
-        None if spec.expect == Expect::Observe => "recorded".to_string(),
+        None if spec.expect == Expect::Observe && observed(record, &row.id) => {
+            "recorded".to_string()
+        }
+        None if spec.expect == Expect::Observe => "not recorded".to_string(),
         None => "not run: no verdict".to_string(),
     }
 }
@@ -195,11 +218,8 @@ fn observation_table(rows: &[RowSpec], records: &[Record]) -> String {
             .filter(|spec| spec.expect == Expect::Observe)
         {
             let seen = match records.iter().find(|record| record.run == spec.run) {
-                Some(record) => record
-                    .observations
-                    .get(&row.id)
-                    .cloned()
-                    .unwrap_or_default(),
+                Some(record) if observed(record, &row.id) => record.observations[&row.id].clone(),
+                Some(_) => vec!["not recorded".to_string()],
                 None => vec!["not run: no record".to_string()],
             };
             for line in seen {

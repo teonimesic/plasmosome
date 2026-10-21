@@ -506,9 +506,16 @@ mod linux {
         let source = PathBuf::from(format!("/run/r2-source-{config}"));
         let hidden = PathBuf::from(format!("/run/r2-hidden-{config}"));
         let unreachable = config == "unreachable";
-        fs::create_dir_all(base.join("opt/p"))?;
+        let parent_private = matches!(config, "private-parent" | "late-directory");
+        let late = config == "late-directory";
+        fs::create_dir_all(base.join(if late { "opt" } else { "opt/p" }))?;
         guest_sys::mount(&text(&base), &base, "none", MS_BIND)?;
-        guest_sys::mount("none", &base, "none", MS_SHARED)?;
+        let parent = if parent_private {
+            MS_PRIVATE
+        } else {
+            MS_SHARED
+        };
+        guest_sys::mount("none", &base, "none", parent)?;
         if unreachable {
             fs::create_dir_all(source.join("p"))?;
             placed(&hidden)?;
@@ -537,6 +544,9 @@ mod linux {
             guest_sys::mount(&text(&hidden), &source, "none", MS_BIND)?;
             None
         } else {
+            if late {
+                fs::create_dir(base.join("opt/p"))?;
+            }
             Some(guest_sys::mount(
                 &text(&source.join("p")),
                 &base.join("opt/p"),
@@ -559,8 +569,16 @@ mod linux {
                 source.join("p/bin/x"),
             ),
         };
+        let attach_point = if late {
+            "created after the workload namespace was made"
+        } else {
+            "made before the workload namespace"
+        };
         Ok(
             json!({"probe": "stage", "ok": true, "config": config, "placed_by": placed_by,
+                  "parent": if parent_private { "private" } else { "shared" },
+                  "workload_propagation": workload_propagation(config).1,
+                  "attach_point": attach_point,
                   "mount": mount, "initial_stat": probe::stat(&initial_path),
                   "workload_stat": reply["workload_stat"]}),
         )
@@ -570,14 +588,20 @@ mod linux {
         staged(config).unwrap_or_else(|error| failure("stage", &error))
     }
 
+    fn workload_propagation(config: &str) -> (Option<libc::c_ulong>, &'static str) {
+        match config {
+            "private" => (Some(MS_PRIVATE), "private"),
+            "private-parent" | "late-directory" => (None, "left as unshare made it"),
+            _ => (Some(MS_SLAVE), "slave"),
+        }
+    }
+
     fn ns_workload(config: &str, base: &str, source: &str) -> ExitCode {
-        let propagation = if config == "private" {
-            MS_PRIVATE
-        } else {
-            MS_SLAVE
-        };
-        let setup = guest_sys::unshare(CLONE_NEWNS)
-            .and_then(|()| guest_sys::mount("none", Path::new(base), "none", propagation));
+        let setup =
+            guest_sys::unshare(CLONE_NEWNS).and_then(|()| match workload_propagation(config).0 {
+                Some(flags) => guest_sys::mount("none", Path::new(base), "none", flags),
+                None => Ok(()),
+            });
         print(&done("ns-workload", setup));
         let _ = io::stdout().flush();
         let mut go = String::new();
@@ -657,7 +681,11 @@ mod linux {
                 guest_sys::umount2(Path::new(target), MNT_DETACH),
             ),
             ["scan", paths @ ..] if !paths.is_empty() => scan(paths),
-            ["stage", config @ ("visible" | "private" | "unreachable")] => stage(config),
+            [
+                "stage",
+                config @ ("visible" | "private" | "unreachable" | "private-parent"
+                | "late-directory"),
+            ] => stage(config),
             _ => return None,
         })
     }

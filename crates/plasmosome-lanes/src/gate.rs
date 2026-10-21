@@ -30,6 +30,8 @@ pub const TREE_DOC: &str = "opt/p/share/doc/readme.txt";
 pub const CACHE_WINDOW_MS: u64 = 5000;
 /// How long an `await` probe waits for a host flag.
 pub const AWAIT_MS: u64 = 30_000;
+/// The directory that holds the tree in the share, the share's only entry once the tree is gone.
+const TREE_PARENT: &str = "opt";
 /// The probe after whose result the host detaches the tree.
 pub const DETACH_AFTER: &str = "m4-hold-cwd";
 /// The flag the host writes once the tree is detached.
@@ -336,7 +338,11 @@ pub fn detach_probes(wait: bool) -> Vec<Probe> {
         probe("m3-release-map", WORKLOAD_UID, &["release", "map"]),
         probe("m3-release-exec", WORKLOAD_UID, &["release", "exec"]),
         probe("detach-list-share", WORKLOAD_UID, &["list", SHARE_MOUNT]),
-        probe("detach-list-opt", WORKLOAD_UID, &["list", &in_share("opt")]),
+        probe(
+            "detach-list-opt",
+            WORKLOAD_UID,
+            &["list", &in_share(TREE_PARENT)],
+        ),
         probe(
             "detach-lookup-tree",
             WORKLOAD_UID,
@@ -356,7 +362,8 @@ pub const SELF_CHECKS: [&str; 4] = [
 
 /// M3 passes when the helper's unconfined control and confined self-check each held, the host's
 /// flag arrived, and the descriptor, the mapping and the executable each read back `data` and
-/// `tool` after the detach, while the share lists no holding directory.
+/// `tool` after the detach, while the share lists only `opt` and `opt` lists nothing: neither the
+/// tree nor a holding directory, under any name, is left anywhere in the share.
 pub fn judge_m3(
     results: &[ProbeResult],
     stderr: &str,
@@ -378,10 +385,23 @@ pub fn judge_m3(
             wrong.extend(read_back(line(results, id, WORKLOAD_UID)?, id, expected));
         }
         let share = started(results, "detach-list-share", WORKLOAD_UID)?;
-        let names = share["names"].as_array().cloned().unwrap_or_default();
-        if names.iter().any(|name| name == HOLDING) {
+        let parent = started(results, "detach-list-opt", WORKLOAD_UID)?;
+        if !share["names"]
+            .as_array()
+            .is_some_and(|names| names.len() == 1 && names[0] == TREE_PARENT)
+        {
             wrong.push(format!(
-                "the share lists the holding directory `{HOLDING}`: {names:?}"
+                "the share lists {}, not only `{TREE_PARENT}`, so something besides it is in the share",
+                share["names"]
+            ));
+        }
+        if !parent["names"]
+            .as_array()
+            .is_some_and(|names| names.is_empty())
+        {
+            wrong.push(format!(
+                "`{TREE_PARENT}` lists {} after the host's detach, not nothing",
+                parent["names"]
             ));
         }
         failures(wrong)
@@ -559,8 +579,19 @@ pub fn judge_r1(results: &[ProbeResult], trials: usize) -> Tally {
     })
 }
 
-/// R2's configurations, in the order they run.
-pub const R2_CONFIGS: [&str; 3] = ["visible", "private", "unreachable"];
+/// R2's configurations, in the order they run: `visible`, the control, where the bind reaches
+/// the workload; `private`, where the workload's copy of a shared parent is private;
+/// `unreachable`, where the workload's namespace binds from a source it cannot reach;
+/// `private-parent`, where the parent is private, the attach point exists before the workload
+/// starts and the workload's namespace is left as it is; and `late-directory`, the same with the
+/// attach point created only after the workload starts.
+pub const R2_CONFIGS: [&str; 5] = [
+    "visible",
+    "private",
+    "unreachable",
+    "private-parent",
+    "late-directory",
+];
 
 /// R2's probes: one guest-root staging per configuration.
 pub fn r2_probes() -> Vec<Probe> {
@@ -570,9 +601,9 @@ pub fn r2_probes() -> Vec<Probe> {
         .collect()
 }
 
-/// R2's verdict for each configuration. `visible` shows the claim when the mount succeeded and
-/// the workload found the file; the other two when the mount succeeded and the workload's `stat`
-/// failed with `ENOENT`.
+/// R2's verdict for each configuration, each only once its mount succeeded and its stat in the
+/// initial namespace found the staged file. `visible` shows the claim when the workload found the
+/// file too; every other configuration when the workload's `stat` failed with `ENOENT`.
 pub fn judge_r2(results: &[ProbeResult]) -> Vec<(String, Verdict)> {
     R2_CONFIGS
         .iter()
@@ -586,6 +617,14 @@ fn staged(results: &[ProbeResult], config: &str) -> Judged {
     let mount = &line["mount"];
     if !ok(mount) {
         return not_run(format!("`{id}`'s mount gave {}", outcome(mount)));
+    }
+    let initial = &line["initial_stat"];
+    if !ok(initial) || initial["kind"] != "file" {
+        return not_run(format!(
+            "`{id}`: staging left no file, the initial namespace's stat gave {} ({})",
+            outcome(initial),
+            initial["kind"]
+        ));
     }
     let stat = &line["workload_stat"];
     if stat["id_u"] != WORKLOAD_UID {

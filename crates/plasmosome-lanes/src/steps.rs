@@ -20,13 +20,16 @@ pub type Action = Box<dyn FnOnce() -> io::Result<String> + Send>;
 pub struct Step {
     /// The probe whose result line starts the action.
     pub after: String,
-    /// The file written once the action returns, which a guest `await` probe waits for. It is
-    /// written after a failed action too, so the guest is never left waiting.
+    /// The file written once the action has succeeded, which a guest `await` probe waits for. A
+    /// failed action writes no flag, so the guest's wait times out and goes no further on a host
+    /// that did not act.
     pub flag: PathBuf,
     pub action: Action,
 }
 
-/// What one step did, with times in milliseconds since the run started.
+/// What one step did, with times in milliseconds since the run started. `flagged_ms` is when the
+/// step ended: once its flag was written, or, for an error, once the error was recorded with no
+/// flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepRecord {
     pub after: String,
@@ -96,14 +99,15 @@ impl Watch {
 
     fn take(&mut self, step: Step) {
         let started_ms = millis(self.start);
-        let outcome = (step.action)().map_err(|error| error.to_string());
-        let outcome = match fs::write(&step.flag, b"go\n") {
-            Ok(()) => outcome,
-            Err(error) => Err(format!(
-                "the flag {} could not be written: {error}",
-                step.flag.display()
-            )),
-        };
+        let outcome = (step.action)()
+            .map_err(|error| error.to_string())
+            .and_then(|text| match fs::write(&step.flag, b"go\n") {
+                Ok(()) => Ok(text),
+                Err(error) => Err(format!(
+                    "the flag {} could not be written: {error}",
+                    step.flag.display()
+                )),
+            });
         self.records.push(StepRecord {
             after: step.after,
             outcome,
