@@ -330,14 +330,16 @@ pub fn lane_notes(run: &StepsRun) -> Vec<String> {
             .map(str::to_string),
     );
     for step in &run.steps {
-        let outcome = match &step.outcome {
-            Ok(text) => format!("ok: {text}"),
-            Err(error) => format!("error: {error}"),
-        };
-        notes.push(format!(
-            "host step after `{}` at {} ms, flag written at {} ms: {outcome}",
-            step.after, step.started_ms, step.flagged_ms
-        ));
+        notes.push(match &step.outcome {
+            Ok(text) => format!(
+                "host step after `{}` at {} ms, flag written at {} ms: ok: {text}",
+                step.after, step.started_ms, step.flagged_ms
+            ),
+            Err(error) => format!(
+                "host step after `{}` at {} ms, ended at {} ms with no flag written: error: {error}",
+                step.after, step.started_ms, step.flagged_ms
+            ),
+        });
     }
     notes
 }
@@ -381,12 +383,13 @@ pub fn read_records() -> Vec<Record> {
         .collect()
 }
 
-/// What a gate lane run showed: a verdict per row, observations per row, and notes beyond the
-/// run's own.
+/// What a gate lane run showed: a verdict per row, observations per row, the measured count of a
+/// tallied row, and notes beyond the run's own.
 #[derive(Default)]
 pub struct Shown {
     pub verdicts: BTreeMap<String, Verdict>,
     pub observations: BTreeMap<String, Vec<String>>,
+    pub counts: BTreeMap<String, String>,
     pub notes: Vec<String>,
 }
 
@@ -410,6 +413,7 @@ pub fn record_lane(
         digests: lane_digests(&gate.lane),
         verdicts: shown.verdicts,
         observations: shown.observations,
+        counts: shown.counts,
         notes,
         lines: framed_lines(&run.run),
     };

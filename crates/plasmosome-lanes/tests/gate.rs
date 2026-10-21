@@ -8,6 +8,7 @@ use plasmosome_lanes::gate::{
     judge_m4, judge_m5, judge_r1, judge_r2, judge_r3, judge_r4_in_flight, judge_r4_thread,
     observe_names, refuses_source,
 };
+use plasmosome_lanes::steps::StepRecord;
 use serde_json::{Value, json};
 
 fn framed(id: &str, uid: u32, mut line: Value) -> ProbeResult {
@@ -256,6 +257,15 @@ fn detach(waited_ms: Option<u64>) -> Vec<ProbeResult> {
     results
 }
 
+fn detached() -> Vec<StepRecord> {
+    vec![StepRecord {
+        after: gate::DETACH_AFTER.to_string(),
+        outcome: Ok("moved 8 entries, deepest first".to_string()),
+        started_ms: 7000,
+        flagged_ms: 7010,
+    }]
+}
+
 fn replace(results: &mut [ProbeResult], id: &str, uid: u32, line: Value) {
     let slot = results
         .iter_mut()
@@ -311,7 +321,13 @@ fn the_detach_probes_hold_four_references_before_the_flag_and_release_after() {
 #[test]
 fn m3_passes_when_every_holder_reads_its_bytes_back_with_the_helper_confined() {
     assert_eq!(
-        judge_m3(&detach(Some(5001)), &self_check(None), &data(), &tool()),
+        judge_m3(
+            &detach(Some(5001)),
+            &self_check(None),
+            &data(),
+            &tool(),
+            &detached()
+        ),
         Verdict::Pass
     );
 }
@@ -323,13 +339,15 @@ fn m3_is_not_run_without_a_confined_helper_or_the_hosts_flag() {
         &results,
         "lane-vmm: starting run",
         &data(),
-        &tool()
+        &tool(),
+        &detached()
     )));
     assert!(is_not_run(&judge_m3(
         &results,
         &self_check(Some("write outside")),
         &data(),
-        &tool()
+        &tool(),
+        &detached()
     )));
     let mut unflagged = detach(Some(5001));
     replace(
@@ -342,8 +360,32 @@ fn m3_is_not_run_without_a_confined_helper_or_the_hosts_flag() {
         &unflagged,
         &self_check(None),
         &data(),
-        &tool()
+        &tool(),
+        &detached()
     )));
+}
+
+#[test]
+fn m3_is_not_run_when_the_host_took_no_detach_step_or_its_detach_failed() {
+    let results = detach(Some(5001));
+    let check = self_check(None);
+    assert!(
+        matches!(judge_m3(&results, &check, &data(), &tool(), &[]), Verdict::NotRun(reason) if reason.contains("no detach step"))
+    );
+    let mut other = detached();
+    other[0].after = "m3-hold-fd".to_string();
+    assert!(is_not_run(&judge_m3(
+        &results,
+        &check,
+        &data(),
+        &tool(),
+        &other
+    )));
+    let mut failed = detached();
+    failed[0].outcome = Err("rename failed: EXDEV".to_string());
+    assert!(
+        matches!(judge_m3(&results, &check, &data(), &tool(), &failed), Verdict::NotRun(reason) if reason.contains("rename failed: EXDEV"))
+    );
 }
 
 #[test]
@@ -357,7 +399,7 @@ fn m3_fails_when_a_held_read_fails_or_reads_other_bytes() {
         json!({"probe": "release", "ok": false, "errno": "ENOENT", "name": "fd"}),
     );
     assert!(is_fail(
-        &judge_m3(&failed, &check, &data(), &tool()),
+        &judge_m3(&failed, &check, &data(), &tool(), &detached()),
         "m3-release-fd"
     ));
     let mut died = detach(Some(5001));
@@ -369,7 +411,7 @@ fn m3_fails_when_a_held_read_fails_or_reads_other_bytes() {
                "error": "the holder closed without a reply"}),
     );
     assert!(is_fail(
-        &judge_m3(&died, &check, &data(), &tool()),
+        &judge_m3(&died, &check, &data(), &tool(), &detached()),
         "m3-release-map"
     ));
     let mut other = detach(Some(5001));
@@ -380,7 +422,7 @@ fn m3_fails_when_a_held_read_fails_or_reads_other_bytes() {
         released("exec", "exec", &expected("cc", 9)),
     );
     assert!(is_fail(
-        &judge_m3(&other, &check, &data(), &tool()),
+        &judge_m3(&other, &check, &data(), &tool(), &detached()),
         "m3-release-exec"
     ));
     let mut shorter = detach(Some(5001));
@@ -391,7 +433,7 @@ fn m3_fails_when_a_held_read_fails_or_reads_other_bytes() {
         released("fd", "fd", &expected("aa", 4)),
     );
     assert!(is_fail(
-        &judge_m3(&shorter, &check, &data(), &tool()),
+        &judge_m3(&shorter, &check, &data(), &tool(), &detached()),
         "m3-release-fd"
     ));
 }
@@ -406,7 +448,7 @@ fn m3_fails_when_the_guest_lists_the_holding_directory() {
         listing(&[gate::HOLDING, "opt"]),
     );
     assert!(is_fail(
-        &judge_m3(&results, &self_check(None), &data(), &tool()),
+        &judge_m3(&results, &self_check(None), &data(), &tool(), &detached()),
         gate::HOLDING
     ));
 }
@@ -421,7 +463,7 @@ fn m3_is_not_run_when_the_unconfined_control_is_missing_or_fails() {
         .collect();
     assert!(!no_control.contains("control"));
     assert!(
-        matches!(judge_m3(&results, &no_control, &data(), &tool()), Verdict::NotRun(reason) if reason.contains("control"))
+        matches!(judge_m3(&results, &no_control, &data(), &tool(), &detached()), Verdict::NotRun(reason) if reason.contains("control"))
     );
     let failed_control = self_check(None).replace(
         "control read outside: expected allowed, observed allowed, holds",
@@ -429,7 +471,7 @@ fn m3_is_not_run_when_the_unconfined_control_is_missing_or_fails() {
     );
     assert_ne!(failed_control, self_check(None));
     assert!(
-        matches!(judge_m3(&results, &failed_control, &data(), &tool()), Verdict::NotRun(reason) if reason.contains("control read outside"))
+        matches!(judge_m3(&results, &failed_control, &data(), &tool(), &detached()), Verdict::NotRun(reason) if reason.contains("control read outside"))
     );
 }
 
@@ -439,7 +481,7 @@ fn m3_fails_when_the_tree_is_still_in_the_share() {
     replace(&mut results, "detach-list-opt", 1000, listing(&["p"]));
 
     assert!(is_fail(
-        &judge_m3(&results, &self_check(None), &data(), &tool()),
+        &judge_m3(&results, &self_check(None), &data(), &tool(), &detached()),
         "opt"
     ));
 }
@@ -455,7 +497,7 @@ fn m3_fails_when_a_holding_directory_is_anywhere_in_the_share() {
         listing(&[gate::HOLDING]),
     );
     assert!(is_fail(
-        &judge_m3(&in_opt, &check, &data(), &tool()),
+        &judge_m3(&in_opt, &check, &data(), &tool(), &detached()),
         gate::HOLDING
     ));
     let mut renamed = detach(Some(5001));
@@ -466,7 +508,7 @@ fn m3_fails_when_a_holding_directory_is_anywhere_in_the_share() {
         listing(&["kept", "opt"]),
     );
     assert!(is_fail(
-        &judge_m3(&renamed, &check, &data(), &tool()),
+        &judge_m3(&renamed, &check, &data(), &tool(), &detached()),
         "kept"
     ));
     let mut no_names = detach(Some(5001));
@@ -477,7 +519,7 @@ fn m3_fails_when_a_holding_directory_is_anywhere_in_the_share() {
         json!({"probe": "list", "ok": true}),
     );
     assert!(is_fail(
-        &judge_m3(&no_names, &check, &data(), &tool()),
+        &judge_m3(&no_names, &check, &data(), &tool(), &detached()),
         "opt"
     ));
     let mut unlisted = detach(Some(5001));
@@ -487,7 +529,13 @@ fn m3_fails_when_a_holding_directory_is_anywhere_in_the_share() {
         1000,
         refused("list", "EIO"),
     );
-    assert!(is_not_run(&judge_m3(&unlisted, &check, &data(), &tool())));
+    assert!(is_not_run(&judge_m3(
+        &unlisted,
+        &check,
+        &data(),
+        &tool(),
+        &detached()
+    )));
 }
 
 #[test]
@@ -498,7 +546,7 @@ fn m3_is_not_run_when_a_release_ran_as_root_and_relays_the_holders_uid() {
     replace(&mut results, "m3-release-fd", 0, relayed);
 
     assert!(
-        matches!(judge_m3(&results, &self_check(None), &data(), &tool()), Verdict::NotRun(reason) if reason.contains("ran as uid 0"))
+        matches!(judge_m3(&results, &self_check(None), &data(), &tool(), &detached()), Verdict::NotRun(reason) if reason.contains("ran as uid 0"))
     );
 }
 
@@ -515,7 +563,8 @@ fn m3_is_not_run_when_a_release_ran_as_root() {
         &results,
         &self_check(None),
         &data(),
-        &tool()
+        &tool(),
+        &detached()
     )));
 }
 
@@ -723,6 +772,20 @@ fn r1_fails_a_trial_whose_lookup_after_found_a_directory() {
     let tally = judge_r1(&r1_trial(0, gone(), found()), 1);
 
     assert!(is_fail(&tally.trials[0].outcome, "dir"));
+}
+
+#[test]
+fn a_tally_counts_the_trials_that_held_of_those_claimed() {
+    let trial = |index, outcome| Trial { index, outcome };
+    let tally = Tally {
+        claimed: 3,
+        trials: vec![
+            trial(0, Verdict::Pass),
+            trial(1, Verdict::Fail("missed".to_string())),
+        ],
+    };
+
+    assert_eq!(tally.count(), "1 of 3 trials held");
 }
 
 #[test]

@@ -9,13 +9,11 @@ use std::time::Duration;
 
 use common::gate::{
     GateLane, Shown, assert_decided, expected, gate_lane, record_lane, results, run_gate,
-    test_commit, write_file, write_record,
+    write_file,
 };
 use plasmosome_lanes::config::{Semantics, Share};
 use plasmosome_lanes::gate::{self, R3_FILE, R3_TAG, R4_DIR, R4_FILE, Tally, Verdict};
-use plasmosome_lanes::results::Record;
 use plasmosome_lanes::steps::Step;
-use serde_json::json;
 
 const R1_TRIALS: usize = 80;
 const R3_TRIALS: usize = 16;
@@ -38,7 +36,7 @@ fn trial_notes(row: &str, tally: &Tally) -> Vec<String> {
 
 fn decided(row: &str, tally: &Tally) -> Verdict {
     let verdict = tally.verdict();
-    eprintln!("{row}: {} of {} held", tally.held(), tally.claimed);
+    eprintln!("{row}: {}", tally.count());
     assert_decided(row, &verdict);
     verdict
 }
@@ -70,6 +68,7 @@ fn r1_a_running_process_finds_a_subtree_the_host_creates_in_its_share() {
     let verdict = decided("R1", &tally);
     let shown = Shown {
         verdicts: BTreeMap::from([("R1".to_string(), verdict)]),
+        counts: BTreeMap::from([("R1".to_string(), tally.count())]),
         notes: trial_notes("R1", &tally),
         ..Shown::default()
     };
@@ -103,11 +102,12 @@ fn r2_mount_returns_0_while_the_workloads_stat_fails_enoent() {
         "r2-staging",
         &gate,
         &[
-            "guest root makes /run/r2-<config>/opt/p, binds it onto itself and makes it shared",
-            "a workload namespace is unshared from it: slave for visible and unreachable, private for private",
-            "visible and private: the initial namespace binds /run/r2-source-<config>/p onto /run/r2-<config>/opt/p",
+            "guest root makes /run/r2-<config>/opt and binds /run/r2-<config> onto itself: shared for visible, private and unreachable, private for private-parent and late-directory",
+            "the attach point opt/p is made before the workload namespace, except for late-directory, where the initial namespace creates it after the namespace exists",
+            "a workload namespace is unshared from it: slave for visible and unreachable, private for private, and left as unshare made it for private-parent and late-directory",
+            "visible, private, private-parent and late-directory: the initial namespace binds /run/r2-source-<config>/p onto /run/r2-<config>/opt/p after the workload namespace exists",
             "unreachable: the initial namespace binds /run/r2-hidden-unreachable over the source, then the workload namespace binds the source's p onto opt/p",
-            "the workload's stat of opt/p/bin/x runs as uid 1000 inside the workload namespace",
+            "the stat of opt/p/bin/x runs in the initial namespace as guest root, and in the workload namespace as uid 1000",
         ],
         &run,
         Shown {
@@ -115,19 +115,6 @@ fn r2_mount_returns_0_while_the_workloads_stat_fails_enoent() {
             ..Shown::default()
         },
     );
-    let reason = "027 §3.4 says four configurations and names two: private propagation, and a bind from a source the namespace cannot reach. PR #136's conversation names no other, so the other two could not be recovered and did not run";
-    write_record(&Record {
-        run: "r2-unrecovered".to_string(),
-        configuration: json!({"reason": reason}),
-        digests: BTreeMap::from([("test commit".to_string(), test_commit())]),
-        verdicts: ["R2 third configuration", "R2 fourth configuration"]
-            .into_iter()
-            .map(|row| (row.to_string(), Verdict::NotRun(reason.to_string())))
-            .collect(),
-        observations: BTreeMap::new(),
-        notes: Vec::new(),
-        lines: Vec::new(),
-    });
 }
 
 #[test]
@@ -158,6 +145,7 @@ fn r3_a_descriptor_and_mapping_survive_a_lazy_unmount() {
         &run,
         Shown {
             verdicts: BTreeMap::from([("R3".to_string(), verdict)]),
+            counts: BTreeMap::from([("R3".to_string(), tally.count())]),
             notes: trial_notes("R3", &tally),
             ..Shown::default()
         },
@@ -192,6 +180,10 @@ fn r4_a_threads_own_table_and_a_descriptor_in_flight() {
             verdicts: BTreeMap::from([
                 ("R4 thread".to_string(), thread_verdict),
                 ("R4 in flight".to_string(), in_flight_verdict),
+            ]),
+            counts: BTreeMap::from([
+                ("R4 thread".to_string(), thread.count()),
+                ("R4 in flight".to_string(), in_flight.count()),
             ]),
             notes,
             ..Shown::default()

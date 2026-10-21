@@ -18,13 +18,13 @@ use common::guest::{TIMEOUT, guest_binary, probe};
 use plasmosome_lanes::config::{MountOption, Semantics, WORKLOAD_UID};
 use plasmosome_lanes::console::ProbeResult;
 use plasmosome_lanes::gate::{
-    self, DETACH_AFTER, DETACH_FLAG, HOLDING, NAME_PAIRS, SHARE_MOUNT, SUID_TOOL, SourceCase, TREE,
-    Verdict,
+    self, DETACH_AFTER, DETACH_FLAG, Expected, HOLDING, NAME_PAIRS, SHARE_MOUNT, SUID_TOOL,
+    SourceCase, TREE, Verdict,
 };
 use plasmosome_lanes::holding::move_to_holding;
-use plasmosome_lanes::results::{Expect, Record, RowSpec, RunSpec, render};
+use plasmosome_lanes::results::{Expect, Record, RowSpec, RunSpec, one_commit, render};
 use plasmosome_lanes::steps::{Action, Step};
-use serde_json::{Value, json};
+use serde_json::json;
 
 const RESULTS_FILE: &str = "2026-10-20-spec027-q1a-gate.md";
 
@@ -364,6 +364,39 @@ fn detach_action(host: Host, tree: PathBuf, holding: PathBuf) -> Action {
     })
 }
 
+fn holders_seen(results: &[ProbeResult], data: &Expected, tool: &Expected) -> Vec<String> {
+    [
+        ("m3-release-fd", "the descriptor", data),
+        ("m3-release-map", "the mapping", data),
+        ("m3-release-exec", "the running binary", tool),
+    ]
+    .into_iter()
+    .map(|(id, what, expected)| {
+        let seen = match gate::result_of(results, id) {
+            None => "left no result line".to_string(),
+            Some(line)
+                if line["ok"] == true
+                    && line["sha256"] == expected.sha256.as_str()
+                    && line["bytes"] == expected.bytes =>
+            {
+                "read its bytes back".to_string()
+            }
+            Some(line) if line["ok"] == true => {
+                format!("read {} bytes that are not the ones placed", line["bytes"])
+            }
+            Some(line) => format!(
+                "failed: {}",
+                line["errno"]
+                    .as_str()
+                    .or_else(|| line["error"].as_str())
+                    .unwrap_or("an unnamed error")
+            ),
+        };
+        format!("`{id}`, {what}: {seen}")
+    })
+    .collect()
+}
+
 fn run_detach(name: &'static str, host: Host, wait: bool) -> (Verdict, Verdict, Record) {
     let mut gate = gate_lane(
         name,
@@ -381,12 +414,16 @@ fn run_detach(name: &'static str, host: Host, wait: bool) -> (Verdict, Verdict, 
     }];
     let run = run_gate(&gate, steps, TIMEOUT);
     let results = results(&run.run);
-    let m3 = gate::judge_m3(results, &run.run.stderr, &data, &tool);
+    let m3 = gate::judge_m3(results, &run.run.stderr, &data, &tool, &run.steps);
     let m4 = gate::judge_m4(results, wait);
     let mut shown = Shown::default();
     if wait {
         shown.verdicts.insert("M3".to_string(), m3.clone());
         shown.verdicts.insert("M4".to_string(), m4.clone());
+        shown.observations.insert(
+            "M3 holders".to_string(),
+            holders_seen(results, &data, &tool),
+        );
     } else {
         shown.observations.insert(
             "Cache window".to_string(),
@@ -589,6 +626,7 @@ fn run_m5(name: &str, what: &str, check: Check) -> Verdict {
         digests: BTreeMap::from([("test commit".to_string(), test_commit())]),
         verdicts: BTreeMap::from([("M5".to_string(), verdict.clone())]),
         observations: BTreeMap::new(),
+        counts: BTreeMap::new(),
         notes: Vec::new(),
         lines,
     });
@@ -706,10 +744,18 @@ fn rows() -> Vec<RowSpec> {
         ),
         row(
             "M3",
-            "A descriptor, a mapping and a running binary opened before the host moves the tree to the holding directory each read their bytes after it, with lane-vmm confined and its self-check passed first.",
+            "A descriptor, a mapping and a running binary opened before the host moves the tree to the holding directory each read their bytes after it, with lane-vmm confined and its self-check passed first. The profile is (allow default): it denies every write but the console's and the disk image's, and denies reads only inside the lane directory, apart from the software directory, the console, the image and the initramfs.",
             vec![
                 run_spec("detach-move", Host::Move.describe(), Pass),
                 run_spec("detach-delete", Host::Delete.describe(), Fail),
+            ],
+        ),
+        row(
+            "M3 holders",
+            "Which of M3's three holders read their bytes back under each host, the delete mutant included.",
+            vec![
+                run_spec("detach-move", Host::Move.describe(), Observe),
+                run_spec("detach-delete", Host::Delete.describe(), Observe),
             ],
         ),
         row(
@@ -771,14 +817,22 @@ fn rows() -> Vec<RowSpec> {
             )],
         ),
         row(
-            "R2 third configuration",
-            "027 §3.4 counts four configurations; this is one it does not name.",
-            vec![run_spec("r2-unrecovered", "not recovered", Pass)],
+            "R2 private-parent",
+            "027 §3.4, item 4: a configuration 027 counts and does not name. With the parent mount private, the attach point made before the workload's namespace, and that namespace left as unshare made it, mount returns 0 and the workload's stat fails ENOENT.",
+            vec![run_spec(
+                "r2-staging",
+                "guest root stages each configuration",
+                Pass,
+            )],
         ),
         row(
-            "R2 fourth configuration",
-            "027 §3.4 counts four configurations; this is one it does not name.",
-            vec![run_spec("r2-unrecovered", "not recovered", Pass)],
+            "R2 late-directory",
+            "027 §3.4, item 4: a configuration 027 counts and does not name. With the parent mount private and no attach point made beforehand, the initial namespace creates the directory after the workload's namespace exists and binds onto it; mount returns 0 and the workload's stat fails ENOENT.",
+            vec![run_spec(
+                "r2-staging",
+                "guest root stages each configuration",
+                Pass,
+            )],
         ),
         row(
             "R3",
@@ -807,7 +861,7 @@ fn rows() -> Vec<RowSpec> {
         ),
         row(
             "Setuid",
-            "What override_stat's setuid bit does for a binary the workload runs.",
+            "What override_stat's setuid bit does for a binary the workload runs. Only the setuid bit was measured; neither setgid nor nodev was.",
             vec![
                 run_spec("share-owned", OWNED, Observe),
                 run_spec("share-owned-nosuid", "the same, mounted nosuid", Observe),
@@ -825,22 +879,14 @@ fn command_text(program: &str, args: &[&str]) -> String {
 }
 
 fn preamble(records: &[Record]) -> String {
-    let commits: Vec<String> = records
-        .iter()
-        .filter_map(|record| record.digests.get("test commit").cloned())
-        .fold(Vec::new(), |mut commits, commit| {
-            if !commits.contains(&commit) {
-                commits.push(commit);
-            }
-            commits
-        });
+    let commit = one_commit(records)
+        .unwrap_or_else(|why| panic!("the records are not one run of one commit: {why}"));
     let host = format!(
         "macOS {} ({}), {}",
         command_text("sw_vers", &["-productVersion"]),
         command_text("sw_vers", &["-buildVersion"]),
         command_text("uname", &["-m"])
     );
-    let commits: Vec<Value> = commits.into_iter().map(Value::from).collect();
     format!(
         "# Spec 027's Q1(a) gate on the pinned guest, 2026-10-20
 
@@ -851,8 +897,15 @@ with no cell. The ignored tests in `crates/plasmosome-lanes/tests/q1a_gate.rs` a
 `tests/rerun.rs` ran them, and `write_the_results_file` wrote this file from their records.
 
 A row passes when its configuration passed and every mutant of it failed. A row whose run left
-no record, or decided nothing, reads `not run`. An observation is recorded and not judged. Every
-workload probe ran as uid 1000, and every result line carries the effective uid as `id_u`.
+no record, or decided nothing, reads `not run`, a mutant's run included. An observation is
+recorded and not judged, and an observation row whose run recorded nothing for it reads
+`not recorded`. A tallied row shows its measured count beside its verdict.
+
+Every workload probe ran as uid 1000, and every result line carries the process's effective uid
+as `id_u`. The setuid observation's holder is the one workload process that ran with effective
+uid 0, which is what that observation looks at. On macOS a new directory takes the group of the
+directory it is made in, so the group M1's plain run shows is that of the folder the lane was made
+in, not one the share chose.
 
 Owner gate O-6 was open while these ran: a library planted in `/opt/homebrew/opt/llvm/lib` or
 `/usr/local/lib` would load before `lane-vmm` checks any image. Nothing was planted there, and
@@ -860,12 +913,12 @@ neither directory was changed. Nothing here needed root on the host or a second 
 gate O-8).
 
 - Host: {host}.
-- Test commits: {commits}.
+- Test commit: `{commit}`. The writer refuses records from more than one commit, or from a
+  tree with uncommitted changes.
 - Re-run: build the guest binaries as `crates/plasmosome-lanes/README.md` says, then
   `cargo test -p plasmosome-lanes --test q1a_gate --test rerun -- --ignored --test-threads=1 --skip write_the_results_file`.
   The writer runs last: `cargo test -p plasmosome-lanes --test q1a_gate write_the_results_file -- --ignored`.
 ",
-        commits = serde_json::to_string(&commits).unwrap_or_default(),
     )
 }
 

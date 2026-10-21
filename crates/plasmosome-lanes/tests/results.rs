@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use plasmosome_lanes::gate::Verdict;
-use plasmosome_lanes::results::{Expect, Record, RowSpec, RunSpec, render, row_verdict};
+use plasmosome_lanes::results::{
+    Expect, Record, RowSpec, RunSpec, one_commit, render, row_verdict,
+};
 use serde_json::json;
 
 fn run(name: &str, expect: Expect) -> RunSpec {
@@ -30,6 +32,7 @@ fn record(name: &str, verdicts: &[(&str, Verdict)]) -> Record {
             .map(|(row, verdict)| (row.to_string(), verdict.clone()))
             .collect(),
         observations: BTreeMap::new(),
+        counts: BTreeMap::new(),
         notes: vec![format!("note of {name}")],
         lines: vec![format!("LANE-RESULT line of {name}")],
     }
@@ -326,4 +329,54 @@ fn an_observation_row_reads_recorded_only_with_its_observation_and_a_missing_ver
             .any(|line| line.starts_with("| Names | real |") && line.ends_with("| recorded |")),
         "{text}"
     );
+}
+
+#[test]
+fn a_measured_count_is_written_beside_its_rows_verdict() {
+    let r1 = row("R1", vec![run("eighty", Expect::Pass)]);
+    let mut eighty = record("eighty", &[("R1", Verdict::Pass)]);
+    eighty
+        .counts
+        .insert("R1".to_string(), "80 of 80 trials held".to_string());
+
+    let text = render("", &[r1], &[eighty]);
+
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| R1 | the claim of R1 |")
+                && line.ends_with("| **pass** (80 of 80 trials held) |")),
+        "{text}"
+    );
+    assert!(
+        text.lines().any(|line| line.starts_with("| R1 | eighty |")
+            && line.ends_with("| pass (80 of 80 trials held) |")),
+        "{text}"
+    );
+    assert!(text.contains("- R1: pass (80 of 80 trials held)"), "{text}");
+}
+
+#[test]
+fn the_records_must_name_one_test_commit_with_no_uncommitted_changes() {
+    let at = |name: &str, commit: &str| {
+        let mut record = record(name, &[]);
+        record
+            .digests
+            .insert("test commit".to_string(), commit.to_string());
+        record
+    };
+
+    assert_eq!(
+        one_commit(&[at("a", "abc"), at("b", "abc")]),
+        Ok("abc".to_string())
+    );
+    assert!(
+        matches!(one_commit(&[at("a", "abc"), at("b", "def")]), Err(why) if why.contains("abc") && why.contains("def"))
+    );
+    assert!(
+        matches!(one_commit(&[at("a", "abc with uncommitted changes")]), Err(why) if why.contains("uncommitted"))
+    );
+    assert!(
+        matches!(one_commit(&[at("a", "abc"), record("bare", &[])]), Err(why) if why.contains("bare"))
+    );
+    assert!(one_commit(&[]).is_err());
 }
