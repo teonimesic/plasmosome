@@ -24,6 +24,7 @@ one.
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's cell ID allocation, `supervisor.lock` and `membraned.log`, its `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
 | `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. Callers gather the facts and carry out the outcome |
+| `supervisor_start` | Spec 023 §4's start: `start_supervisor` runs one cell's `membraned` detached, with an exact argv, an empty environment and only descriptors 0 to 4, and then writes it the config record. Nothing calls it yet |
 | `closure` | What removing a plugin takes, with no IO. `AttachmentGraph` holds one cell's attached plugins, the providers each one directly requires, and which ones were asked for by name; a provider is attached before its requirers. `stranded_by` lists the plugins that directly require a given one, which `plasmid.remove` must refuse to strand. `removal_closure` gives that plugin, every plugin that transitively requires it, and every unnamed provider required only by plugins it takes, followed down the chain. Spec 011's `plasmid.remove` and spec 028's expiry are to share it, so the two cannot take different sets; nothing calls it yet |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary. Its config may carry spec 023's `cell_runtime`, read as `CellRuntime` |
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
@@ -131,7 +132,10 @@ toml builds, so a declaration that passes has a tree at most 32 levels deep. A h
 two whatever it names, so under a plain table header the count is above the tree's depth, up to
 about twice it: a 16-part table header with a key under it counts 33 and is refused, although its
 tree is 17 deep.
-`WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
+`WireError::manifest_refusal` turns any of them into code 108. A `Field` refusal carries its
+`field` and its `fix`, and its `plasmid` exactly when it names one, as members a client reads
+without parsing `detail`. A refusal of an `id` that is missing, not a string or empty names no
+plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three members.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description.
 
@@ -293,7 +297,8 @@ calls them yet.
   then, the error is `Io` naming `supervisor.lock`. A directory at `supervisor.lock.tmp` cannot be
   unlinked, so every create is then an `Io` error naming it; only a writer under the root can plant
   one. The returned `SupervisorLock` holds the lock. `into_owned_fd` gives up its descriptor, still
-  locked, to become `membraned`'s descriptor 4.
+  locked. `start_supervisor` takes the `SupervisorLock` itself instead, and hands `membraned` a
+  copy of its descriptor as descriptor 4.
 - `CellDir::probe_supervisor_lock` tries the lock on a fresh read-only descriptor. `Held` means
   another open of the file holds it, even one in this process. `Free` keeps the lock it took
   until the returned `SupervisorLock` is dropped. `Missing` means no entry is there, and nothing
@@ -314,6 +319,58 @@ holds it when it has a `SupervisorLock` whose `identity()` equals the cell's
 `supervisor_lock_identity()`: one from `create_supervisor_lock` that it has not handed over, or
 one from a `Free` probe. `retire` does not take one yet. Nothing calls `retire`, and its first
 caller is where the shape of that call will be known.
+
+## Starting membraned
+
+`supervisor_start::start_supervisor` is spec 023 §4's start of one cell's `membraned`. The caller
+passes the verified `membraned` path, the cell, its held `SupervisorLock`, `membraned.log` and
+the encoded config record. Nothing calls it yet; `cell.new` will, after it verifies the Artifacts
+and creates the lock.
+
+- `membraned` runs `[path, "--config-fd=3", "--lock-fd=4", "--cell=<id>"]` with an empty
+  environment. Descriptors 0 and 1 are `/dev/null`, 2 is the log, 3 is the read end of a new
+  pipe and 4 is the lock. Every other descriptor is closed in the new process, close-on-exec or
+  not: up to the larger of `getdtablesize()` and `kern.maxfilesperproc` on Darwin, and with
+  `close_range` on Linux, which needs Linux 5.9. Every signal is at its default action and none is
+  blocked.
+- It is a double fork, not a launchd job: launchd starts a job from a plist, and the job inherits
+  no descriptor from the controller, so it would get no pipe and no lock. The intermediate forks
+  once more and exits, so `membraned` leads its own session and process group with init as its
+  parent. The controller reaps the intermediate by its PID and keeps no PID of `membraned`.
+- Everything that allocates happens before the fork: the argv, `/dev/null`, a copy of the log and
+  of the lock, the config pipe and a report pipe, each copied to descriptor 5 or above, so no copy
+  onto 0 to 4 replaces a source a later copy needs. A lock that already sits at 4 is copied too,
+  because `dup2(4, 4)` would leave it close-on-exec. The children make only async-signal-safe
+  calls, except the intermediate's own `fork`, which POSIX.1-2024 no longer lists. The `SAFETY:`
+  comment in `intermediate` gives its reason: the intermediate has one thread, and the first
+  fork's own child handlers left every atfork lock released. The calling thread blocks every signal from just before the fork until the fork
+  returns, so no handler of the controller runs in a child. The grandchild sets every action to
+  be ignored and then to the default before it empties its mask. Setting an action to be ignored
+  discards a signal still pending, such as one sent to the controller's process group before the
+  grandchild left it.
+- A failure before the exec writes its step and errno to the report pipe, which is close-on-exec.
+  End of file with nothing read means the exec succeeded. Then, and only then, the controller
+  closes its lock and its copy of the read end, so the lock is never free: `membraned` holds the
+  same open file. A failure returns the lock, still held, so the caller can retire the cell. A
+  new process killed directly before its exec also closes the report pipe with nothing written.
+  The start reads that as an exec, so it releases its lock, and the record's write gives
+  `SupervisorClosedPipe`.
+- The wait for the exec ends at the deadline. If by then the new process has neither reported a
+  failure nor closed its report pipe, the controller closes the record's pipe unwritten and
+  returns `ExecUnconfirmed` with the lock still held. A `membraned` that was executed reads an
+  empty record.
+- The record is written after the exec, so it may be larger than a pipe holds. The write never
+  waits past the deadline: a full pipe at the deadline is `RecordNotTaken`, and a closed reader is
+  `SupervisorClosedPipe`. On Darwin the pipe is set not to raise `SIGPIPE`; on Linux the start
+  relies on a Rust `main` ignoring it. Once the whole record is written, the controller closes the pipe: that is the end of file
+  `membraned`'s `cell_start::read_config` reads to.
+- On Darwin a new pipe is close-on-exec only after a second call. A process the controller starts
+  at that moment by a spawn that does not close every other descriptor can inherit a pipe end.
+  That end has no close-on-exec flag, so if it is the report pipe's write end, the start waits
+  until that process exits, or returns `ExecUnconfirmed` at the deadline. Spec 023 has every
+  start close them.
+- On Linux before 5.9 there is no `close_range`, so every start fails with
+  `Exec { step: Descriptors, errno: ENOSYS }` and no `membraned` runs: the start fails closed.
 
 ## Command line
 
