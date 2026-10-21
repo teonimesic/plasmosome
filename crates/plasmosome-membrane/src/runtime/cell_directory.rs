@@ -177,3 +177,603 @@ impl fmt::Display for CellDirectoryFault {
         todo!()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::test_fixtures::private_root;
+    use crate::runtime::test_fixtures::tree::set_mode;
+    use plasmosome_core::private_socket::effective_uid;
+    use std::fs;
+    use std::io;
+    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::path::{Path, PathBuf};
+
+    fn recipe_path(path: &Path) -> RecipePath {
+        RecipePath::parse(path.to_str().expect("test paths are UTF-8"))
+            .expect("test paths are canonical")
+    }
+
+    fn make_dir(path: &Path, mode: u32) -> PathBuf {
+        fs::create_dir(path).expect("mkdir");
+        set_mode(path, mode);
+        path.to_path_buf()
+    }
+
+    fn open_at(path: &Path) -> Result<PrivateDirectory, CellDirectoryRefusal> {
+        PrivateDirectory::open(&recipe_path(path))
+    }
+
+    fn opened(path: &Path) -> PrivateDirectory {
+        open_at(path).expect("the private directory opens")
+    }
+
+    fn fault_of<T: fmt::Debug>(outcome: Result<T, CellDirectoryRefusal>) -> CellDirectoryFault {
+        outcome.expect_err("the call is refused").fault
+    }
+
+    fn private(refusal: PrivateSocketError) -> CellDirectoryFault {
+        CellDirectoryFault::Private(refusal)
+    }
+
+    fn identity_of(path: &Path) -> FileIdentity {
+        let metadata = fs::symlink_metadata(path).expect("lstat");
+        FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }
+    }
+
+    fn absent(path: &Path) -> bool {
+        matches!(fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    }
+
+    fn copy_of(
+        path: &Path,
+        parent: &PrivateDirectory,
+        bytes: &[u8],
+    ) -> Result<WritableRoot, CellDirectoryRefusal> {
+        create_copy(&recipe_path(path), parent, bytes, &Digest::of(bytes))
+    }
+
+    struct Cell {
+        _root: tempfile::TempDir,
+        base: PathBuf,
+        dir: PathBuf,
+    }
+
+    impl Cell {
+        fn new() -> Cell {
+            let root = private_root();
+            let base = root.path().to_path_buf();
+            let dir = make_dir(&base.join("cell"), 0o700);
+            Cell {
+                _root: root,
+                base,
+                dir,
+            }
+        }
+
+        fn root_img(&self) -> PathBuf {
+            self.dir.join("root.img")
+        }
+    }
+
+    #[test]
+    fn a_private_directory_is_owned_by_the_effective_uid_with_no_group_or_other_bit() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        assert_eq!(dir.path().as_path(), cell.dir);
+        assert_eq!(dir.identity(), identity_of(&cell.dir));
+        for (name, mode) in [("group", 0o750), ("other", 0o701), ("shared", 0o770)] {
+            let path = make_dir(&cell.base.join(name), mode);
+            assert_eq!(
+                fault_of(open_at(&path)),
+                private(PrivateSocketError::NotPrivate { path, mode }),
+                "{name}"
+            );
+        }
+        let file = cell.base.join("file");
+        fs::write(&file, b"").expect("write");
+        set_mode(&file, 0o600);
+        assert_eq!(
+            fault_of(open_at(&file)),
+            private(PrivateSocketError::NotDirectory { path: file })
+        );
+    }
+
+    #[test]
+    fn a_world_readable_directory_or_one_reached_through_a_symlink_is_refused() {
+        let cell = Cell::new();
+        let open = make_dir(&cell.base.join("open"), 0o755);
+        assert_eq!(
+            fault_of(open_at(&open)),
+            private(PrivateSocketError::NotPrivate {
+                path: open,
+                mode: 0o755
+            })
+        );
+        let link = cell.base.join("link");
+        symlink(&cell.dir, &link).expect("symlink");
+        assert_eq!(
+            fault_of(open_at(&link)),
+            private(PrivateSocketError::SymlinkInPath { path: link.clone() })
+        );
+        make_dir(&cell.dir.join("inner"), 0o700);
+        assert_eq!(
+            fault_of(open_at(&link.join("inner"))),
+            private(PrivateSocketError::SymlinkInPath { path: link })
+        );
+    }
+
+    #[test]
+    fn reconfirm_refuses_a_directory_renamed_away_and_replaced() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        assert_eq!(dir.reconfirm(), Ok(()));
+        fs::rename(&cell.dir, cell.base.join("moved")).expect("rename");
+        make_dir(&cell.dir, 0o700);
+        let refusal = dir
+            .reconfirm()
+            .expect_err("the path names another directory");
+        assert_eq!(refusal.path.as_path(), cell.dir);
+        assert_eq!(
+            refusal.fault,
+            private(PrivateSocketError::Replaced {
+                path: cell.dir.clone()
+            })
+        );
+    }
+
+    #[test]
+    fn a_copy_whose_bytes_match_is_a_new_private_file_holding_them() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let bytes: Vec<u8> = (0..(3 << 20) + 17).map(|at: u32| at as u8).collect();
+        let root = copy_of(&cell.root_img(), &dir, &bytes).expect("the copy is made");
+        assert_eq!(root.path().as_path(), cell.root_img());
+        assert_eq!(root.identity(), identity_of(&cell.root_img()));
+        let metadata = fs::symlink_metadata(cell.root_img()).expect("lstat");
+        assert!(metadata.is_file());
+        assert_eq!(metadata.mode() & 0o7777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(metadata.uid(), effective_uid());
+        assert_eq!(fs::read(cell.root_img()).expect("read"), bytes);
+    }
+
+    #[test]
+    fn a_copy_whose_bytes_miss_the_digest_is_refused_and_leaves_no_file() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let expected = Digest::of(b"the root image");
+        let outcome = create_copy(
+            &recipe_path(&cell.root_img()),
+            &dir,
+            &b"other bytes"[..],
+            &expected,
+        );
+        assert_eq!(
+            fault_of(outcome),
+            CellDirectoryFault::CopyMismatch {
+                expected,
+                actual: Digest::of(b"other bytes"),
+            }
+        );
+        assert!(absent(&cell.root_img()));
+    }
+
+    struct FailsAfter(usize);
+
+    impl Read for FailsAfter {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.0 == 0 {
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            }
+            let read = self.0.min(buffer.len());
+            buffer[..read].fill(7);
+            self.0 -= read;
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn a_copy_whose_read_fails_is_refused_and_leaves_no_file() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let outcome = create_copy(
+            &recipe_path(&cell.root_img()),
+            &dir,
+            FailsAfter(100_000),
+            &Digest::of(b"the root image"),
+        );
+        assert_eq!(
+            fault_of(outcome),
+            CellDirectoryFault::Io {
+                op: "pread",
+                errno: libc::EIO
+            }
+        );
+        assert!(absent(&cell.root_img()));
+    }
+
+    #[test]
+    fn an_entry_already_at_the_name_is_refused_as_exists_and_left_as_it_was() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let name = cell.root_img();
+        let victim = cell.base.join("victim");
+        fs::write(&victim, b"victim bytes").expect("write");
+        set_mode(&victim, 0o644);
+        let victim_identity = identity_of(&victim);
+
+        fs::write(&name, b"old bytes").expect("write");
+        let before = identity_of(&name);
+        assert_eq!(
+            fault_of(copy_of(&name, &dir, b"new")),
+            CellDirectoryFault::Exists
+        );
+        assert_eq!(fs::read(&name).expect("read"), b"old bytes");
+        assert_eq!(identity_of(&name), before);
+        fs::remove_file(&name).expect("rm");
+
+        let nowhere = cell.base.join("nowhere");
+        symlink(&nowhere, &name).expect("symlink");
+        assert_eq!(
+            fault_of(copy_of(&name, &dir, b"new")),
+            CellDirectoryFault::Exists
+        );
+        assert!(absent(&nowhere));
+        assert_eq!(fs::read_link(&name).expect("readlink"), nowhere);
+        fs::remove_file(&name).expect("rm");
+
+        symlink(&victim, &name).expect("symlink");
+        assert_eq!(
+            fault_of(copy_of(&name, &dir, b"new")),
+            CellDirectoryFault::Exists
+        );
+        assert_eq!(fs::read(&victim).expect("read"), b"victim bytes");
+        assert_eq!(identity_of(&victim), victim_identity);
+        let victim_mode = fs::metadata(&victim).expect("stat").mode() & 0o7777;
+        assert_eq!(victim_mode, 0o644);
+        fs::remove_file(&name).expect("rm");
+
+        make_dir(&name, 0o700);
+        assert_eq!(
+            fault_of(copy_of(&name, &dir, b"new")),
+            CellDirectoryFault::Exists
+        );
+        assert!(fs::symlink_metadata(&name).expect("lstat").is_dir());
+    }
+
+    #[test]
+    fn a_writable_root_outside_the_private_directory_is_refused_as_wrong_parent() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let other = make_dir(&cell.base.join("other"), 0o700);
+        let nested = make_dir(&cell.dir.join("nested"), 0o700);
+        for path in [
+            other.join("root.img"),
+            nested.join("root.img"),
+            cell.base.join("root.img"),
+        ] {
+            assert_eq!(
+                fault_of(copy_of(&path, &dir, b"bytes")),
+                CellDirectoryFault::WrongParent,
+                "{}",
+                path.display()
+            );
+            assert!(absent(&path), "{}", path.display());
+        }
+        assert!(absent(&cell.root_img()));
+        assert_eq!(
+            fault_of(copy_of(Path::new("/root.img"), &dir, b"bytes")),
+            CellDirectoryFault::WrongParent
+        );
+    }
+
+    #[test]
+    fn a_private_directory_replaced_before_the_copy_is_refused_and_nothing_is_created() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let moved = cell.base.join("moved");
+        fs::rename(&cell.dir, &moved).expect("rename");
+        make_dir(&cell.dir, 0o700);
+        assert_eq!(
+            fault_of(copy_of(&cell.root_img(), &dir, b"bytes")),
+            private(PrivateSocketError::Replaced {
+                path: cell.dir.clone()
+            })
+        );
+        assert!(absent(&cell.root_img()));
+        assert!(absent(&moved.join("root.img")));
+    }
+
+    #[test]
+    fn a_directory_that_refuses_the_create_is_an_io_refusal() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        set_mode(&cell.dir, 0o500);
+        let outcome = copy_of(&cell.root_img(), &dir, b"bytes");
+        set_mode(&cell.dir, 0o700);
+        assert_eq!(
+            fault_of(outcome),
+            CellDirectoryFault::Io {
+                op: "openat",
+                errno: libc::EACCES
+            }
+        );
+        assert!(absent(&cell.root_img()));
+    }
+
+    #[test]
+    fn remove_reports_removed_left_replacement_or_already_gone() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let name = cell.root_img();
+
+        let root = copy_of(&name, &dir, b"first").expect("the copy is made");
+        assert_eq!(root.remove(), RemoveOutcome::Removed);
+        assert!(absent(&name));
+
+        let root = copy_of(&name, &dir, b"second").expect("the copy is made");
+        let moved = cell.dir.join("moved.img");
+        fs::rename(&name, &moved).expect("rename");
+        fs::write(&name, b"replacement").expect("write");
+        assert_eq!(root.remove(), RemoveOutcome::LeftReplacement);
+        assert_eq!(fs::read(&moved).expect("read"), b"second");
+        assert_eq!(fs::read(&name).expect("read"), b"replacement");
+        fs::remove_file(&name).expect("rm");
+
+        let root = copy_of(&name, &dir, b"third").expect("the copy is made");
+        fs::remove_file(&name).expect("rm");
+        assert_eq!(root.remove(), RemoveOutcome::AlreadyGone);
+    }
+
+    #[test]
+    fn remove_reports_a_failed_inspection_or_unlink_and_leaves_the_copy() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let name = cell.root_img();
+        let failed = RemoveOutcome::Failed {
+            errno: libc::EACCES,
+        };
+
+        let root = copy_of(&name, &dir, b"bytes").expect("the copy is made");
+        set_mode(&cell.dir, 0o500);
+        let outcome = root.remove();
+        set_mode(&cell.dir, 0o700);
+        assert_eq!(outcome, failed, "no write permission: the unlink fails");
+        assert_eq!(fs::read(&name).expect("read"), b"bytes");
+        fs::remove_file(&name).expect("rm");
+
+        let root = copy_of(&name, &dir, b"bytes").expect("the copy is made");
+        set_mode(&cell.dir, 0o000);
+        let outcome = root.remove();
+        set_mode(&cell.dir, 0o700);
+        assert_eq!(
+            outcome, failed,
+            "no search permission: the inspection fails"
+        );
+        assert_eq!(fs::read(&name).expect("read"), b"bytes");
+    }
+
+    #[test]
+    fn dropping_a_writable_root_removes_its_copy_and_leaves_a_replacement() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let name = cell.root_img();
+        drop(copy_of(&name, &dir, b"bytes").expect("the copy is made"));
+        assert!(absent(&name));
+
+        let root = copy_of(&name, &dir, b"bytes").expect("the copy is made");
+        fs::rename(&name, cell.dir.join("moved.img")).expect("rename");
+        fs::write(&name, b"replacement").expect("write");
+        drop(root);
+        assert_eq!(fs::read(&name).expect("read"), b"replacement");
+        assert_eq!(
+            fs::read(cell.dir.join("moved.img")).expect("read"),
+            b"bytes"
+        );
+    }
+
+    #[test]
+    fn remove_reaches_the_copy_in_a_renamed_directory_and_leaves_the_old_path_alone() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let root = copy_of(&cell.root_img(), &dir, b"bytes").expect("the copy is made");
+        let moved = cell.base.join("moved");
+        fs::rename(&cell.dir, &moved).expect("rename");
+        make_dir(&cell.dir, 0o700);
+        fs::write(cell.root_img(), b"decoy").expect("write");
+        assert_eq!(root.remove(), RemoveOutcome::Removed);
+        assert!(absent(&moved.join("root.img")));
+        assert_eq!(fs::read(cell.root_img()).expect("read"), b"decoy");
+    }
+
+    #[test]
+    fn each_fault_says_what_was_found() {
+        use CellDirectoryFault::*;
+        let (expected, actual) = (Digest::of(b"a"), Digest::of(b"b"));
+        let mismatch = format!("{actual}, not the verified {expected}");
+        let rows = [
+            (
+                Private(PrivateSocketError::NotPrivate {
+                    path: "/a/cell".into(),
+                    mode: 0o750,
+                }),
+                "/a/cell has mode 0750",
+            ),
+            (WrongParent, "not the private directory"),
+            (
+                WrongSource {
+                    role: ArtifactRole::Kernel,
+                },
+                "kernel, not the root image",
+            ),
+            (Exists, "already exists and was left"),
+            (CopyMismatch { expected, actual }, &mismatch),
+            (
+                Source(ArtifactFault::ChangedSinceVerification),
+                "the root image changed or moved after it was verified: its size or times",
+            ),
+            (
+                Io {
+                    op: "fsync",
+                    errno: 5,
+                },
+                "fsync failed with errno 5",
+            ),
+        ];
+        for (fault, part) in rows {
+            let shown = fault.to_string();
+            assert!(shown.contains(part), "{shown:?} names {part}");
+        }
+        let refusal = CellDirectoryRefusal {
+            path: RecipePath::parse("/a/cell/root.img").expect("canonical"),
+            fault: Exists,
+        };
+        assert!(refusal.to_string().starts_with("/a/cell/root.img: "));
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use super::*;
+        use crate::runtime::artifacts::verify_artifact;
+        use crate::runtime::recipe::Artifact;
+        use crate::runtime::strict_json;
+        use crate::runtime::test_fixtures::tree::{ArtifactTree, set_flags};
+        use std::io::Seek;
+        use std::os::unix::fs::FileExt;
+
+        fn verified(role: ArtifactRole, path: &Path, bytes: &[u8]) -> VerifiedArtifact {
+            let text = serde_json::json!({
+                "path": path.to_str().expect("test paths are UTF-8"),
+                "sha256": Digest::of(bytes).hex(),
+            })
+            .to_string();
+            let value = strict_json::parse_value(text.as_bytes()).expect("the artifact is JSON");
+            let artifact =
+                Artifact::from_value(&value, "root_image").expect("the artifact is valid");
+            verify_artifact(role, &artifact).expect("the artifact verifies")
+        }
+
+        struct Bundle {
+            tree: ArtifactTree,
+            cell: PathBuf,
+            image: PathBuf,
+        }
+
+        impl Bundle {
+            fn new() -> Bundle {
+                let tree = ArtifactTree::new();
+                tree.dir("base", 0o700);
+                let cell = tree.dir("cell", 0o700);
+                let image = tree.join("base/rootfs.raw");
+                Bundle { tree, cell, image }
+            }
+
+            fn root_img(&self) -> PathBuf {
+                self.cell.join("root.img")
+            }
+
+            fn create(
+                &self,
+                source: &VerifiedArtifact,
+            ) -> Result<WritableRoot, CellDirectoryRefusal> {
+                WritableRoot::create(&recipe_path(&self.root_img()), &opened(&self.cell), source)
+            }
+        }
+
+        fn image_bytes() -> Vec<u8> {
+            (0..(2 << 20) + 5).map(|at: u32| (at % 251) as u8).collect()
+        }
+
+        #[test]
+        fn the_copy_holds_exactly_the_verified_bytes_in_a_new_private_file() {
+            let bundle = Bundle::new();
+            let bytes = image_bytes();
+            bundle.tree.immutable_file("base/rootfs.raw", &bytes);
+            let source = verified(ArtifactRole::RootImage, &bundle.image, &bytes);
+            let root = bundle.create(&source).expect("the copy is made");
+            assert_eq!(root.path().as_path(), bundle.root_img());
+            assert_eq!(root.identity(), identity_of(&bundle.root_img()));
+            assert_ne!(root.identity(), source.identity());
+            let metadata = fs::symlink_metadata(bundle.root_img()).expect("lstat");
+            assert!(metadata.is_file());
+            assert_eq!(metadata.mode() & 0o7777, 0o600);
+            assert_eq!(metadata.nlink(), 1);
+            assert_eq!(metadata.uid(), effective_uid());
+            assert_eq!(fs::read(bundle.root_img()).expect("read"), bytes);
+            let mut file = source.file();
+            assert_eq!(file.stream_position().expect("the offset"), 0);
+        }
+
+        #[test]
+        fn the_copy_reads_the_verified_descriptor_not_the_path() {
+            let bundle = Bundle::new();
+            let bytes = image_bytes();
+            bundle.tree.immutable_file("base/rootfs.raw", &bytes);
+            let source = verified(ArtifactRole::RootImage, &bundle.image, &bytes);
+            set_flags(&bundle.image, 0);
+            fs::rename(&bundle.image, bundle.tree.join("base/rootfs.old")).expect("rename");
+            bundle
+                .tree
+                .immutable_file("base/rootfs.raw", b"another image");
+            assert_eq!(
+                fault_of(bundle.create(&source)),
+                CellDirectoryFault::Source(ArtifactFault::Replaced {
+                    verified: source.identity(),
+                    found: identity_of(&bundle.image),
+                })
+            );
+            assert!(absent(&bundle.root_img()));
+        }
+
+        #[test]
+        fn a_root_image_a_held_writer_rewrote_after_verification_is_refused_and_leaves_no_copy() {
+            let bundle = Bundle::new();
+            let bytes = image_bytes();
+            let path = bundle.tree.file("base/rootfs.raw", &bytes, 0o644);
+            let writer = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("a writer opened before the lock");
+            set_mode(&path, 0o444);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            let source = verified(ArtifactRole::RootImage, &path, &bytes);
+            writer
+                .write_all_at(&bytes[..16], 0)
+                .expect("the held writer still writes");
+            assert_eq!(
+                fault_of(bundle.create(&source)),
+                CellDirectoryFault::Source(ArtifactFault::ChangedSinceVerification)
+            );
+            assert!(absent(&bundle.root_img()));
+        }
+
+        #[test]
+        fn a_source_other_than_the_root_image_is_refused_as_wrong_source() {
+            let bundle = Bundle::new();
+            let kernel = bundle.tree.immutable_file("base/kernel", b"kernel");
+            let source = verified(ArtifactRole::Kernel, &kernel, b"kernel");
+            assert_eq!(
+                fault_of(bundle.create(&source)),
+                CellDirectoryFault::WrongSource {
+                    role: ArtifactRole::Kernel
+                }
+            );
+            assert!(absent(&bundle.root_img()));
+        }
+
+        #[test]
+        fn create_refuses_an_entry_already_at_the_name_and_leaves_it() {
+            let bundle = Bundle::new();
+            let bytes = image_bytes();
+            bundle.tree.immutable_file("base/rootfs.raw", &bytes);
+            let source = verified(ArtifactRole::RootImage, &bundle.image, &bytes);
+            fs::write(bundle.root_img(), b"old bytes").expect("write");
+            assert_eq!(fault_of(bundle.create(&source)), CellDirectoryFault::Exists);
+            assert_eq!(fs::read(bundle.root_img()).expect("read"), b"old bytes");
+        }
+    }
+}

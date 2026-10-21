@@ -1302,6 +1302,33 @@ mod tests {
     }
 
     #[test]
+    fn the_lent_descriptor_reaches_the_directory_held_open_after_its_path_is_replaced() {
+        let root = test_root();
+        make_dir(&root.path().join("cell"), 0o700);
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        fs::rename(root.path().join("cell"), root.path().join("moved")).expect("rename");
+        make_dir(&root.path().join("cell"), 0o700);
+        let lent = fs::File::from(dir.as_fd().try_clone_to_owned().expect("dup"));
+        let held = lent.metadata().expect("fstat");
+        assert_eq!(
+            DirIdentity {
+                dev: held.dev(),
+                ino: held.ino()
+            },
+            dir.identity()
+        );
+        let entry = c"made";
+        assert_eq!(stat_at(&OwnedFd::from(lent), entry), Err(libc::ENOENT));
+        fs::write(root.path().join("moved/made"), b"").expect("a file in the moved directory");
+        let lent = dir.as_fd().try_clone_to_owned().expect("dup");
+        assert_eq!(
+            stat_at(&lent, entry).map(|facts| facts.kind),
+            Ok(Kind::Regular)
+        );
+        assert!(!root.path().join("cell/made").exists());
+    }
+
+    #[test]
     fn reconfirm_fails_when_the_directory_is_no_longer_private() {
         let root = test_root();
         make_dir(&root.path().join("cell"), 0o700);
