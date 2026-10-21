@@ -2969,6 +2969,34 @@ mod tests {
     }
 
     #[test]
+    fn a_mode_set_by_name_is_private_and_never_follows_a_link() {
+        let (_dir, root) = temp_root();
+        let target = root.join("target");
+        fs::create_dir(&target).expect("the target is made");
+        set_mode(&target, 0o500);
+        symlink(&target, root.join("link")).expect("the link is made");
+        fs::create_dir(root.join("plain")).expect("the directory is made");
+        set_mode(&root.join("plain"), 0o300);
+        let parent = fs::File::open(&root).expect("the root opens");
+        let on_link = change_mode_at(parent.as_fd(), c"link", PRIVATE_DIRECTORY);
+        assert_eq!(
+            mode_of(&target),
+            0o500,
+            "the chmod by name followed the link"
+        );
+        if cfg!(target_os = "macos") {
+            on_link.expect("macOS sets the link's own mode");
+            assert_eq!(mode_of(&root.join("link")), 0o700);
+        } else {
+            expect_match!(on_link, Err(error) => {
+                assert_eq!(error.raw_os_error(), Some(libc::EOPNOTSUPP), "{error}")
+            });
+        }
+        change_mode_at(parent.as_fd(), c"plain", PRIVATE_DIRECTORY).expect("the mode is set");
+        assert_eq!(mode_of(&root.join("plain")), 0o700);
+    }
+
+    #[test]
     fn a_cell_whose_cells_sync_failed_is_not_adopted_and_its_retry_syncs_cells() {
         let (_dir, root) = temp_root();
         fs::create_dir(root.join("cells")).expect("cells is made");
