@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
+use std::io::{self, Read};
+use std::os::unix::fs::FileExt;
 
 use super::artifacts::VerifiedArtifact;
 use super::digest::Digest;
@@ -75,8 +78,54 @@ pub enum InitramfsRefusal {
 
 impl fmt::Display for InitramfsRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        use InitramfsRefusal::*;
+        match self {
+            WrongRole { role } => write!(
+                f,
+                "the {role} was passed where the initramfs or the guest policy belongs"
+            ),
+            TooLarge { bytes } => write!(
+                f,
+                "the initramfs holds {bytes} bytes, more than {MAX_INITRAMFS_BYTES}"
+            ),
+            NotNewc { offset } => write!(f, "the entry at byte {offset} is not newc 070701"),
+            BadHeaderField { offset, field } => write!(
+                f,
+                "the {field} field of the entry at byte {offset} is not 8 hex digits, or is a \
+                 body on a directory or the trailer"
+            ),
+            NonzeroCheck { offset } => {
+                write!(f, "the entry at byte {offset} has a nonzero check field")
+            }
+            BadName { offset, reason } => {
+                write!(f, "the name of the entry at byte {offset} {reason}")
+            }
+            DuplicateEntry { name } => write!(f, "{name} appears twice"),
+            SymlinkEntry { name } => write!(f, "{name} is a symlink"),
+            UnsupportedType { name, mode } => write!(
+                f,
+                "{name} has mode {mode:06o}, neither a regular file nor a directory"
+            ),
+            HardLink { name, nlink } => write!(f, "{name} has nlink {nlink}, not 1"),
+            MissingParent { name } => write!(f, "{name} has no earlier parent directory"),
+            Truncated { offset } => write!(f, "the part at byte {offset} runs past the end"),
+            NonzeroPadding { offset } => write!(f, "padding byte {offset} is not zero"),
+            DataAfterTrailer { offset } => {
+                write!(f, "byte {offset}, after the trailer, is not zero")
+            }
+            MissingTrailer => f.write_str("the archive ends with no TRAILER!!! entry"),
+            MissingInit => f.write_str("the archive has no regular init entry"),
+            InitNotExecutable { mode } => write!(f, "init has mode {mode:06o}, no execute bit"),
+            InitEmpty => f.write_str("init is empty"),
+            MissingGuestPolicy => {
+                f.write_str("the archive has no regular plasmosome/guest-policy entry")
+            }
+            GuestPolicyMismatch { expected, actual } => write!(
+                f,
+                "plasmosome/guest-policy hashes to {actual}, not the verified {expected}"
+            ),
+            Io { op, errno } => write!(f, "{op} failed with errno {errno}"),
+        }
     }
 }
 
@@ -102,21 +151,288 @@ pub fn verify_initramfs(
     initramfs: &VerifiedArtifact,
     guest_policy: &VerifiedArtifact,
 ) -> Result<InitramfsBinding, InitramfsRefusal> {
-    let _ = (initramfs, guest_policy);
-    todo!()
+    for (artifact, role) in [
+        (initramfs, ArtifactRole::Initramfs),
+        (guest_policy, ArtifactRole::GuestPolicy),
+    ] {
+        if artifact.role() != role {
+            return Err(InitramfsRefusal::WrongRole {
+                role: artifact.role(),
+            });
+        }
+    }
+    let bytes = read_bounded(initramfs.file(), initramfs.size(), MAX_INITRAMFS_BYTES)?;
+    audit_newc(&bytes, guest_policy.digest())
+}
+
+const MAGIC: &[u8; 6] = b"070701";
+const HEADER_BYTES: usize = 110;
+const PATH_MAX: usize = 4096;
+const TRAILER: &str = "TRAILER!!!";
+const POLICY_NAME: &str = "plasmosome/guest-policy";
+const FIELDS: [&str; 13] = [
+    "ino",
+    "mode",
+    "uid",
+    "gid",
+    "nlink",
+    "mtime",
+    "filesize",
+    "devmajor",
+    "devminor",
+    "rdevmajor",
+    "rdevminor",
+    "namesize",
+    "check",
+];
+const TYPE_BITS: u32 = 0o170000;
+const REGULAR: u32 = 0o100000;
+const DIRECTORY: u32 = 0o040000;
+const SYMLINK: u32 = 0o120000;
+
+struct Entry<'a> {
+    at: usize,
+    mode: u32,
+    nlink: u32,
+    name: &'a str,
+    data: &'a [u8],
+    end: usize,
 }
 
 pub(crate) fn audit_newc(
     bytes: &[u8],
     expected_policy: &Digest,
 ) -> Result<InitramfsBinding, InitramfsRefusal> {
-    let _ = (bytes, expected_policy);
-    todo!()
+    let mut seen: HashMap<&str, bool> = HashMap::new();
+    let (mut init, mut policy) = (None, None);
+    let mut at = 0;
+    loop {
+        let entry = read_entry(bytes, at)?;
+        if entry.name == TRAILER {
+            if !entry.data.is_empty() {
+                return Err(bad_field(entry.at, "filesize"));
+            }
+            let after = bytes.get(entry.end..).unwrap_or_default();
+            return match after.iter().position(|byte| *byte != 0) {
+                Some(index) => Err(InitramfsRefusal::DataAfterTrailer {
+                    offset: (entry.end + index) as u64,
+                }),
+                None => bind(init, policy, expected_policy, seen.len()),
+            };
+        }
+        judge(&entry, &seen)?;
+        let regular = entry.mode & TYPE_BITS == REGULAR;
+        match entry.name {
+            "init" if regular => init = Some((entry.mode, entry.data)),
+            POLICY_NAME if regular => policy = Some(entry.data),
+            _ => {}
+        }
+        seen.insert(entry.name, !regular);
+        at = entry.end;
+    }
+}
+
+fn bind(
+    init: Option<(u32, &[u8])>,
+    policy: Option<&[u8]>,
+    expected: &Digest,
+    entries: usize,
+) -> Result<InitramfsBinding, InitramfsRefusal> {
+    let (mode, init) = init.ok_or(InitramfsRefusal::MissingInit)?;
+    if mode & 0o111 == 0 {
+        return Err(InitramfsRefusal::InitNotExecutable { mode });
+    }
+    if init.is_empty() {
+        return Err(InitramfsRefusal::InitEmpty);
+    }
+    let actual = Digest::of(policy.ok_or(InitramfsRefusal::MissingGuestPolicy)?);
+    if actual != *expected {
+        return Err(InitramfsRefusal::GuestPolicyMismatch {
+            expected: *expected,
+            actual,
+        });
+    }
+    Ok(InitramfsBinding {
+        init_size: init.len() as u64,
+        init_digest: Digest::of(init),
+        policy_digest: actual,
+        entries,
+    })
+}
+
+fn read_entry(bytes: &[u8], at: usize) -> Result<Entry<'_>, InitramfsRefusal> {
+    let offset = at as u64;
+    let rest = bytes.get(at..).unwrap_or_default();
+    if rest.is_empty() {
+        return Err(InitramfsRefusal::MissingTrailer);
+    }
+    match rest.get(..MAGIC.len()) {
+        Some(magic) if magic == MAGIC => {}
+        None if MAGIC.starts_with(rest) => return Err(InitramfsRefusal::Truncated { offset }),
+        _ => return Err(InitramfsRefusal::NotNewc { offset }),
+    }
+    let header = take(bytes, at, HEADER_BYTES)?;
+    let mut fields = [0; 13];
+    for (index, field) in fields.iter_mut().enumerate() {
+        let start = MAGIC.len() + index * 8;
+        *field = header
+            .get(start..start + 8)
+            .and_then(hex_field)
+            .ok_or_else(|| bad_field(at, FIELDS[index]))?;
+    }
+    let [
+        _,
+        mode,
+        _,
+        _,
+        nlink,
+        _,
+        filesize,
+        _,
+        _,
+        _,
+        _,
+        namesize,
+        check,
+    ] = fields;
+    if check != 0 {
+        return Err(InitramfsRefusal::NonzeroCheck { offset });
+    }
+    let bad_name = |reason| InitramfsRefusal::BadName { offset, reason };
+    let namesize = namesize as usize;
+    if namesize < 2 {
+        return Err(bad_name("is empty"));
+    }
+    if namesize > PATH_MAX {
+        return Err(bad_name("is longer than PATH_MAX"));
+    }
+    let name_at = at + HEADER_BYTES;
+    let Some((0, name)) = take(bytes, name_at, namesize)?.split_last() else {
+        return Err(bad_name("does not end in NUL"));
+    };
+    if name.contains(&0) {
+        return Err(bad_name("holds a NUL before its end"));
+    }
+    let name = std::str::from_utf8(name).map_err(|_| bad_name("is not UTF-8"))?;
+    let data_at = padded(bytes, name_at + namesize)?;
+    let data = take(bytes, data_at, filesize as usize)?;
+    let end = padded(bytes, data_at + data.len())?;
+    Ok(Entry {
+        at,
+        mode,
+        nlink,
+        name,
+        data,
+        end,
+    })
+}
+
+fn judge(entry: &Entry<'_>, seen: &HashMap<&str, bool>) -> Result<(), InitramfsRefusal> {
+    if let Some(reason) = name_fault(entry.name) {
+        let offset = entry.at as u64;
+        return Err(InitramfsRefusal::BadName { offset, reason });
+    }
+    let name = entry.name.to_string();
+    match entry.mode & TYPE_BITS {
+        REGULAR if entry.nlink != 1 => {
+            let nlink = entry.nlink;
+            return Err(InitramfsRefusal::HardLink { name, nlink });
+        }
+        DIRECTORY if !entry.data.is_empty() => return Err(bad_field(entry.at, "filesize")),
+        REGULAR | DIRECTORY => {}
+        SYMLINK => return Err(InitramfsRefusal::SymlinkEntry { name }),
+        _ => {
+            let mode = entry.mode;
+            return Err(InitramfsRefusal::UnsupportedType { name, mode });
+        }
+    }
+    if let Some((parent, _)) = entry.name.rsplit_once('/')
+        && seen.get(parent) != Some(&true)
+    {
+        return Err(InitramfsRefusal::MissingParent { name });
+    }
+    if seen.contains_key(entry.name) {
+        return Err(InitramfsRefusal::DuplicateEntry { name });
+    }
+    Ok(())
+}
+
+fn name_fault(name: &str) -> Option<&'static str> {
+    let mut parts = name.split('/');
+    if name.starts_with('/') {
+        Some("is absolute")
+    } else if name.ends_with('/') {
+        Some("ends in /")
+    } else if parts.clone().any(str::is_empty) {
+        Some("has an empty part")
+    } else if parts.any(|part| part == "." || part == "..") {
+        Some("has a . or .. part")
+    } else {
+        None
+    }
+}
+
+fn hex_field(text: &[u8]) -> Option<u32> {
+    text.iter().try_fold(0, |value, byte| {
+        Some((value << 4) | char::from(*byte).to_digit(16)?)
+    })
+}
+
+fn bad_field(at: usize, field: &'static str) -> InitramfsRefusal {
+    InitramfsRefusal::BadHeaderField {
+        offset: at as u64,
+        field,
+    }
+}
+
+fn take(bytes: &[u8], at: usize, length: usize) -> Result<&[u8], InitramfsRefusal> {
+    at.checked_add(length)
+        .and_then(|end| bytes.get(at..end))
+        .ok_or(InitramfsRefusal::Truncated { offset: at as u64 })
+}
+
+fn padded(bytes: &[u8], at: usize) -> Result<usize, InitramfsRefusal> {
+    let end = at.next_multiple_of(4);
+    match take(bytes, at, end - at)?
+        .iter()
+        .position(|byte| *byte != 0)
+    {
+        Some(index) => Err(InitramfsRefusal::NonzeroPadding {
+            offset: (at + index) as u64,
+        }),
+        None => Ok(end),
+    }
 }
 
 fn read_bounded(file: &File, size: u64, bound: u64) -> Result<Vec<u8>, InitramfsRefusal> {
-    let _ = (file, size, bound);
-    todo!()
+    if size > bound {
+        return Err(InitramfsRefusal::TooLarge { bytes: size });
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(size).map_or(0, |size| size + 1));
+    Positioned { file, offset: 0 }
+        .take(bound.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| InitramfsRefusal::Io {
+            op: "pread",
+            errno: error.raw_os_error().unwrap_or(libc::EIO),
+        })?;
+    match bytes.len() as u64 {
+        read if read > bound => Err(InitramfsRefusal::TooLarge { bytes: read }),
+        _ => Ok(bytes),
+    }
+}
+
+struct Positioned<'a> {
+    file: &'a File,
+    offset: u64,
+}
+
+impl Read for Positioned<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.file.read_at(buffer, self.offset)?;
+        self.offset += read as u64;
+        Ok(read)
+    }
 }
 
 #[cfg(test)]
