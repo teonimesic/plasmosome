@@ -339,6 +339,18 @@ def an_existing_workload_name_or_id_1000_refuses():
         ]:
             detail = refusal("stage", stage_with, root, {path: f(data)})
             assert f"/{path} line" in detail, detail
+        for path, data in [
+            ("etc/group", GROUP + b"wheel2:x:2000:workload\0\n"),
+            ("etc/group", GROUP + b"wheel2:x:2000:workload\0,alice\n"),
+            ("etc/group", GROUP + b"wheel2:x:2000:alice,workload\0junk\n"),
+            ("etc/gshadow", GSHADOW + b"wheel2:*::workload\0\n"),
+            ("etc/gshadow", GSHADOW + b"wheel2:*:workload\0:\n"),
+            ("etc/gshadow", GSHADOW + b"workload\0:*::\n"),
+            ("etc/gshadow", GSHADOW + b"workload\0\n"),
+        ]:
+            _, mode, uid, gid, _, _ = DEBIAN[path]
+            detail = refusal("stage", stage_with, root, {path: f(data, mode, uid, gid)})
+            assert f"/{path}" in detail and "NUL" in detail, detail
 
 
 def entries_under_opt_or_usr_local_bin_refuse():
