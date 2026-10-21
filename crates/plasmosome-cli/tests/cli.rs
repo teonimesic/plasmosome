@@ -481,3 +481,34 @@ fn a_served_command_with_no_code_is_internal() {
     assert_eq!(envelope["command"], "plasmosome.status");
     assert_eq!(envelope["error"]["code"], "internal");
 }
+
+fn help_text(line: &[&str], commands: &[Command]) -> String {
+    match read(&args(line), commands) {
+        Reading::Help { text, .. } => text,
+        other => panic!("{line:?} read as {other:?}"),
+    }
+}
+
+#[test]
+fn help_says_what_each_command_is() {
+    let commands = status_served();
+    let help = help_text(&["--help"], &commands);
+    let row = help
+        .lines()
+        .find(|line| line.starts_with("  plasmosome status "))
+        .expect("status is listed");
+    assert!(
+        row.ends_with("  served") && !row.ends_with("not served"),
+        "{row:?}"
+    );
+    assert!(help_text(&["status", "--help"], &commands).contains("\nServed in this build.\n"));
+    let search = help_text(&["registry", "search", "--help"], COMMANDS);
+    assert!(
+        search.contains("Spec 020's registry command search, which changes no state."),
+        "{search}"
+    );
+    assert!(
+        help_text(&["registry", "yank", "--help"], COMMANDS).contains("which changes state."),
+        "yank changes state"
+    );
+}

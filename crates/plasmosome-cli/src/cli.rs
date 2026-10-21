@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn a_panic_is_internal() {
+    fn a_panic_in_a_command_is_internal_and_no_other_panic_is_hidden() {
         let previous = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
             HOOK_RAN.set(true);
@@ -670,5 +670,13 @@ mod tests {
         assert_eq!(envelope["error"]["domain"], "client");
         assert_eq!(envelope["error"]["code"], "internal");
         assert!(envelope.get("instance").is_none());
+
+        HOOK_RAN.set(false);
+        let outside = panic::catch_unwind(|| panic!("a panic outside a command"));
+        assert!(outside.is_err());
+        assert!(
+            HOOK_RAN.get(),
+            "the hook handle installed hid a panic outside a command"
+        );
     }
 }
