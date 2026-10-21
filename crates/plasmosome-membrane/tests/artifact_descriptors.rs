@@ -3,7 +3,7 @@
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use plasmosome_membrane::runtime::artifacts::{ArtifactFault, verify_recipe_artifacts};
@@ -112,6 +112,40 @@ fn chflags(path: &Path, flags: libc::c_uint) -> libc::c_int {
     unsafe { libc::chflags(name.as_ptr(), flags) }
 }
 
+fn identity_of(path: &Path) -> (u64, u64) {
+    let metadata = fs::symlink_metadata(path).expect("stat");
+    (metadata.dev(), metadata.ino())
+}
+
+#[allow(unsafe_code)]
+fn identity_and_close_on_exec(fd: libc::c_int) -> Option<((u64, u64), bool)> {
+    // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat writes only the local `stat`. A number no longer open fails with EBADF.
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
+    // SAFETY: F_GETFD only reads the descriptor's flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    (flags != -1).then_some((
+        (stat.st_dev as u64, stat.st_ino),
+        flags & libc::FD_CLOEXEC != 0,
+    ))
+}
+
+fn descriptors_naming(identities: &[(u64, u64)]) -> Vec<(libc::c_int, bool)> {
+    open_descriptors()
+        .iter()
+        .filter_map(|name| name.parse().ok())
+        .filter_map(|fd| {
+            let (identity, close_on_exec) = identity_and_close_on_exec(fd)?;
+            identities
+                .contains(&identity)
+                .then_some((fd, close_on_exec))
+        })
+        .collect()
+}
+
 fn open_descriptors() -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir("/dev/fd")
         .expect("/dev/fd lists this process's descriptors")
@@ -122,10 +156,13 @@ fn open_descriptors() -> Vec<String> {
 }
 
 #[test]
-fn a_refused_recipe_and_a_dropped_one_leave_every_descriptor_as_it_was() {
+fn each_verified_artifact_holds_two_close_on_exec_descriptors_and_a_refused_or_dropped_one_none() {
     let bundle = Bundle::new();
     let (tampered, intact) = (bundle.recipe(Some("root_image")), bundle.recipe(None));
+    let root = [identity_of(Path::new("/"))];
+    let files: Vec<(u64, u64)> = bundle.paths.iter().map(|path| identity_of(path)).collect();
     let before = open_descriptors();
+    let roots_before = descriptors_naming(&root).len();
     let refusal = verify_recipe_artifacts(&tampered).expect_err("the root image is tampered");
     assert_eq!(refusal.role, ArtifactRole::RootImage);
     assert_eq!(
@@ -138,7 +175,26 @@ fn a_refused_recipe_and_a_dropped_one_leave_every_descriptor_as_it_was() {
     assert_eq!(open_descriptors(), before, "after the refusal");
     let verified = verify_recipe_artifacts(&intact).expect("every artifact verifies");
     let held = open_descriptors().len().saturating_sub(before.len());
-    assert!(held >= ARTIFACTS.len(), "{held} descriptors held");
+    assert_eq!(
+        held,
+        2 * ARTIFACTS.len(),
+        "each artifact's file and its walk's /"
+    );
+    let on_root = descriptors_naming(&root);
+    let on_files = descriptors_naming(&files);
+    assert_eq!(
+        on_root.len() - roots_before,
+        ARTIFACTS.len(),
+        "one / per walk"
+    );
+    assert_eq!(on_files.len(), ARTIFACTS.len(), "one per file");
+    let inherited: Vec<libc::c_int> = on_root
+        .iter()
+        .chain(&on_files)
+        .filter(|(_, close_on_exec)| !close_on_exec)
+        .map(|(fd, _)| *fd)
+        .collect();
+    assert_eq!(inherited, Vec::<libc::c_int>::new(), "without FD_CLOEXEC");
     drop(verified);
     assert_eq!(open_descriptors(), before, "after the drop");
 }

@@ -970,6 +970,56 @@ mod tests {
         }
 
         #[test]
+        fn reconfirm_refuses_an_owner_rewrite_that_kept_the_size_and_restored_the_mtime() {
+            let tree = ArtifactTree::new();
+            let path = tree.immutable_file("kernel", b"kernel");
+            let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
+            let before = fs::metadata(&path).expect("stat");
+            set_flags(&path, 0);
+            set_mode(&path, 0o644);
+            let writer = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("the owner opens it for writing");
+            writer.write_all_at(b"KERNEL", 0).expect("rewrite");
+            writer
+                .set_modified(before.modified().expect("mtime"))
+                .expect("restore the mtime");
+            drop(writer);
+            set_mode(&path, 0o444);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            let after = fs::metadata(&path).expect("stat");
+            let size_and_mtime = |m: &fs::Metadata| (m.len(), m.mtime(), m.mtime_nsec());
+            assert_eq!(size_and_mtime(&after), size_and_mtime(&before));
+            assert_ne!(
+                (after.ctime(), after.ctime_nsec()),
+                (before.ctime(), before.ctime_nsec())
+            );
+            assert_eq!(
+                reconfirmed(&verified),
+                Err(ArtifactFault::ChangedSinceVerification)
+            );
+        }
+
+        #[test]
+        fn reconfirm_closes_the_file_it_opens_whether_it_passes_or_refuses() {
+            let tree = ArtifactTree::new();
+            let path = tree.immutable_file("kernel", b"kernel");
+            let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
+            let identity = [verified.identity()];
+            assert_eq!(descriptors_naming(&identity).len(), 1);
+            for _ in 0..50 {
+                assert_eq!(reconfirmed(&verified), Ok(()));
+            }
+            assert_eq!(descriptors_naming(&identity).len(), 1, "after it passed");
+            set_flags(&path, 0);
+            for _ in 0..50 {
+                assert_eq!(reconfirmed(&verified), Err(ArtifactFault::NotImmutable));
+            }
+            assert_eq!(descriptors_naming(&identity).len(), 1, "after it refused");
+        }
+
+        #[test]
         fn reconfirm_refuses_a_file_whose_uchg_was_cleared_or_that_was_made_writable() {
             let tree = ArtifactTree::new();
             let path = tree.immutable_file("kernel", b"kernel");
@@ -1066,6 +1116,18 @@ mod tests {
             let refusal = verify_recipe_artifacts(&recipe_pinning(&bundle, &library))
                 .expect_err("the second library is tampered");
             assert_eq!(refusal.role, ArtifactRole::Library(1));
+        }
+
+        #[test]
+        fn each_role_is_reported_when_it_and_every_role_after_it_are_tampered() {
+            let bundle = bundle();
+            for (index, (role, _, _)) in ROLES.iter().enumerate() {
+                let tampered: Vec<ArtifactRole> =
+                    ROLES[index..].iter().map(|(role, _, _)| *role).collect();
+                let refusal = verify_recipe_artifacts(&recipe_pinning(&bundle, &tampered))
+                    .expect_err("an artifact is tampered");
+                assert_eq!(refusal.role, *role, "{tampered:?}");
+            }
         }
     }
 }
