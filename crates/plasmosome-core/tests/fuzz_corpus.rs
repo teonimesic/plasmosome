@@ -1,3 +1,5 @@
+#[path = "fuzz/control_line.rs"]
+mod control_line;
 #[path = "fuzz/replay.rs"]
 mod replay;
 
@@ -142,4 +144,9 @@ fn inputs_arrive_in_name_order() {
     let expected: Vec<Vec<u8>> = sorted.iter().map(|name| name.as_bytes().to_vec()).collect();
     let seen = SEEN.lock().expect("no recording check panics").clone();
     assert_eq!(seen, expected, "the inputs arrive sorted by name");
+}
+
+#[test]
+fn the_control_line_corpus_replays() {
+    replay::replay("control_line", control_line::check);
 }
