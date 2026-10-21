@@ -189,7 +189,7 @@ component that escapes the sandbox runs as the component host process, under G3'
   on task plasmosome-qep), and it cannot judge Unix connects: "The qualified host policy allows
   outbound connections to Unix sockets and answers `network-outbound` denied."
   (`plasmosome-membrane`'s `confinement.rs`, lines 4 to 7). Spec 023 records the same gap in the
-  helper's own policy: "the qualified bundle's policy allows any Unix socket" (`023:480`). So for
+  helper's own policy: "the qualified bundle's policy allows any Unix socket" (`023:483`). So for
   Unix connects, signals, exec, Mach lookups and reads of other processes the reviewed policy text
   is the proof, and an acceptance item probes each.
 - **G4. Enforcement outside the component host.** Every check here is made by the cell's egress
@@ -428,7 +428,7 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   lists the VMM helper's orphan as not covered: "The helper and VM keep running." (`026:95`). A
   component host that outlived its lifeline is stopped at the controller's next supervisor check
   of that cell, which runs at startup and, while serving, "whenever a query to a cell's membrane
-  fails" (`023:393`).
+  fails" (`023:396`).
 
 ### 9. What a failure looks like on each wire
 
