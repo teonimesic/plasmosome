@@ -482,8 +482,12 @@ cannot change its target.
 is spec 001 §4.1's path boundary for private sockets. It refuses a symbolic link in any
 component, an ancestor that another user could replace, a socket directory that is not the
 caller's own `0700` directory without an ACL, and a socket entry that is not the caller's socket
-with mode `0600`. The client maps #124's errors, as merged (`1f07313`), as below. Its only checks of
-its own run first: that a path is normal, and that it fits `sun_path`.
+with mode `0600`. The client maps #124's errors, as merged (`1f07313`), as below. For `--socket`
+and a named instance, its only checks of its own run first: that a path is normal, and that it
+fits `sun_path`. In default selection, the `sun_path` check runs after the path check, and only on
+an entry that holds a socket, because a stopped instance is not a candidate. Amended on
+2026-10-21: this said "Its only checks of its own run first: that a path is normal, and that it
+fits `sun_path`."
 
 | #124 error | Client code | `rule` | Exit |
 | --- | --- | --- | --- |
