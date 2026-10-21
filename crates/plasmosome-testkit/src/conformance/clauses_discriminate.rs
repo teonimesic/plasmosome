@@ -95,6 +95,7 @@ enum Defect {
     RefusalSwapsItsAddress(Call),
     UnknownRevokeTidiesResidue,
     RefusedEffectLandsLate(Call),
+    RefusedGrantDropsTheIssuedRecordLate,
     SnapshotOmitsIssuedRecords,
     SnapshotReconstructsGrantsFromObjects,
 }
@@ -142,6 +143,8 @@ struct DefectiveBackend {
     recovery_log: Rc<RefCell<Vec<LedgerEntry>>>,
     pending_effects: RefCell<Vec<OsObject>>,
     landed_effects: RefCell<Vec<OsObject>>,
+    pending_record_drops: Vec<Handle>,
+    landing_record_drops: Vec<Handle>,
 }
 
 impl DefectiveBackend {
@@ -163,6 +166,8 @@ impl DefectiveBackend {
             recovery_log,
             pending_effects: RefCell::default(),
             landed_effects: RefCell::default(),
+            pending_record_drops: Vec::new(),
+            landing_record_drops: Vec::new(),
         };
         if defect == Defect::RecordsItsOwnRecoveryLog {
             let recovered = backend.recovery_log.borrow().clone();
@@ -345,6 +350,14 @@ impl DefectiveBackend {
         let pending = std::mem::take(&mut *self.pending_effects.borrow_mut());
         self.landed_effects.borrow_mut().extend(pending);
         observed
+    }
+
+    fn land_record_drops(&mut self) {
+        for handle in std::mem::take(&mut self.landing_record_drops) {
+            self.ledger.remove(&handle);
+            self.grant_order.retain(|held| *held != handle);
+        }
+        self.landing_record_drops = std::mem::take(&mut self.pending_record_drops);
     }
 
     fn record_rebuilt_from(&self, object: &OsObject) -> LedgerEntry {
@@ -661,6 +674,13 @@ impl EnforcementBackend for DefectiveBackend {
                 self.ledger.insert(requested.handle, requested);
                 return Err(refusal);
             }
+            Err(refusal)
+                if self.defect == Defect::RefusedGrantDropsTheIssuedRecordLate
+                    && self.ledger.contains_key(&requested.handle) =>
+            {
+                self.pending_record_drops.push(requested.handle);
+                return Err(refusal);
+            }
             outcome => outcome?,
         };
         if !valid {
@@ -881,6 +901,7 @@ impl EnforcementBackend for DefectiveBackend {
             std::panic::panic_any(ASSERTION_SHAPED_INFRASTRUCTURE_PANIC);
         }
         let state = self.standing();
+        self.land_record_drops();
         let grants = match self.defect {
             Defect::SnapshotOmitsIssuedRecords => Vec::new(),
             Defect::SnapshotReconstructsGrantsFromObjects => state
@@ -2662,6 +2683,40 @@ fn a_late_effect_shows_from_the_second_read_after_its_own_call() {
             }
         }
     }
+}
+
+#[test]
+fn the_snapshot_clause_rejects_a_refused_grant_whose_issued_record_drops_after_it_returns() {
+    assert_rejected(|| {
+        conformance::snapshot_never_invents_objects(carrying(
+            Defect::RefusedGrantDropsTheIssuedRecordLate,
+        ))
+    });
+}
+
+#[test]
+fn a_late_record_drop_shows_from_the_second_read_after_its_refused_grant() {
+    let mut backend = DefectiveBackend::carrying(Defect::RefusedGrantDropsTheIssuedRecordLate);
+    let issued = conformance::op_for(
+        GrantId::new(),
+        conformance::conformance_owner(),
+        broker("egressd"),
+    );
+    let entry = backend.grant(issued.clone(), GrantKind::Hot).unwrap();
+    let invalid = conformance::op_for(
+        issued.id(),
+        issued.owner().clone(),
+        conformance::invalid_capability(&issued.capability()),
+    );
+    assert_eq!(
+        backend.grant(invalid.clone(), GrantKind::Hot),
+        Err(conformance::invalid_refusal(&invalid))
+    );
+    let first = backend.snapshot_os_state().unwrap();
+    assert_eq!(first.grants(), std::slice::from_ref(&entry));
+    let second = backend.snapshot_os_state().unwrap();
+    assert!(second.grants().is_empty());
+    assert_eq!(second.state(), first.state());
 }
 
 #[test]
