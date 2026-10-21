@@ -708,7 +708,13 @@ fn no_handler_of_the_controller_runs_in_a_child() {
     let storm = Storm::start();
     for start in 0..40 {
         let lock = cell.lock();
-        match cell.start(&missing, lock, cell.log(), cell.record()) {
+        let outcome = cell.start(&missing, lock, cell.log(), cell.record());
+        assert_eq!(
+            caught.pids_other_than_this(),
+            Vec::<libc::pid_t>::new(),
+            "by start {start} the controller's SIGUSR1 handler ran only in the controller; the start gave {outcome:?}"
+        );
+        match outcome {
             Err(StartError::Exec {
                 lock,
                 step: StartStep::Exec,
@@ -783,7 +789,7 @@ impl Caught {
         Caught(log.to_path_buf())
     }
 
-    fn pids_other_than_this(self) -> Vec<libc::pid_t> {
+    fn pids_other_than_this(&self) -> Vec<libc::pid_t> {
         let bytes = std::fs::read(&self.0).unwrap_or_default();
         let (pids, _) = bytes.as_chunks::<4>();
         pids.iter()
