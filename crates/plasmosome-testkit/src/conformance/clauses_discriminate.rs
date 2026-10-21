@@ -6,8 +6,8 @@ use std::rc::Rc;
 use super as conformance;
 use crate::builders::{broker, mount, proxy_map, session_file, uds_socket};
 use plasmosome_backend::{
-    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FileAccess,
-    GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy,
+    BackendError, Capability, CellId, CellOwner, CompositeBackend, DrainSpec, EnforcementBackend,
+    FileAccess, GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy,
     UniverseClass, UniverseOp, UniverseRemoval,
 };
 
@@ -82,6 +82,11 @@ enum Defect {
     SwallowsInvalidOperations(Call),
     ValidatesAfterTheEffect(Call),
     RefusesAnotherLaunchAtAnOccupiedEndpoint,
+    GrantReplacesAnAppliedObject,
+    GrantReplacesAPlantedObject,
+    AcceptsInvalidOperationsOf(UniverseClass, Call),
+    RefusalRollsBackItsAddress(Call),
+    ChecksTheAddressBeforeValidating(Call),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +179,15 @@ impl DefectiveBackend {
     }
 
     fn validated(&mut self, operation: &UniverseOp, call: Call) -> Result<bool, BackendError> {
+        if self.defect == Defect::ChecksTheAddressBeforeValidating(call)
+            && self.observed().objects().any(|held| {
+                held.class() == operation.class()
+                    && held.id == operation.id()
+                    && *held != operation.object()
+            })
+        {
+            return Err(identity_conflict(operation.handle()));
+        }
         let Err(error) = operation.validate() else {
             return Ok(true);
         };
@@ -184,12 +198,33 @@ impl DefectiveBackend {
         };
         match self.defect {
             Defect::AcceptsInvalidOperations(accepted) if accepted == call => Ok(true),
+            Defect::AcceptsInvalidOperationsOf(class, accepted)
+                if class == operation.class() && accepted == call =>
+            {
+                Ok(true)
+            }
             Defect::SwallowsInvalidOperations(swallowed) if swallowed == call => Ok(false),
             Defect::ValidatesAfterTheEffect(late) if late == call => {
-                self.state.insert(operation.object())?;
+                let _ = self.state.insert(operation.object());
+                Err(refusal)
+            }
+            Defect::RefusalRollsBackItsAddress(rollback) if rollback == call => {
+                self.drop_address(operation.handle());
                 Err(refusal)
             }
             _ => Err(refusal),
+        }
+    }
+
+    fn drop_address(&mut self, handle: Handle) {
+        let standing: Vec<OsObject> = self
+            .state
+            .objects()
+            .filter(|held| held.class() == handle.class && held.id == handle.id)
+            .cloned()
+            .collect();
+        for object in standing {
+            self.state.remove(&removal_of(&object), &object.owner);
         }
     }
 
@@ -601,12 +636,21 @@ impl EnforcementBackend for DefectiveBackend {
             .any(|held| held.class() == handle.class && held.id == handle.id)
         {
             let applied = self.applied.iter().any(|op| op.handle() == handle);
+            let identical = observed.objects().any(|held| *held == entry.object());
             let promotes = match self.defect {
                 Defect::DirectApplyPromotesToGrant => applied,
                 Defect::PlantedResiduePromotesToGrant => !applied,
                 _ => false,
-            } && observed.objects().any(|held| *held == entry.object());
-            if !promotes {
+            } && identical;
+            let replaces = match self.defect {
+                Defect::GrantReplacesAnAppliedObject => applied,
+                Defect::GrantReplacesAPlantedObject => !applied,
+                _ => false,
+            } && !identical;
+            if replaces {
+                self.drop_address(handle);
+                self.state.insert(entry.object())?;
+            } else if !promotes {
                 return Err(identity_conflict(handle));
             }
             self.ledger.insert(handle, entry.clone());
@@ -1312,6 +1356,14 @@ fn revoke_order_witnesses_are_independent() {
             Defect::RevokesOnlyInReversePushOrder,
         ))
     });
+    assert_rejected(|| {
+        conformance::fresh_backends_share_no_authority(carrying(Defect::RevokesOnlyInGrantOrder))
+    });
+    assert_rejected(|| {
+        conformance::fresh_backends_share_no_authority(carrying(
+            Defect::RevokesOnlyInReversePushOrder,
+        ))
+    });
 }
 
 #[test]
@@ -1679,6 +1731,58 @@ fn the_retry_clause_rejects_a_grant_that_promotes_an_applied_or_planted_object()
 }
 
 #[test]
+fn the_retry_clause_rejects_a_grant_that_replaces_an_applied_or_planted_object() {
+    for defect in [
+        Defect::GrantReplacesAnAppliedObject,
+        Defect::GrantReplacesAPlantedObject,
+    ] {
+        assert_rejected(|| conformance::grant_retry_returns_the_original_entry(carrying(defect)));
+    }
+}
+
+#[test]
+fn a_replacing_grant_takes_over_only_a_changed_object_of_its_own_origin() {
+    for (defect, replaced) in [
+        (Defect::GrantReplacesAnAppliedObject, Call::Apply),
+        (Defect::GrantReplacesAPlantedObject, Call::Plant),
+    ] {
+        for origin in [Call::Apply, Call::Plant] {
+            let standing = conformance::op_for(
+                GrantId::new(),
+                conformance::conformance_owner(),
+                mount("/src", "/work"),
+            );
+            let changed = conformance::op_for(
+                standing.id(),
+                conformance::second_owner(),
+                mount("/src", "/work"),
+            );
+            let mut backend = DefectiveBackend::carrying(defect);
+            call_with(&mut backend, origin, &standing).unwrap();
+            assert_eq!(
+                backend.grant(standing.clone(), GrantKind::Hot),
+                Err(identity_conflict(standing.handle())),
+                "{defect:?} must not promote an identical {origin:?} object"
+            );
+            let outcome = backend.grant(changed.clone(), GrantKind::Hot);
+            let mut expected = OsState::new();
+            if origin == replaced {
+                assert_eq!(outcome.map(|entry| entry.handle), Ok(changed.handle()));
+                expected.insert(changed.object()).unwrap();
+            } else {
+                assert_eq!(outcome, Err(identity_conflict(changed.handle())));
+                expected.insert(standing.object()).unwrap();
+            }
+            assert_eq!(
+                backend.snapshot_os_state(),
+                expected,
+                "{defect:?} {origin:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_retry_clause_rejects_a_refused_retry_and_a_retry_that_ignores_any_field() {
     assert_rejected(|| {
         conformance::grant_retry_returns_the_original_entry(carrying(Defect::RetryIsRefused))
@@ -1801,7 +1905,7 @@ fn a_recovery_log_carries_grants_and_revokes_into_the_next_instance() {
 
 #[test]
 fn the_snapshot_clause_rejects_any_call_that_mishandles_an_invalid_operation() {
-    for call in [Call::Grant, Call::Apply, Call::Plant] {
+    for call in CALLS {
         for defect in [
             Defect::AcceptsInvalidOperations(call),
             Defect::SwallowsInvalidOperations(call),
@@ -1812,26 +1916,179 @@ fn the_snapshot_clause_rejects_any_call_that_mishandles_an_invalid_operation() {
     }
 }
 
+const CALLS: [Call; 3] = [Call::Grant, Call::Apply, Call::Plant];
+
+fn call_with(
+    backend: &mut DefectiveBackend,
+    call: Call,
+    operation: &UniverseOp,
+) -> Result<(), BackendError> {
+    match call {
+        Call::Grant => backend
+            .grant(operation.clone(), GrantKind::Hot)
+            .map(|entry| assert_eq!(entry.handle, operation.handle())),
+        Call::Apply => backend.apply(operation.clone()),
+        Call::Plant => backend.plant(operation.object()),
+    }
+}
+
+fn invalid_of_every_class() -> Vec<UniverseOp> {
+    let mut proxy = proxy_map("api.plasmosome.test", "splice");
+    if let Capability::ProxyMap { recipe, .. } = &mut proxy {
+        recipe.port = 0;
+    }
+    [
+        session_file("relative/skills/pr.md"),
+        uds_socket("relative/egressd.uds"),
+        proxy,
+        broker("egress\0d"),
+        mount("/src", "/workspace/"),
+    ]
+    .into_iter()
+    .map(|capability| {
+        conformance::op_for(GrantId::new(), conformance::conformance_owner(), capability)
+    })
+    .collect()
+}
+
+#[test]
+fn the_invalid_fixtures_cover_every_class_and_each_one_fails_validation() {
+    let invalid = invalid_of_every_class();
+    assert_eq!(
+        invalid.iter().map(UniverseOp::class).collect::<Vec<_>>(),
+        CLASSES
+    );
+    for operation in invalid {
+        assert!(operation.validate().is_err(), "{operation:?}");
+    }
+}
+
+#[test]
+fn the_snapshot_clause_rejects_an_invalid_operation_accepted_for_any_one_class() {
+    for class in CLASSES {
+        for call in CALLS {
+            assert_rejected(|| {
+                conformance::snapshot_never_invents_objects(carrying(
+                    Defect::AcceptsInvalidOperationsOf(class, call),
+                ))
+            });
+        }
+    }
+}
+
+#[test]
+fn a_one_class_invalid_operation_defect_accepts_only_its_own_class_through_its_own_call() {
+    for class in CLASSES {
+        for defective in CALLS {
+            for operation in invalid_of_every_class() {
+                for call in CALLS {
+                    let mut backend = DefectiveBackend::carrying(
+                        Defect::AcceptsInvalidOperationsOf(class, defective),
+                    );
+                    let accepted = operation.class() == class && call == defective;
+                    let outcome = call_with(&mut backend, call, &operation);
+                    assert_eq!(
+                        outcome.is_ok(),
+                        accepted,
+                        "{class:?} {defective:?} {call:?}"
+                    );
+                    assert_eq!(
+                        !backend.snapshot_os_state().is_empty(),
+                        accepted,
+                        "{class:?} {defective:?} {call:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_snapshot_clause_rejects_a_composite_whose_network_leaf_accepts_invalid_grants() {
+    let composite = |network: Defect| {
+        move || {
+            CompositeBackend::new(
+                Box::new(DefectiveBackend::carrying(network)),
+                Box::new(DefectiveBackend::carrying(Defect::None)),
+                Box::new(DefectiveBackend::carrying(Defect::None)),
+            )
+            .unwrap()
+        }
+    };
+    conformance::snapshot_never_invents_objects(composite(Defect::None));
+    assert_rejected(|| {
+        conformance::snapshot_never_invents_objects(composite(Defect::AcceptsInvalidOperations(
+            Call::Grant,
+        )))
+    });
+}
+
+#[test]
+fn the_snapshot_clause_rejects_a_refusal_that_clears_its_address_or_checks_it_first() {
+    for call in CALLS {
+        for defect in [
+            Defect::RefusalRollsBackItsAddress(call),
+            Defect::ChecksTheAddressBeforeValidating(call),
+        ] {
+            assert_rejected(|| conformance::snapshot_never_invents_objects(carrying(defect)));
+        }
+    }
+}
+
+#[test]
+fn an_occupied_address_defect_changes_only_its_own_call() {
+    for defective in CALLS {
+        for defect in [
+            Defect::RefusalRollsBackItsAddress(defective),
+            Defect::ChecksTheAddressBeforeValidating(defective),
+        ] {
+            for call in CALLS {
+                let mut backend = DefectiveBackend::carrying(defect);
+                let standing = conformance::hot_grant(
+                    conformance::conformance_owner(),
+                    &session_file("/var/lib/plasmosome/conformance/skills/pr.md"),
+                );
+                let entry = backend
+                    .grant(standing.operation.clone(), standing.kind)
+                    .unwrap();
+                let invalid = conformance::op_for(
+                    standing.operation.id(),
+                    conformance::conformance_owner(),
+                    session_file("relative/skills/pr.md"),
+                );
+                let outcome = call_with(&mut backend, call, &invalid);
+                let mut expected = OsState::new();
+                expected.insert(standing.operation.object()).unwrap();
+                if call == defective && defect == Defect::RefusalRollsBackItsAddress(call) {
+                    expected = OsState::new();
+                }
+                if call == defective && defect == Defect::ChecksTheAddressBeforeValidating(call) {
+                    assert_eq!(outcome, Err(identity_conflict(invalid.handle())));
+                } else {
+                    assert!(
+                        matches!(outcome, Err(BackendError::InvalidOperation { .. })),
+                        "{defect:?} through {call:?}: {outcome:?}"
+                    );
+                }
+                assert_eq!(backend.snapshot_os_state(), expected, "{defect:?} {call:?}");
+                assert_eq!(backend.ledger.get(&entry.handle), Some(&entry));
+            }
+        }
+    }
+}
+
 #[test]
 fn an_invalid_operation_defect_mishandles_only_its_own_call_in_its_own_way() {
-    let invalid = conformance::invalid_operation();
-    let calls = [Call::Grant, Call::Apply, Call::Plant];
-    let run = |backend: &mut DefectiveBackend, call: Call| match call {
-        Call::Grant => backend
-            .grant(invalid.clone(), GrantKind::Hot)
-            .map(|entry| assert_eq!(entry.handle, invalid.handle())),
-        Call::Apply => backend.apply(invalid.clone()),
-        Call::Plant => backend.plant(invalid.object()),
-    };
-    for defective in calls {
+    let invalid = invalid_of_every_class().remove(0);
+    for defective in CALLS {
         for (defect, refused, changed) in [
             (Defect::AcceptsInvalidOperations(defective), false, true),
             (Defect::SwallowsInvalidOperations(defective), false, false),
             (Defect::ValidatesAfterTheEffect(defective), true, true),
         ] {
-            for call in calls {
+            for call in CALLS {
                 let mut backend = DefectiveBackend::carrying(defect);
-                let outcome = run(&mut backend, call);
+                let outcome = call_with(&mut backend, call, &invalid);
                 let (refused, changed) = if call == defective {
                     (refused, changed)
                 } else {
