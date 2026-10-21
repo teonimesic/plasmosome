@@ -539,8 +539,8 @@ def runner_refused_group_of_exited_leader():
     calls = []
 
     def killpg(child, group, sig):
-        assert group == child.pid and child.returncode is None, "signalled a group after its leader was reaped"
-        calls.append("injected")
+        calls.append("after reap" if group != child.pid or child.returncode is not None else "injected")
+        assert calls[-1] == "injected", "signalled a group after its leader was reaped"
         try:
             os.killpg(group, sig)
         except PermissionError:
@@ -560,6 +560,7 @@ def runner_refused_group_of_exited_leader():
         child = processes.child
         assert child.returncode is not None, "the exited leader of a refused group was left unreaped"
         assert child.stdout.closed and child.stderr.closed, "a refused group left its pipes open"
+        assert "after reap" not in calls, f"signalled a group after its leader was reaped: {calls}"
         assert len(calls) == 1, f"expected exactly one killpg, saw {calls}"
         if sys.platform == "darwin":
             assert calls == ["kernel"], f"the kernel did not refuse a group whose only member is a zombie: {calls}"
