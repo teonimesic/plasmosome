@@ -106,36 +106,48 @@ fn run_every_case(arguments: &[OsString]) -> ExitCode {
         .map(OsString::as_os_str)
         .filter(|argument| !argument.as_encoded_bytes().starts_with(b"-"))
         .collect();
-    let chosen = CASES.iter().filter(|(name, _)| {
-        filters.is_empty()
-            || filters
-                .iter()
-                .any(|filter| name.contains(&*filter.to_string_lossy()))
-    });
+    let chosen: Vec<&str> = CASES
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| {
+            filters.is_empty()
+                || filters
+                    .iter()
+                    .any(|filter| name.contains(&*filter.to_string_lossy()))
+        })
+        .collect();
+    let filtered_out = CASES.len() - chosen.len();
+    let all_started = Instant::now();
+    println!("\nrunning {} tests", chosen.len());
     let mut passed = 0;
     let mut failed = Vec::new();
-    for (name, _) in chosen {
+    for name in chosen {
         let started = Instant::now();
         match run_case(name) {
             Ok(()) => {
-                println!("case {name} ... ok ({:?})", started.elapsed());
+                println!("test {name} ... ok");
+                println!("    took {:?}", started.elapsed());
                 passed += 1;
             }
             Err(failure) => {
-                println!("case {name} ... FAILED: {failure}");
-                failed.push(*name);
+                println!("test {name} ... FAILED");
+                println!("    {failure}");
+                failed.push(name);
             }
         }
     }
+    if !failed.is_empty() {
+        println!("\nfailures:\n    {}", failed.join("\n    "));
+    }
+    println!(
+        "\ntest result: {}. {passed} passed; {} failed; 0 ignored; 0 measured; {filtered_out} filtered out; finished in {:.2}s\n",
+        if failed.is_empty() { "ok" } else { "FAILED" },
+        failed.len(),
+        all_started.elapsed().as_secs_f64()
+    );
     if failed.is_empty() {
-        println!("supervisor_start: {passed} cases passed");
         ExitCode::SUCCESS
     } else {
-        println!(
-            "supervisor_start: {passed} cases passed, {} failed: {}",
-            failed.len(),
-            failed.join(", ")
-        );
         ExitCode::FAILURE
     }
 }
