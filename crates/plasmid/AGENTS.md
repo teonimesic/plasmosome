@@ -18,10 +18,16 @@ on it.
 - **The package name and the binary name are the same word on purpose.** A binary target named
   after a package somebody else publishes makes `cargo install` fail for whoever installs both.
   `plasmid` is the only package that may ship a binary called `plasmid`.
-- **The scaffold refuses rather than guesses.** `plasmid new` stays a named refusal until the SDK
-  interface is frozen.
+- **The scaffold refuses rather than guesses.** `plasmid new` writes the declaration with only the
+  id, the version and an empty description, and grants no capability. It writes no component, and
+  exits 2 for that refusal, until the plasmid interface is frozen.
 
 ## Testing
 
 `cargo test -p plasmid`. The verbs are exercised by running the built binary through
 `CARGO_BIN_EXE_plasmid` and reading its exit status, because the exit status is the contract.
+
+The tests parse what `plasmid new` writes with `plasmosome-core`'s parser, so a printed section
+that drifts from the refusals the parser gives fails a test. `plasmosome-core` is a path-only
+dev-dependency, which `cargo package` drops. As a normal dependency it would stop this crate from
+packaging, because `plasmosome-core` is not published.
