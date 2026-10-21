@@ -33,7 +33,7 @@ pub struct VerifiedArtifact {
     walk: Walk,
     file: File,
     identity: FileIdentity,
-    size: u64,
+    stamp: Stamp,
     digest: Digest,
 }
 
@@ -55,7 +55,7 @@ impl VerifiedArtifact {
 
     /// Its size in bytes when it was hashed.
     pub fn size(&self) -> u64 {
-        self.size
+        self.stamp.size
     }
 
     /// The digest of its bytes, equal to the pinned one.
@@ -70,23 +70,27 @@ impl VerifiedArtifact {
     }
 
     /// Opens the path again from the same "/" descriptor, applies every check except the hash,
-    /// and requires the same device and inode. A path that now names another file, even one
-    /// with the same bytes, is `Replaced`.
+    /// and requires the same device and inode, size, modification time and change time. A path
+    /// that now names another file, even one with the same bytes, is `Replaced`. A file changed
+    /// in place since it was verified, such as through a descriptor opened for writing before
+    /// it was locked, is `ChangedSinceVerification`.
     pub fn reconfirm(&self) -> Result<(), ArtifactRefusal> {
         let refuse = |fault| ArtifactRefusal {
             role: self.role,
             path: self.path.as_path().to_path_buf(),
             fault,
         };
-        let found = open_checked(&self.walk).map_err(refuse)?.identity;
-        if found == self.identity {
-            Ok(())
-        } else {
-            Err(refuse(ArtifactFault::Replaced {
+        let checked = open_checked(&self.walk).map_err(refuse)?;
+        if checked.identity != self.identity {
+            return Err(refuse(ArtifactFault::Replaced {
                 verified: self.identity,
-                found,
-            }))
+                found: checked.identity,
+            }));
         }
+        if checked.stamp != self.stamp {
+            return Err(refuse(ArtifactFault::ChangedSinceVerification));
+        }
+        Ok(())
     }
 }
 
@@ -258,7 +262,7 @@ pub fn verify_artifact(
         walk,
         file: checked.file,
         identity: checked.identity,
-        size: checked.stamp.size,
+        stamp: checked.stamp,
         digest,
     })
 }
@@ -343,8 +347,9 @@ fn judge_immutability(_metadata: &Metadata) -> Result<(), ArtifactFault> {
     Err(ArtifactFault::ImmutabilityUnverifiable)
 }
 
-fn hash(file: &File, _size: u64) -> Result<Digest, ArtifactFault> {
-    Digest::of_reader(Positioned { file, offset: 0 }).map_err(|error| io_fault("pread", &error))
+fn hash(file: &File, size: u64) -> Result<Digest, ArtifactFault> {
+    Digest::of_reader(Positioned { file, offset: 0 }.take(size.saturating_add(1)))
+        .map_err(|error| io_fault("pread", &error))
 }
 
 struct Positioned<'a> {
