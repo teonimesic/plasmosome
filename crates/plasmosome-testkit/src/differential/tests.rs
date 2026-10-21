@@ -1,5 +1,6 @@
 mod comparison;
 mod manifest;
+mod normalization;
 mod runs;
 
 use serde_json::{Map, Value, json};
@@ -92,7 +93,8 @@ fn object(value: Value) -> Map<String, Value> {
     value.as_object().expect("an object").clone()
 }
 
-fn fields(lane: Lane, probe: &str) -> Map<String, Value> {
+fn fields(lane: Lane, run: u64, probe: &str) -> Map<String, Value> {
+    let seed = 10 * lane as u64 + run;
     object(match probe {
         "hint-mounts" => json!({
             "/opt": {"source": "none", "fstype": "virtiofs", "options": "ro"},
@@ -101,13 +103,15 @@ fn fields(lane: Lane, probe: &str) -> Map<String, Value> {
         }),
         "hint-cgroup" => json!({"path": "/workload"}),
         "hint-env" => json!({"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/home/workload"}),
-        "hint-processes" => json!({"pids": [1, 100, 200], "leader": 200}),
-        "hint-self" => json!({"pid": 200}),
-        "op-inodes" => json!({"distinct": [1000, 2000], "linked": [3000, 3000]}),
-        "op-times" => json!({"times": [10_000, 20_000]}),
+        "hint-processes" => json!({"pids": [1, 100 + seed, 200 + seed], "leader": 200 + seed}),
+        "hint-self" => json!({"pid": 200 + seed}),
+        "op-inodes" => {
+            json!({"distinct": [1000 + seed, 2000 + seed], "linked": [3000 + seed, 3000 + seed]})
+        }
+        "op-times" => json!({"times": [10_000 + seed, 20_000 + seed]}),
         "op-utimensat" => json!({
             "mtime": 1_234_567_890,
-            "ctime": 30_000,
+            "ctime": 30_000 + seed,
             "mode": if lane == Lane::Cell { "0600" } else { "0644" }
         }),
         _ if lane == Lane::Open => json!({"outcome": "reached"}),
@@ -124,7 +128,7 @@ fn lane_run(lane: Lane, run: u64) -> Run {
                 probe: id.to_string(),
                 completed: true,
                 failed_before_step: false,
-                fields: fields(lane, id),
+                fields: fields(lane, run, id),
             })
             .collect(),
         transcript: Some(object(json!({
@@ -184,6 +188,6 @@ fn differs(probe: &str, field: &str) -> Finding {
 }
 
 #[test]
-fn runs_equal_but_for_the_allowed_mode_and_the_open_lanes_reach_pass() {
+fn runs_that_differ_only_in_ruled_values_and_the_allowed_mode_pass() {
     assert_eq!(verdict(&manifest(), &runs()), Verdict::Pass);
 }

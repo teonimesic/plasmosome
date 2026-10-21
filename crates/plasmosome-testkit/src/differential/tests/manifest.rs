@@ -215,15 +215,30 @@ fn a_field_the_workload_set_in_one_probe_may_have_a_rule_in_another() {
 }
 
 #[test]
-fn a_probe_that_leaves_out_its_workload_set_is_refused() {
-    let mut manifest = manifest_json();
-    let index = probe_index(&manifest, "op-times");
-    manifest["probes"][index]
-        .as_object_mut()
-        .expect("a probe is an object")
-        .remove("workload_set");
-    let reason = malformed(&manifest.to_string());
-    assert!(reason.contains("missing field `workload_set`"), "{reason}");
+fn a_probe_that_leaves_out_its_workload_set_or_gives_null_is_refused_naming_it() {
+    for (id, null) in [
+        ("op-times", false),
+        ("op-times", true),
+        ("facility-2", false),
+        ("facility-2", true),
+    ] {
+        let mut manifest = manifest_json();
+        let index = probe_index(&manifest, id);
+        let probe = manifest["probes"][index]
+            .as_object_mut()
+            .expect("a probe is an object");
+        probe.remove("workload_set");
+        if null {
+            probe.insert("workload_set".to_string(), Value::Null);
+        }
+        assert_eq!(
+            refusal(&manifest),
+            ManifestRefusal::WorkloadSetMissing {
+                probe: id.to_string()
+            },
+            "{id} null: {null}"
+        );
+    }
 }
 
 #[test]
@@ -271,6 +286,52 @@ fn a_key_repeated_in_one_object_is_refused_naming_it() {
             "{reason}"
         );
     }
+}
+
+#[test]
+fn a_key_repeated_inside_an_allowed_value_is_refused_at_any_depth_naming_it() {
+    for (cell_value, path) in [
+        (json!({"mode": "0600"}), "/mode"),
+        (json!({"stat": {"mode": "0600"}}), "/stat/mode"),
+        (json!([{"mode": "0600"}]), "/0/mode"),
+        (
+            json!({"stat": [1, {"xattr": {"mode": "0600"}}]}),
+            "/stat/1/xattr/mode",
+        ),
+    ] {
+        let mut manifest = manifest_json();
+        manifest["allowances"][0]["cell_value"] = cell_value;
+        let text = manifest.to_string();
+        let once = r#""mode":"0600""#;
+        assert_eq!(text.matches(once).count(), 1, "{path}");
+        let reason = malformed(&text.replacen(once, r#""mode":"0600","mode":"0777""#, 1));
+        assert!(
+            reason.contains(&format!("duplicate object key at \"{path}\"")),
+            "{path}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn an_allowed_value_that_is_not_json_is_refused_as_malformed() {
+    let text = manifest_json().to_string();
+    let once = r#""cell_value":"0600""#;
+    assert_eq!(text.matches(once).count(), 1);
+    let reason = malformed(&text.replacen(once, r#""cell_value":}"#, 1));
+    assert!(reason.contains("expected value"), "{reason}");
+}
+
+#[test]
+fn an_allowed_value_of_any_json_type_loads_unchanged() {
+    let value = json!({
+        "stat": {"mode": "0600", "uid": 1000, "offset": -1, "ratio": 0.5, "size": u64::MAX},
+        "flags": [true, false, null, [], {}],
+        "name": "notes.txt"
+    });
+    let mut manifest = manifest_json();
+    manifest["allowances"][0]["cell_value"] = value.clone();
+    let loaded = load_value(&manifest).expect("the manifest loads");
+    assert_eq!(loaded.allowances[0].cell_value, value);
 }
 
 #[test]
