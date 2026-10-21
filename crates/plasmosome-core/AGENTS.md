@@ -24,7 +24,8 @@ gatekeeper, session log. It decides capability grants. It does not enforce them.
   [spec 026](../../docs/specs/026-security-standard.md#2-unsafe-code), because it needs FFI calls
   the standard library does not offer, through `libc` and the crate's own `unsafe extern`
   declarations, for things such as its signal handler, the machine's memory and page size
-  (`sysconf`), no-follow file access, file locks and kernel peer credentials;
+  (`sysconf`), no-follow file access, file locks, kernel peer credentials and starting
+  `membraned` with `fork` and `execve`;
   `#[allow(unsafe_code)]` goes on the item that holds the `unsafe`, never on a `mod` or the crate
   root.
 
