@@ -10,8 +10,9 @@ share.
 
 ## Hard rules
 
-- **A grant returns a ledger entry.** If a backend can create something it cannot describe how to
-  undo, the seam is wrong — fix the backend, do not widen the trait.
+- **A successful grant returns the ledger entry for the address its caller prepared.** If a
+  backend can create something it cannot describe how to undo, the seam is wrong — fix the
+  backend, do not widen the trait.
 - **A removal names its owner.** More than one plasmid can hold a key at once, so a revoke says
   whose object it is taking. The owner is a plugin in one cell: a removal takes that owner's
   object, and takes nothing when that owner holds nothing there — never another plugin's, and

@@ -64,3 +64,13 @@ fn composite_backend_removes_repeated_grants_independently() {
 fn composite_backend_keeps_a_timed_out_holding_and_its_peers() {
     conformance::graceful_timeouts_preserve_the_selected_holding(composite_over_fake_leaves);
 }
+
+#[test]
+fn composite_backend_returns_the_original_entry_to_a_retry_and_promotes_nothing() {
+    conformance::grant_retry_returns_the_original_entry(composite_over_fake_leaves);
+}
+
+#[test]
+fn composite_backends_fresh_from_the_factory_share_no_authority() {
+    conformance::fresh_backends_share_no_authority(composite_over_fake_leaves);
+}

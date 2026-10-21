@@ -1,35 +1,27 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use plasmosome_backend::{
-    CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantKind,
-    PluginId, ResidueReport,
+    CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, PluginId, ResidueReport,
 };
-use plasmosome_ledger::{Closure, DetachReport, Effect, InverseVia, Ledger, SealedLedger};
-use plasmosome_testkit::builders::{proxy_map, session_file, uds_socket};
+use plasmosome_ledger::{Closure, DetachReport, Ledger, SealedLedger};
+use plasmosome_testkit::builders::{GrantClosure, proxy_map, session_file, uds_socket};
 
 fn attach_detach(
     (mut ledger, mut backend): (Ledger, FakeBackend),
 ) -> (SealedLedger, FakeBackend, DetachReport) {
     let before = backend.snapshot_os_state();
-    for (index, capability) in [
-        session_file("/session"),
-        uds_socket("/run/egressd.uds"),
-        proxy_map("api.example.test", "proxy"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let entry = backend.grant(Grant {
-            owner: CellOwner {
-                cell: CellId::from("attach-detach-cell"),
-                plugin: PluginId::from("attach-detach"),
-            },
-            capability,
-            kind: GrantKind::Hot,
-        });
-        ledger.push(Effect::exact(
-            format!("grant-{index}"),
-            InverseVia::Backend(entry.handle),
-        ));
+    let prepared = GrantClosure::for_owner(CellOwner {
+        cell: CellId::from("attach-detach-cell"),
+        plugin: PluginId::from("attach-detach"),
+    })
+    .hot(session_file("/session"))
+    .hot(uds_socket("/run/egressd.uds"))
+    .hot(proxy_map("api.example.test", "proxy"))
+    .prepare();
+    for grant in &prepared {
+        ledger.push(grant.backend_effect());
+    }
+    for grant in prepared {
+        backend.grant(grant.operation, grant.kind).unwrap();
     }
     let Closure::ExternalFree(mut sealed) = ledger.close() else {
         unreachable!();
