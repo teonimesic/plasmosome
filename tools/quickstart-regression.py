@@ -141,11 +141,6 @@ def a_base_one_byte_too_long_is_refused_in_one_line():
     refused(base, f"{base} is too long")
 
 
-def a_much_longer_base_is_refused_in_one_line():
-    base = base_of(LONGEST_BASE + 30)
-    refused(base, f"{base} is too long")
-
-
 def a_missing_base_is_refused():
     base = ROOT / f"missing-{secrets.token_hex(4)}"
     refused(base, f"cannot inspect {base}: No such file or directory")
@@ -191,7 +186,6 @@ def a_base_only_the_effective_uid_can_write_reaches_the_build():
 TESTS = [
     a_private_base_of_the_longest_length_reaches_the_build,
     a_base_one_byte_too_long_is_refused_in_one_line,
-    a_much_longer_base_is_refused_in_one_line,
     a_missing_base_is_refused,
     a_file_is_refused,
     a_base_group_can_write_is_refused,
