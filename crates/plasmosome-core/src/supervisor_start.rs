@@ -20,8 +20,6 @@ const UNWOUND: libc::c_int = 70;
 
 const FAILED: libc::c_int = 127;
 
-/// Darwin's `fcntl` command from `<sys/fcntl.h>` that stops a write to a descriptor raising
-/// `SIGPIPE`, so the write fails with `EPIPE` instead. The pinned `libc` does not define it.
 #[cfg(target_os = "macos")]
 const F_SETNOSIGPIPE: libc::c_int = 73;
 
@@ -651,7 +649,8 @@ fn set_nonblocking(fd: BorrowedFd<'_>) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 fn never_raise_sigpipe(fd: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: fcntl with F_SETNOSIGPIPE takes an integer, and `fd` is open for the call.
+    // SAFETY: F_SETNOSIGPIPE is 73 in Darwin's <sys/fcntl.h>, which the pinned libc does not
+    // define. With it fcntl takes an integer, and `fd` is open for the call.
     if unsafe { libc::fcntl(fd.as_raw_fd(), F_SETNOSIGPIPE, 1) } == -1 {
         return Err(io::Error::last_os_error());
     }
