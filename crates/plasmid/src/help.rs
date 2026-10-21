@@ -27,8 +27,12 @@ Global flags, before or after the command, never after --:
 
 --kernel, --socket and --deadline-ms are for commands that reach a socket, and none of those is
 served yet. A command that is not served reads only --json and --human of these flags, and
-plasmid new takes none of them but -h and --help. A flag given twice is a usage error. When a
-line holds more than one fault, the usage error names the first, reading from the left.
+plasmid new takes none of them but -h and --help.
+
+With -h or --help, only the command words are judged. No flag is a fault then, known or unknown,
+with or without a value, given once or twice, and a usage error names the first bad word. Without
+them, --version anywhere but as the sole argument is a usage error. Otherwise a usage error names
+the first fault on the line, flag or word, reading from the left, and a flag given twice is one.
 
 Environment:
   PLASMOSOME_KERNEL  works as --kernel, for commands that reach a socket
