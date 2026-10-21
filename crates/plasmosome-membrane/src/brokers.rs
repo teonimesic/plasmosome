@@ -346,6 +346,8 @@ mod tests {
         }
     }
 
+    const EXPIRY_SLEEPS: usize = 4;
+
     #[derive(Default)]
     struct ExpiryAwaitingProbe {
         budgets: Mutex<Vec<Option<Duration>>>,
@@ -367,10 +369,17 @@ mod tests {
                 .lock()
                 .expect("the record of probe budgets is uncontended")
                 .push(left.ok());
-            while let Ok(before) = left {
+            for _ in 0..EXPIRY_SLEEPS {
+                let Ok(before) = left else {
+                    return Ok(ready());
+                };
                 std::thread::sleep(before);
                 left = budget.remaining();
             }
+            assert!(
+                left.is_err(),
+                "the real clock never spent the budget in {EXPIRY_SLEEPS} sleeps of what was left of it"
+            );
             Ok(ready())
         }
     }
