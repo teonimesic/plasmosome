@@ -87,11 +87,11 @@ pub(crate) fn hold_fork_side() -> std::sync::RwLockReadGuard<'static, ()> {
 }
 
 #[cfg(test)]
-pub(crate) fn a_writer_waits() -> bool {
-    matches!(
-        SPAWN_LOCK.try_read(),
-        Err(std::sync::TryLockError::WouldBlock)
-    )
+pub(crate) fn waits_for_the_write_side(thread: std::thread::ThreadId) -> bool {
+    WAITING_FOR_THE_WRITE_SIDE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&thread)
 }
 
 fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
@@ -123,9 +123,46 @@ fn write_held<T>(lock: &RwLock<()>, create: impl FnOnce() -> T) -> T {
     if CREATING_DESCRIPTORS.get() {
         return create();
     }
-    let _held = lock.write().unwrap_or_else(PoisonError::into_inner);
+    let _held = write_side(lock);
     let _creating = Creating::mark();
     create()
+}
+
+fn write_side(lock: &RwLock<()>) -> std::sync::RwLockWriteGuard<'_, ()> {
+    #[cfg(test)]
+    let _waiting = WaitsForTheWriteSide::mark();
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+static WAITING_FOR_THE_WRITE_SIDE: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+struct WaitsForTheWriteSide(std::thread::ThreadId);
+
+#[cfg(test)]
+impl WaitsForTheWriteSide {
+    fn mark() -> WaitsForTheWriteSide {
+        let waiting = std::thread::current().id();
+        WAITING_FOR_THE_WRITE_SIDE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(waiting);
+        WaitsForTheWriteSide(waiting)
+    }
+}
+
+#[cfg(test)]
+impl Drop for WaitsForTheWriteSide {
+    fn drop(&mut self) {
+        let mut waiting = WAITING_FOR_THE_WRITE_SIDE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = waiting.iter().position(|thread| *thread == self.0) {
+            waiting.swap_remove(at);
+        }
+    }
 }
 
 struct Creating;

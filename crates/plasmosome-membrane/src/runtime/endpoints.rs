@@ -425,7 +425,7 @@ mod tests {
     use plasmosome_core::private_socket::effective_uid;
     use std::fs::File;
     use std::io::{ErrorKind, Write};
-    use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
@@ -477,12 +477,13 @@ mod tests {
     }
 
     #[allow(unsafe_code)]
-    fn nonblocking_and_close_on_exec(fd: BorrowedFd<'_>) -> bool {
-        // SAFETY: fcntl with F_GETFD or F_GETFL takes no pointer, and the borrow keeps `fd` open.
+    fn nonblocking_and_close_on_exec(fd: std::os::fd::RawFd) -> bool {
+        // SAFETY: fcntl with F_GETFD or F_GETFL takes no pointer, and the caller keeps `fd` open
+        // for the call.
         let (descriptor, status) = unsafe {
             (
-                libc::fcntl(fd.as_raw_fd(), libc::F_GETFD),
-                libc::fcntl(fd.as_raw_fd(), libc::F_GETFL),
+                libc::fcntl(fd, libc::F_GETFD),
+                libc::fcntl(fd, libc::F_GETFL),
             )
         };
         descriptor != -1
@@ -792,7 +793,7 @@ mod tests {
             0o600,
             "only the owner may connect"
         );
-        assert!(nonblocking_and_close_on_exec(listener.listener.as_fd()));
+        assert!(nonblocking_and_close_on_exec(listener.listener.as_raw_fd()));
     }
 
     #[test]
@@ -873,7 +874,7 @@ mod tests {
             libc::pid_t::try_from(std::process::id()).unwrap(),
             "a connection from this process reports this process"
         );
-        assert!(nonblocking_and_close_on_exec(stream.as_fd()));
+        assert!(nonblocking_and_close_on_exec(stream.as_raw_fd()));
 
         let child = VmmChild::spawn(Connects::to(&path)).expect("the fork succeeds");
         let (_stream, pid) = accepted_within(&listener);
@@ -1149,22 +1150,29 @@ mod tests {
         operation: impl FnOnce() -> T + Send + 'static,
     ) -> T {
         let held = crate::spawn_lock::hold_fork_side();
-        let (started, started_after) = mpsc::channel();
         let (finished, finished_after) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = started.send(());
+        let operating = std::thread::spawn(move || {
             let _ = finished.send(operation());
         });
-        started_after
-            .recv_timeout(PATIENCE)
-            .expect("the thread starts");
-        let fallback = Instant::now() + Duration::from_millis(50);
-        while !crate::spawn_lock::a_writer_waits() && Instant::now() < fallback {
+        let deadline = Instant::now() + PATIENCE;
+        let early = loop {
+            if crate::spawn_lock::waits_for_the_write_side(operating.thread().id()) {
+                break None;
+            }
+            if let Ok(done) = finished_after.try_recv() {
+                break Some(done);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "within {PATIENCE:?} it neither finished nor waited for the spawn lock"
+            );
             std::thread::sleep(Duration::from_millis(1));
-        }
-        let early = finished_after.try_recv().is_ok();
+        };
         drop(held);
-        assert!(!early, "it finished while a fork held the spawn lock");
+        assert!(
+            early.is_none(),
+            "it finished while a fork held the spawn lock, without waiting for the write side"
+        );
         finished_after
             .recv_timeout(PATIENCE)
             .expect("it finishes once the fork side is released")
