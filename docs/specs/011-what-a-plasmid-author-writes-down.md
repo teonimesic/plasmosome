@@ -415,6 +415,9 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   and only its author can choose it. So following the fix deletes the binding with its tools, and an
   author who meant them writes the key instead. Spec 008 refuses a blank provided key when the
   journal is read, so no attach records one. Amended on 2026-10-21: this had no rule for such a key.
+  Amended on 2026-10-21: whitespace is Unicode White_Space, the characters Rust's `str::trim`
+  removes, so a key made only of U+3000 or U+00A0 is blank and one made only of U+FEFF, U+200B or
+  U+180E is not.
 - **A tool name in a `[provides]` binding is not empty or only whitespace.** A blank name is refused
   naming the tool by its field path, such as `provides."a:tools".tools.""`, with `fix` exactly
   `remove this entry`, before its description is checked, so no fix writes the blank name back. No

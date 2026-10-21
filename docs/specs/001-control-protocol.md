@@ -1101,7 +1101,9 @@ An unrestricted host process or model observer cannot substitute. Spec017 define
 access adapters; spec008 still requires real restart, complete observation and quarantine.
 
 The membrane execs a dedicated VMM helper linked to libkrun v1.19.4, commit
-`728df8125077d0db44265f6e997c72b81b65c015`. Configuration and `krun_start_enter` run inside that
+`728df8125077d0db44265f6e997c72b81b65c015`. Its record is `docs/dependencies/native/libkrun.toml`,
+as spec 026 §1 asks of each native artifact. Amended on 2026-10-21: this did not name the record.
+Configuration and `krun_start_enter` run inside that
 already-exec'd helper, never as unsafe Rust work between fork and exec. The context is consumed
 by start; `krun_free_ctx` is not a running-VM shutdown authority. Retain the original child and
 prevent leakage of VM descriptors to descendants. Guest-ready requires the trusted shim's actual
