@@ -1604,7 +1604,11 @@ mod tests {
         for (quoted, decoded) in blank_tool_keys() {
             for value in ["42", "false", "{}", "\"\"", "\" \""] {
                 let source = format!("{PROVIDER}[provides.\"a:tools\".tools]\n{quoted} = {value}");
-                assert_eq!(tool_names(&source), [decoded.clone()], "{source}");
+                assert_eq!(
+                    tool_names(&source),
+                    std::slice::from_ref(&decoded),
+                    "{source}"
+                );
                 let path = format!("provides.\"a:tools\".tools.{quoted}");
                 assert_eq!(field_fix(&source, &path), REMOVAL, "{source}");
             }
