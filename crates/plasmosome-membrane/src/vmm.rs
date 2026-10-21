@@ -1739,6 +1739,7 @@ mod signal_pressure {
                     dropped: Arc::clone(&dropped),
                 })
                 .expect("the interrupter thread is running");
+            let _withheld = WithheldLeaderSignal::for_leader(child.pid());
             set_sigusr1_blocked(false);
             drop(child);
             set_sigusr1_blocked(true);
@@ -1826,10 +1827,7 @@ mod signal_pressure {
             let signals_before = DELIVERED.load(Ordering::Relaxed);
             let interruptions_before = interrupted_reaps();
             reset_reap_record();
-            let unhandled = {
-                let _withheld = WithheldLeaderSignal::for_leader(pid);
-                interrupter.drop_interrupted(child, &release)
-            };
+            let unhandled = interrupter.drop_interrupted(child, &release);
             let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
             let interruptions = interrupted_reaps() - interruptions_before;
             assert_reaped_by_drop(pid, interruptions);
