@@ -1,6 +1,8 @@
 use crate::runtime::RemoveOutcome;
 use crate::runtime::path::RecipePath;
-use plasmosome_core::private_socket::{PrivateListener, PrivateSocketError, effective_uid};
+use plasmosome_core::private_socket::{
+    Accepted, PrivateDir, PrivateListener, PrivateSocketError, effective_uid,
+};
 use std::io::{ErrorKind, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -90,8 +92,34 @@ impl RuntimeListener {
         path: &RecipePath,
         trusted_uid: u32,
     ) -> Result<RuntimeListener, EndpointRefusal> {
-        let _ = (path, trusted_uid);
-        todo!()
+        let refused = |refusal| EndpointRefusal::Private {
+            path: path.clone(),
+            refusal,
+        };
+        let (Some(parent), Some(name)) = (
+            path.as_path().parent(),
+            path.as_path().file_name().and_then(std::ffi::OsStr::to_str),
+        ) else {
+            return Err(refused(PrivateSocketError::BadPath {
+                path: path.as_path().to_owned(),
+            }));
+        };
+        let dir = PrivateDir::open(parent).map_err(refused)?;
+        let mut refusal = None;
+        let bound = crate::spawn_lock::with_descriptors_held(|_held| {
+            PrivateListener::bind(dir, name, trusted_uid).map_err(|found| {
+                refusal = Some(found);
+                std::io::Error::from(ErrorKind::Other)
+            })
+        });
+        match (bound, refusal) {
+            (Ok(listener), _) => Ok(RuntimeListener {
+                path: path.clone(),
+                listener,
+            }),
+            (Err(_), Some(refusal)) => Err(refused(refusal)),
+            (Err(_), None) => Err(EndpointRefusal::Inheritable { path: path.clone() }),
+        }
     }
 
     /// The path this listener was bound at.
@@ -110,7 +138,38 @@ impl RuntimeListener {
         expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
     )]
     pub(crate) fn accept_ready(&self) -> std::io::Result<Option<Connection>> {
-        todo!()
+        let mut refused = None;
+        let taken =
+            crate::spawn_lock::with_descriptors_held(|_held| match self.listener.accept()? {
+                Some(Accepted::Trusted(stream)) => Ok(stream),
+                Some(Accepted::Refused(refusal)) => {
+                    refused = Some(refusal);
+                    Err(ErrorKind::ConnectionRefused.into())
+                }
+                None => Err(ErrorKind::WouldBlock.into()),
+            });
+        let stream = match (taken, refused) {
+            (Ok(stream), _) => stream,
+            (Err(_), Some(refusal)) => return Ok(Some(Connection::Refused(refusal))),
+            (Err(error), None) if error.kind() == ErrorKind::WouldBlock => return Ok(None),
+            (Err(error), None) => return Err(error),
+        };
+        let identified = stream
+            .set_nonblocking(true)
+            .map_err(|error| PrivateSocketError::Io {
+                op: "fcntl",
+                path: self.path.as_path().to_owned(),
+                errno: errno_of(&error),
+            })
+            .and_then(|()| {
+                peer_pid(&stream).map_err(|error| PrivateSocketError::PeerCredentials {
+                    errno: errno_of(&error),
+                })
+            });
+        Ok(Some(match identified {
+            Ok(pid) => Connection::Identified { stream, pid },
+            Err(refusal) => Connection::Refused(refusal),
+        }))
     }
 
     /// Closes the listener, then removes its socket file only while the entry
@@ -118,7 +177,7 @@ impl RuntimeListener {
     /// says what it found. Dropping the listener does the same and discards
     /// the outcome.
     pub fn close(self) -> RemoveOutcome {
-        todo!()
+        self.listener.close()
     }
 }
 
@@ -334,6 +393,10 @@ fn keep(transcript: &mut Transcript, read: &[u8]) {
     let (kept, over) = read.split_at(read.len().min(room));
     transcript.bytes.extend_from_slice(kept);
     transcript.dropped += over.len() as u64;
+}
+
+fn errno_of(error: &std::io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
 }
 
 impl std::fmt::Display for EndpointRefusal {
