@@ -1089,7 +1089,7 @@ mod tests {
             found: &mut BTreeMap<String, serde_json::Value>,
         ) {
             match value {
-                serde_json::Value::Object(fields) => {
+                serde_json::Value::Object(fields) if !fields.is_empty() => {
                     for (name, field) in fields {
                         let nested = if path.is_empty() {
                             name
@@ -1121,27 +1121,115 @@ mod tests {
         state
     }
 
+    type FieldNames = (&'static [&'static str], &'static [&'static str]);
+
+    fn field_names(capability: &Capability) -> FieldNames {
+        match capability {
+            Capability::SessionFile {
+                path: _,
+                recipe:
+                    SessionFileRecipe {
+                        contents: _,
+                        mode: FileAccess::ReadOnly | FileAccess::ReadWrite,
+                        guest_path: _,
+                    },
+            } => (
+                &["SessionFile.path"],
+                &[
+                    "SessionFile.recipe.contents",
+                    "SessionFile.recipe.mode",
+                    "SessionFile.recipe.guest_path",
+                ],
+            ),
+            Capability::UdsSocket {
+                path: _,
+                recipe:
+                    UdsRecipe {
+                        upstream: _,
+                        guest_path: _,
+                    },
+            } => (
+                &["UdsSocket.path"],
+                &["UdsSocket.recipe.upstream", "UdsSocket.recipe.guest_path"],
+            ),
+            Capability::ProxyMap {
+                host: _,
+                route: _,
+                recipe:
+                    ProxyRecipe {
+                        transport: ProxyTransport::Tcp | ProxyTransport::Udp,
+                        destination: _,
+                        port: _,
+                        allow_private: _,
+                    },
+            } => (
+                &["ProxyMap.host", "ProxyMap.route"],
+                &[
+                    "ProxyMap.recipe.transport",
+                    "ProxyMap.recipe.destination",
+                    "ProxyMap.recipe.port",
+                    "ProxyMap.recipe.allow_private",
+                ],
+            ),
+            Capability::Broker {
+                name: _,
+                launch:
+                    BrokerLaunch {
+                        command: _,
+                        control_socket: _,
+                        data_socket: _,
+                    },
+            } => (
+                &["Broker.name"],
+                &[
+                    "Broker.launch.command",
+                    "Broker.launch.control_socket",
+                    "Broker.launch.data_socket",
+                ],
+            ),
+            Capability::Mount {
+                source: _,
+                target: _,
+                recipe:
+                    MountRecipe {
+                        access: FileAccess::ReadOnly | FileAccess::ReadWrite,
+                    },
+            } => (&["Mount.source", "Mount.target"], &["Mount.recipe.access"]),
+        }
+    }
+
     #[test]
     fn every_recipe_and_launch_field_has_one_row_that_changes_only_that_field() {
         let rows = recipe_field_changes();
-        let mut recipe_fields: Vec<String> = [
+        let mut recipe_fields = Vec::new();
+        for capability in [
             session_file("/skills/pr.md"),
             fixtures::uds_socket("/run/egressd.uds"),
             proxy_map("api.github.com", "splice"),
             mount("/code", "/workspace"),
             broker("egressd"),
-        ]
-        .iter()
-        .flat_map(|capability| json_leaves(capability).into_keys())
-        .filter(|path| path.contains(".recipe.") || path.contains(".launch."))
-        .collect();
-        recipe_fields.sort();
-        let mut row_fields: Vec<String> = rows.iter().map(|row| row.0.to_string()).collect();
-        row_fields.sort();
+        ] {
+            let (selection, recipe) = field_names(&capability);
+            let mut named: Vec<&str> = selection.iter().chain(recipe).copied().collect();
+            named.sort_unstable();
+            assert_eq!(
+                json_leaves(&capability)
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                named,
+                "{capability:?}"
+            );
+            recipe_fields.extend_from_slice(recipe);
+        }
+        recipe_fields.sort_unstable();
+        let mut row_fields: Vec<&str> = rows.iter().map(|row| row.0).collect();
+        row_fields.sort_unstable();
         assert_eq!(row_fields, recipe_fields);
         assert_eq!(rows.len(), 13);
 
         for (field, before, after) in rows {
+            assert!(field_names(&before).1.contains(&field), "{field}");
             assert_eq!(before.class(), after.class(), "{field}");
             assert_eq!(before.key(), after.key(), "{field}");
             assert_eq!(before.validate(), Ok(()), "{field}");
