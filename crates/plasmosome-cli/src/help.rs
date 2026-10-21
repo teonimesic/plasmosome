@@ -13,7 +13,8 @@ Flags, anywhere among the command words and never after `--`. A flag given twice
 error, and so is --kernel, --socket or --deadline-ms on a registry command. With -h or --help,
 only the command words are read: no flag is a fault, and the first bad word is named. A command
 this build does not serve reads only --json and --human, and --version reads only itself. Any
-other line names its leftmost fault.
+other line names its leftmost fault. This build reaches an instance only through --socket.
+Beside it, --kernel only names the instance; PLASMOSOME_KERNEL and HOME are not read yet.
   --kernel NAME     the instance named NAME, at $HOME/.plasmosome/instances/NAME/control.uds
   --socket PATH     the socket at PATH, which is absolute with no empty, `.` or `..` component
   --deadline-ms N   the budget for the whole command, from 1 to 3600000 ms; 10000 by default
