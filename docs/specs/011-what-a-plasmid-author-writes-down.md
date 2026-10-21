@@ -476,10 +476,10 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - `[provides]` with bindings `"a:tools"`, `""` and `" "`, each declaring one described tool, is
   refused at `provides.""` or `provides." "` with `fix` `remove this entry`. With that binding
   removed, the other is refused the same way, and then the declaration parses with only the tool of
-  `a:tools`. `[provides]` with `"" = false` is refused at `provides.""` with `remove this entry`.
-  Catches: a parser that keeps a blank key, one that drops it and its tools in silence, one that
-  refuses only the empty key, and a fix that writes the blank key back. Amended on 2026-10-21: this
-  item is new.
+  `a:tools`. `[provides]` with `"" = false`, or `[provides.""]` with only an unknown key `tool`, is
+  refused at `provides.""` with `remove this entry`. Catches: a parser that keeps a blank key, one
+  that drops it and its tools in silence, one that refuses only the empty key, a fix that writes the
+  blank key back, and a check inside the binding first. Amended on 2026-10-21: this item is new.
 - A plasmid granted two hosts and denied a third produces a report naming the denied host and the
   hosts field, in which neither granted host appears anywhere.
 - The denial report reaches the session log and the plasmid's status, and the calling code inside
