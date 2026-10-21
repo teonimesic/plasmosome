@@ -129,9 +129,10 @@ sources for its cell.
 ```
 
 - `plasmids` maps a plasmid ID to its entry. A key is a nonempty, NUL-free string, and must equal
-  the `id` of the declaration it lists. Reading this file opens no declaration, so §5 checks the key
-  each time it opens one: for the named plasmid, and for each listing step 2's search opens. A
-  mismatch is §5's 108 with `path` the declaration, not a `content` fault of this file. Amended on
+  the `id` of the declaration it lists. Reading this file opens no declaration, so the key is
+  checked each time one is opened: by §5 for the named plasmid and for each listing step 2's search
+  opens, and by §8 when a reload re-reads a local member's declaration. A mismatch is §5's 108 with
+  `path` the declaration, at a reload as at an add, not a `content` fault of this file. Amended on
   2026-10-21: this did not say when the key is checked, so a mismatch read both as this file's
   `content` fault and as §5's 108 naming the declaration.
 - `declaration` is optional: the absolute path of the plasmid's declaration file, for local
@@ -556,36 +557,39 @@ ProxyMap (O-11) or Mount (O-7).
    naming it. Two attached providers whose files are then deleted: R attaches, with or without a
    controller restart in between, with a record naming both, and their holdings are unchanged. An
    attached H whose record does not provide `k`, but whose listed declaration now does, is not a
-   candidate: R is 103 `k`, and with a listed P that provides `k`, P joins and R's record names only
-   P. R that also provides `k` is 108 with `path` R's declaration, field `requires.capabilities[0]`,
-   `fix` `remove this entry` and a `detail` naming `k` and R, and leaves no journal record, whether
-   P is unlisted, listed or attached. A P that R's search selects and that requires a key `j` it
-   provides is 108 with `path` P's declaration and a `detail` naming `j` and P, and leaves no
-   journal record. Cycles are each 108 with `fix` `remove this entry` and leave no journal record. R
-   requires `k` from P, P requires `n`, which an attached plasmid provides, and then `j` from Q, and
-   Q requires `m`, which R provides: `path` P's declaration, plasmid ID P, field
-   `requires.capabilities[1]`, and a `detail` naming the edges of P, Q and R in that order. With Q
-   requiring `i` from P instead: `path` P's declaration and a `detail` naming only the edges of P
-   and Q. A shared provider is not a cycle: with P requiring nothing, R requiring `k` and `m`, and Q
-   providing `m` and requiring `k`, R, P and Q attach, and P is attached once. Catches: borrowing
-   another member's entries, an undefined candidate set, skipping an unsafe listing, re-reading an
-   attached provider, a plasmid made its own provider or only left out of its own candidates, a
-   refusal that names R's declaration for P's fault, a cycle check that sees only two plasmids or
-   only cycles through R, refusing a shared provider, a field that names the requirer's first entry,
-   a `path` that depends on the order of the walk, a step 1 that knows what an attached plasmid
-   provides only until a restart, an edge to an attached plasmid that does not provide the key, and
-   a cycle refusal carrying another plasmid's ID. Amended on 2026-10-20: this item had no
-   self-provider case. Amended on 2026-10-20: this item had no cycle case. Amended on 2026-10-21:
-   this item had no restart case and no attached candidate case, and did not check the cycle
-   refusal's plasmid ID.
+   candidate: R is 103, `capability` `k`, `plasmid` R, and with a listed P that provides `k`, P
+   joins and R's record names only P. With H's listing group-writable, R is 108 naming H's
+   declaration. R that also provides `k` is 108 with `path` R's declaration, field
+   `requires.capabilities[0]`, `fix` `remove this entry` and a `detail` naming `k` and R, and leaves
+   no journal record, whether P is unlisted, listed or attached. A P that R's search selects and
+   that requires a key `j` it provides is 108 with `path` P's declaration and a `detail` naming `j`
+   and P, and leaves no journal record. Cycles are each 108 with `fix` `remove this entry` and leave
+   no journal record. R requires `k` from P, P requires `n`, which an attached plasmid provides, and
+   then `j` from Q, and Q requires `m`, which R provides: `path` P's declaration, plasmid ID P,
+   field `requires.capabilities[1]`, and a `detail` naming the edges of P, Q and R in that order.
+   With Q requiring `i` from P instead: `path` P's declaration and a `detail` naming only the edges
+   of P and Q. A shared provider is not a cycle: with P requiring nothing, R requiring `k` and `m`,
+   and Q providing `m` and requiring `k`, R, P and Q attach, and P is attached once. Catches:
+   borrowing another member's entries, an undefined candidate set, skipping an unsafe listing,
+   re-reading an attached provider, a plasmid made its own provider or only left out of its own
+   candidates, a refusal that names R's declaration for P's fault, a cycle check that sees only two
+   plasmids or only cycles through R, refusing a shared provider, a field that names the requirer's
+   first entry, a `path` that depends on the order of the walk, a step 1 that knows what an attached
+   plasmid provides only until a restart, an edge to an attached plasmid that does not provide the
+   key, a search that skips an attached plasmid's listing, a 103 that names H, and a cycle refusal
+   carrying another plasmid's ID. Amended on 2026-10-20: this item had no self-provider case.
+   Amended on 2026-10-20: this item had no cycle case. Amended on 2026-10-21: this item had no
+   restart case and no attached candidate case, and did not check the cycle refusal's plasmid ID.
 5. Local selection. An unlisted ID is 101 `plasmid <id>`, even with a valid declaration at the
    project root and under `.plasmosome/plasmids/`; so is an entry with no `declaration`. An unsafe
-   or mismatched declaration is 108 with `path` the declaration, not the operator file, both for the
-   named plasmid and for a listing that only step 2's search opens. A listed, matching one attaches
-   with source `{"kind": "local"}`. `cell.new` with a genome and no artifact is 101 `genome <name>`,
-   with no cell directory, even with `.plasmosome/genomes/<name>.toml` present. Catches: searching
-   any default path, and a mismatch reported as the operator file's `content` fault. Amended on
-   2026-10-21: this item did not cover a mismatched listing that only the search opens.
+   or mismatched declaration is 108 with `path` the declaration, not the operator file: for the
+   named plasmid, for a listing that only step 2's search opens, and for a reload that re-reads a
+   declaration with another `id`. A listed, matching one attaches with source `{"kind": "local"}`.
+   `cell.new` with a genome and no artifact is 101 `genome <name>`, with no cell directory, even
+   with `.plasmosome/genomes/<name>.toml` present. Catches: searching any default path, a mismatch
+   reported as the operator file's `content` fault, and a reload that does not check the key.
+   Amended on 2026-10-21: this item did not cover a mismatched listing that only the search opens,
+   or a reload.
 6. Attach, change the entry's `destination`, restart. Recovery holds the original destination.
    Reload: the new generation holds the new one with a fresh ID. With a second plasmid holding
    that host at the old recipe, the reload is 108. Catches: recovery that reads the operator

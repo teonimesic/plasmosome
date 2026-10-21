@@ -451,10 +451,10 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   scope; a relative path-scope entry; a network section with no hosts; a declaration naming no
   capability and no implementation; a command secret naming no subject; and a declaration with no
   `id`, which names `id` and carries no plasmid id.
-- `requires.capabilities = ["a", 5, "", " ", "k"]` is refused at `requires.capabilities[1]` with
-  `fix` `remove this entry`. Each time the refused entry is removed, the next refusal is again at
-  `requires.capabilities[1]`, for `""` and then `" "`, and the result parses with requires `["a",
-  "k"]`. Catches: a parser that drops an entry and shifts later indexes, and one that keeps a blank
+- `requires.capabilities = ["a", 5, "b", "", " "]` is refused at `requires.capabilities[1]` with
+  `fix` `remove this entry`. Each time the refused entry is removed, the next refusal is at
+  `requires.capabilities[2]`, for `""` and then `" "`, and the result parses with requires `["a",
+  "b"]`. Catches: a parser that drops an entry and shifts later indexes, and one that keeps a blank
   key. Amended on 2026-10-21: this item is new.
 - A plasmid granted two hosts and denied a third produces a report naming the denied host and the
   hosts field, in which neither granted host appears anywhere.
