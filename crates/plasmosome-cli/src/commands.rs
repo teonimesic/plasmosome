@@ -22,5 +22,71 @@ impl Command {
     }
 }
 
+const fn verb(
+    words: &'static [&'static str],
+    operands: &'static [&'static str],
+    method: &'static str,
+    changes_state: bool,
+) -> Command {
+    Command {
+        words,
+        operands,
+        command: method,
+        is_method: true,
+        changes_state,
+        served: false,
+    }
+}
+
+const fn registry(
+    words: &'static [&'static str],
+    operands: &'static [&'static str],
+    name: &'static str,
+    changes_state: bool,
+) -> Command {
+    Command {
+        words,
+        operands,
+        command: name,
+        is_method: false,
+        changes_state,
+        served: false,
+    }
+}
+
 /// Every `plasmosome` command of spec 025 §2, in the table's order. No command is served yet.
-pub const COMMANDS: &[Command] = &[];
+pub const COMMANDS: &[Command] = &[
+    verb(&["status"], &[], "plasmosome.status", false),
+    verb(&["recovery"], &[], "plasmosome.recovery", false),
+    verb(&["stop"], &[], "plasmosome.stop", true),
+    verb(&["start"], &[], "plasmosome.start", true),
+    verb(&["list"], &[], "plasmosome.list", false),
+    verb(&["cell", "new"], &[], "cell.new", true),
+    verb(&["germinate"], &["GENOME"], "cell.new", true),
+    verb(&["cell", "list"], &[], "cell.list", false),
+    verb(&["cell", "status"], &[], "cell.status", false),
+    verb(&["cell", "kill"], &[], "cell.kill", true),
+    verb(&["cell", "exec"], &[], "cell.exec", true),
+    verb(&["exec", "status"], &[], "exec.status", false),
+    verb(&["exec", "output"], &[], "exec.output", false),
+    registry(
+        &["registry", "source", "add"],
+        &["ALIAS"],
+        "source.add",
+        false,
+    ),
+    registry(&["registry", "source", "list"], &[], "source.list", false),
+    registry(
+        &["registry", "source", "remove"],
+        &["ALIAS"],
+        "source.remove",
+        false,
+    ),
+    registry(&["registry", "search"], &[], "search", false),
+    registry(&["registry", "show"], &["REF"], "show", false),
+    registry(&["registry", "inspect"], &["DIRECTORY"], "inspect", false),
+    registry(&["registry", "fetch"], &["REF"], "fetch", false),
+    registry(&["registry", "register"], &["DIRECTORY"], "register", true),
+    registry(&["registry", "yank"], &["REF"], "yank", true),
+    registry(&["registry", "import"], &["DIRECTORY"], "import", false),
+];

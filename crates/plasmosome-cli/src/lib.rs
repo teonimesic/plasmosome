@@ -7,6 +7,7 @@ mod cli;
 mod codes;
 mod commands;
 mod envelope;
+mod help;
 pub mod json;
 
 pub use cli::{Invocation, Reading, handle, main_with, read};
