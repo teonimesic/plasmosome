@@ -31,7 +31,9 @@ const DEADLINE: &str = "--deadline-ms";
 
 const VALUE_FLAGS: [&str; 3] = [KERNEL, SOCKET, DEADLINE];
 
-const KNOWN_FLAGS: [&str; 5] = [KERNEL, SOCKET, DEADLINE, JSON, HUMAN];
+const KNOWN_FLAGS: [&str; 8] = [
+    KERNEL, SOCKET, DEADLINE, JSON, HUMAN, SHORT_HELP, HELP, VERSION,
+];
 
 const MAX_DEADLINE_MS: u32 = 3_600_000;
 
@@ -219,6 +221,17 @@ impl<'a> Line<'a> {
             .collect()
     }
 
+    fn words_before_an_unknown_flag(&self) -> Vec<&'a OsStr> {
+        self.head
+            .iter()
+            .take_while(|arg| {
+                arg.kind != Kind::Flag || KNOWN_FLAGS.iter().any(|known| arg.text == *known)
+            })
+            .filter(|arg| arg.kind == Kind::Word)
+            .map(|arg| arg.text)
+            .collect()
+    }
+
     fn flags(&self) -> impl Iterator<Item = (usize, &'a OsStr)> + '_ {
         self.head
             .iter()
@@ -253,7 +266,7 @@ impl<'a> Line<'a> {
     }
 
     fn help(&self, commands: &[Command]) -> Reading {
-        let words = self.words();
+        let words = self.words_before_an_unknown_flag();
         let text = match name(&words, commands) {
             Named::Nothing => help::binary(commands),
             Named::Group(group) => help::group(commands, group),
