@@ -111,9 +111,11 @@ pub enum StartStep {
 /// writes `record`, waiting no later than `deadline` for `membraned` to read, and closes the pipe.
 /// Returns `Ok` once the whole record is written.
 ///
-/// The children run only async-signal-safe calls between `fork` and `exec` and allocate nothing,
-/// so the caller may have other threads. The calling thread blocks every signal from just before
-/// the fork until the fork returns, so no handler of this process runs in a child.
+/// Between `fork` and `exec` the children allocate nothing and make only async-signal-safe calls,
+/// except the intermediate's own `fork`, which POSIX.1-2024 no longer lists. The `SAFETY:`
+/// comment in `intermediate` gives that fork's reason. So the caller may have other threads. The
+/// calling thread blocks every signal from just before the fork until the fork returns, so no
+/// handler of this process runs in a child.
 ///
 /// On Darwin a new pipe is close-on-exec only after a second call. A process this one starts at
 /// that moment by a spawn that does not close every other descriptor can inherit a pipe end. If
@@ -260,8 +262,9 @@ struct Child {
 #[allow(unsafe_code)]
 fn fork_intermediate(child: &Child) -> Result<libc::pid_t, Failure> {
     let blocked = BlockedSignals::all().map_err(Failure::Prepare)?;
-    // SAFETY: The child runs only `intermediate`, which makes only async-signal-safe calls and ends
-    // in `_exit` or `execve`, so it allocates nothing and takes no lock another thread may hold.
+    // SAFETY: The child runs only `intermediate`, which makes only async-signal-safe calls, except
+    // its own `fork`, whose SAFETY comment there gives its reason. It ends in `_exit` or `execve`,
+    // so it allocates nothing and takes no lock another thread may hold.
     // Every pointer `child` holds points into `Layout::spawn`'s frame and the Layout, which the
     // child's copy of memory keeps, and every descriptor it names is open until this returns.
     let forked = unsafe { libc::fork() };

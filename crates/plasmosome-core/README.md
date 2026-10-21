@@ -338,7 +338,9 @@ and creates the lock.
   of the lock, the config pipe and a report pipe, each copied to descriptor 5 or above, so no copy
   onto 0 to 4 replaces a source a later copy needs. A lock that already sits at 4 is copied too,
   because `dup2(4, 4)` would leave it close-on-exec. The children make only async-signal-safe
-  calls. The calling thread blocks every signal from just before the fork until the fork
+  calls, except the intermediate's own `fork`, which POSIX.1-2024 no longer lists. The `SAFETY:`
+  comment in `intermediate` gives its reason: the intermediate has one thread, and the first
+  fork's own child handlers left every atfork lock released. The calling thread blocks every signal from just before the fork until the fork
   returns, so no handler of the controller runs in a child. The grandchild sets every action to
   be ignored and then to the default before it empties its mask. Setting an action to be ignored
   discards a signal still pending, such as one sent to the controller's process group before the
