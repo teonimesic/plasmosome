@@ -15,9 +15,11 @@ handle its leaf issued; task 008 fixed the backend rather than the clauses, whic
 holding every backend to the same functions.
 
 Every clause reads the backend's complete account, and a snapshot that fails is a contract
-failure. Each check compares the whole snapshot with what the clause expects: the standing
+failure. Each account check compares the whole snapshot with what the clause expects: the standing
 objects, an issued record for each standing grant and none for an applied or planted object, and
-no unfinished effect. Two defects hold the clauses to that. `SnapshotOmitsIssuedRecords` reports
+no unfinished effect. One per-step check does not: after each revoke,
+`planted_residue_survives_unrelated_revoke` checks only that the planted residue still stands.
+That clause ends with a check of the whole snapshot. Two defects hold the clauses to that. `SnapshotOmitsIssuedRecords` reports
 its objects with no records, and `snapshot_never_invents_objects` must reject it.
 `SnapshotReconstructsGrantsFromObjects` rebuilds a record for every standing object, and
 `apply_and_removal_reach_the_universe` must reject it.
