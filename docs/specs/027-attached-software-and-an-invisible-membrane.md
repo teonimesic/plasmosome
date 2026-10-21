@@ -209,11 +209,13 @@ tool calls, results, exit statuses and files left behind. The only exceptions ar
 differences, each allowed mechanically: the manifest names the probes and fields where it shows
 and the exact value the cell lane may have there, such as mode 0600 for a file the workload
 created. Any other difference, in those probes or the harness transcript, fails the verdict. No
-rule reaches the transcript, because its values sit inside text that a rule could reach only by
-how it looks. So the recorded session asks only for tool calls whose results hold no value the
-system chose, such as a process ID or a time: such a value differs between boots, and fails the
-verdict. Amended on 2026-10-21: this said the transcript is compared after normalization, which no
-rule can reach.
+rule reaches the transcript, because rules name probes, and a value inside a tool result could be
+reached only by how it looks. So the recorded session asks only for tool calls whose results hold
+no value the system chose, such as a process ID or a time, and that leave no file holding one. A
+`git add` returns nothing, but the `.git/index` it leaves records each file's device, inode number
+and times. Such a value need not be the same between boots or between lanes, and where it differs
+it fails the verdict. Amended on 2026-10-21: this said the transcript is compared after
+normalization, which no rule can reach.
 
 **The workload** is the probe suite plus one unmodified harness pinned by version and digest (Q3),
 attached in the cell lane and installed by hand elsewhere, driven by a recorded model session from
@@ -230,8 +232,10 @@ which relations between its values the placeholders keep:
   distinct ones stay distinct, even in two fields: a leader and the process list it belongs to, or
   two files' inodes. A parent mount ID is numbered with the mount IDs, since it names a mount.
 - **A system time** is numbered by rank within its field, earliest first, and equal times share a
-  number, so time placeholders keep their order. Times that cannot be ranked exactly, such as whole
-  numbers beside fractions, refuse the runs.
+  number, so time placeholders keep their order. Integers are ranked as integers and other numbers
+  as `f64`, as they are read below. A time field that mixes the two refuses the runs, because they
+  would be compared through `f64`, which does not hold every integer exactly. So `[1e3, 1001]` and
+  `[-0, 5]` are refused.
 - **A memory or load counter** is numbered by first appearance within its field. Two counters that
   happen to be equal name nothing, so counters in two fields are not related.
 - **A duration** keeps no relation: every one becomes the same placeholder, because timing is not
@@ -248,13 +252,15 @@ by first appearance within one field, which cannot keep the order of times and l
 between two fields, and it did not say whether durations keep an order.
 
 **Reading guest output.** The probe output and the transcript a guest writes are read so that two
-different numbers never read as one. The reader refuses the runs, naming the lane, the probe or the
-transcript, and the field, when it finds an integer below `i64::MIN` or above `u64::MAX`, or a
-number with a fraction or an exponent whose value differs from the shortest decimal that reads back
-as the same `f64`. So `1760954400.123456789` is refused, since it and `1760954400.123456788` read
-as one `f64`, and `0.1` is not. Amended on 2026-10-21: §6 did not say how numbers are read, and a
-reader that holds every number as an `f64` reads `18446744073709551616` and `18446744073709551617`
-as one.
+different numbers never read as one. Here an integer is a number written without a fraction or an
+exponent, other than `-0`, so `1e20` and `-0` are not integers. The reader refuses the runs, naming
+the lane, the probe or the transcript, and the field, when it finds an integer below `i64::MIN` or
+above `u64::MAX`, or any other number whose value differs from the shortest decimal that reads
+back as the same `f64`. An integer reads as itself and any other number as the `f64` nearest to
+it, and the value read is the value judged. So `1760954400.123456789` is refused, since it and
+`1760954400.123456788` read as one `f64`, and `0.1` is not. Amended on 2026-10-21: §6 did not say
+how numbers are read, and a reader that holds every number as an `f64` reads
+`18446744073709551616` and `18446744073709551617` as one.
 
 **Results** go in a dated file under `docs/benchmarks/`: each lane's configuration; the digests of
 the image, kernel, libkrun, fixtures, harness, session, probe suite and manifest; the normalization
