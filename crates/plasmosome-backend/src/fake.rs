@@ -172,6 +172,7 @@ mod tests {
     use crate::backend::Capability;
     use crate::fixtures::{self, broker, mount, proxy_map, session_file, uds_socket};
     use crate::recipe::{BrokerLaunch, ProxyRecipe, RecipeError};
+    use crate::snapshot::EnforcementSnapshot;
     use crate::universe::{CellId, CellOwner, GrantId, PluginId, UniverseClass};
     use std::time::Duration;
 
@@ -1049,5 +1050,83 @@ mod tests {
                 .unwrap(),
             standing
         );
+    }
+
+    fn standing(objects: &[OsObject]) -> OsState {
+        let mut state = OsState::new();
+        for object in objects {
+            state.insert(object.clone()).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn a_snapshot_reports_a_record_for_each_live_grant_and_none_for_applied_or_planted_objects() {
+        let owner = cell_owner("cell-1", "github-pr");
+        let mut backend = FakeBackend::new();
+        let hot = grant_to(&mut backend, &owner, session_file("/skills/pr.md"));
+        let bound = backend
+            .grant(
+                fixtures::op(GrantId::new(), owner.clone(), broker("egressd")),
+                GrantKind::GenerationBound,
+            )
+            .unwrap();
+        let applied = mount_by(&owner);
+        backend.apply(applied.clone()).unwrap();
+        let planted = OsObject {
+            id: GrantId::new(),
+            owner: owner.clone(),
+            capability: proxy_map("api.github.com", "splice"),
+        };
+        backend.plant(planted.clone()).unwrap();
+        assert_eq!(
+            backend.snapshot_os_state(),
+            EnforcementSnapshot::new(
+                standing(&[
+                    hot.object(),
+                    bound.object(),
+                    applied.object(),
+                    planted.clone()
+                ]),
+                vec![hot.clone(), bound.clone()],
+                Vec::new(),
+            )
+        );
+        backend.revoke(hot.handle, DrainSpec::forcing()).unwrap();
+        backend
+            .apply_removal(bound.removal(), &bound.owner, DrainSpec::forcing())
+            .unwrap();
+        assert_eq!(
+            backend.snapshot_os_state(),
+            EnforcementSnapshot::new(
+                standing(&[applied.object(), planted]),
+                Vec::new(),
+                Vec::new()
+            )
+        );
+    }
+
+    #[test]
+    fn an_armed_observation_fails_once_with_no_other_effect_and_then_observes_normally() {
+        let owner = cell_owner("cell-1", "network");
+        let mut backend = FakeBackend::new();
+        let entry = grant_to(&mut backend, &owner, uds_socket("/run/ak/egressd.uds"));
+        backend.fail_next_observation("observer unreachable");
+        let applied = mount_by(&owner);
+        backend.apply(applied.clone()).unwrap();
+        let failed = backend.snapshot_os_state().unwrap_err();
+        assert_eq!(
+            failed,
+            BackendError::Fault("observer unreachable".to_string())
+        );
+        assert_eq!(failed.to_string(), "backend fault: observer unreachable");
+        let complete = EnforcementSnapshot::new(
+            standing(&[entry.object(), applied.object()]),
+            vec![entry.clone()],
+            Vec::new(),
+        );
+        assert_eq!(backend.snapshot_os_state(), complete);
+        assert_eq!(backend.snapshot_os_state(), complete);
+        assert_eq!(backend.peek_entry(entry.handle).unwrap(), entry);
     }
 }
