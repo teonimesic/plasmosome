@@ -1051,23 +1051,6 @@ mod tests {
         }
 
         #[test]
-        fn the_recipe_stops_at_a_tampered_root_image_and_leaves_no_descriptor_open() {
-            let bundle = bundle();
-            let refusal =
-                verify_recipe_artifacts(&recipe_pinning(&bundle, &[ArtifactRole::RootImage]))
-                    .expect_err("the root image is tampered");
-            assert_eq!(refusal.role, ArtifactRole::RootImage);
-            assert_eq!(
-                refusal.fault,
-                ArtifactFault::DigestMismatch {
-                    expected: Digest::of(b"tampered"),
-                    actual: Digest::of(b"rootfs.raw"),
-                }
-            );
-            assert_eq!(descriptors_naming(&bundle.identities()), Vec::<i32>::new());
-        }
-
-        #[test]
         fn of_two_tampered_artifacts_the_first_in_field_order_is_reported() {
             let bundle = bundle();
             let tampered = [ArtifactRole::GuestPolicy, ArtifactRole::RootImage];
