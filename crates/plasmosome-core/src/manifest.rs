@@ -1,5 +1,12 @@
+use std::collections::HashSet;
+use std::fmt;
+use std::hash::Hash;
 use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
+
+use plasmosome_backend::canonical_path;
+pub use plasmosome_backend::is_proxy_host;
 
 use crate::toml_depth;
 
@@ -25,6 +32,8 @@ pub struct PlasmidManifest {
     pub network: Option<NetworkSpec>,
     pub requires: Vec<String>,
     pub provides_tools: Vec<ToolDeclaration>,
+    /// The `[provides]` binding keys, such as `github:tools`, in file order and as written.
+    pub provides: Vec<String>,
     pub secrets: Vec<SecretRef>,
     pub commands: Option<CommandsSpec>,
     pub workspace: Option<WorkspaceMount>,
@@ -40,11 +49,104 @@ pub struct ToolDeclaration {
     pub description: String,
 }
 
+/// The top-level `[network]`, with spec 022 §6's exact values: at least one host, every host a
+/// lower-case DNS name that `is_proxy_host` accepts, at least one port, and no host or port
+/// written twice. Each pin is a `Cidr` with no host bits set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NetworkSpec {
     pub hosts: Vec<String>,
     pub ports: Vec<u16>,
+    pub pin_cidrs: Vec<Cidr>,
+}
+
+/// A command's own `[network]`, with its values as written: `hosts` and `pin_cidrs` are lists
+/// of strings and every port is from 1 to 65535. Nothing else is checked, so a host need not be
+/// a DNS name, a pin need not be a CIDR, and either list may be empty or repeat an entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandNetwork {
+    pub hosts: Vec<String>,
+    pub ports: Vec<u16>,
     pub pin_cidrs: Vec<String>,
+}
+
+/// An IP network written as `<address>/<prefix>`, such as `192.0.2.0/24`, with no bit set past
+/// the prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Cidr {
+    network: IpAddr,
+    prefix: u8,
+}
+
+/// Why `Cidr::parse` refused a text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CidrError {
+    /// The text is not `<address>/<prefix>` in its one accepted spelling.
+    Malformed,
+    /// The address has a bit set past the prefix. `network` is the same address and prefix with
+    /// those bits cleared.
+    HostBitsSet { network: Cidr },
+}
+
+impl Cidr {
+    /// Parses `<address>/<prefix>`. The address must be spelled as Rust's `IpAddr` displays it,
+    /// and an IPv6 address must not carry an IPv4 address in IPv4-mapped or IPv4-compatible
+    /// form, the rule `ProxyRecipe::validate` applies to a destination. So `192.000.002.000/24`,
+    /// `2001:DB8::/32` and `::ffff:192.0.2.0/120` are `Malformed`. The prefix is 0 to 32 for
+    /// IPv4 and 0 to 128 for IPv6, in decimal digits with no sign and no leading zero. An address
+    /// with a bit set past the prefix is `HostBitsSet`, never rewritten.
+    pub fn parse(text: &str) -> Result<Cidr, CidrError> {
+        let (written, prefix) = text.split_once('/').ok_or(CidrError::Malformed)?;
+        let address: IpAddr = written.parse().map_err(|_| CidrError::Malformed)?;
+        let embeds_ipv4 = matches!(address, IpAddr::V6(v6)
+            if !v6.is_unspecified() && !v6.is_loopback() && v6.to_ipv4().is_some());
+        if embeds_ipv4 || address.to_string() != written {
+            return Err(CidrError::Malformed);
+        }
+        let width = if address.is_ipv4() { 32 } else { 128 };
+        let prefix = prefix_length(prefix, width).ok_or(CidrError::Malformed)?;
+        let network = Cidr {
+            network: masked(address, prefix),
+            prefix,
+        };
+        if network.network != address {
+            return Err(CidrError::HostBitsSet { network });
+        }
+        Ok(network)
+    }
+
+    /// True when `address` is of this network's family and its first `prefix` bits are the
+    /// network's. An IPv4-mapped IPv6 address is IPv6, so `192.0.2.0/24` does not contain
+    /// `::ffff:192.0.2.1`.
+    pub fn contains(&self, address: IpAddr) -> bool {
+        address.is_ipv4() == self.network.is_ipv4() && masked(address, self.prefix) == self.network
+    }
+}
+
+impl fmt::Display for Cidr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.network, self.prefix)
+    }
+}
+
+fn prefix_length(text: &str, width: u8) -> Option<u8> {
+    let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    if !digits || (text.len() > 1 && text.starts_with('0')) {
+        return None;
+    }
+    text.parse().ok().filter(|prefix| *prefix <= width)
+}
+
+fn masked(address: IpAddr, prefix: u8) -> IpAddr {
+    match address {
+        IpAddr::V4(v4) => {
+            let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+            IpAddr::V4(Ipv4Addr::from(u32::from(v4) & mask))
+        }
+        IpAddr::V6(v6) => {
+            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+            IpAddr::V6(Ipv6Addr::from(u128::from(v6) & mask))
+        }
+    }
 }
 
 /// The `[workspace].mount` a declaration writes. `dst` is the guest path, `/workspace` when the
@@ -159,7 +261,7 @@ pub struct CommandDecl {
     pub id: String,
     pub exec: Vec<String>,
     pub subject: Option<String>,
-    pub network: Option<NetworkSpec>,
+    pub network: Option<CommandNetwork>,
     pub secrets: Vec<SecretRef>,
 }
 
@@ -309,6 +411,12 @@ impl PlasmidManifest {
             .map(|provides| parse_tools(&id, provides))
             .transpose()?
             .unwrap_or_default();
+        let provides = raw
+            .get("provides")
+            .and_then(toml::Value::as_table)
+            .map(|bindings| binding_keys(text, bindings))
+            .transpose()?
+            .unwrap_or_default();
         let secrets = raw
             .get("secrets")
             .map(|secrets| parse_secret_refs(&id, "secrets", secrets))
@@ -320,14 +428,9 @@ impl PlasmidManifest {
             .transpose()?;
         let workspace = raw
             .get("workspace")
-            .and_then(|w| w.get("mount"))
-            .map(|m| WorkspaceMount {
-                dst: m
-                    .get("dst")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or("/workspace")
-                    .to_string(),
-            });
+            .map(|workspace| parse_workspace(&id, workspace))
+            .transpose()?
+            .flatten();
         let mock = raw
             .get("mock")
             .map(|m| {
@@ -412,16 +515,9 @@ impl PlasmidManifest {
         if let Some(spec) = &mock {
             validate_mock(&id, spec, network.as_ref())?;
         }
-        if let Some(spec) = &network
-            && spec.hosts.is_empty()
-        {
-            return Err(field_error(
-                &id,
-                "network.hosts".into(),
-                strings_line("hosts", &[EXAMPLE_HOST.into()]),
-                "a network section must name at least one host",
-            ));
-        }
+        let network = network
+            .map(|written| exact_network(&id, written))
+            .transpose()?;
         if let Some(commands) = &commands {
             validate_commands(&id, commands)?;
         }
@@ -433,6 +529,7 @@ impl PlasmidManifest {
             network,
             requires,
             provides_tools,
+            provides,
             secrets,
             commands,
             workspace,
@@ -613,7 +710,7 @@ fn parse_network(
     field_path: &str,
     n: &toml::Value,
     mock_hosts: &[String],
-) -> Result<NetworkSpec, ManifestError> {
+) -> Result<CommandNetwork, ManifestError> {
     if !n.is_table() {
         let hosts = evident_or(n, mock_hosts, EXAMPLE_HOST);
         return Err(field_error(
@@ -631,11 +728,231 @@ fn parse_network(
     )?;
     let ports = declared_ports(id, &format!("{field_path}.ports"), n.get("ports"))?;
     let pin_cidrs = declared_string_list(id, field_path, n.get("pin_cidrs"), ListRepair::Pins)?;
+    Ok(CommandNetwork {
+        hosts,
+        ports,
+        pin_cidrs,
+    })
+}
+
+fn exact_network(id: &str, written: CommandNetwork) -> Result<NetworkSpec, ManifestError> {
+    let CommandNetwork {
+        hosts,
+        ports,
+        pin_cidrs,
+    } = written;
+    let refused =
+        |field: String, fix: String, detail: &str| Err(field_error(id, field, fix, detail));
+    match (hosts.is_empty(), ports.is_empty()) {
+        (true, true) => {
+            return refused(
+                "network".into(),
+                REMOVE_ENTRY.into(),
+                "a network section with no host and no port declares nothing",
+            );
+        }
+        (true, false) => {
+            return refused(
+                "network.hosts".into(),
+                strings_line("hosts", &[EXAMPLE_HOST.into()]),
+                "a network section must name at least one host",
+            );
+        }
+        (false, true) => {
+            return refused(
+                "network.hosts[0]".into(),
+                REMOVE_ENTRY.into(),
+                "a network section that names hosts must declare a port",
+            );
+        }
+        (false, false) => {}
+    }
+    if let Some(index) = first_repeat(&ports) {
+        return refused(
+            format!("network.ports[{index}]"),
+            REMOVE_ENTRY.into(),
+            &format!("{} is already declared", ports[index]),
+        );
+    }
+    let declared: HashSet<&str> = hosts.iter().map(String::as_str).collect();
+    if let Some((index, host)) = hosts
+        .iter()
+        .enumerate()
+        .find(|(_, host)| !is_proxy_host(host))
+    {
+        let lower = host.to_ascii_lowercase();
+        let fix = if is_proxy_host(&lower) && !declared.contains(lower.as_str()) {
+            toml_string(&lower)
+        } else {
+            REMOVE_ENTRY.into()
+        };
+        return refused(
+            format!("network.hosts[{index}]"),
+            fix,
+            &format!("{} is not a lower-case DNS name", toml_string(host)),
+        );
+    }
+    if let Some(index) = first_repeat(&hosts) {
+        return refused(
+            format!("network.hosts[{index}]"),
+            REMOVE_ENTRY.into(),
+            &format!("{} is already declared", toml_string(&hosts[index])),
+        );
+    }
+    let pin_cidrs = exact_pins(id, &pin_cidrs)?;
     Ok(NetworkSpec {
         hosts,
         ports,
         pin_cidrs,
     })
+}
+
+fn first_repeat<T: Eq + Hash>(items: &[T]) -> Option<usize> {
+    let mut seen = HashSet::with_capacity(items.len());
+    items.iter().position(|item| !seen.insert(item))
+}
+
+fn exact_pins(id: &str, written: &[String]) -> Result<Vec<Cidr>, ManifestError> {
+    let parsed: Vec<Result<Cidr, CidrError>> = written.iter().map(|pin| Cidr::parse(pin)).collect();
+    let refused = |index: usize, fix: String, detail: String| {
+        Err(field_error(
+            id,
+            format!("network.pin_cidrs[{index}]"),
+            fix,
+            &detail,
+        ))
+    };
+    let masked = parsed
+        .iter()
+        .enumerate()
+        .find_map(|(index, pin)| match pin {
+            Err(CidrError::HostBitsSet { network }) => Some((index, network)),
+            _ => None,
+        });
+    if let Some((index, network)) = masked {
+        return refused(
+            index,
+            toml_string(&network.to_string()),
+            format!(
+                "{} has host bits set past its prefix",
+                toml_string(&written[index])
+            ),
+        );
+    }
+    if let Some(index) = parsed.iter().position(Result::is_err) {
+        let fix = if parsed.iter().any(Result::is_ok) {
+            REMOVE_ENTRY.into()
+        } else {
+            toml_string(EXAMPLE_PIN)
+        };
+        return refused(
+            index,
+            fix,
+            format!(
+                "{} is not a CIDR such as {}",
+                toml_string(&written[index]),
+                toml_string(EXAMPLE_PIN)
+            ),
+        );
+    }
+    Ok(parsed.into_iter().flatten().collect())
+}
+
+const DEFAULT_DST: &str = "/workspace";
+
+fn parse_workspace(
+    id: &str,
+    workspace: &toml::Value,
+) -> Result<Option<WorkspaceMount>, ManifestError> {
+    let Some(table) = workspace.as_table() else {
+        return Ok(None);
+    };
+    let Some(mount) = table.get("mount") else {
+        return Err(field_error(
+            id,
+            "workspace.mount".into(),
+            format!("mount = {{ dst = {} }}", toml_string(DEFAULT_DST)),
+            "a workspace section must declare its mount",
+        ));
+    };
+    let refused = |fix: &str, detail: String| {
+        Err(field_error(
+            id,
+            "workspace.mount.dst".into(),
+            format!("dst = {}", toml_string(fix)),
+            &detail,
+        ))
+    };
+    let dst = match mount.get("dst") {
+        None => DEFAULT_DST,
+        Some(toml::Value::String(dst)) if canonical_path("dst", dst).is_ok() => dst,
+        Some(toml::Value::String(dst)) => {
+            let rooted = if dst.starts_with('/') {
+                dst.clone()
+            } else {
+                format!("/{dst}")
+            };
+            let trimmed = rooted.trim_end_matches('/');
+            let fix = if canonical_path("dst", trimmed).is_ok() {
+                trimmed
+            } else {
+                DEFAULT_DST
+            };
+            return refused(
+                fix,
+                format!("{} is not a canonical absolute path", toml_string(dst)),
+            );
+        }
+        Some(other) => {
+            return refused(
+                DEFAULT_DST,
+                format!("{} is not a path string", shown(other)),
+            );
+        }
+    };
+    Ok(Some(WorkspaceMount {
+        dst: dst.to_string(),
+    }))
+}
+
+fn binding_keys(text: &str, bindings: &toml::Table) -> Result<Vec<String>, ManifestError> {
+    if bindings.len() < 2 {
+        return Ok(bindings.keys().cloned().collect());
+    }
+    let in_file_order: ProvidesInFileOrder = toml::from_str(text).map_err(ManifestError::Parse)?;
+    Ok(in_file_order.provides.0)
+}
+
+#[derive(serde::Deserialize)]
+struct ProvidesInFileOrder {
+    provides: BindingKeys,
+}
+
+struct BindingKeys(Vec<String>);
+
+impl<'de> serde::Deserialize<'de> for BindingKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(BindingKeysVisitor)
+    }
+}
+
+struct BindingKeysVisitor;
+
+impl<'de> serde::de::Visitor<'de> for BindingKeysVisitor {
+    type Value = BindingKeys;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a [provides] table")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<BindingKeys, A::Error> {
+        let mut keys = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            map.next_value::<serde::de::IgnoredAny>()?;
+            keys.push(key);
+        }
+        Ok(BindingKeys(keys))
+    }
 }
 
 fn parse_secret_refs(
@@ -904,36 +1221,55 @@ fn validate_secret_ref(
 fn validate_mock(
     id: &str,
     mock: &MockSpec,
-    network: Option<&NetworkSpec>,
+    network: Option<&CommandNetwork>,
 ) -> Result<(), ManifestError> {
     let Some(network) = network else {
-        if mock.hosts.is_empty() {
-            return Err(field_error(
-                id,
-                "mock".into(),
-                REMOVE_ENTRY.into(),
-                "[mock] names no host, and there is no [network]",
-            ));
-        }
-        return Err(field_error(
-            id,
-            "network".into(),
-            format!(
-                "[network]\n{}",
-                strings_line("hosts", &distinct(&mock.hosts))
-            ),
-            "a mock stands in for hosts that [network] declares, and there is no [network]",
-        ));
+        let detail = if mock.hosts.is_empty() {
+            "[mock] names no host, and there is no [network]"
+        } else {
+            "a mock stands in for hosts that [network] declares, and there is no [network]"
+        };
+        return Err(field_error(id, "mock".into(), REMOVE_ENTRY.into(), detail));
     };
-    let undeclared: Vec<String> = distinct(&mock.hosts)
-        .into_iter()
-        .filter(|host| !network.hosts.contains(host))
-        .collect();
-    let Some(host) = undeclared.first() else {
+    let Some((index, host)) = mock
+        .hosts
+        .iter()
+        .enumerate()
+        .find(|(_, host)| !network.hosts.contains(host))
+    else {
         return Ok(());
     };
+    if network.ports.is_empty() {
+        return Err(field_error(
+            id,
+            "mock".into(),
+            REMOVE_ENTRY.into(),
+            &format!(
+                "[mock] stands in for {}, which [network] does not declare, \
+                 and [network] declares no port",
+                toml_string(host)
+            ),
+        ));
+    }
+    if !is_proxy_host(host) {
+        let lower = host.to_ascii_lowercase();
+        let fix = if is_proxy_host(&lower) && !mock.hosts.contains(&lower) {
+            toml_string(&lower)
+        } else {
+            REMOVE_ENTRY.into()
+        };
+        return Err(field_error(
+            id,
+            format!("mock.hosts[{index}]"),
+            fix,
+            &format!(
+                "[mock] stands in for {}, which is not a lower-case DNS name",
+                toml_string(host)
+            ),
+        ));
+    }
     let fix = if network.hosts.is_empty() {
-        strings_line("hosts", &undeclared)
+        strings_line("hosts", &distinct(&mock.hosts))
     } else {
         toml_string(host)
     };

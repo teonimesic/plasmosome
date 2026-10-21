@@ -344,7 +344,10 @@ pub(crate) fn nul_free(field: &'static str, value: &str) -> Result<(), RecipeErr
     Ok(())
 }
 
-pub(crate) fn canonical_path(field: &'static str, value: &str) -> Result<(), RecipeError> {
+/// Checks that `value` is a canonical absolute path: NUL-free, starting with `/`, and with no
+/// empty, `.` or `..` component, so `/` itself and a trailing `/` are refused. `field` names the
+/// value in the error. The path is never rewritten and the filesystem is never read.
+pub fn canonical_path(field: &'static str, value: &str) -> Result<(), RecipeError> {
     nul_free(field, value)?;
     let Some(rest) = value.strip_prefix('/') else {
         return Err(RecipeError::NotAbsolute {
@@ -398,6 +401,13 @@ fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
         return None;
     }
     address.to_ipv4()
+}
+
+/// True when `host` is a host a proxy may be granted by name: a DNS name as
+/// `ProxyRecipe::validate` defines it, written in lower case. An IP literal, a name whose last
+/// label is a number, a trailing dot and any upper-case letter are refused, never rewritten.
+pub fn is_proxy_host(host: &str) -> bool {
+    is_dns_name(host) && !host.bytes().any(|byte| byte.is_ascii_uppercase())
 }
 
 fn is_dns_name(value: &str) -> bool {

@@ -41,7 +41,7 @@ pub use lifetime::{
 pub use paging::{ObservationPage, PageAssembler, PageCursor};
 pub use recipe::{
     BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,
-    RecipeError, SessionFileRecipe, UdsRecipe,
+    RecipeError, SessionFileRecipe, UdsRecipe, canonical_path, is_proxy_host,
 };
 pub use snapshot::{EnforcementSnapshot, IncompleteEffect};
 pub use universe::{

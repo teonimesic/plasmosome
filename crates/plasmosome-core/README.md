@@ -76,29 +76,65 @@ or a string such as `"443, 8080"` is removed, not unwrapped. The parser itself n
 wraps an entry.
 
 Every other refusal of what a declaration says takes the same form, naming the plasmid: a network
-section that is not a table; a top-level `[network]` that names no host (a command's own network
-section with no host still parses); `hosts`, `pin_cidrs` or `[mock]` `hosts` that are not lists
-of strings; a declaration with no capability and no implementation, or whose only capability is
-an empty commands table; `[commands]`, its commands table or a command that is not a table, or
-`[commands]` with no commands table; a command whose `exec` is missing, is not a list or names no
-program; and a `[mock]` with no `[network]`, or naming a host `[network]` does not declare. In
-`hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is named by its index.
-Its fix is `remove this entry`, except in a pin list with no string entry, where it is the
-example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned. A `[provides]`
-binding whose key is empty or only whitespace is refused at its own path, such as `provides.""`,
-before anything inside it is checked. Its fix is `remove this entry`: no key is guessed, so
-following the fix deletes the binding and its tools. A key is blank when every character in it is
-Unicode White_Space, the characters `str::trim` removes. A key made only of U+3000 or U+00A0 is
-blank. A key such as `" a"` is not, and neither is one made only of U+FEFF, U+200B or U+180E, which
-are not White_Space.
+section that is not a table; a top-level `[network]` that declares a port and names no host (a
+command's own network section with no host still parses); `hosts`, `pin_cidrs` or `[mock]`
+`hosts` that are not lists of strings; a declaration with no capability and no implementation, or
+whose only capability is an empty commands table; `[commands]`, its commands table or a command
+that is not a table, or `[commands]` with no commands table; a command whose `exec` is missing, is
+not a list or names no program; and a `[mock]` with no `[network]`, or naming a host `[network]`
+does not declare. In `hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is
+named by its index. Its fix is `remove this entry`, except in a pin list with no string entry,
+where it is the example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned.
+A `[provides]` binding whose key is empty or only whitespace is refused at its own path, such as
+`provides.""`, before anything inside it is checked. Its fix is `remove this entry`: no key is
+guessed, so following the fix deletes the binding and its tools. A key is blank when every
+character in it is Unicode White_Space, the characters `str::trim` removes. A key made only of
+U+3000 or U+00A0 is blank. A key such as `" a"` is not, and neither is one made only of U+FEFF,
+U+200B or U+180E, which are not White_Space.
 
 For a network section that is not a table, or a `hosts` that is not a list, the fix uses the
 string the author wrote there. For the top-level `[network]`, it then uses the `[mock]` hosts.
-The `[mock]` check also runs before the no-host check, so an empty top-level `hosts` is offered
-the `[mock]` hosts. Only after those does a fix name the example `api.example.com`. A `[mock]`
-`hosts` with no string in it, and a `[mock]` with no host and no `[network]`, get
-`remove this entry`. A command fix runs the program the author wrote, else the command's key,
-else `command-name`.
+The `[mock]` check also runs before the no-host check, so an empty top-level `hosts` beside a
+declared port is offered the `[mock]` hosts. Only after those does a fix name the example
+`api.example.com`. A `[mock]` `hosts` with no string in it gets `remove this entry`. So does a
+`[mock]` with no `[network]`, refused at `mock`, and a `[mock]` naming a host that a `[network]`
+with no port does not declare: declaring that host would give hosts with no port, which the rules
+below remove. With a port declared, a mock host that `[network]` does not declare and that
+`is_proxy_host` refuses is refused at its entry, such as `mock.hosts[1]`. Its fix is the host in
+lower case when that is a DNS name `[mock]` does not already hold, else `remove this entry`. A
+command fix runs the program the author wrote, else the command's key, else `command-name`.
+
+The top-level `[network]` and `[workspace]` must also hold exact values (spec 022 §6). The network
+checks run after the ones above, in this order:
+
+1. No host and no port: refused at `network` with `remove this entry`. With a port and no host,
+   the no-host refusal above stands.
+2. Hosts with no port, or with `ports = []`: refused at `network.hosts[0]` with
+   `remove this entry`. No port is guessed, so following the fixes removes the hosts one at a time
+   and then the section.
+3. A port written twice: refused at the later entry, such as `network.ports[1]`, with
+   `remove this entry`.
+4. A host that `is_proxy_host` refuses, such as one with an upper-case letter, an IP literal, a
+   trailing dot or a last label that is a number: refused at its entry. Its fix is the host in
+   lower case when that is a DNS name not already declared, else `remove this entry`.
+5. A host written twice: refused at the later entry with `remove this entry`.
+6. A pin with host bits set, such as `192.0.2.1/24`: refused at its entry with the network it
+   masks to, `"192.0.2.0/24"`.
+7. A pin that is not a `Cidr`: refused at its entry with `remove this entry` when another pin in
+   the list is one, else with the example pin `"192.0.2.0/24"`.
+
+So following a pin fix never unpins the section, and a masked pin keeps the addresses the author
+wrote. A command's own network section keeps its values as written, as a `CommandNetwork`.
+
+A `[workspace]` table with no `mount` is refused at `workspace.mount` with
+`mount = { dst = "/workspace" }`, before the check for a declaration with no capability. A `dst`
+that is not a string is refused at `workspace.mount.dst` with `dst = "/workspace"`. So is a `dst`
+that `plasmosome_backend::canonical_path` refuses: relative, `/`, with a trailing `/`, with an
+empty, `.` or `..` component, or with a NUL. Its fix adds a leading `/` to a relative value and
+removes trailing `/`s when that gives a canonical path, such as `dst = "/srv/work"` for
+`srv/work//`, and is `dst = "/workspace"` otherwise. Any other `dst`, such as `/srv/work.d`, is
+kept exactly as written. A `workspace` or `mount` that is not a table is read as before: no
+workspace, or the default `/workspace`.
 
 A fix built from a list the author wrote names each entry once, keeping the first:
 `commands = ["gh", "gh"]` gets one `[commands.commands.gh]` section, since TOML refuses a
@@ -137,7 +173,8 @@ tree is 17 deep.
 without parsing `detail`. A refusal of an `id` that is missing, not a string or empty names no
 plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three members.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
-description.
+description. `PlasmidManifest::provides` lists the `[provides]` binding keys, such as
+`github:tools`, in file order and as written; `provides_tools` keeps the keys' byte order.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
 mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` that declare
