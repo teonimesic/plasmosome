@@ -148,7 +148,14 @@ they repair.
 
 **Taking over, and closing.** When a contributor stops answering, the steward closes the PR with a
 reason, or takes the change over. It opens a new PR from a branch of this repository, keeping the
-contributor's commits as authored, and closes the original with a link. The squash's author is
+contributor's commits as authored, and closes the original with a link. The separate clone (§3)
+runs no hooks, so before pushing that branch the steward runs main's copies of the provenance and
+attribution guards there, each read with `git show origin/main:.githooks/<guard>` into a file
+outside the clone, and run from the clone's top directory: the provenance guard with the branch
+checked out, and the attribution guard over `origin/main..<branch>`. It pushes only when both
+pass. Its task commands stay in the owner's clone: the task store and the pinned `bd` live under
+that clone's git directory, so `tools/work-state` exits 2 in any other clone. Amended on 2026-10-21:
+until then a take-over branch was public before any guard read it. The squash's author is
 then the owner, with the contributor as co-author (spec 029 §1). The task takes `in_progress` while
 the steward writes code, moves its `external_ref` to the new PR with the old one in notes, and
 returns to `review`. The new PR is still an outside PR. No time is promised (Q4). A merged PR's
