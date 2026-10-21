@@ -74,7 +74,12 @@ A PR that changes any path or kind of code listed in
 [spec 026 section 8](../../../docs/specs/026-security-standard.md#8-which-prs-this-spec-governs)
 is also governed by spec 026, whatever its task maps to. Run nothing from a contributor's PR on
 your own machine, its git hooks included, until spec 026's git-only step has passed for that
-head. Fetch the PR's ref and inspect it through the object store. Check it out only after that,
+head. Fetch the PR's ref and inspect it through the object store. The step is
+`.githooks/build-input-guard`, and main's copy judges the fetched head from any branch: under
+`set -o pipefail`, run `git fetch origin main` and `git fetch origin pull/N/head`, then pipe
+`git --no-replace-objects cat-file blob origin/main:.githooks/build-input-guard` into
+`python3 -I - FETCH_HEAD`. Only a `build-input-guard: clean (<sha>)` line counts, and that SHA is
+the one to check out. Check it out only after that,
 in a clone made with `git clone --no-checkout -c core.hooksPath=/dev/null`, outside every agent
 session's project root and never a worktree, and read any change to `.githooks/`, `.github/`,
 `build.rs` or `rust-toolchain*` first. An outside work PR

@@ -1,6 +1,6 @@
 #!/usr/bin/env -S python3 -I
-"""Spec 026's git-only step: refuse a commit whose Cargo configuration or toolchain files would
-swap or wrap what cargo builds.
+"""Spec 026's git-only step: refuse a commit whose Cargo configuration, toolchain files,
+manifests, symlinks or lockfiles would swap or wrap what cargo builds.
 
 Usage: build-input-guard [COMMIT]    (COMMIT defaults to HEAD)
 
@@ -12,13 +12,27 @@ It refuses any tracked `.cargo/config` or `.cargo/config.toml` at any depth, and
 `.cargo`. It refuses an extensionless `rust-toolchain`, and a `rust-toolchain.toml` holding
 anything beyond a [toolchain] table with channel, components, targets and profile. It refuses
 every submodule, since the commit does not hold a submodule's files. It refuses every tracked
-`.gitattributes`, since through one checkout can write a file other than the blob this step
-judged; a maintainer lifts that by changing this step. Names are compared as a case-insensitive
-filesystem compares them.
+`.gitattributes`, since through one, checkout can write a file other than the blob this step
+judged; a maintainer lifts that by changing this step.
 
-Clean does not yet cover `[patch]`, `[replace]`, path dependencies outside the repository,
-symlinks that leave it, or lockfile sources other than crates.io. A reviewer reads those by hand
-until plasmosome-jfm2 adds them to this step.
+In every `Cargo.toml` it refuses `[patch]`, `[replace]`, `cargo-features` and `[project]`. Cargo
+reads `[project]` as `[package]` before edition 2024, and this step reads only `[package]`, so
+refusing it leaves `[package]` the one table a build script or `package.workspace` is read from. A
+path dependency, in any dependency table, must reach a tracked directory inside the repository. The
+build script, `package.workspace`, workspace members and target paths must stay inside it. A path is
+read as cargo reads it: `..` first, lexically from the manifest's directory, then through tracked
+symlinks, at most 40 of them. That lexical reading relies on the `cargo-features` refusal: cargo
+reads two unstable forms, `package.build` as an array and a dependency's `base`, another way, so
+revisit this model before lifting that refusal or moving `channel` to a cargo that makes either
+stable. It refuses a tracked symlink that leaves the repository, loops, or leads to a directory
+holding a `Cargo.toml`, because cargo reads that manifest's paths from the symlink's location.
+Inside a symlink's target, `..` steps back only out of a tracked directory. After any other name,
+such as `.git` or `target`, it is refused: a checkout can hold anything there, and this step sees
+only the commit. A symlink target, or a path value that need not be a directory, that ends at an
+untracked name passes; what a checkout later holds at that name, such as under `target/` or `.git/`,
+is not judged. In every `Cargo.lock`, a package has no source or exactly one of the two crates.io
+sources. It never reads `deny.toml`, which a PR can loosen. Names and paths are compared as a
+case-insensitive filesystem compares them, Unicode normalization included.
 
 Exit 0: clean. Exit 1: refused. Each finding is one line, `build-input-guard: <path>: <key>:
 <reason>`, and the harm follows once. Exit 2: the step could not read the commit, or was run the
@@ -36,7 +50,8 @@ This works from any branch:
 Only a line `build-input-guard: clean (<sha>)` counts as a pass. If main's copy cannot be read,
 python3 gets an empty script and exits 0 with no line at all, which pipefail turns into a failure.
 Check out that exact SHA in the separate clone, not whatever `pull/N/head` names by then: the
-head can move between the two fetches.
+head can move between the two fetches. Checkout honours replace refs, which this step ignores, so
+that clone must hold none; spec 030 section 3's plain clone fetches no `refs/replace/`.
 
 A CI verdict counts only when the PR leaves `.github/`, `.githooks/` and `tools/` unchanged. The
 script runs as `python3 -I`, so a module planted beside it cannot shadow the standard library. It
@@ -56,6 +71,7 @@ if not sys.flags.isolated:
 import re
 import subprocess
 import threading
+import unicodedata
 
 try:
     import tomllib
@@ -71,6 +87,18 @@ except ImportError:
 MAX_BYTES = 8 * 1024 * 1024
 SYMLINK_TARGET_BYTES = 4096
 GIT_TIMEOUT_SECONDS = 60
+MAX_SYMLINKS = 40
+
+LEAVES = "leaves"
+OUTSIDE = "outside"
+LOOP = "loop"
+AMBIGUOUS = "ambiguous"
+UNREADABLE_TARGET = "unreadable target"
+PAST_UNTRACKED = "past an untracked name"
+MISSING = "missing"
+FILE = "file"
+SUBMODULE = "submodule"
+DIRECTORY = "directory"
 
 # Spec 026 section 1 names no key that tracked Cargo configuration may hold. A key is added here
 # only after the spec names it.
@@ -90,6 +118,62 @@ GITATTRIBUTES_REFUSED = (
 SUBMODULE_REFUSED = (
     "every submodule is refused; this commit does not hold its files, "
     "so this step cannot judge them"
+)
+MANIFEST_REFUSED = "a manifest must be a regular file"
+TOP_LEVEL_REFUSED = {
+    "patch": "[patch] swaps the code cargo builds for a dependency, so it is refused",
+    "replace": "[replace] swaps the code cargo builds for a dependency, so it is refused",
+    "cargo-features": (
+        "unstable cargo features are refused; on a nightly toolchain, profile-rustflags lets a "
+        "manifest pass rustflags such as --cap-lints=allow"
+    ),
+    "project": (
+        "[project] is cargo's old name for [package]; cargo reads its build and workspace values, "
+        "which this step judges only under [package], so it is refused"
+    ),
+}
+NOT_A_STRING = "cargo reads a path here, and this value is not a string"
+GLOB_THEN_PARENT = "has a .. after a glob, which can leave the repository"
+STEPS_BACK = (
+    "steps back with .. out of a name this commit does not track as a directory, such as .git, "
+    "so this step cannot tell where it leads"
+)
+PATH_PROBLEMS = {
+    LEAVES: "leaves the repository",
+    OUTSIDE: "leaves the repository through a tracked symlink",
+    LOOP: f"goes through more than {MAX_SYMLINKS} symlinks",
+    AMBIGUOUS: "reaches tracked paths that a case-insensitive filesystem treats as one",
+    UNREADABLE_TARGET: "goes through a symlink whose target this step cannot read as a path",
+    PAST_UNTRACKED: STEPS_BACK,
+    MISSING: "does not resolve to a tracked directory: nothing is tracked there",
+    FILE: "does not resolve to a tracked directory: it is a file",
+    SUBMODULE: "does not resolve to a tracked directory: it is a submodule",
+}
+DEPENDENCY_TABLES = (
+    "dependencies",
+    "dev-dependencies",
+    "dev_dependencies",
+    "build-dependencies",
+    "build_dependencies",
+)
+TARGET_KINDS = ("bin", "example", "test", "bench")
+GLOB = re.compile(r"[*?\[]")
+SYMLINK_PROBLEMS = {
+    OUTSIDE: "it leads outside the repository, so cargo could build what this commit does not hold",
+    LOOP: f"it goes through more than {MAX_SYMLINKS} symlinks",
+    AMBIGUOUS: "it reaches tracked paths that a case-insensitive filesystem treats as one",
+    UNREADABLE_TARGET: "this step cannot read its target as a path",
+    PAST_UNTRACKED: f"it {STEPS_BACK}",
+}
+LOCKFILE_REFUSED = "a lockfile must be a regular file"
+CRATES_IO = (
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+)
+SOURCE_REFUSED = f"a lockfile source must be {CRATES_IO[0]} or {CRATES_IO[1]}"
+LEADS_TO_A_MANIFEST = (
+    "it leads to a directory holding a Cargo.toml, and cargo reads a manifest reached through "
+    "a symlink as if it sat at the symlink's path"
 )
 
 HARM = (
@@ -117,6 +201,81 @@ class Entry:
         self.mode = mode
         self.kind = kind
         self.oid = oid
+
+
+def folded(name):
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
+
+
+def lexical(base, value):
+    if value.startswith("/"):
+        return None
+    parts = list(base)
+    for name in value.split("/"):
+        if name == "..":
+            if not parts:
+                return None
+            parts.pop()
+        elif name not in ("", "."):
+            parts.append(name)
+    return parts
+
+
+class Tree:
+    def __init__(self, listed):
+        self.found = {}
+        self.holding_a_manifest = set()
+        for entry in listed:
+            parts = [folded(part) for part in entry.path.split("/")]
+            self.found.setdefault("/".join(parts), []).append(entry)
+            if entry.path.casefold().split("/")[-1] == "cargo.toml":
+                self.holding_a_manifest.update(
+                    "/".join(parts[:depth]) for depth in range(len(parts))
+                )
+
+    def walk(self, parts):
+        pending = list(reversed(parts))
+        reached = []
+        hops = 0
+        while pending:
+            name = pending.pop()
+            if name in ("", "."):
+                continue
+            if name == "..":
+                if not reached:
+                    return OUTSIDE, None
+                reached.pop()
+                continue
+            here = [*reached, folded(name)]
+            found = self.found.get("/".join(here), [])
+            if found and all(entry.kind == "tree" for entry in found):
+                reached = here
+                continue
+            if len(found) > 1:
+                return AMBIGUOUS, None
+            entry = found[0] if found else None
+            if entry is None or entry.mode != SYMLINK:
+                if ".." in pending:
+                    return PAST_UNTRACKED, None
+                if entry is None:
+                    return MISSING, None
+                if entry.kind == "commit":
+                    return SUBMODULE, None
+                return (MISSING if pending else FILE), None
+            hops += 1
+            if hops > MAX_SYMLINKS:
+                return LOOP, None
+            target = symlink_target(entry)
+            if target is None or "\0" in target:
+                return UNREADABLE_TARGET, None
+            if target.startswith("/"):
+                return OUTSIDE, None
+            pending.extend(reversed(target.split("/")))
+        return DIRECTORY, "/".join(reached)
+
+    def reach(self, base, value):
+        parts = lexical(base, value)
+        return (LEAVES, None) if parts is None else self.walk(parts)
 
 
 def printable(text):
@@ -229,12 +388,22 @@ def read_toml(entry):
         return None, f"cannot be parsed as TOML: {printable(str(error))}"
 
 
+TARGETS = {}
+
+
+def symlink_target(entry):
+    if entry.oid not in TARGETS:
+        data = git(["cat-file", "blob", entry.oid], blob_what(entry), limit=SYMLINK_TARGET_BYTES)
+        TARGETS[entry.oid] = None if data is None else data.decode("utf-8", "surrogateescape")
+    return TARGETS[entry.oid]
+
+
 def whole(entry, rule):
     if entry.mode != SYMLINK:
         return (entry.path, KIND_LABELS[entry.kind], rule)
-    target = git(["cat-file", "blob", entry.oid], blob_what(entry), limit=SYMLINK_TARGET_BYTES)
+    target = symlink_target(entry)
     shown = (
-        printable(target.decode("utf-8", "surrogateescape"))
+        printable(target)
         if target is not None
         else f"a target longer than {SYMLINK_TARGET_BYTES} bytes"
     )
@@ -285,9 +454,155 @@ def toolchain(entry):
     return found
 
 
-def check(entry):
+def key_name(parts):
+    shown = ""
+    for part in parts:
+        if isinstance(part, int):
+            shown += f"[{part}]"
+        else:
+            shown += ("." if shown else "") + key_path([part])
+    return shown
+
+
+def table_at(document, *keys):
+    for key in keys:
+        document = document.get(key) if isinstance(document, dict) else None
+    return document if isinstance(document, dict) else {}
+
+
+def dependency_tables(document):
+    holders = [([], document)]
+    holders.extend(
+        (["target", cfg], table)
+        for cfg, table in table_at(document, "target").items()
+        if isinstance(table, dict)
+    )
+    for keys, holder in holders:
+        for name in DEPENDENCY_TABLES:
+            yield [*keys, name], table_at(holder, name)
+    yield ["workspace", "dependencies"], table_at(document, "workspace", "dependencies")
+
+
+def path_values(document):
+    for keys, table in dependency_tables(document):
+        for name, dependency in table.items():
+            if isinstance(dependency, dict) and "path" in dependency:
+                yield [*keys, name, "path"], dependency["path"], True
+    package = table_at(document, "package")
+    build = package.get("build")
+    if isinstance(build, str):
+        yield ["package", "build"], build, False
+    elif isinstance(build, list):
+        for index, script in enumerate(build):
+            yield ["package", "build", index], script, False
+    if "workspace" in package:
+        yield ["package", "workspace"], package["workspace"], False
+    library = table_at(document, "lib")
+    if "path" in library:
+        yield ["lib", "path"], library["path"], False
+    for kind in TARGET_KINDS:
+        targets = document.get(kind)
+        for index, target in enumerate(targets if isinstance(targets, list) else []):
+            if isinstance(target, dict) and "path" in target:
+                yield [kind, index, "path"], target["path"], False
+
+
+def path_problem(tree, base, value, directory, globbing):
+    if not isinstance(value, str):
+        return NOT_A_STRING
+    judged = value
+    if globbing:
+        parts = value.split("/")
+        globbed = next((index for index, part in enumerate(parts) if GLOB.search(part)), None)
+        if globbed is not None:
+            if ".." in parts[globbed:]:
+                return f'"{printable(value)}" {GLOB_THEN_PARENT}'
+            judged, directory = "/".join(parts[:globbed]), False
+    kind, _ = tree.reach(base, judged)
+    if kind == DIRECTORY or (kind in (MISSING, FILE, SUBMODULE) and not directory):
+        return None
+    return f'"{printable(value)}" {PATH_PROBLEMS[kind]}'
+
+
+def manifest(entry, tree):
+    if entry.kind != "blob" or entry.mode == SYMLINK:
+        return [whole(entry, MANIFEST_REFUSED)]
+    document, problem = read_toml(entry)
+    if problem:
+        return [(entry.path, "(file)", problem)]
+    found = [
+        (entry.path, key, reason) for key, reason in TOP_LEVEL_REFUSED.items() if key in document
+    ]
+    base = entry.path.split("/")[:-1]
+    values = [(keys, value, directory, False) for keys, value, directory in path_values(document)]
+    workspace = table_at(document, "workspace")
+    for field in ("members", "default-members"):
+        members = workspace.get(field)
+        for index, member in enumerate(members if isinstance(members, list) else []):
+            values.append((["workspace", field, index], member, True, True))
+    for keys, value, directory, globbing in values:
+        problem = path_problem(tree, base, value, directory, globbing)
+        if problem:
+            found.append((entry.path, key_name(keys), problem))
+    return found
+
+
+def locked_source(keys, package):
+    if not isinstance(package, dict):
+        return (key_name(keys), "must be a table")
+    if "source" not in package or package["source"] in CRATES_IO:
+        return None
+    which = " ".join(
+        printable(package[key]) if isinstance(package.get(key), str) else f"(no {key})"
+        for key in ("name", "version")
+    )
+    source = package["source"]
+    origin = (
+        f'"{printable(source)}"' if isinstance(source, str) else "a source that is not a string"
+    )
+    return (key_name([*keys, "source"]), f"{which} is locked from {origin}; {SOURCE_REFUSED}")
+
+
+def lockfile(entry):
+    if entry.kind != "blob" or entry.mode == SYMLINK:
+        return [whole(entry, LOCKFILE_REFUSED)]
+    document, problem = read_toml(entry)
+    if problem:
+        return [(entry.path, "(file)", problem)]
+    patch = document.get("patch", {})
+    groups = [
+        (["package"], document.get("package", [])),
+        (["patch", "unused"], patch.get("unused", []) if isinstance(patch, dict) else patch),
+    ]
+    found = []
+    for keys, packages in groups:
+        if not isinstance(packages, list):
+            found.append((key_name(keys), "must be an array of tables"))
+            continue
+        found.extend(
+            locked_source([*keys, index], package) for index, package in enumerate(packages)
+        )
+    if "root" in document:
+        found.append(locked_source(["root"], document["root"]))
+    return [(entry.path, key, reason) for key, reason in filter(None, found)]
+
+
+def symlink(entry, tree):
+    kind, reached = tree.walk(entry.path.split("/"))
+    if kind in SYMLINK_PROBLEMS:
+        return [whole(entry, SYMLINK_PROBLEMS[kind])]
+    if kind == DIRECTORY and reached in tree.holding_a_manifest:
+        return [whole(entry, LEADS_TO_A_MANIFEST)]
+    return []
+
+
+def check(entry, tree):
     if entry.kind == "commit":
         return [(entry.path, "(submodule)", SUBMODULE_REFUSED)]
+    return named(entry, tree) + (symlink(entry, tree) if entry.mode == SYMLINK else [])
+
+
+def named(entry, tree):
     parts = entry.path.casefold().split("/")
     if parts[-1] == ".gitattributes":
         return [whole(entry, GITATTRIBUTES_REFUSED)]
@@ -299,6 +614,10 @@ def check(entry):
         return [whole(entry, EXTENSIONLESS_REFUSED)]
     if parts[-1] == "rust-toolchain.toml":
         return toolchain(entry)
+    if parts[-1] == "cargo.toml":
+        return manifest(entry, tree)
+    if parts[-1] == "cargo.lock":
+        return lockfile(entry)
     return []
 
 
@@ -308,7 +627,9 @@ def main(arguments):
         return 2
     try:
         sha = resolve(arguments[0] if arguments else "HEAD")
-        findings = [finding for entry in entries(sha) for finding in check(entry)]
+        listed = entries(sha)
+        tree = Tree(listed)
+        findings = [finding for entry in listed for finding in check(entry, tree)]
     except CannotRead as error:
         print(f"build-input-guard: cannot read {error.what}: {error.detail}", file=sys.stderr)
         print(f"Refusing rather than passing: {UNREADABLE}.", file=sys.stderr)
