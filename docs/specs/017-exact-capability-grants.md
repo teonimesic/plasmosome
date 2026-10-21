@@ -357,7 +357,7 @@ ProxyMap DNS/address/TUN-flow binding. Closed staged attachments do not particip
 Activation is per operation after durable prepare, not an atomic visibility change for an
 entire transaction; failed later operations are durably aborted and all new bindings withdrawn.
 Already acquired bytes or remote side effects are not rolled back by that cleanup.
-Effective unqualified selection is host-authoritative through spec001's bounded4091grant.select,
+Effective unqualified selection is host-authoritative through spec 001's bounded 4091 grant.select,
 not a stale guest-side active list. It excludes a host-closed/incomplete grant before delayed
 guest cleanup finishes, so fresh peer access survives as well as existing peer handles.
 
