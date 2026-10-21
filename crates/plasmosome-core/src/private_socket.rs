@@ -1,7 +1,7 @@
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -276,13 +276,6 @@ impl PrivateListener {
         }
         stream.set_nonblocking(false)?;
         Ok(Some(Accepted::Trusted(stream)))
-    }
-}
-
-impl AsFd for PrivateListener {
-    /// The listening descriptor, as [`PrivateListener::as_raw_fd`] gives it.
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.listener.as_fd()
     }
 }
 
