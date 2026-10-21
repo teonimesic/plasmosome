@@ -733,9 +733,10 @@ def run_rows(rows):
         except Skipped as reason:
             skipped.append(row.__name__)
             print(f"skip {row.__name__}: {reason}")
-        except Exception as error:
+        except (Exception, SystemExit) as error:
             failed.append(row.__name__)
-            print(f"FAIL {row.__name__}: {type(error).__name__}: {error}", flush=True)
+            detail = f"exit code {error.code!r}" if isinstance(error, SystemExit) else error
+            print(f"FAIL {row.__name__}: {type(error).__name__}: {detail}", flush=True)
             traceback.print_exception(error)
         else:
             print(f"ok {row.__name__}")
