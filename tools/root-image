@@ -49,6 +49,7 @@ MAX_ACCOUNT_FILE_BYTES = 1 << 20
 MAX_ADD_BYTES = 256 << 20
 MAX_OUTPUT_BYTES = 16 << 20
 MAX_OWN_FILE_BYTES = 1 << 20
+MAX_LINK_BYTES = 4095
 HOLE = 64 << 10
 COMMAND_TIMEOUT = 1800
 BLOCK_SIZE = 4096
@@ -322,6 +323,11 @@ def base_members(source):
     members = {}
     for member in source.getmembers():
         name = member.name
+        if "\0" in name or "\0" in member.linkname:
+            raise Refused("stage", f"the base holds a member {name!r} whose name or link holds a NUL byte")
+        if len(os.fsencode(member.linkname)) > MAX_LINK_BYTES:
+            raise Refused("stage", f"/{name} has a link target of {len(os.fsencode(member.linkname))} bytes, over the "
+                                   f"{MAX_LINK_BYTES} that Linux allows")
         if name in ("", ".") or name.startswith("/") or ".." in name.split("/") or \
                 posixpath.normpath(name) != name:
             raise Refused("stage", f"the base holds a member named {name!r}, not a normalised relative path")
@@ -419,7 +425,7 @@ def stage(base_tar, stage_tar, adds, epoch, limit):
                 members = base_members(source)
                 check_layout(members, adds)
                 return write_stage_tar(source, members, adds, epoch, stage_tar)
-        except tarfile.TarError as error:
+        except (tarfile.TarError, ValueError, EOFError) as error:
             raise Refused("stage", f"{base_tar} is not a readable tar archive: {error}") from None
         except OSError as error:
             raise Refused("stage", f"cannot stage {base_tar} into {stage_tar}: {error.strerror}") from None
