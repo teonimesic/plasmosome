@@ -246,12 +246,23 @@ a change nobody reviewed.
   set and the pairing rules themselves are unchanged; what changes is that a well-formed reference
   need no longer carry the field.
 - **§1, the error table.** No code is added, removed or renumbered — the closed set stands. The
-  refusals an author can reach gain one structured field, `fix`, holding the line the author would
-  write. Where the field is list-valued, `fix` holds the entry to add, not the whole line: a
+  refusals an author can reach gain three structured fields on 108: `field`, the declaration field
+  the refusal names, written as its path; `fix`, holding the line the author would write; and
+  `plasmid`, the declaration's id, exactly when the refusal names one; no `id` refusal today does,
+  as no id parsed. The three refusals of the file as a whole (Contract) gain none of them.
+  Where the field is list-valued, `fix` holds the entry to add, not the whole line: a
   replacement line would either drop the entries already there or name them, and naming what is
   already granted is what the report above forbids. Where the repair is to delete what `field`
   names, `fix` is exactly `remove this entry`, and an entry in a list is named by its index, such
   as `network.ports[1]`.
+  Where an entry in a list is wrong but evidently means a valid one, or removing it would leave the
+  list failing open, `field` names the entry by its index and `fix` holds the entry to write in its
+  place, such as `8080` for `network.ports[1] = "8080"`, or the example pin `"192.0.2.0/24"` at
+  `network.pin_cidrs[0]` when the list holds no string pin. Amended on 2026-10-21: this said the
+  refusals "gain one structured field, `fix`, holding the line the author would write", and named
+  no `fix` written in place of an entry. A client could not act on a `fix` such as
+  `remove this entry`, because only the `detail` prose named the field, and spec 022's acceptance
+  10 asks each author 108 for the field, a `fix` and the plasmid ID.
 - **§3.9 and §3.6, and only those two.** The `plasmid.add` reply of §3.10 and the
   `plasmid.reload` reply of §3.12 also carry a plasmid as an object and are deliberately left
   alone: both report a transition, and the plasmid on the far side of it has been denied nothing
@@ -496,8 +507,9 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   admitted by the parser, and a parser that admits fields it does not define cannot tell a
   provenance note from a misspelled one.
 - **This spec amends spec 001 in three named places** — `delivery` optionality in §3.10, the
-  `fix` field in §1, and the `denials` field on the per-plasmid objects of §3.9 and §3.6 — and
-  nowhere else. No error code is added, removed or renumbered.
+  `field`, `fix` and `plasmid` fields of 108 in §1, and the `denials` field on the per-plasmid
+  objects of §3.9 and §3.6 — and nowhere else. No error code is added, removed or renumbered.
+  Amended on 2026-10-21: this read "the `fix` field in §1".
 - **Nothing here decides the gate.** Two properties hold whatever it turns out to be: the approval
   is not the cell's to give, and the declarations of a plasmid and its required closure, read with
   spec 022's operator declarations file, are sufficient for a reviewer to bound its reach. Neither
@@ -529,6 +541,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   scope; a relative path-scope entry; a network section with no hosts; a declaration naming no
   capability and no implementation; a command secret naming no subject; and a declaration with no
   `id`, which names `id` and carries no plasmid id.
+- A 108 built from each refusal in the item above carries `field` and `fix` as members of its
+  error object, equal to the refusal's own, and `plasmid`, the id itself, except for the
+  declaration with no `id`. Following each `fix` at its `field`, read from those members alone,
+  ends where following the refusals ends, also for a command key such as `"a: b"`. A TOML syntax
+  error, a declaration over 1 MiB and one nested more than 32 levels carry none of the three.
+  Catches: a field or plasmid only in `detail`, which a key or an id holding `: ` makes impossible
+  to split, and a member sent as `null`. Amended on 2026-10-21: this item is new.
 - `requires.capabilities = ["a", 5, "b", "", " "]` is refused at `requires.capabilities[1]` with
   `fix` `remove this entry`. Each time the refused entry is removed, the next refusal is at
   `requires.capabilities[2]`, for `""` and then `" "`, and the result parses with requires `["a",
