@@ -96,164 +96,182 @@ fn internal(error: PrivateSocketError) -> Row {
     row(error, ClientCode::Internal, 70, Vec::new())
 }
 
-fn every_row_from_socket() -> Vec<Row> {
-    vec![
-        row(
-            PrivateSocketError::BadPath {
-                path: at("/Users/o/../a/control.uds"),
-            },
-            ClientCode::InvalidArgument,
-            64,
-            vec![("argument", text("--socket"))],
-        ),
-        unsafe_socket(
-            PrivateSocketError::SymlinkInPath { path: at("/tmp") },
-            "/tmp",
-            "symlink",
-        ),
-        row(
-            PrivateSocketError::NoDirectory {
-                path: at(DIRECTORY),
-            },
-            ClientCode::NoInstance,
-            1,
-            vec![("path", text(DIRECTORY))],
-        ),
-        row(
-            PrivateSocketError::NoSocket { path: at(SOCKET) },
-            ClientCode::NotRunning,
-            1,
-            vec![("path", text(SOCKET))],
-        ),
-        unsafe_socket(
-            PrivateSocketError::NotDirectory {
-                path: at(DIRECTORY),
-            },
-            DIRECTORY,
-            "not_directory",
-        ),
-        unsafe_socket(
-            PrivateSocketError::ForeignOwner {
-                path: at("/Users/o"),
-                uid: 502,
-            },
-            "/Users/o",
-            "owner",
-        ),
-        unsafe_socket(
-            PrivateSocketError::Replaceable {
-                path: at("/Users/o/.plasmosome"),
-                mode: 0o777,
-            },
-            "/Users/o/.plasmosome",
-            "mode",
-        ),
-        unsafe_socket(
-            PrivateSocketError::ReplaceableByAcl {
-                path: at("/Users/o/.plasmosome"),
-            },
-            "/Users/o/.plasmosome",
-            "acl",
-        ),
-        unsafe_socket(
-            PrivateSocketError::OwnershipIgnored {
-                path: at("/Volumes/u"),
-            },
-            "/Volumes/u",
-            "owner",
-        ),
-        row(
-            PrivateSocketError::NotPrivate {
-                path: at(DIRECTORY),
-                mode: 0o750,
-            },
-            ClientCode::UnsafeSocket,
-            2,
-            vec![
-                ("path", text(DIRECTORY)),
-                ("rule", text("mode")),
-                ("fix", text(&format!("chmod 700 '{DIRECTORY}'"))),
-            ],
-        ),
-        unsafe_socket(
-            PrivateSocketError::AclPresent {
-                path: at(DIRECTORY),
-            },
-            DIRECTORY,
-            "acl",
-        ),
-        internal(PrivateSocketError::Replaced {
+macro_rules! every_variant {
+    ($($variant:ident => $row:expr),* $(,)?) => {
+        const LISTED: &[&str] = &[$(stringify!($variant)),*];
+
+        fn every_row_from_socket() -> Vec<Row> {
+            vec![$($row),*]
+        }
+
+        fn position(error: &PrivateSocketError) -> usize {
+            let name = match error {
+                $(PrivateSocketError::$variant { .. } => stringify!($variant),)*
+            };
+            LISTED
+                .iter()
+                .position(|listed| *listed == name)
+                .expect("each variant is listed")
+        }
+    };
+}
+
+every_variant! {
+    BadPath => row(
+        PrivateSocketError::BadPath {
+            path: at("/Users/o/../a/control.uds"),
+        },
+        ClientCode::InvalidArgument,
+        64,
+        vec![("argument", text("--socket"))],
+    ),
+    SymlinkInPath => unsafe_socket(
+        PrivateSocketError::SymlinkInPath { path: at("/tmp") },
+        "/tmp",
+        "symlink",
+    ),
+    NoDirectory => row(
+        PrivateSocketError::NoDirectory {
             path: at(DIRECTORY),
-        }),
-        unsafe_socket(
-            PrivateSocketError::BadName {
-                name: "a/b".to_string(),
-            },
-            CHECKED,
-            "name",
-        ),
-        row(
-            PrivateSocketError::PathTooLong {
-                path: at(SOCKET),
-                max: 103,
-            },
-            ClientCode::SocketPathTooLong,
-            2,
-            vec![("path", text(SOCKET)), ("max_bytes", number(103))],
-        ),
-        internal(PrivateSocketError::AddressInUse { path: at(SOCKET) }),
-        unsafe_socket(
-            PrivateSocketError::NotASocket { path: at(SOCKET) },
-            SOCKET,
-            "not_socket",
-        ),
-        unsafe_socket(
-            PrivateSocketError::SocketOwner {
-                path: at(SOCKET),
-                uid: 502,
-            },
-            SOCKET,
-            "owner",
-        ),
-        unsafe_socket(
-            PrivateSocketError::SocketMode {
-                path: at(SOCKET),
-                mode: 0o666,
-            },
-            SOCKET,
-            "mode",
-        ),
-        internal(PrivateSocketError::BindEscaped { path: at(SOCKET) }),
-        row(
-            PrivateSocketError::PeerCredentials { errno: 57 },
-            ClientCode::PeerMismatch,
-            2,
-            vec![("path", text(CHECKED)), ("uid", number(TRUSTED))],
-        ),
-        row(
-            PrivateSocketError::PeerMismatch {
-                trusted: TRUSTED,
-                found: 65,
-            },
-            ClientCode::PeerMismatch,
-            2,
-            vec![
-                ("path", text(CHECKED)),
-                ("uid", number(TRUSTED)),
-                ("peer_uid", number(65)),
-            ],
-        ),
-        row(
-            PrivateSocketError::Io {
-                op: "openat",
-                path: at(DIRECTORY),
-                errno: 24,
-            },
-            ClientCode::LocalIo,
-            1,
-            vec![("path", text(DIRECTORY)), ("errno", number(24))],
-        ),
-    ]
+        },
+        ClientCode::NoInstance,
+        1,
+        vec![("path", text(DIRECTORY))],
+    ),
+    NoSocket => row(
+        PrivateSocketError::NoSocket { path: at(SOCKET) },
+        ClientCode::NotRunning,
+        1,
+        vec![("path", text(SOCKET))],
+    ),
+    NotDirectory => unsafe_socket(
+        PrivateSocketError::NotDirectory {
+            path: at(DIRECTORY),
+        },
+        DIRECTORY,
+        "not_directory",
+    ),
+    ForeignOwner => unsafe_socket(
+        PrivateSocketError::ForeignOwner {
+            path: at("/Users/o"),
+            uid: 502,
+        },
+        "/Users/o",
+        "owner",
+    ),
+    Replaceable => unsafe_socket(
+        PrivateSocketError::Replaceable {
+            path: at("/Users/o/.plasmosome"),
+            mode: 0o777,
+        },
+        "/Users/o/.plasmosome",
+        "mode",
+    ),
+    ReplaceableByAcl => unsafe_socket(
+        PrivateSocketError::ReplaceableByAcl {
+            path: at("/Users/o/.plasmosome"),
+        },
+        "/Users/o/.plasmosome",
+        "acl",
+    ),
+    OwnershipIgnored => unsafe_socket(
+        PrivateSocketError::OwnershipIgnored {
+            path: at("/Volumes/u"),
+        },
+        "/Volumes/u",
+        "owner",
+    ),
+    NotPrivate => row(
+        PrivateSocketError::NotPrivate {
+            path: at(DIRECTORY),
+            mode: 0o750,
+        },
+        ClientCode::UnsafeSocket,
+        2,
+        vec![
+            ("path", text(DIRECTORY)),
+            ("rule", text("mode")),
+            ("fix", text(&format!("chmod 700 '{DIRECTORY}'"))),
+        ],
+    ),
+    AclPresent => unsafe_socket(
+        PrivateSocketError::AclPresent {
+            path: at(DIRECTORY),
+        },
+        DIRECTORY,
+        "acl",
+    ),
+    Replaced => internal(PrivateSocketError::Replaced {
+        path: at(DIRECTORY),
+    }),
+    BadName => unsafe_socket(
+        PrivateSocketError::BadName {
+            name: "a/b".to_string(),
+        },
+        CHECKED,
+        "name",
+    ),
+    PathTooLong => row(
+        PrivateSocketError::PathTooLong {
+            path: at(SOCKET),
+            max: 103,
+        },
+        ClientCode::SocketPathTooLong,
+        2,
+        vec![("path", text(SOCKET)), ("max_bytes", number(103))],
+    ),
+    AddressInUse => internal(PrivateSocketError::AddressInUse { path: at(SOCKET) }),
+    NotASocket => unsafe_socket(
+        PrivateSocketError::NotASocket { path: at(SOCKET) },
+        SOCKET,
+        "not_socket",
+    ),
+    SocketOwner => unsafe_socket(
+        PrivateSocketError::SocketOwner {
+            path: at(SOCKET),
+            uid: 502,
+        },
+        SOCKET,
+        "owner",
+    ),
+    SocketMode => unsafe_socket(
+        PrivateSocketError::SocketMode {
+            path: at(SOCKET),
+            mode: 0o666,
+        },
+        SOCKET,
+        "mode",
+    ),
+    BindEscaped => internal(PrivateSocketError::BindEscaped { path: at(SOCKET) }),
+    PeerCredentials => row(
+        PrivateSocketError::PeerCredentials { errno: 57 },
+        ClientCode::PeerMismatch,
+        2,
+        vec![("path", text(CHECKED)), ("uid", number(TRUSTED))],
+    ),
+    PeerMismatch => row(
+        PrivateSocketError::PeerMismatch {
+            trusted: TRUSTED,
+            found: 65,
+        },
+        ClientCode::PeerMismatch,
+        2,
+        vec![
+            ("path", text(CHECKED)),
+            ("uid", number(TRUSTED)),
+            ("peer_uid", number(65)),
+        ],
+    ),
+    Io => row(
+        PrivateSocketError::Io {
+            op: "openat",
+            path: at(DIRECTORY),
+            errno: 24,
+        },
+        ClientCode::LocalIo,
+        1,
+        vec![("path", text(DIRECTORY)), ("errno", number(24))],
+    ),
 }
 
 #[test]
@@ -325,33 +343,6 @@ fn as_spec_row(error: &PrivateSocketError) -> [String; 4] {
         _ => String::new(),
     };
     [variant_name(error), code, rule, exit]
-}
-
-fn position(error: &PrivateSocketError) -> usize {
-    match error {
-        PrivateSocketError::BadPath { .. } => 0,
-        PrivateSocketError::SymlinkInPath { .. } => 1,
-        PrivateSocketError::NoDirectory { .. } => 2,
-        PrivateSocketError::NoSocket { .. } => 3,
-        PrivateSocketError::NotDirectory { .. } => 4,
-        PrivateSocketError::ForeignOwner { .. } => 5,
-        PrivateSocketError::Replaceable { .. } => 6,
-        PrivateSocketError::ReplaceableByAcl { .. } => 7,
-        PrivateSocketError::OwnershipIgnored { .. } => 8,
-        PrivateSocketError::NotPrivate { .. } => 9,
-        PrivateSocketError::AclPresent { .. } => 10,
-        PrivateSocketError::Replaced { .. } => 11,
-        PrivateSocketError::BadName { .. } => 12,
-        PrivateSocketError::PathTooLong { .. } => 13,
-        PrivateSocketError::AddressInUse { .. } => 14,
-        PrivateSocketError::NotASocket { .. } => 15,
-        PrivateSocketError::SocketOwner { .. } => 16,
-        PrivateSocketError::SocketMode { .. } => 17,
-        PrivateSocketError::BindEscaped { .. } => 18,
-        PrivateSocketError::PeerCredentials { .. } => 19,
-        PrivateSocketError::PeerMismatch { .. } => 20,
-        PrivateSocketError::Io { .. } => 21,
-    }
 }
 
 #[test]
