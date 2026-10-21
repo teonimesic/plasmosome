@@ -773,33 +773,34 @@ mod tests {
         );
     }
 
-    fn waits_for_the_fork_side<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
-        let held = crate::spawn_lock::hold_fork_side();
-        let (sent, received) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = sent.send(work());
-        });
-        let early = received.recv_timeout(Duration::from_millis(250));
-        drop(held);
-        assert!(
-            matches!(early, Err(mpsc::RecvTimeoutError::Timeout)),
-            "the work finished while a fork held the spawn lock"
-        );
-        received
-            .recv_timeout(PATIENCE)
-            .expect("the work finishes once the fork releases the spawn lock")
-    }
-
     #[test]
     fn bind_and_accept_wait_while_a_fork_holds_the_spawn_lock() {
         let scratch = Scratch::new();
-        let path = scratch.path("control.sock");
-        let binding = path.clone();
-        let listener = waits_for_the_fork_side(move || RuntimeListener::bind(&binding))
-            .expect("the bind succeeds");
-        let _client = UnixStream::connect(path.as_path()).unwrap();
-        let accepted =
-            waits_for_the_fork_side(move || listener.accept_ready().map(|a| a.is_some()));
-        assert!(matches!(accepted, Ok(true)), "{accepted:?}");
+        let pending = RuntimeListener::bind(&scratch.path("data.sock")).unwrap();
+        let _client = UnixStream::connect(pending.path().as_path()).unwrap();
+        let binding = scratch.path("control.sock");
+        let held = crate::spawn_lock::hold_fork_side();
+        let (bound, bound_after) = mpsc::channel();
+        let (accepted, accepted_after) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = bound.send(RuntimeListener::bind(&binding).map(drop));
+        });
+        std::thread::spawn(move || {
+            let _ = accepted.send(pending.accept_ready().map(|ready| ready.is_some()));
+        });
+        std::thread::sleep(Duration::from_millis(250));
+        let early = (
+            bound_after.try_recv().is_ok(),
+            accepted_after.try_recv().is_ok(),
+        );
+        drop(held);
+        assert_eq!(
+            early,
+            (false, false),
+            "(bind, accept) finished while a fork held the spawn lock"
+        );
+        assert_eq!(bound_after.recv_timeout(PATIENCE), Ok(Ok(())));
+        let accepted = accepted_after.recv_timeout(PATIENCE);
+        assert!(matches!(accepted, Ok(Ok(true))), "{accepted:?}");
     }
 }
