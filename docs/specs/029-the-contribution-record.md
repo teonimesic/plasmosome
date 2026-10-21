@@ -198,7 +198,10 @@ Each identity it reads, in all four positions alike (author, committer, `Co-auth
    `Claude (Fable 5)`, is reported as crediting a model. Amended on 2026-10-21: until then a
    malformed address was cleared, and once rule 3 replaced the vendor search, `Claude <@>` and
    `Claude <noreply@anthropic.com>` with a space or a U+00A0 before the `>` would have been
-   cleared too.
+   cleared too. Amended again on 2026-10-21: a trailer value that holds a carriage return, a
+   vertical tab, a form feed, U+0085, U+2028 or U+2029, or that git unfolds from a trailer going
+   on over more than one line of the message, is no address either, because a reader may see it
+   as more than one line.
 3. **Tool identities.** An address is a model's when, compared whole and ignoring ASCII case, it
    equals a listed tool address. It is also a model's when it is a GitHub noreply address,
    `<login>@users.noreply.github.com` with or without an `<id>+` prefix, whose login equals a
