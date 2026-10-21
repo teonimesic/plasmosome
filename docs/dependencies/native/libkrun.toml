@@ -1,0 +1,56 @@
+name = "libkrun"
+purpose = """\
+  The virtual machine monitor library. The VMM helper of spec 001 §4.2 links it, and \
+  plasmosome-lanes' lane-vmm loads it, to boot the Linux guest of guest-kernel.toml on \
+  Hypervisor.framework.\
+  """
+version = "1.19.4"
+bundle_manifest_sha256 = "eed141b574337d9911885a839b9afe6835ee5aa27472bbd41ee768f108266b3f"
+file = "lib/libkrun.1.19.4.dylib"
+sha256 = "e4a4aafe3a6842a5f3a863bda7b7359a045e3cfab2b20324494e5f6bd1b8e3a4"
+sources = [
+  """\
+  https://github.com/libkrun/libkrun at tag v1.19.4, commit \
+  728df8125077d0db44265f6e997c72b81b65c015, which the tag points at.\
+  """,
+  """\
+  Built from that commit by plasmosome-itt on 2026-09-18, on macOS 26.6.2 arm64, with \
+  `make BLK=1`: no NET, EFI, GPU, SND, INPUT, SEV, TDX or AWS_NITRO. It keeps the default \
+  init-blob feature, and spec 001 §4.2 turns that init off with krun_disable_implicit_init. \
+  Tools: Apple clang 21.0.0, rustc 1.97.1 and Homebrew LLD 23.1.1.\
+  """,
+]
+licence = "Apache-2.0"
+limits = [
+  """\
+  The dylib carries LC_RPATH /opt/homebrew/opt/llvm/lib, and krun_create_ctx loads \
+  libkrunfw.5.dylib by its leaf name (src/libkrun/src/lib.rs lines 83, 114-115 and 553 at \
+  728df812). So dyld searches that path among others, and a library planted there runs its \
+  initializers before any check of the loaded images (crates/plasmosome-lanes/README.md, \
+  "Limits"). This is owner gate O-6. lane-vmm refuses the run when such a file exists, before \
+  it loads libkrun. plasmosome-vev's audit refuses any LC_RPATH, so plasmosome-qep's cell boot \
+  waits on O-6, and plasmosome-jab plans a new build with the rpath deleted.\
+  """,
+  """\
+  libkrun's Cargo.lock at 728df812 locks 184 crates.io packages, and the dylib's Rust code is \
+  built from those its features and target need. Spec 026's cargo-deny reads only this \
+  repository's lockfiles, so no advisory against them reaches here (spec 026, threat model, \
+  "Native artifacts and the host"). Who tracks them is spec 026 Q6.\
+  """,
+]
+
+[checks]
+cadence = "weekly"
+updates = """\
+  Compare v1.19.4 with the newest release of https://github.com/libkrun/libkrun, and read the \
+  release notes in between for security fixes.\
+  """
+advisories = """\
+  Read the GitHub security advisories of https://github.com/libkrun/libkrun. Then take a clone \
+  at the pinned commit, outside this repository, and read its .cargo/ and rust-toolchain* first, \
+  as spec 026 section 1's "Read before running" asks of a contributor's code. From a directory \
+  with no deny.toml, run `cargo-deny --manifest-path <clone>/Cargo.toml --workspace \
+  --all-features --locked check advisories`.\
+  """
+by = "Nobody, until the owner answers spec 026 Q6."
+last = "never"
