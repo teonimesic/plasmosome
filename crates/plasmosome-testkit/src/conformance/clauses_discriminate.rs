@@ -4,9 +4,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use super as conformance;
 use crate::builders::{broker, mount, proxy_map, session_file, uds_socket};
 use plasmosome_backend::{
-    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, Grant, GrantId,
-    GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass,
-    UniverseOp, UniverseRemoval,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FileAccess, Grant,
+    GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy,
+    UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +415,9 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::GrantSubstitutesRequestedCapability {
             grant.capability = substituted_capability(&grant.capability);
         }
+        if self.defect == Defect::GrantSubstitutesRecipe(grant.capability.class()) {
+            grant.capability = substituted_recipe(&grant.capability);
+        }
         if self.defect == Defect::GrantSubstitutesLiveOwner
             && let Some(owner) = self
                 .ledger
@@ -447,7 +450,7 @@ impl EnforcementBackend for DefectiveBackend {
             grant.capability = capability;
         }
         let handle = self.mint(grant.capability.class());
-        let entry = LedgerEntry {
+        let mut entry = LedgerEntry {
             handle,
             owner: grant.owner,
             capability: grant.capability,
@@ -460,7 +463,11 @@ impl EnforcementBackend for DefectiveBackend {
                     .objects()
                     .any(|held| held.owner == entry.owner && held.capability == entry.capability);
             if !duplicate {
-                self.state.insert(entry.object()).unwrap();
+                let mut object = entry.object();
+                if self.defect == Defect::GrantRecordsAnotherRecipe(object.class()) {
+                    object.capability = substituted_recipe(&object.capability);
+                }
+                self.state.insert(object).unwrap();
             }
             if self.defect == Defect::GrantMaterializesAShadow {
                 self.state.insert(shadow_of(&entry)).unwrap();
@@ -475,6 +482,9 @@ impl EnforcementBackend for DefectiveBackend {
         {
             self.ledger.remove(&previous);
             self.grant_order.retain(|held| *held != previous);
+        }
+        if self.defect == Defect::GrantReturnsAnotherRecipe(entry.capability.class()) {
+            entry.capability = substituted_recipe(&entry.capability);
         }
         self.ledger.insert(handle, entry.clone());
         self.grant_order.push(handle);
@@ -667,6 +677,29 @@ fn substituted_capability(capability: &Capability) -> Capability {
         Capability::ProxyMap { host, .. } => proxy_map(host, "substituted-route"),
         Capability::Broker { .. } => broker("substituted-broker"),
         Capability::Mount { target, .. } => mount("/substituted", target),
+    }
+}
+
+fn substituted_recipe(capability: &Capability) -> Capability {
+    let mut substitute = capability.clone();
+    match &mut substitute {
+        Capability::SessionFile { recipe, .. } => recipe.mode = flipped(recipe.mode),
+        Capability::UdsSocket { recipe, .. } => {
+            recipe.guest_path = format!("{}.substituted", recipe.guest_path);
+        }
+        Capability::ProxyMap { recipe, .. } => recipe.port = recipe.port % u16::MAX + 1,
+        Capability::Broker { launch, .. } => {
+            launch.data_socket = format!("{}.substituted", launch.data_socket);
+        }
+        Capability::Mount { recipe, .. } => recipe.access = flipped(recipe.access),
+    }
+    substitute
+}
+
+fn flipped(access: FileAccess) -> FileAccess {
+    match access {
+        FileAccess::ReadOnly => FileAccess::ReadWrite,
+        FileAccess::ReadWrite => FileAccess::ReadOnly,
     }
 }
 
