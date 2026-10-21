@@ -96,6 +96,8 @@ enum Defect {
     UnknownRevokeTidiesResidue,
     RefusedEffectLandsLate(Call),
     RefusedGrantDropsTheIssuedRecordLate,
+    RefusalDropsTheIssuedRecordAtOnce(Call),
+    UnknownRevokeDropsAnIssuedRecord,
     SnapshotOmitsIssuedRecords,
     SnapshotReconstructsGrantsFromObjects,
 }
@@ -269,6 +271,12 @@ impl DefectiveBackend {
                 self.pending_effects.borrow_mut().push(operation.object());
                 Err(refusal)
             }
+            Defect::RefusalDropsTheIssuedRecordAtOnce(dropping)
+                if dropping == call && self.ledger.contains_key(&operation.handle()) =>
+            {
+                self.drop_record(operation.handle());
+                Err(refusal)
+            }
             _ => Err(refusal),
         }
     }
@@ -354,10 +362,14 @@ impl DefectiveBackend {
 
     fn land_record_drops(&mut self) {
         for handle in std::mem::take(&mut self.landing_record_drops) {
-            self.ledger.remove(&handle);
-            self.grant_order.retain(|held| *held != handle);
+            self.drop_record(handle);
         }
         self.landing_record_drops = std::mem::take(&mut self.pending_record_drops);
+    }
+
+    fn drop_record(&mut self, handle: Handle) {
+        self.ledger.remove(&handle);
+        self.grant_order.retain(|held| *held != handle);
     }
 
     fn record_rebuilt_from(&self, object: &OsObject) -> LedgerEntry {
@@ -858,6 +870,11 @@ impl EnforcementBackend for DefectiveBackend {
                     .any(|held| held.class() == handle.class && held.id == handle.id)
             {
                 self.tidy_residue();
+            }
+            if let Some(&issued) = self.ledger.keys().next()
+                && self.defect == Defect::UnknownRevokeDropsAnIssuedRecord
+            {
+                self.drop_record(issued);
             }
             return match self.defect {
                 Defect::UnknownHandleReportsSuccess => Ok(a_stranger(handle)),
@@ -2786,6 +2803,73 @@ fn a_late_record_drop_shows_from_the_second_read_after_its_refused_grant() {
     let second = backend.snapshot_os_state().unwrap();
     assert!(second.grants().is_empty());
     assert_eq!(second.state(), first.state());
+}
+
+#[test]
+fn the_snapshot_clause_rejects_a_refused_call_that_drops_an_issued_record_at_once() {
+    for (call, reason) in [
+        (Call::Grant, "grant changed the account"),
+        (Call::Apply, "apply changed the account"),
+        (Call::Plant, "plant changed the account"),
+    ] {
+        assert_rejected(reason, || {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::RefusalDropsTheIssuedRecordAtOnce(call),
+            ))
+        });
+    }
+    assert_rejected("grant's handle changed the account", || {
+        conformance::snapshot_never_invents_objects(carrying(
+            Defect::UnknownRevokeDropsAnIssuedRecord,
+        ))
+    });
+}
+
+#[test]
+fn a_record_drop_at_once_keeps_every_object_and_shows_on_the_first_read() {
+    let issued = conformance::op_for(
+        GrantId::new(),
+        conformance::conformance_owner(),
+        broker("egressd"),
+    );
+    let invalid = conformance::op_for(
+        issued.id(),
+        issued.owner().clone(),
+        conformance::invalid_capability(&issued.capability()),
+    );
+    let mut standing = OsState::new();
+    standing.insert(issued.object()).unwrap();
+    let unknown = invalid_of_every_class().remove(0).handle();
+    for dropping in CALLS {
+        for call in CALLS {
+            let mut backend =
+                DefectiveBackend::carrying(Defect::RefusalDropsTheIssuedRecordAtOnce(dropping));
+            let entry = backend.grant(issued.clone(), GrantKind::Hot).unwrap();
+            assert_eq!(
+                call_with(&mut backend, call, &invalid),
+                Err(conformance::invalid_refusal(&invalid))
+            );
+            let kept = if call == dropping {
+                vec![]
+            } else {
+                vec![entry]
+            };
+            assert_eq!(
+                backend.snapshot_os_state(),
+                Ok(EnforcementSnapshot::new(standing.clone(), kept, Vec::new()).unwrap())
+            );
+        }
+    }
+    let mut backend = DefectiveBackend::carrying(Defect::UnknownRevokeDropsAnIssuedRecord);
+    backend.grant(issued.clone(), GrantKind::Hot).unwrap();
+    assert_eq!(
+        backend.revoke(unknown, DrainSpec::forcing()),
+        Err(BackendError::UnknownHandle { handle: unknown })
+    );
+    assert_eq!(
+        backend.snapshot_os_state(),
+        Ok(EnforcementSnapshot::new(standing, Vec::new(), Vec::new()).unwrap())
+    );
 }
 
 #[test]
