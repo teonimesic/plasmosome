@@ -143,17 +143,17 @@ def gates_job_pins_cargo_deny():
     assert len(keys) == 1 and versions[0] in re.split(r"[^0-9A-Za-z.]+", keys[0]), (versions, keys)
     assert wrapper_steps(workflow) == WRAPPER_STEPS, wrapper_steps(workflow)
     sources = "        run: python3 tools/cargo-deny-check sources\n"
-    advisories = "      - name: cargo-deny advisories\n        if: github.event_name == 'pull_request'\n"
     advisories_run = "        run: python3 tools/cargo-deny-check advisories --changed-since HEAD^1\n"
-    for old, new, caught in (
-        ("      - name: cargo-deny sources\n", "      - name: cargo-deny sources, renamed\n", False),
-        (sources, sources + "          || true\n", True),
-        (advisories_run, advisories_run + "          --changed-since HEAD\n", True),
-        (advisories, advisories + "          && false\n", True),
+    advisories_if = f"        if: {PULL_REQUEST}\n        run: python3 tools/cargo-deny-check advisories"
+    renamed, count = re.subn(r"(?m)^(      - name: .*)$", r"\1, renamed", workflow)
+    assert count and wrapper_steps(renamed) == WRAPPER_STEPS, wrapper_steps(renamed)
+    for old, new in (
+        (sources, sources + "          || true\n"),
+        (advisories_run, advisories_run + "          --changed-since HEAD\n"),
+        (advisories_if, advisories_if.replace("\n", "\n          && false\n", 1)),
     ):
         assert workflow.count(old) == 1, old
-        edited = wrapper_steps(workflow.replace(old, new))
-        assert (edited != WRAPPER_STEPS) == caught, (new, edited)
+        assert wrapper_steps(workflow.replace(old, new)) != WRAPPER_STEPS, new
 
 
 def classification():
