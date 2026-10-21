@@ -151,16 +151,16 @@ fn run_guard_shadowed(root: &Path, repository: &Path, shadow: &Path) -> Output {
         .expect("the guard runs")
 }
 
-fn real_git() -> PathBuf {
+fn real_tool(tool: &str) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
-        .map(|directory| directory.join("git"))
+        .map(|directory| directory.join(tool))
         .find(|candidate| {
             std::fs::metadata(candidate).is_ok_and(|metadata| {
                 metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
             })
         })
-        .expect("git is on PATH")
+        .unwrap_or_else(|| panic!("{tool} is on PATH"))
 }
 
 fn shell_quoted(text: &str) -> String {
@@ -170,7 +170,7 @@ fn shell_quoted(text: &str) -> String {
 fn run_guard_with_git_refusing(root: &Path, repository: &Path, fragment: &str) -> Output {
     let shadow = tempfile::tempdir().expect("a scratch directory is created");
     let marker = shadow.path().join("the-stub-refused");
-    let git = real_git();
+    let git = real_tool("git");
     let stub = format!(
         "#!/bin/sh\ncase \" $* \" in\n  *{}*)\n    : > {}\n    echo \"stub: refusing $*\" >&2\n    exit 128\n    ;;\nesac\nexec {} \"$@\"\n",
         shell_quoted(fragment),
@@ -195,7 +195,12 @@ fn said(output: &Output) -> String {
     )
 }
 
-const OFFENCE: &str = "credits a model as an author";
+const OFFENCE: &str = "\" credits a model: ";
+
+const FIX: &str = "reword the commit and correct or remove the line";
+
+const UNTRACEABLE_CO_AUTHOR: &str =
+    "docs: a change\n\nSome body prose.\n\nCo-authored-by: Probe <me@laptop.local>\n";
 
 const MODEL_CO_AUTHOR: &str =
     "docs: a change\n\nSome body prose.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n";
@@ -408,7 +413,7 @@ fn refuses_a_trailer_with_no_address_for_each_model_word() {
             &[
                 "Claude",
                 "Anthropic",
-                "ChatGPT",
+                "GPT",
                 "OpenAI",
                 "Copilot",
                 "Codex",
@@ -632,5 +637,477 @@ fn clears_a_body_larger_than_a_pipe_buffer_whose_first_line_is_trailer_shaped() 
             "the guard called its own tooling unreadable on a body it can read; a guard that refuses \
              because a writer it spawned took SIGPIPE refuses at random.\nguard said:\n{stdout}",
         );
+    });
+}
+
+#[test]
+fn tells_the_contributor_how_to_fix_an_untraceable_trailer() {
+    check_workspace(|root| {
+        assert_refused_saying(
+            &run_guard_over(root, UNTRACEABLE_CO_AUTHOR),
+            FIX,
+            "a commit crediting an address on `.local`, whose contributor has to be told what to change",
+        );
+    });
+}
+
+fn assert_refused_when_grep_fails_on_the_address(root: &Path, arms: &str, check: &str) {
+    let repository = repository_with_commit(UNTRACEABLE_CO_AUTHOR);
+    let grep = real_tool("grep");
+    let stub = format!(
+        "#!/bin/sh\ninput=$(cat)\ncase \"$*\" in\n{arms}\nesac\nprintf '%s\\n' \"$input\" | exec {} \"$@\"\n",
+        shell_quoted(grep.to_str().expect("the path to grep is UTF-8"))
+    );
+    let shadow = directory_shadowing("grep", &stub);
+    let output = run_guard_shadowed(root, repository.path(), shadow.path());
+    assert_refused_saying(
+        &output,
+        "grep exited 2",
+        &format!("a commit crediting `me@laptop.local` while grep fails only on {check}"),
+    );
+    assert!(
+        !said(&output).contains("is untraceable"),
+        "the guard reported the address untraceable although grep could not answer {check}, so that check never asked grep.\nguard said:\n{}",
+        said(&output)
+    );
+}
+
+#[test]
+fn judges_a_domain_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_on_the_address(
+            root,
+            "  *localdomain*) [ \"$input\" = me@laptop.local ] && exit 2 ;;",
+            "the domain check (if the guard's domain pattern no longer holds `localdomain`, point the stub at the new pattern; that alone is not a guard bug)",
+        )
+    });
+}
+
+#[test]
+fn judges_whether_there_is_an_address_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_on_the_address(
+            root,
+            "  *localdomain*) ;;\n  *) [ \"$input\" = me@laptop.local ] && exit 2 ;;",
+            "the check that the address holds an `@`, the one check other than the domain's that the guard runs on the bare address",
+        )
+    });
+}
+
+#[derive(Clone, Copy)]
+enum Position {
+    CoAuthoredBy,
+    SignedOffBy,
+}
+
+impl Position {
+    fn as_written(self) -> &'static str {
+        match self {
+            Position::CoAuthoredBy => "Co-Authored-By",
+            Position::SignedOffBy => "Signed-Off-By",
+        }
+    }
+
+    fn as_printed(self) -> &'static str {
+        match self {
+            Position::CoAuthoredBy => "Co-authored-by",
+            Position::SignedOffBy => "Signed-off-by",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Verdict {
+    Model,
+    Untraceable,
+    Cleared,
+}
+
+impl Verdict {
+    fn refusal(self, position: Position) -> Option<&'static str> {
+        match (self, position) {
+            (Verdict::Model, Position::CoAuthoredBy) => {
+                Some("credits a model: GitHub shows it on main as a co-author.")
+            }
+            (Verdict::Model, Position::SignedOffBy) => Some(
+                "credits a model: a sign-off certifies where a change came from, which a tool cannot do.",
+            ),
+            (Verdict::Untraceable, _) => Some(
+                "is untraceable: no account can be found for it, so the record on main names somebody no reader can trace.",
+            ),
+            (Verdict::Cleared, _) => None,
+        }
+    }
+}
+
+const IDENTITIES: &[(&str, Verdict)] = &[
+    ("Probe <probe@local>", Verdict::Untraceable),
+    ("Probe <probe@localhost>", Verdict::Untraceable),
+    ("Probe <probe@invalid>", Verdict::Untraceable),
+    ("Probe <probe@test>", Verdict::Untraceable),
+    ("Probe <probe@example>", Verdict::Untraceable),
+    ("Probe <probe@example.com>", Verdict::Untraceable),
+    ("Probe <probe@example.net>", Verdict::Untraceable),
+    ("Probe <probe@example.org>", Verdict::Untraceable),
+    ("Probe <probe@home.arpa>", Verdict::Untraceable),
+    ("Probe <probe@internal>", Verdict::Untraceable),
+    ("Probe <probe@localdomain>", Verdict::Untraceable),
+    ("Probe <me@laptop.local.>", Verdict::Untraceable),
+    ("Probe <me@LAPTOP.LOCAL>", Verdict::Untraceable),
+    ("Exec025 <exec025@localhost>", Verdict::Untraceable),
+    ("Probe <probe@ci.example.com>", Verdict::Untraceable),
+    ("Probe <me@host.ci.internal>", Verdict::Untraceable),
+    ("Claude (Fable 5) <>", Verdict::Model),
+    ("Claude: Fable 5", Verdict::Model),
+    ("Jane Doe <>", Verdict::Untraceable),
+    ("Jane Doe <jane>", Verdict::Untraceable),
+    ("Jane Doe", Verdict::Untraceable),
+    ("Claudette Roe <>", Verdict::Untraceable),
+    ("Probe <claude>", Verdict::Untraceable),
+    ("ChatGPT", Verdict::Untraceable),
+    (
+        "Jane Doe <jane@corp.locale.io> <jane@laptop.local>",
+        Verdict::Untraceable,
+    ),
+    (
+        "Jane Doe <jane@laptop.local> <jane@corp.locale.io>",
+        Verdict::Cleared,
+    ),
+    ("Jane Doe <jane@corp.locale.io> <", Verdict::Untraceable),
+    ("Jane Doe <jane@corp.locale.io", Verdict::Untraceable),
+    (
+        "Probe <me@laptop.local>me@corp.locale.io>",
+        Verdict::Untraceable,
+    ),
+    ("Jane Doe jane@corp.locale.io>", Verdict::Untraceable),
+    (
+        "Probe <me@corp.locale.io@laptop.local>",
+        Verdict::Untraceable,
+    ),
+    ("QA <qa@ci.tests.org>", Verdict::Cleared),
+    ("Jane Doe <jane@corp.locale.io>", Verdict::Cleared),
+    ("Probe <probe@notlocal>", Verdict::Cleared),
+    ("Probe <probe@example.community>", Verdict::Cleared),
+    ("Probe <probe@te\u{17f}t>", Verdict::Cleared),
+    (
+        "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+        Verdict::Cleared,
+    ),
+    ("dependabot[bot] <support@github.com>", Verdict::Cleared),
+    ("Probe Person <probe@corp.locale.io>", Verdict::Cleared),
+];
+
+const PROBES_PER_REPOSITORY: usize = 8;
+
+struct Probe {
+    label: String,
+    message: String,
+    refusal: Option<String>,
+}
+
+struct ProbeRun {
+    shas: Vec<String>,
+    said: String,
+    refused: bool,
+}
+
+fn probe_repository(messages: &[&str]) -> (TempDir, Vec<String>) {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let path = directory.path();
+    git_succeeds(path, &["init", "--quiet"], None);
+    let mut stream = String::new();
+    for (index, message) in messages.iter().enumerate() {
+        stream.push_str(&format!(
+            "commit refs/heads/probe\nmark :{}\ncommitter A Person <person@corp.locale.io> 1700000000 +0000\ndata {}\n{message}\n",
+            index + 1,
+            message.len()
+        ));
+    }
+    let marks = path.join("probe-marks");
+    let export = format!("--export-marks={}", marks.display());
+    git_succeeds(path, &["fast-import", "--quiet", &export], Some(&stream));
+    let marks = std::fs::read_to_string(&marks).expect("setup: fast-import wrote its marks");
+    let mut shas = vec![String::new(); messages.len()];
+    for line in marks.lines() {
+        let (mark, sha) = line
+            .split_once(' ')
+            .expect("setup: a mark line holds a mark and a SHA");
+        let index: usize = mark
+            .strip_prefix(':')
+            .and_then(|mark| mark.parse().ok())
+            .expect("setup: fast-import numbers its marks");
+        shas[index - 1] = sha[..9].to_owned();
+    }
+    (directory, shas)
+}
+
+fn run_guard_over_probes(root: &Path, probes: &[Probe]) -> ProbeRun {
+    let messages: Vec<&str> = probes.iter().map(|probe| probe.message.as_str()).collect();
+    let (repository, shas) = probe_repository(&messages);
+    let output = guard_command(root, repository.path())
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env("LANG", "C.UTF-8")
+        .arg("probe")
+        .output()
+        .expect("the guard runs");
+    ProbeRun {
+        shas,
+        said: said(&output),
+        refused: !output.status.success(),
+    }
+}
+
+fn assert_each_probe_judged(root: &Path, what: &str, probes: &[Probe]) {
+    let runs: Vec<ProbeRun> = std::thread::scope(|scope| {
+        let handles: Vec<_> = probes
+            .chunks(PROBES_PER_REPOSITORY)
+            .map(|chunk| scope.spawn(move || run_guard_over_probes(root, chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a probe run finishes"))
+            .collect()
+    });
+    let mut misjudged = Vec::new();
+    for (run, chunk) in runs.iter().zip(probes.chunks(PROBES_PER_REPOSITORY)) {
+        for (probe, sha) in chunk.iter().zip(&run.shas) {
+            let naming = format!("attribution-guard: {sha} ");
+            let lines: Vec<&str> = run
+                .said
+                .lines()
+                .filter(|line| line.starts_with(&naming))
+                .collect();
+            let label = &probe.label;
+            match &probe.refusal {
+                Some(refusal) => {
+                    let expected = format!("{naming}{refusal}");
+                    if lines != [expected.as_str()] {
+                        misjudged.push(format!("{label} must be refused by exactly one line, `{expected}`; the lines naming its commit are {lines:?}"));
+                    }
+                }
+                None => {
+                    if !lines.is_empty() {
+                        misjudged.push(format!(
+                            "{label} must be cleared, yet the guard named its commit: {lines:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        let holds_a_refusal = chunk.iter().any(|probe| probe.refusal.is_some());
+        if run.refused != holds_a_refusal {
+            let labels: Vec<&str> = chunk.iter().map(|probe| probe.label.as_str()).collect();
+            misjudged.push(if holds_a_refusal {
+                format!("the guard exited successfully over {labels:?}, which lets every refusal among them through")
+            } else {
+                format!("the guard failed over {labels:?}, none of which it may refuse")
+            });
+        }
+    }
+    let said: Vec<&str> = runs.iter().map(|run| run.said.as_str()).collect();
+    assert!(
+        misjudged.is_empty(),
+        "{what}, these probes got the wrong verdict:\n{}\nguard said:\n{}",
+        misjudged.join("\n"),
+        said.join("\n")
+    );
+}
+
+fn assert_each_identity_judged_in(root: &Path, position: Position) {
+    let probes: Vec<Probe> = IDENTITIES
+        .iter()
+        .enumerate()
+        .map(|(index, (identity, verdict))| Probe {
+            label: format!("{identity:?}"),
+            message: format!("probe {index}\n\n{}: {identity}\n", position.as_written()),
+            refusal: verdict
+                .refusal(position)
+                .map(|refusal| format!("{} \"{identity}\" {refusal}", position.as_printed())),
+        })
+        .collect();
+    assert_each_probe_judged(root, &format!("as {}", position.as_written()), &probes);
+}
+
+#[test]
+fn judges_each_identity_as_a_co_author() {
+    check_workspace(|root| assert_each_identity_judged_in(root, Position::CoAuthoredBy));
+}
+
+#[test]
+fn judges_each_identity_as_a_sign_off() {
+    check_workspace(|root| assert_each_identity_judged_in(root, Position::SignedOffBy));
+}
+
+#[test]
+fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
+    check_workspace(|root| {
+        let model = "Co-authored-by \"Gemini <probe@corp.locale.io>\" credits a model: GitHub shows it on main as a co-author.";
+        let lines: &[(&str, &str, bool)] = &[
+            ("U+3000, an ideographic space", "\u{3000}", true),
+            ("U+2003, an em space", "\u{2003}", true),
+            ("U+00A0, a no-break space", "\u{a0}", true),
+            ("a vertical tab", "\u{b}", true),
+            ("a form feed", "\u{c}", true),
+            ("a space", " ", false),
+            ("a tab", "\t", false),
+            ("a carriage return", "\r", false),
+        ];
+        let probes: Vec<Probe> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, (name, line, git_reads_text))| Probe {
+                label: format!("a line holding only {name}"),
+                message: format!("probe {index}\n\nProse A\nProse B\nProse C\nCo-authored-by: Gemini <probe@corp.locale.io>\n{line}\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n"),
+                refusal: git_reads_text.then(|| model.to_owned()),
+            })
+            .collect();
+        assert_each_probe_judged(
+            root,
+            "Git ends a paragraph only at a line holding nothing but spaces, tabs and carriage returns. A model's co-author line above a person's sign-off is a trailer unless such a line comes between them, so",
+            &probes,
+        );
+    });
+}
+
+#[test]
+fn reads_a_paragraph_both_ways_when_a_line_is_blank_only_to_another_reader() {
+    check_workspace(|root| {
+        let model = "Co-authored-by: Gemini <probe@corp.locale.io>";
+        let refused = "Co-authored-by \"Gemini <probe@corp.locale.io>\" credits a model: GitHub shows it on main as a co-author.";
+        let person = "Co-authored-by: A Colleague <colleague@corp.locale.io>";
+        let sign_off = "Signed-off-by: A Colleague <colleague@corp.locale.io>";
+        let untraceable = "Co-authored-by: Probe <me@laptop.local>";
+        let untraceable_refused = "Co-authored-by \"Probe <me@laptop.local>\" is untraceable: no account can be found for it, so the record on main names somebody no reader can trace.";
+        let prose = "Some prose that follows.";
+        let ambiguous: &[(&str, &str)] = &[
+            ("U+3000, an ideographic space", "\u{3000}"),
+            ("U+2003, an em space", "\u{2003}"),
+            ("U+00A0, a no-break space", "\u{a0}"),
+            ("a vertical tab", "\u{b}"),
+            ("a form feed", "\u{c}"),
+        ];
+        let mut rows: Vec<(String, String, Option<&str>)> = Vec::new();
+        for (name, line) in ambiguous {
+            rows.push((
+                format!("a model co-author, a line holding only {name}, then prose"),
+                format!("{model}\n{line}\n{prose}\n"),
+                Some(refused),
+            ));
+            rows.push((
+                format!("a person's co-author, a line holding only {name}, then prose"),
+                format!("{person}\n{line}\n{prose}\n"),
+                None,
+            ));
+            rows.push((
+                format!("a model co-author, a line holding only {name}, then a person's sign-off"),
+                format!("{model}\n{line}\n{sign_off}\n"),
+                Some(refused),
+            ));
+            rows.push((
+                format!("prose, a line holding only {name}, then a model co-author"),
+                format!("{prose}\n{line}\n{model}\n"),
+                Some(refused),
+            ));
+        }
+        rows.push((
+            "an untraceable co-author, a line holding only U+3000, then prose".into(),
+            format!("{untraceable}\n\u{3000}\n{prose}\n"),
+            Some(untraceable_refused),
+        ));
+        rows.push((
+            "a model co-author, a line of a space, U+3000 and a tab, then prose".into(),
+            format!("{model}\n \u{3000}\t\n{prose}\n"),
+            Some(refused),
+        ));
+        rows.push((
+            "a model co-author, a line of U+00A0 and a letter, then prose".into(),
+            format!("{model}\n\u{a0}x\n{prose}\n"),
+            None,
+        ));
+        rows.push((
+            "a model co-author, a line holding only U+30C0, then prose".into(),
+            format!("{model}\n\u{30c0}\n{prose}\n"),
+            None,
+        ));
+        for (name, line) in [
+            ("a space", " "),
+            ("a tab", "\t"),
+            ("a carriage return", "\r"),
+            ("a carriage return, a space and a carriage return", "\r \r"),
+        ] {
+            rows.push((
+                format!("a model co-author, a line holding only {name}, then prose"),
+                format!("{model}\n{line}\n{prose}\n"),
+                Some(refused),
+            ));
+        }
+        let probes: Vec<Probe> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, body, refusal))| Probe {
+                label,
+                message: format!("probe {index}\n\n{body}"),
+                refusal: refusal.map(str::to_owned),
+            })
+            .collect();
+        assert_each_probe_judged(
+            root,
+            "A line git reads as text but another reader may call blank splits the paragraph for that reader, so the guard must refuse what either reading refuses, and only once; so",
+            &probes,
+        );
+    });
+}
+
+#[test]
+fn clears_a_look_alike_domain_when_the_caller_sets_lc_all() {
+    check_workspace(|root| {
+        let repository =
+            repository_with_commit("docs: a change\n\nCo-authored-by: Probe <probe@te\u{17f}t>\n");
+        let output = guard_command(root, repository.path())
+            .env("LC_ALL", "C.UTF-8")
+            .arg("HEAD")
+            .output()
+            .expect("the guard runs");
+        assert!(
+            output.status.success(),
+            "the guard refused `probe@te\u{17f}t`, a look-alike of a listed domain, when the caller set LC_ALL=C.UTF-8. A guard that sets only LC_CTYPE or LANG leaves grep in the caller's LC_ALL, where GNU grep folds the long s onto `s`.\nguard said:\n{}",
+            said(&output)
+        );
+    });
+}
+
+#[test]
+fn prints_both_offences_when_a_line_git_reads_as_blank_parts_two_model_co_authors() {
+    check_workspace(|root| {
+        let harm = "credits a model: GitHub shows it on main as a co-author.";
+        std::thread::scope(|scope| {
+            for (name, line) in [
+                ("a space", " "),
+                ("a tab", "\t"),
+                ("a carriage return", "\r"),
+                ("a carriage return, a space and a carriage return", "\r \r"),
+            ] {
+                scope.spawn(move || {
+                    let repository = repository_with_commit(&format!(
+                        "docs: a change\n\nCo-authored-by: Gemini <probe@corp.locale.io>\n{line}\nCo-authored-by: Copilot <probe@corp.locale.io>\n"
+                    ));
+                    let head = git(repository.path(), &["rev-parse", "HEAD"], None);
+                    let sha = String::from_utf8_lossy(&head.stdout)[..9].to_owned();
+                    let output = run_guard_in(root, repository.path(), "HEAD");
+                    let said = said(&output);
+                    let naming = format!("attribution-guard: {sha} ");
+                    let lines: Vec<&str> = said.lines().filter(|text| text.starts_with(&naming)).collect();
+                    let expected = [
+                        format!("{naming}Co-authored-by \"Gemini <probe@corp.locale.io>\" {harm}"),
+                        format!("{naming}Co-authored-by \"Copilot <probe@corp.locale.io>\" {harm}"),
+                    ];
+                    assert!(
+                        !output.status.success() && lines == expected,
+                        "a model co-author, a line holding only {name}, then a second model co-author must be refused by both lines, in this order: {expected:?}. Git reads the line as blank, so each co-author is a trailer of its own paragraph. A guard that keeps the two paragraphs as one hands git only the last, and the first offence stays hidden until the second is fixed.\nthe lines naming its commit are {lines:?}\nguard said:\n{said}"
+                    );
+                });
+            }
+        });
     });
 }
