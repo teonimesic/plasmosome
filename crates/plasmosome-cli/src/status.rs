@@ -22,6 +22,8 @@ const MAX_SOCKET_PATH: usize = 107;
 
 const DEFAULT_DEADLINE_MS: u32 = 10_000;
 
+const MAX_REQUEST_BYTES: usize = 1_048_576;
+
 pub(crate) fn run(
     invocation: Invocation,
     context: &Context<'_>,
@@ -44,6 +46,26 @@ pub(crate) fn run(
         );
         return refuse(INVALID.to_string(), error, form, stdout, stderr);
     };
+    let params = kernel
+        .iter()
+        .map(|name| ("name".to_string(), Json::String(name.clone())))
+        .collect();
+    let request = request_line(command.command, params)
+        .expect("a request with at most one param repeats no key");
+    let bytes = request.len() - 1;
+    if let Some(name) = &kernel
+        && bytes > MAX_REQUEST_BYTES
+    {
+        let error = client(
+            ClientCode::InvalidArgument,
+            format!(
+                "--kernel's name makes the request line {bytes} bytes before its newline, \
+                 and a daemon reads at most {MAX_REQUEST_BYTES}"
+            ),
+            vec![("argument".to_string(), Json::String(name.clone()))],
+        );
+        return refuse(INVALID.to_string(), error, form, stdout, stderr);
+    }
     let deadline = Deadline::new(
         context.clock,
         start,
@@ -51,7 +73,7 @@ pub(crate) fn run(
     );
     let outcome = answer(
         &command,
-        kernel.as_deref(),
+        &request,
         Path::new(&socket),
         context.trusted_uid,
         &deadline,
@@ -86,23 +108,13 @@ pub(crate) fn run(
 
 fn answer(
     command: &Command,
-    kernel: Option<&str>,
+    request: &str,
     socket: &Path,
     trusted_uid: u32,
     deadline: &Deadline<'_>,
 ) -> Result<Json, ErrorBody> {
-    let params = kernel
-        .map(|name| vec![("name".to_string(), Json::String(name.to_string()))])
-        .unwrap_or_default();
-    let request = request_line(command.command, params).map_err(|_| {
-        ErrorBody::Client(client(
-            ClientCode::Internal,
-            "the client built a request that repeats a key".to_string(),
-            Vec::new(),
-        ))
-    })?;
     let stream = connect(socket, trusted_uid).map_err(ErrorBody::Client)?;
-    let line = exchange(stream, socket, trusted_uid, &request, deadline).map_err(|unreplied| {
+    let line = exchange(stream, socket, trusted_uid, request, deadline).map_err(|unreplied| {
         ErrorBody::Client(match unreplied {
             Unreplied::NotSent(error) => error,
             Unreplied::Unanswered(failure) => unanswered(failure, command.changes_state),
