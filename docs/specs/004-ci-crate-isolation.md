@@ -13,6 +13,12 @@ declared minimum Rust version (1.96) still true. A green run means all four, and
 crates CI checks cannot drift from the workspace without a test failing. CI also reports how much
 of the code the tests execute; no coverage percentage ever fails a run.
 
+CI also runs rustdoc over the workspace with warnings denied, in `gates` and `macos`, so a `///`
+link to an item that was renamed, made private or never existed fails the run. Nothing else in CI
+reads a doc link: `cargo test` compiles doctests with `rustdoc --test`, which does not resolve
+links, and clippy runs no rustdoc lint. Until this step existed, executors ran the command by
+hand, and #244, which skipped it, merged a link rustdoc could not resolve.
+
 The `gates` job proves the workspace together. It does not prove a crate stands on its own — a
 crate can lean on a sibling's dev-dependencies or on workspace build order and stay green for
 months.
@@ -33,8 +39,8 @@ blocked on owner decisions. This spec ships the strongest check available short 
 
 - **`gates`** — the integration gate; the testkit's cross-crate tests run here. This spec sets
   only its ignored-test report, the `--no-fail-fast` and output capture on its test steps that
-  feed it, and the `ignore_without_reason` flag on its clippy step (below); its other steps
-  belong to the specs that add them.
+  feed it, the `ignore_without_reason` flag on its clippy step, and its rustdoc step (all
+  below); its other steps belong to the specs that add them.
 - **`crate`** — a matrix job, one entry per workspace member, hardcoded in `ci.yml`. Two steps
   per entry, one command per step (the existing `ci.yml` rule: a multi-command step can pass
   while a command inside it failed):
@@ -65,6 +71,8 @@ blocked on owner decisions. This spec ships the strongest check available short 
   2. `cargo test --workspace --exclude plasmosome-guards`
   3. `cargo test -p plasmosome-guards`
   4. the ignored-test report
+  5. `cargo doc --locked --workspace --no-deps`, with `RUSTDOCFLAGS` set to `-D warnings` on this
+     step only, as [the rustdoc step](#the-rustdoc-step) says
 
   Steps 2 and 3 are the split `gates` uses, so each guard test runs once per job; the guards run
   here too because their hook-script tests meet BSD userland on macOS. There is no separate build
@@ -142,6 +150,47 @@ succeed or never ran, as after a red clippy step, it names that step and says th
 only what ran; it never then says that none was ignored. A test compiled out by `cfg` for the
 other OS is not a skip; the other OS's job runs it.
 
+### The rustdoc step
+
+`gates` and `macos` each run `cargo doc --locked --workspace --no-deps` as one step, directly after
+the ignored-test report, with `RUSTDOCFLAGS` set to `-D warnings` on that step alone. It is step 5
+of the `macos` list above, the fifth of the shared steps that start at clippy. `--locked` is there
+because [spec 026](026-security-standard.md#3-the-toolchain) requires it of every CI cargo command
+that resolves dependencies. `--no-deps` documents the workspace members only; a dependency's doc
+warnings are not this repository's to fix.
+
+- **Both jobs.** rustdoc documents only what is compiled for the OS it runs on. Items under
+  `cfg(target_os = "linux")` are documented only in `gates`, and items under
+  `cfg(target_os = "macos")` only in `macos`, as with clippy.
+- **On the step, not the job.** Cargo passes `RUSTDOCFLAGS` to every rustdoc call it makes,
+  including the doctests `cargo test` compiles. A job-wide value would change how the test steps
+  build doctests, and they would no longer run what the root gate runs.
+- **Public items only.** The step does not pass `--document-private-items`. It checks the docs a
+  caller reads, which is what the root `AGENTS.md` asks `///` to serve. It is also the command
+  executors already ran by hand, so a green root gate predicts a green step on the same OS. A broken
+  link in a private item's doc may go unreported.
+- **What it cannot see.** `-D warnings` turns a warning into an error, and a lint a package allows
+  does not warn, so the step passes it. A rustdoc lint can be allowed in a manifest, through
+  `[lints.rustdoc]` or the root's `[workspace.lints.rustdoc]`, or in source, through an attribute
+  such as `#![allow(rustdoc::broken_intra_doc_links)]` or `allow(warnings)`. Each is a visible line
+  in a diff. [Spec 026 §8](026-security-standard.md#8-which-prs-this-spec-governs) already puts
+  every manifest `[lints]` change before its reviewer, and a reviewer reads a new attribute as code.
+  A target whose manifest sets `doc = false` is not documented at all, and an item marked
+  `#[doc(hidden)]` drops out of the docs, so the step reads neither one's links. Spec 026 §8 does
+  not list a manifest's target tables, so a reviewer reads a `doc = false` line as code too.
+- **Not a guard.** It is a lint run on the footing of the clippy step: it reports rustdoc's lints
+  at the levels rustdoc and the packages set, with warnings denied.
+  [Spec 013](013-what-earns-a-guard.md) counts a level a package declares as that package's code,
+  not a guard, and a broken doc link is undone by the next commit.
+
+The root gate in `AGENTS.md` runs the same check as
+`RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`, without `--locked`, like its other
+cargo commands.
+
+Amended on 2026-10-21: this section is new, with step 5 of `macos`, the rustdoc sentences under
+Behavior, `gates`, Cost, Contract and Acceptance, and the root gate's command. Until then no CI
+step ran rustdoc.
+
 ### Coverage is a report, not a gate
 
 The `coverage` job goes red only when a test or the tool fails, never on a percentage. That is a
@@ -196,6 +245,12 @@ time, instrumented. On 2026-10-09 at `a0a5411`, one `cargo llvm-cov` 0.6.21 run 
 crates, on an M3 Max with a cold target, took 93 s and measured 93.09% of lines, macOS lines
 included. The fifteen-minute revisit applies to every job.
 
+The rustdoc step is cheap. On 2026-10-21 at `3c5db3b`, on an Apple-silicon Mac with a cold,
+separate target, `cargo doc --locked --workspace --no-deps` took 5.6 s by cargo's own count and
+wrote 81 MB. At `2c55cd7` the same day, on the same Mac while other builds ran on it, the same
+command with `-D warnings` took 14.1 s by the same count and wrote 82 MB. Its first CI timings go
+in plasmosome-36oc's notes.
+
 ## Contract
 
 - Job names: `gates`, `crate (<member>)` one per workspace member, `msrv`, `macos`, `coverage`.
@@ -207,6 +262,10 @@ included. The fifteen-minute revisit applies to every job.
   without a C warning; and every test that is not ignored builds and passes. It promises nothing
   a booted guest would show, nothing about other macOS versions (spec 001 admits macOS 14 and
   later) and nothing about Intel Macs.
+- A green `gates` or `macos` run promises: rustdoc documented every workspace member on that OS with
+  no warning, at the lint levels the packages declare. It promises nothing about the docs of private
+  or `#[doc(hidden)]` items, of a target whose manifest sets `doc = false`, or of items compiled
+  only for the other OS.
 - A test that needs a prerequisite asserts it; one a CI runner cannot supply is
   `#[ignore = "needs <prerequisite>"]`, and a bare `#[ignore]` fails clippy in every member.
   `gates` and `macos` each name every ignored test with its crate and reason, say none was only
@@ -218,8 +277,8 @@ included. The fifteen-minute revisit applies to every job.
 ## Acceptance
 
 Each item names the task that delivers it: plasmosome-005 the matrix, `msrv` and the guard;
-plasmosome-6ja `macos` and the ignored-test report; plasmosome-52e `coverage`; "first" means
-whichever of 6ja and 52e lands first.
+plasmosome-6ja `macos` and the ignored-test report; plasmosome-52e `coverage`; plasmosome-36oc
+the rustdoc step and the root gate's command; "first" means whichever of 6ja and 52e lands first.
 
 - (005) `ci.yml` has the `crate` matrix job covering every workspace member at merge time, two
   steps per entry, one command per step.
@@ -230,7 +289,7 @@ whichever of 6ja and 52e lands first.
 - (005) The guard fails when a workspace member is missing from the matrix or the matrix names a
   non-member, and the mutation test (entry removed, failure observed, entry restored) is recorded
   in the PR.
-- (6ja) `ci.yml` has the `macos` job on `macos-26` with the four steps above and no `if:`, the
+- (6ja) `ci.yml` has the `macos` job on `macos-26` with steps 1 to 4 above and no `if:`, the
   workflow's triggers carry no `paths` filter, and its header states the pipeline exception.
 - (first) On a push each commit has its own concurrency group; only pull requests cancel.
 - (6ja) On throwaway commits, each run recorded in the PR: an assertion broken in a
@@ -257,5 +316,14 @@ whichever of 6ja and 52e lands first.
 - (52e) On throwaway commits, each linked from the PR: deleting the only test that reaches some
   lines lowers that file's reported coverage while `coverage` stays green, and a failing test
   turns `coverage` red.
+- (36oc) `gates` and `macos` each run the rustdoc step as described, and no job, workflow or
+  other step sets `RUSTDOCFLAGS`.
+- (36oc) On one throwaway commit, linked from the PR, one crate's public docs hold three links
+  that do not resolve: one compiled on both OSes, one only under `cfg(target_os = "linux")` and
+  one only under `cfg(target_os = "macos")`. The rustdoc step is red in both jobs while their
+  clippy and test steps are green. The `gates` log names the first two links and not the third;
+  the `macos` log names the first and third and not the second. On a Mac the root gate's command
+  fails on that commit too.
+- (36oc) The root gate in `AGENTS.md` carries the command named above.
 - (each) Every new job is green on the PR that introduces it, and the gate in the root
   `AGENTS.md` is green.
