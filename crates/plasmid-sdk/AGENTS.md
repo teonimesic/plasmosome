@@ -7,8 +7,8 @@ The published contract plasmid authors build against. Reserved; the interface is
 ## Hard rules
 
 - **Do not freeze the interface by accident.** Anything exported here becomes a compatibility
-  promise to third-party crates. Until the design lands, exports stay minimal and the scaffold
-  refuses to generate.
+  promise to third-party crates. Until the design lands, exports stay minimal and `plasmid new`
+  generates no component.
 - **The kernel must never depend on a specific plasmid.** Discovery is by manifest at runtime.
   If kernel code names a plasmid, the layering broke.
 - **No binary target in this package.** Cargo gives a package one `[dependencies]` table,
