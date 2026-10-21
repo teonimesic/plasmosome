@@ -3,16 +3,22 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
+use std::time::Instant;
 
+use plasmosome_core::private_socket::effective_uid;
 use plasmosome_core::state::InstanceName;
 
+use crate::clock::{Clock, SystemClock};
 use crate::codes::{ClientCode, Exit};
 use crate::commands::{COMMANDS, Command};
 use crate::envelope::{ClientError, Envelope, ErrorBody, Form, emit};
 use crate::help;
 use crate::json::{self, Json, Number};
+use crate::status;
 
-const INVALID: &str = "invalid";
+pub(crate) const INVALID: &str = "invalid";
+
+const STATUS: &str = "plasmosome.status";
 
 const SHORT_HELP: &str = "-h";
 
@@ -75,24 +81,37 @@ pub struct Invocation {
     pub form: Form,
 }
 
-/// The whole `main` of the `plasmosome` binary. Takes the arguments after the program name and
-/// the package version the binary was built with, and returns the process exit code.
-pub fn main_with(args: impl IntoIterator<Item = OsString>, version: &str) -> u8 {
-    let args: Vec<OsString> = args.into_iter().collect();
-    let stdout = io::stdout();
-    let stderr = io::stderr();
-    handle(
-        &args,
-        version,
-        COMMANDS,
-        &mut stdout.lock(),
-        &mut stderr.lock(),
-    )
-    .code()
+/// What [`handle`] reads a line against, and what it runs a command with.
+pub struct Context<'a> {
+    /// The package version the binary was built with.
+    pub version: &'a str,
+    /// The command table, [`COMMANDS`] in the binary.
+    pub commands: &'a [Command],
+    /// The UID that a socket's owner and the daemon must run as. The binary passes its own
+    /// effective UID, and no flag, variable or file reaches it.
+    pub trusted_uid: u32,
+    /// The monotonic clock a command's deadline is counted on, from the start of the call.
+    pub clock: &'a dyn Clock,
 }
 
-/// Reads `args` against `commands`, writes the outcome to `stdout` or `stderr`, and returns the
-/// exit. A panic prints nothing of its own: it ends in one `internal` envelope on `stderr`, in
+/// The whole `main` of the `plasmosome` binary. Takes the arguments after the program name and
+/// the package version the binary was built with, and returns the process exit code. It runs the
+/// command with the process's own effective UID as the trusted UID, on [`SystemClock`].
+pub fn main_with(args: impl IntoIterator<Item = OsString>, version: &str) -> u8 {
+    let args: Vec<OsString> = args.into_iter().collect();
+    let context = Context {
+        version,
+        commands: COMMANDS,
+        trusted_uid: effective_uid(),
+        clock: &SystemClock,
+    };
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    handle(&args, &context, &mut stdout.lock(), &mut stderr.lock()).code()
+}
+
+/// Reads `args` against `context.commands`, runs a served command, writes the outcome to
+/// `stdout` or `stderr`, and returns the exit. The command's deadline starts at this call. A panic prints nothing of its own: it ends in one `internal` envelope on `stderr`, in
 /// the form the line chose, and [`Exit::Internal`].
 ///
 /// The first call installs a panic hook for the whole process. The hook is silent on a thread
@@ -100,20 +119,20 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>, version: &str) -> u8 
 /// hook set after that first call replaces it, and a panic in a command then reaches that hook.
 pub fn handle(
     args: &[OsString],
-    version: &str,
-    commands: &[Command],
+    context: &Context<'_>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Exit {
+    let start = context.clock.now();
     quiet_panics();
     let mut named = INVALID.to_string();
     let mut form = Form::Json;
     let quiet = QUIET.replace(true);
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let reading = read(args, commands);
+        let reading = read(args, context.commands);
         named = reading.command().to_string();
         form = reading.form();
-        act(reading, version, stdout, stderr)
+        act(reading, context, start, stdout, stderr)
     }));
     QUIET.set(quiet);
     outcome.unwrap_or_else(|_| {
@@ -609,11 +628,17 @@ fn quiet_panics() {
     });
 }
 
-fn act(reading: Reading, version: &str, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Exit {
+fn act(
+    reading: Reading,
+    context: &Context<'_>,
+    start: Instant,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Exit {
     match reading {
         Reading::Help { text, form } => print(&text, HELP, form, stdout, stderr),
         Reading::Version => print(
-            &format!("plasmosome {version}\n"),
+            &format!("plasmosome {}\n", context.version),
             VERSION,
             Form::Json,
             stdout,
@@ -624,6 +649,9 @@ fn act(reading: Reading, version: &str, stdout: &mut dyn Write, stderr: &mut dyn
             error,
             form,
         } => refuse(command, error, form, stdout, stderr),
+        Reading::Run(invocation) if invocation.command.command == STATUS => {
+            status::run(invocation, context, start, stdout, stderr)
+        }
         Reading::Run(invocation) => {
             let error = client(
                 ClientCode::Internal,
@@ -674,7 +702,7 @@ fn print(
     refuse(command.to_string(), error, form, stdout, stderr)
 }
 
-fn refuse(
+pub(crate) fn refuse(
     command: String,
     error: ClientError,
     form: Form,
@@ -691,7 +719,11 @@ fn refuse(
     exit
 }
 
-fn client(code: ClientCode, message: String, fields: Vec<(String, Json)>) -> ClientError {
+pub(crate) fn client(
+    code: ClientCode,
+    message: String,
+    fields: Vec<(String, Json)>,
+) -> ClientError {
     ClientError::new(code, message, fields)
         .expect("the client's own fields repeat no key and hold no object")
 }

@@ -54,9 +54,12 @@ const fn registry(
     }
 }
 
-/// Every `plasmosome` command of spec 025 §2, in the table's order. No command is served yet.
+/// Every `plasmosome` command of spec 025 §2, in the table's order. Only `status` is served.
 pub const COMMANDS: &[Command] = &[
-    verb(&["status"], &[], "plasmosome.status", false),
+    Command {
+        served: true,
+        ..verb(&["status"], &[], "plasmosome.status", false)
+    },
     verb(&["recovery"], &[], "plasmosome.recovery", false),
     verb(&["stop"], &[], "plasmosome.stop", true),
     verb(&["start"], &[], "plasmosome.start", true),
