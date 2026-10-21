@@ -26,7 +26,10 @@ than a library and a binary sharing one dependency table.
 
 `plasmid --help` lists them with these marks, the global flags, `PLASMOSOME_KERNEL` and the exit
 codes. `plasmid <command> --help` describes one command. `plasmid --version` prints
-`plasmid 0.0.0`; anywhere else before `--`, `--version` is a usage error.
+`plasmid 0.0.0`; anywhere else before `--`, `--version` is a usage error. The command is the
+first word read from the left, past each known flag and its value, up to `--` or the first unknown
+flag with no `=`. So `plasmid --frob add x` is a usage error that names `--frob`, and
+`plasmid --frob=x add x --help` prints add's help.
 
 A command that is not served exits 2 and prints one JSON line on stderr. Of the rest of the line
 it reads only `--json` and `--human`, and it reads no environment variable and no socket:
