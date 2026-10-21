@@ -794,6 +794,18 @@ no-follow device-and-inode identity. The subset this spec covers:
 - `membrane.cell.observe` — the supervisor's observed state (cells, broker readiness, VMM
   liveness). This is the only source the controller trusts for liveness; `sessions.status`-style
   requested state is lifecycle, not liveness.
+- `membrane.cell.denials` — `{cell, book?, after: u64}`, answered from the membrane's memory with
+  no wait and not paged, like `membrane.cell.desired`, as `{cell, book, lines, entries}`. `book`
+  is a UUID the membrane draws when it starts. `lines` are the spec 011 report lines the membrane
+  holds with a number above `after`, at most 64, in order. `entries` are every entry that names a
+  plasmid, as `{plasmid, denials}` with spec 011's `denials` shape, in the order first seen. A
+  request whose `book` equals the membrane's drops the lines numbered `after` and below, so a
+  line is dropped only after the controller has appended it; a request with no `book` or another
+  one drops nothing and is answered as if `after` were 0, so a restarted membrane never drops a
+  line the controller has not seen. The membrane keeps the counts and lines for its own life, and
+  forgets a plasmid's entries when a published DesiredCell no longer has that plasmid. Spec 011
+  gives the bounds. Amended on 2026-10-21: this method is new. §4 named no method that carries
+  spec 011's denial report from the membrane to the controller.
 - `membrane.residue.snapshot` — the F9-universe observation taken **from the supervisor/broker
   side** at diff time (86 §4 rule 4). The controller diffs snapshots, never its intentions.
 - `membrane.cell.kill` — drain-then-kill with `DrainSpec { deadline, policy }` carried
