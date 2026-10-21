@@ -189,16 +189,26 @@ warnings are not this repository's to fix.
 - **What it cannot see.** `-D warnings` turns a warning into an error, and a lint a package allows
   does not warn, so the step passes it. A rustdoc lint can be allowed in a manifest, through
   `[lints.rustdoc]` or the root's `[workspace.lints.rustdoc]`, or in source, through an attribute
-  such as `#![allow(rustdoc::broken_intra_doc_links)]` or `allow(warnings)`. Each is a visible line
-  in a diff. [Spec 026 §8](026-security-standard.md#8-which-prs-this-spec-governs) already puts
-  every manifest `[lints]` change before its reviewer, and a reviewer reads a new attribute as code.
-  A target whose manifest sets `doc = false` is not documented at all, and an item marked
-  `#[doc(hidden)]` drops out of the docs, so the step reads neither one's links. Spec 026 §8 does
-  not list a manifest's target tables, so a reviewer reads a `doc = false` line as code too.
+  such as `#![allow(rustdoc::broken_intra_doc_links)]` or `allow(warnings)`. A manifest can also
+  allow one by its old name, without the `rustdoc::` prefix, under `[lints.rust]` or the root's
+  `[workspace.lints.rust]`, as in `broken_intra_doc_links = "allow"`. rustdoc then warns that the
+  lint was renamed, and `-D warnings` does not deny that warning, so the step passes. Clippy passes
+  the line with no warning. In a source attribute the old name fails the step, on the same warning.
+  Each is a visible line in a diff.
+  [Spec 026 §8](026-security-standard.md#8-which-prs-this-spec-governs) already puts every manifest
+  `[lints]` change before its reviewer, and a reviewer reads a new attribute as code.
+- **What it never reads.** A target whose manifest sets `doc = false` is not documented at all, and
+  an item marked `#[doc(hidden)]` drops out of the docs, so the step reads neither one's links.
+  rustdoc sets `cfg(doc)`, so an item under `#[cfg(not(doc))]` does not exist for rustdoc on either
+  OS, and the step reads none of its links, while clippy and the tests still compile it.
+  Spec 026 §8 does not list a manifest's target tables, so a reviewer reads a `doc = false` line as
+  code too.
 - **Not a guard.** It is a lint run on the footing of the clippy step: it reports rustdoc's lints
   at the levels rustdoc and the packages set, with warnings denied.
   [Spec 013](013-what-earns-a-guard.md) counts a level a package declares as that package's code,
-  not a guard, and a broken doc link is undone by the next commit.
+  not a guard, and a broken doc link is undone by the next commit. No check refuses what "What it
+  cannot see" and "What it never reads" name either: each is a line a reviewer sees in the diff,
+  and spec 013 admits no guard for a harm the next commit undoes.
 
 The root gate in `AGENTS.md` runs the same check as
 `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`, without `--locked`, like its other
@@ -207,6 +217,11 @@ cargo commands.
 Amended on 2026-10-21: this section is new, with step 5 of `macos`, the rustdoc sentences under
 Behavior, `gates`, Cost, Contract and Acceptance, and the root gate's command. Until then no CI
 step ran rustdoc.
+
+Amended on 2026-10-21, after the review of #275: "What it cannot see" did not name a lint allowed
+by its old name, and nothing here named `cfg(not(doc))`. Its `doc = false` and `#[doc(hidden)]`
+sentences moved, unchanged, to the new "What it never reads". "Not a guard" gained its last
+sentence. The Contract's list gained `cfg(not(doc))` and names hidden items however they are marked.
 
 ### Coverage is a report, not a gate
 
@@ -280,9 +295,10 @@ in plasmosome-36oc's notes.
   a booted guest would show, nothing about other macOS versions (spec 001 admits macOS 14 and
   later) and nothing about Intel Macs.
 - A green `gates` or `macos` run promises: rustdoc documented every workspace member on that OS with
-  no warning, at the lint levels the packages declare. It promises nothing about the docs of private
-  or `#[doc(hidden)]` items, of a target whose manifest sets `doc = false`, or of items compiled
-  only for the other OS.
+  no warning, at the lint levels the packages declare, including levels set by a lint's old name.
+  It promises nothing about the docs of private items or items marked hidden, of a target whose
+  manifest sets `doc = false`, of items compiled only for the other OS, or of items under
+  `cfg(not(doc))`.
 - A test that needs a prerequisite asserts it; one a CI runner cannot supply is
   `#[ignore = "needs <prerequisite>"]`, and a bare `#[ignore]` fails clippy in every member.
   In every run that is not cancelled, `gates` and `macos` each name every ignored test with its
