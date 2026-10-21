@@ -17,7 +17,7 @@ const VALUE_FLAGS: [&str; 3] = ["--kernel", "--socket", "--deadline-ms"];
 
 const FLAGS: [&str; 5] = ["--kernel", "--socket", "--deadline-ms", JSON, HUMAN];
 
-const HELP_READS_PAST: [&str; 8] = [
+const KNOWN_FLAGS: [&str; 8] = [
     "--kernel",
     "--socket",
     "--deadline-ms",
@@ -125,7 +125,7 @@ pub(crate) fn read(arguments: &[OsString]) -> Reading<'_> {
             Some(OsStr::new(VERSION)),
         );
     }
-    if let Some((command, method)) = line.words().first().and_then(|word| unserved(word)) {
+    if let Some((command, method)) = line.command_words().first().and_then(|word| unserved(word)) {
         return line.not_served(command, method);
     }
     line.parse()
@@ -176,22 +176,28 @@ impl<'a> Line<'a> {
         self.head.iter().any(|(_, argument)| *argument == flag)
     }
 
-    fn of(&self, wanted: Kind) -> impl Iterator<Item = (usize, &'a OsStr)> + '_ {
+    fn flags(&self) -> impl Iterator<Item = &'a OsStr> + '_ {
         self.head
             .iter()
-            .enumerate()
-            .filter(move |(_, (kind, _))| *kind == wanted)
-            .map(|(index, (_, argument))| (index, *argument))
+            .filter(|(kind, _)| *kind == Kind::Flag)
+            .map(|(_, flag)| *flag)
     }
 
-    fn words(&self) -> Vec<&'a OsStr> {
-        self.of(Kind::Word).map(|(_, word)| word).collect()
+    fn command_words(&self) -> Vec<&'a OsStr> {
+        self.head
+            .iter()
+            .take_while(|(kind, argument)| {
+                *kind != Kind::Flag
+                    || KNOWN_FLAGS.iter().any(|known| *argument == *known)
+                    || argument.as_encoded_bytes().contains(&b'=')
+            })
+            .filter(|(kind, _)| *kind == Kind::Word)
+            .map(|(_, word)| *word)
+            .collect()
     }
 
     fn count(&self, flag: &str) -> usize {
-        self.of(Kind::Flag)
-            .filter(|(_, argument)| *argument == flag)
-            .count()
+        self.flags().filter(|argument| *argument == flag).count()
     }
 
     fn form(&self) -> Form {
@@ -207,15 +213,7 @@ impl<'a> Line<'a> {
     }
 
     fn help(&self) -> Reading<'a> {
-        let words: Vec<&OsStr> = self
-            .head
-            .iter()
-            .take_while(|(kind, argument)| {
-                *kind != Kind::Flag || HELP_READS_PAST.iter().any(|known| *argument == *known)
-            })
-            .filter(|(kind, _)| *kind == Kind::Word)
-            .map(|(_, word)| *word)
-            .collect();
+        let words = self.command_words();
         let Some(first) = words.first() else {
             return Reading::Help(help::binary(), self.form());
         };
@@ -259,7 +257,7 @@ impl<'a> Line<'a> {
 
     fn not_served(&self, command: &Command, method: &str) -> Reading<'a> {
         let mut seen: Vec<&str> = Vec::new();
-        for (_, flag) in self.of(Kind::Flag) {
+        for flag in self.flags() {
             let Some(form) = [JSON, HUMAN].into_iter().find(|form| flag == *form) else {
                 continue;
             };
@@ -296,8 +294,9 @@ impl<'a> Line<'a> {
     }
 
     fn parse(&self) -> Reading<'a> {
+        let command = self.command_words().first().and_then(|word| served(word));
         let mut seen: Vec<&str> = Vec::new();
-        let mut command: Option<&Command> = None;
+        let mut at_command = false;
         let mut name: Option<&'a str> = None;
         for &(kind, argument) in &self.head {
             let Some(text) = argument.to_str() else {
@@ -309,33 +308,28 @@ impl<'a> Line<'a> {
                     Some(argument),
                 );
             };
-            match (kind, command, name) {
-                (Kind::Value, _, _) => {}
-                (Kind::Flag, _, _) if !FLAGS.contains(&text) => {
+            match (kind, command) {
+                (Kind::Value, _) => {}
+                (Kind::Flag, _) if !FLAGS.contains(&text) => {
                     return self.usage(
                         format!("unknown flag `{text}`; see plasmid --help"),
                         Some(argument),
                     );
                 }
-                (Kind::Flag, Some(command), _) => return self.not_taken(command, text),
-                (Kind::Flag, None, _) => {
+                (Kind::Flag, Some(command)) => return self.not_taken(command, text),
+                (Kind::Flag, None) => {
                     if let Some(fault) = self.twice_or_clash(&seen, text) {
                         return fault;
                     }
                     seen.push(text);
                 }
-                (Kind::Word, None, _) => {
-                    let Some(served) = served(argument) else {
-                        return self.unknown(argument);
-                    };
-                    if let Some(flag) = seen.first() {
-                        return self.not_taken(served, flag);
-                    }
-                    command = Some(served);
+                (Kind::Word, None) => return self.unknown(argument),
+                (Kind::Word, Some(_)) if !at_command => at_command = true,
+                (Kind::Word, Some(_)) if name.is_none() && is_plasmid_name(text) => {
+                    name = Some(text);
                 }
-                (Kind::Word, Some(_), None) if is_plasmid_name(text) => name = Some(text),
-                (Kind::Word, Some(_), None) => return self.not_a_name(text),
-                (Kind::Word, Some(command), Some(_)) => return self.extra(command, argument),
+                (Kind::Word, Some(_)) if name.is_none() => return self.not_a_name(text),
+                (Kind::Word, Some(command)) => return self.extra(command, argument),
             }
         }
         if let Some(fault) = self.missing_value() {
