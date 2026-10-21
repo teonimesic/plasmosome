@@ -743,6 +743,7 @@ mod tests {
             (TrustCheck::Links, "links"),
             (TrustCheck::Mode, "mode"),
             (TrustCheck::Size, "size"),
+            (TrustCheck::InsideMountSource, "inside_mount_source"),
         ];
         for (check, name) in cases {
             assert_eq!(check.as_str(), name);

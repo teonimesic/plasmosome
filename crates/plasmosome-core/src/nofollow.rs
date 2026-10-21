@@ -1850,4 +1850,112 @@ mod tests {
             assert_eq!(PrivateSocketError::from(refusal), expected);
         }
     }
+
+    #[test]
+    fn identities_judge_no_directory_and_return_every_identity() {
+        let root = TestRoot::new();
+        make_dir(&root.join("a"), 0o775);
+        make_dir(&root.join("a/b"), 0o777);
+        make_dir(&root.join("a/b/c"), 0o700);
+        assert_eq!(
+            root.walk("a/b/c").identities(),
+            Ok(vec![
+                identity_of(root.path()),
+                identity_of(&root.join("a")),
+                identity_of(&root.join("a/b")),
+                identity_of(&root.join("a/b/c")),
+            ])
+        );
+        assert_eq!(
+            root.walk("a/b/c")
+                .open_directory(by_the_ancestor_rule)
+                .map(|opened| opened.chain),
+            Err(WalkRefusal::Replaceable {
+                path: root.join("a"),
+                mode: 0o775
+            }),
+            "the full walk still judges what identities() passes"
+        );
+    }
+
+    #[test]
+    fn identities_refuse_a_symlink_anywhere() {
+        let root = TestRoot::new();
+        make_dir(&root.join("real"), 0o700);
+        make_dir(&root.join("real/c"), 0o700);
+        symlink("real", root.join("link")).expect("symlink");
+        symlink("c", root.join("real/inner")).expect("symlink");
+        for (relative, link) in [
+            ("link/c", "link"),
+            ("link", "link"),
+            ("real/inner", "real/inner"),
+        ] {
+            assert_eq!(
+                root.walk(relative).identities(),
+                Err(WalkRefusal::Symlink {
+                    path: root.join(link)
+                }),
+                "{relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn identities_refuse_a_missing_name_a_file_and_an_unsearchable_directory() {
+        let root = TestRoot::new();
+        write_file(&root.join("file"), b"", 0o600);
+        for (relative, refusal) in [
+            (
+                "absent",
+                WalkRefusal::Missing {
+                    path: root.join("absent"),
+                },
+            ),
+            (
+                "absent/x",
+                WalkRefusal::Missing {
+                    path: root.join("absent"),
+                },
+            ),
+            (
+                "file",
+                WalkRefusal::NotDirectory {
+                    path: root.join("file"),
+                },
+            ),
+            (
+                "file/x",
+                WalkRefusal::NotDirectory {
+                    path: root.join("file"),
+                },
+            ),
+        ] {
+            assert_eq!(root.walk(relative).identities(), Err(refusal), "{relative}");
+        }
+        if effective_uid() == 0 {
+            println!("skipped the unsearchable case: root searches every directory");
+            return;
+        }
+        make_dir(&root.join("locked"), 0o700);
+        make_dir(&root.join("locked/x"), 0o700);
+        set_mode(&root.join("locked"), 0o000);
+        let outcome = root.walk("locked/x").identities();
+        set_mode(&root.join("locked"), 0o700);
+        assert!(
+            matches!(
+                outcome,
+                Err(WalkRefusal::Io {
+                    errno: libc::EACCES,
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn identities_of_the_root_is_the_root_alone() {
+        let walk = Walk::from_root(Path::new("/")).expect("an absolute path");
+        assert_eq!(walk.identities(), Ok(vec![identity_of(Path::new("/"))]));
+    }
 }
