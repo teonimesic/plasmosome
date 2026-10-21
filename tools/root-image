@@ -384,7 +384,8 @@ def listed(field):
 def accounts(source, members, epoch):
     """Return the four account files with the workload account appended, refusing a collision.
 
-    glibc's files backend skips blanks at the start of a line, so a name is compared after them.
+    glibc's files backend skips blanks at the start of a line, so a name is compared after them. It also ends a line
+    at a NUL byte, so a file that holds one is refused.
     """
     days = epoch // 86400
     lines = {"etc/passwd": PASSWD_LINE + b"\n", "etc/group": GROUP_LINE + b"\n",
@@ -395,6 +396,8 @@ def accounts(source, members, epoch):
         if member is None or kind_of(member) != "file":
             raise Refused("stage", f"the base has no regular /{name}")
         data = read_member(source, member, MAX_ACCOUNT_FILE_BYTES)
+        if b"\0" in data:
+            raise Refused("stage", f"/{name} holds a NUL byte, where glibc's files backend ends the line")
         for number, line in enumerate(data.split(b"\n"), 1):
             fields = line.lstrip().split(b":")
             if fields[0] == b"workload":
