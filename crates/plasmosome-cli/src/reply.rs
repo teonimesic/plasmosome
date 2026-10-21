@@ -45,7 +45,7 @@ pub fn read_reply(reader: &mut dyn BufRead) -> Result<Vec<u8>, ReadFailure> {
     }
 }
 
-fn failure_of(error: &io::Error) -> ReadFailure {
+pub(crate) fn failure_of(error: &io::Error) -> ReadFailure {
     match error.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => ReadFailure::TimedOut,
         _ => ReadFailure::Transport {
@@ -193,6 +193,30 @@ pub fn unanswered(failure: ReadFailure, changes_state: bool) -> ClientError {
             format!("the reply passed {MAX_REPLY_BYTES} bytes before its newline"),
         ),
     };
+    unreplied(failure, cause, what, changes_state)
+}
+
+/// Returns the client error for a request cut off midway by `error`, after part of it was written.
+///
+/// A write that timed out has `cause` `deadline`. Any other failed write has `cause`
+/// `transport`, and the message names the error. As with [`unanswered`], it is `no_reply`, exit
+/// 1, with `changes_state` false and `outcome_unknown`, exit 3, with `changes_state` true.
+pub fn cut_off(error: &io::Error, changes_state: bool) -> ClientError {
+    let failure = failure_of(error);
+    let (cause, what) = match failure {
+        ReadFailure::TimedOut => (
+            "deadline",
+            "the deadline passed before the request was written whole".to_string(),
+        ),
+        _ => (
+            "transport",
+            format!("writing the request failed after part of it was sent: {error}"),
+        ),
+    };
+    unreplied(failure, cause, what, changes_state)
+}
+
+fn unreplied(failure: ReadFailure, cause: &str, what: String, changes_state: bool) -> ClientError {
     let cause = Json::String(cause.to_string());
     let (code, message, field) = match (changes_state, failure) {
         (true, _) => (

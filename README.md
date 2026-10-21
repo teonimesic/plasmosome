@@ -5,8 +5,8 @@ intended cell is a hardware-isolated microVM with no ambient network, filesystem
 model access; revocable plasmids grant only the capabilities it needs.
 
 Today this repository does not create that cell or deliver those enforcement properties. It
-contains the first libraries plus two runnable daemons that answer status for an empty controller
-and an empty membrane.
+contains the first libraries, two runnable daemons that answer status for an empty controller
+and an empty membrane, and the `plasmosome` command, which asks a controller for its status.
 
 The [status-only quickstart](#status-only-quickstart) builds and exercises exactly that delivered
 surface in a private temporary directory, then stops and reaps both daemons.
@@ -42,12 +42,13 @@ states what the tree serves now.
 | `plasmosomed <config.json>` | Runs a foreground controller and serves only `plasmosome.status` on its configured Unix socket. |
 | `membraned <config.json>` | Runs a foreground empty/broker supervisor and serves only `membrane.status` on its configured Unix socket. |
 | `plasmid <command>` | `plasmid new <name>` writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. `plasmid list`, `add`, `remove`, `reload` and `renew` are listed in `plasmid --help` and exit 2 with a `not_served` envelope. A wrong command line exits 64 with an `invalid` envelope, and `plasmid --version` prints `plasmid 0.0.0`. |
+| `plasmosome status --socket PATH` | Checks that the socket is a socket you own with mode `0600`, in a directory you own that no other user can open, and that no user but you or root can replace a directory above it. It then checks that the daemon runs as you, sends one `plasmosome.status` request, and prints the answer in spec 025's envelope: one JSON line on stdout, or the error on stderr with an exit code that says whether repeating is safe. `status` needs `--socket` in this build. `plasmosome --help` marks every other command not served, and each exits 2 with `not_served`. |
 
-There is no `plasmosome` executable or `plasmosome start` command today. The accepted future
-controller methods — `plasmosome.start/list/status/stop`, `cell.new/list/status/kill/exec`,
-`exec.status` and `plasmid.list/add/remove/reload` — are not implemented except for
-`plasmosome.status`. The membrane's desired-state, observe, kill and residue methods are also
-reserved. See the [`plasmosome-core`](crates/plasmosome-core/README.md),
+The `plasmosome` executable serves only `status --socket`, so there is no `plasmosome start`. The
+accepted future controller methods — `plasmosome.start/list/status/stop`,
+`cell.new/list/status/kill/exec`, `exec.status` and `plasmid.list/add/remove/reload` — are not
+implemented except for `plasmosome.status`. The membrane's desired-state, observe, kill and
+residue methods are also reserved. See the [`plasmosome-core`](crates/plasmosome-core/README.md),
 [`plasmosome-membrane`](crates/plasmosome-membrane/README.md) and
 [`plasmid`](crates/plasmid/README.md) guides for their narrower current contracts.
 
@@ -140,6 +141,7 @@ required_paths = [
     root / "Cargo.toml",
     root / "crates" / "plasmosome-core",
     root / "crates" / "plasmosome-membrane",
+    root / "crates" / "plasmosome",
     root / "crates" / "plasmid",
 ]
 for required in required_paths:
@@ -289,6 +291,64 @@ with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir=private_base) 
             raise TimeoutError(f"{operation} exceeded {STATUS_BUDGET}s")
         return allowance
 
+    def plasmosome_status(record, path):
+        argv = [
+            str(binaries["plasmosome"]),
+            "status",
+            "--kernel",
+            "quickstart",
+            "--socket",
+            str(path),
+        ]
+        print("plasmosome status argv:", json.dumps(argv))
+        deadline = time.monotonic() + STATUS_BUDGET
+        while True:
+            code = record["process"].poll()
+            if code is not None:
+                raise RuntimeError(f"{record['name']} exited early with {code}")
+            completed = subprocess.run(
+                argv,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=remaining(deadline, "plasmosome status"),
+                check=False,
+            )
+            if completed.returncode != 1:
+                break
+            try:
+                error = json.loads(completed.stderr)["error"]["code"]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                break
+            if error not in ("not_running", "unreachable"):
+                break
+            time.sleep(min(0.05, remaining(deadline, "plasmosome status retry")))
+        require(
+            completed.returncode == 0,
+            f"plasmosome status exited {completed.returncode}: {completed.stderr}",
+        )
+        require(not completed.stderr, f"plasmosome status wrote stderr: {completed.stderr}")
+        require(
+            completed.stdout.endswith("\n") and completed.stdout.count("\n") == 1,
+            f"plasmosome status did not print one line: {completed.stdout!r}",
+        )
+        envelope = json.loads(completed.stdout)
+        require(
+            sorted(envelope) == ["command", "instance", "result", "schema"],
+            f"unexpected envelope keys: {envelope}",
+        )
+        require(envelope["schema"] == 1, f"unexpected envelope schema: {envelope}")
+        require(
+            envelope["command"] == "plasmosome.status",
+            f"unexpected envelope command: {envelope}",
+        )
+        require(
+            envelope["instance"] == {"name": "quickstart", "socket": str(path)},
+            f"unexpected envelope instance: {envelope}",
+        )
+        print("plasmosome status stdout:", completed.stdout, end="")
+        return envelope["result"]
+
     def request_status(record, path, request):
         deadline = time.monotonic() + STATUS_BUDGET
         while True:
@@ -342,7 +402,7 @@ with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir=private_base) 
         build_binaries()
         binaries = {
             name: target / "debug" / name
-            for name in ("plasmosomed", "membraned", "plasmid")
+            for name in ("plasmosomed", "membraned", "plasmid", "plasmosome")
         }
         for binary in binaries.values():
             require(
@@ -382,13 +442,7 @@ with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir=private_base) 
             scratch_path / "membraned.log",
         )
 
-        controller_request = {
-            "id": 1,
-            "method": "plasmosome.status",
-            "params": {"name": "quickstart"},
-        }
-        controller_response = request_status(controller, controller_socket, controller_request)
-        result = controller_response.get("result")
+        result = plasmosome_status(controller, controller_socket)
         require(isinstance(result, dict), f"controller result is not an object: {result}")
         require(result.get("name") == "quickstart", f"unexpected controller name: {result}")
         require(result.get("state") == "running", f"unexpected controller state: {result}")
@@ -534,13 +588,18 @@ print("status-only quickstart completed successfully")
 PY
 ```
 
-The controller response has `ready:true`, `cells:[]` and `ledger_generation:0`: the controller can
-answer status, but no guest exists. Its config must name an absolute `instance_root` and a
-`recovery_deadline_ms` of at least 1. This build checks both for shape only and uses neither: it
-does not open the root or recover cells yet, so the example never creates `instance`. The
-independently started membrane returns exactly `{"ready":false,"state":"empty"}` because
-`brokers:[]`; that is the expected successful response, not a failed daemon start. Its
-`status_deadline_ms` is a broker probe budget, not a strict elapsed bound.
+`plasmosome status --socket` asks the controller for its status once and prints spec 025's
+envelope: `schema`, `command`, `instance` and the controller's `result` as it arrived. The
+example's own loop runs it again while the daemon has not yet bound its socket.
+`--kernel quickstart` names the instance, so the controller checks that name against its
+config. The result has `ready:true`, `cells:[]` and `ledger_generation:0`: the controller can
+answer status, but no guest exists. Its config must
+name an absolute `instance_root` and a `recovery_deadline_ms` of at least 1. This build checks
+both for shape only and uses neither: it does not open the root or recover cells yet, so the
+example never creates `instance`. The membrane, which the example asks directly over its own
+socket, returns exactly `{"ready":false,"state":"empty"}` because `brokers:[]`; that is the
+expected successful response, not a failed daemon start. Its `status_deadline_ms` is a broker
+probe budget, not a strict elapsed bound.
 
 This example creates no cell and launches no OMP, Claude Code, Codex or other agent harness. It
 does not establish hardware/OS isolation, enforcement, credential custody, attach/detach,
@@ -569,7 +628,7 @@ that its complete runtime role is delivered.
 | `plasmosome-membrane` | Per-cell host supervisor for the VMM, network path and broker processes |
 | `plasmosome-ledger` | Typed reversibility: effects and their inverses; spec 020's registry IDs and release references |
 | `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
-| `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes and client codes; never shipped |
+| `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes, client codes, argument reading and `status --socket`; never shipped |
 | `plasmid` | Plasmid-author command line; today `plasmid new` writes a declaration, and the other plasmid commands answer `not_served` |
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
 | `plasmosome-guards` | Repository policy checks |
