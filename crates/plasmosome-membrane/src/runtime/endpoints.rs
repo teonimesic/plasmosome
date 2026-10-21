@@ -464,8 +464,9 @@ impl std::error::Error for EndpointRefusal {}
 mod tests {
     use super::*;
     use crate::runtime::launch::{HelperExec, PreparedHelper};
-    use crate::runtime::test_fixtures::{fake, recipe, recipe_value};
+    use crate::runtime::test_fixtures::{fake, private_root, recipe, recipe_value};
     use crate::vmm::{Launch, VmmChild, VmmState};
+    use plasmosome_core::private_socket::effective_uid;
     use std::fs::File;
     use std::io::{ErrorKind, Write};
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
@@ -482,7 +483,7 @@ mod tests {
 
     impl Scratch {
         fn new() -> Scratch {
-            let dir = tempfile::tempdir().expect("a temporary directory");
+            let dir = private_root();
             let root = dir
                 .path()
                 .canonicalize()
@@ -546,6 +547,20 @@ mod tests {
                     panic!("the peer is identified, but errno {errno} came back")
                 }
                 None => {}
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a connection is pending within {PATIENCE:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn taken_within(listener: &RuntimeListener) -> Connection {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            if let Some(taken) = listener.accept_ready().expect("accepting does not fail") {
+                return taken;
             }
             assert!(
                 Instant::now() < deadline,
@@ -674,6 +689,67 @@ mod tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"victim bytes");
         assert!(is_socket(stale.as_path()), "the stale socket stays");
         assert_eq!(identity(&stale), stale_identity, "it is the same socket");
+    }
+
+    #[test]
+    fn a_parent_reached_through_a_symlink_is_refused_and_nothing_is_bound_at_its_target() {
+        let scratch = Scratch::new();
+        std::fs::create_dir(scratch.root.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", scratch.root.join("link")).unwrap();
+        let through_link = scratch.path("link/control.sock");
+        let refused = RuntimeListener::bind(&through_link);
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(
+            absent(&scratch.root.join("real/control.sock")),
+            "no socket was bound in the directory the link names"
+        );
+    }
+
+    #[test]
+    fn a_parent_other_principals_can_search_is_refused() {
+        let scratch = Scratch::new();
+        let shared = scratch.root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = scratch.path("shared/control.sock");
+        let refused = RuntimeListener::bind(&path);
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(absent(path.as_path()), "no socket was bound there");
+    }
+
+    #[test]
+    fn a_path_longer_than_a_socket_address_names_the_limit() {
+        let scratch = Scratch::new();
+        let path = scratch.path(&"s".repeat(120));
+        let refused = RuntimeListener::bind(&path).expect_err("the path is too long to bind");
+        assert!(
+            refused.to_string().contains("bytes a socket address holds"),
+            "{refused}"
+        );
+        assert!(absent(path.as_path()), "nothing was created");
+    }
+
+    #[test]
+    fn a_peer_whose_uid_is_not_trusted_is_closed_and_never_identified() {
+        let scratch = Scratch::new();
+        let path = scratch.path("data.sock");
+        let stranger = effective_uid().wrapping_add(1);
+        let listener = RuntimeListener::bind_trusting(&path, stranger).unwrap();
+        let mut client = UnixStream::connect(path.as_path()).unwrap();
+        client.write_all(b"hello").unwrap();
+        let taken = taken_within(&listener);
+        assert!(
+            !matches!(taken, Connection::Identified { .. }),
+            "a peer of another uid is not handed out: {taken:?}"
+        );
+        drop(taken);
+        client.set_read_timeout(Some(PATIENCE)).unwrap();
+        let mut byte = [0u8; 1];
+        let read = client.read(&mut byte).map_err(|error| error.kind());
+        assert!(
+            matches!(read, Ok(0) | Err(ErrorKind::ConnectionReset)),
+            "the refused peer sees its stream closed: {read:?}"
+        );
     }
 
     #[test]
