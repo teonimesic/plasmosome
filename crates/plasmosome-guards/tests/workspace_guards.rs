@@ -223,6 +223,29 @@ fn no_binary_target_takes_a_name_another_package_owns() {
     });
 }
 
+#[test]
+fn the_plasmosome_binary_is_in_the_held_package() {
+    check_workspace(|root| {
+        let packages = workspace_packages(root);
+        let package = |name: &str| {
+            packages
+                .iter()
+                .find(|package| package_name(package) == name)
+                .unwrap_or_else(|| panic!("`{name}` is not a package in this workspace"))
+        };
+        assert_eq!(
+            binary_targets(package("plasmosome")),
+            ["plasmosome"],
+            "spec 025 §1 makes `plasmosome` a binary target of the `plasmosome` package, the name this project holds"
+        );
+        assert_eq!(
+            package("plasmosome-cli")["publish"],
+            serde_json::json!([]),
+            "spec 025 §1 keeps the command line's logic in `plasmosome-cli` with `publish = false`, so the held `plasmosome` name stays the only publishable package it ships in"
+        );
+    });
+}
+
 fn metadata_package(name: &str, binaries: &[&str]) -> serde_json::Value {
     let mut targets = vec![serde_json::json!({"kind": ["lib"], "name": name})];
     for binary in binaries {
