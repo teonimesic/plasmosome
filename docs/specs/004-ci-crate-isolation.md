@@ -198,7 +198,12 @@ warnings are not this repository's to fix.
   [Spec 026 §8](026-security-standard.md#8-which-prs-this-spec-governs) already puts every manifest
   `[lints]` change before its reviewer, and a reviewer reads a new attribute as code.
 - **What it never reads.** A target whose manifest sets `doc = false` is not documented at all, and
-  an item marked `#[doc(hidden)]` drops out of the docs, so the step reads neither one's links.
+  an item marked `#[doc(hidden)]`, such as a function, a struct with its fields and methods, or a
+  trait, drops out of the docs, so the step reads neither one's links. `hidden` can share the
+  attribute with other words, as in `#[doc(alias = "x", hidden)]`, which a search for `doc(hidden)`
+  misses. A hidden module or `pub use` hides less. The step still reads a hidden module's own docs,
+  and the docs of each item in it or named by a hidden `pub use`, with or without `inline`, unless
+  that item is marked itself. It skips only the doc comment on the `pub use` line.
   rustdoc sets `cfg(doc)`, so an item under `#[cfg(not(doc))]` does not exist for rustdoc on either
   OS, and the step reads none of its links, while clippy and the tests still compile it.
   Spec 026 §8 does not list a manifest's target tables, so a reviewer reads a `doc = false` line as
@@ -220,8 +225,10 @@ step ran rustdoc.
 
 Amended on 2026-10-21, after the review of #275: "What it cannot see" did not name a lint allowed
 by its old name, and nothing here named `cfg(not(doc))`. Its `doc = false` and `#[doc(hidden)]`
-sentences moved, unchanged, to the new "What it never reads". "Not a guard" gained its last
-sentence. The Contract's list gained `cfg(not(doc))` and names hidden items however they are marked.
+sentences moved to the new "What it never reads", and the `#[doc(hidden)]` claim was corrected
+there: in the review of #283, rustdoc 1.99.1 still read the links of a hidden module and of the
+item a hidden `pub use` names. "Not a guard" gained its last sentence. The Contract's list gained
+`cfg(not(doc))` and names hidden items however they are marked.
 
 ### Coverage is a report, not a gate
 
