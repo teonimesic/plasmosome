@@ -115,9 +115,34 @@ pub struct SocketEntry {
     pub ino: u64,
 }
 
+/// The backlog [`PrivateListener::bind`] passes to `listen`. Once about this many connections
+/// wait unaccepted, macOS refuses the next connect with `ECONNREFUSED`, the error a closed
+/// listener gives too. Linux makes a blocking connect wait and a nonblocking one fail with
+/// `EAGAIN`.
+pub const LISTEN_BACKLOG: i32 = 16;
+
 /// A listening socket inside a [`PrivateDir`] that hands out only connections whose kernel peer
-/// UID is trusted. Dropping it closes the socket and then removes the entry it created, only
-/// while the entry at that name is still the same socket by device and inode.
+/// UID is trusted. Dropping it does what [`PrivateListener::close`] says and discards the
+/// outcome.
+///
+/// It lends its descriptor only as a raw one, for polling:
+///
+/// ```
+/// use plasmosome_core::private_socket::PrivateListener;
+/// let polled: fn(&PrivateListener) -> std::os::fd::RawFd = PrivateListener::as_raw_fd;
+/// ```
+///
+/// It does not implement `AsFd`, so safe code cannot copy the descriptor. A copy could accept a
+/// peer whose UID is not trusted, make the listener block, or keep the socket listening after
+/// [`PrivateListener::close`]:
+///
+/// ```compile_fail,E0277
+/// fn lends<T: std::os::fd::AsFd>() {}
+/// lends::<plasmosome_core::private_socket::PrivateListener>();
+/// ```
+///
+/// Stable rustdoc does not check the `E0277`, so that block passes on any compile error and is
+/// kept this small.
 #[derive(Debug)]
 pub struct PrivateListener {
     listener: UnixListener,
@@ -130,20 +155,44 @@ struct BoundEntry {
     dir: PrivateDir,
     name: CString,
     entry: SocketEntry,
+    removed: bool,
+}
+
+impl BoundEntry {
+    #[allow(unsafe_code)]
+    fn remove(&mut self) -> RemoveOutcome {
+        self.removed = true;
+        let facts = match stat_at(&self.dir.dir, &self.name) {
+            Ok(facts) => facts,
+            Err(errno) => return gone_or_failed(errno),
+        };
+        if facts.kind != Kind::Socket || facts.dev != self.entry.dev || facts.ino != self.entry.ino
+        {
+            return RemoveOutcome::LeftReplacement;
+        }
+        // SAFETY: `self.name` is a CString this entry owns, and `self.dir` keeps the directory
+        // descriptor open for the call. unlinkat keeps no pointer to the name.
+        if unsafe { libc::unlinkat(self.dir.dir.as_raw_fd(), self.name.as_ptr(), 0) } == 0 {
+            RemoveOutcome::Removed
+        } else {
+            gone_or_failed(last_errno())
+        }
+    }
 }
 
 impl Drop for BoundEntry {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
-        if let Ok(facts) = stat_at(&self.dir.dir, &self.name)
-            && facts.kind == Kind::Socket
-            && facts.dev == self.entry.dev
-            && facts.ino == self.entry.ino
-        {
-            // SAFETY: `self.name` is a CString this entry owns, and `self.dir` keeps the directory
-            // descriptor open for the call. unlinkat keeps no pointer to the name.
-            unsafe { libc::unlinkat(self.dir.dir.as_raw_fd(), self.name.as_ptr(), 0) };
+        if !self.removed {
+            let _ = self.remove();
         }
+    }
+}
+
+fn gone_or_failed(errno: i32) -> RemoveOutcome {
+    if errno == libc::ENOENT {
+        RemoveOutcome::AlreadyGone
+    } else {
+        RemoveOutcome::Failed { errno }
     }
 }
 
@@ -167,7 +216,7 @@ impl PrivateListener {
     ) -> Result<PrivateListener, PrivateSocketError> {
         let (socket, bound) = prepare(dir, name)?;
         // SAFETY: listen takes no pointer, and `socket` keeps its descriptor open for the call.
-        if unsafe { libc::listen(socket.as_raw_fd(), 16) } != 0 {
+        if unsafe { libc::listen(socket.as_raw_fd(), LISTEN_BACKLOG) } != 0 {
             return Err(io_failure(
                 "listen",
                 &bound.entry.path,
@@ -190,9 +239,25 @@ impl PrivateListener {
         &self.bound.entry
     }
 
-    /// The listening descriptor, for polling. The caller must not close it or accept on it.
+    /// The listening descriptor, for polling. The caller must not close it, accept on it,
+    /// change its flags or keep a copy of it.
     pub fn as_raw_fd(&self) -> RawFd {
         self.listener.as_raw_fd()
+    }
+
+    /// Closes the socket, then removes the entry it created only while the entry at that name
+    /// in the held directory is still the same socket by device and inode, and says what it
+    /// found there. Dropping the listener does the same and discards the outcome. A child that
+    /// another thread is spawning holds a copy of every descriptor until its exec, so the socket
+    /// can take connections until that exec.
+    pub fn close(self) -> RemoveOutcome {
+        let PrivateListener {
+            listener,
+            mut bound,
+            ..
+        } = self;
+        drop(listener);
+        bound.remove()
     }
 
     /// Accepts one pending connection without blocking. `Ok(None)`: nothing pending. A peer
@@ -224,6 +289,20 @@ impl PrivateListener {
         stream.set_nonblocking(false)?;
         Ok(Some(Accepted::Trusted(stream)))
     }
+}
+
+/// The result of removing a path that was created, after checking that the path still names
+/// the object that was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveOutcome {
+    /// The path still named the created object, and it is gone.
+    Removed,
+    /// Nothing was at the path.
+    AlreadyGone,
+    /// Another object now occupies the path. It was left in place.
+    LeftReplacement,
+    /// The removal failed with this errno; the object may remain.
+    Failed { errno: i32 },
 }
 
 /// One accepted connection: a stream from a trusted peer, or the reason the peer was refused.
@@ -688,6 +767,7 @@ fn prepare_as(
             dev: created.dev,
             ino: created.ino,
         },
+        removed: false,
     };
     recheck?;
     restrict_to_owner(&bound)?;
