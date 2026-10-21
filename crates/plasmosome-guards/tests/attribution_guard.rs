@@ -756,6 +756,7 @@ const IDENTITIES: &[(&str, Verdict)] = &[
     ("Probe <me@LAPTOP.LOCAL>", Verdict::Untraceable),
     ("Exec025 <exec025@localhost>", Verdict::Untraceable),
     ("Probe <probe@ci.example.com>", Verdict::Untraceable),
+    ("Probe <me@host.ci.internal>", Verdict::Untraceable),
     ("Claude (Fable 5) <>", Verdict::Model),
     ("Claude: Fable 5", Verdict::Model),
     ("Jane Doe <>", Verdict::Untraceable),
@@ -774,6 +775,15 @@ const IDENTITIES: &[(&str, Verdict)] = &[
     ),
     ("Jane Doe <jane@corp.locale.io> <", Verdict::Untraceable),
     ("Jane Doe <jane@corp.locale.io", Verdict::Untraceable),
+    (
+        "Probe <me@laptop.local>me@corp.locale.io>",
+        Verdict::Untraceable,
+    ),
+    ("Jane Doe jane@corp.locale.io>", Verdict::Untraceable),
+    (
+        "Probe <me@corp.locale.io@laptop.local>",
+        Verdict::Untraceable,
+    ),
     ("QA <qa@ci.tests.org>", Verdict::Cleared),
     ("Jane Doe <jane@corp.locale.io>", Verdict::Cleared),
     ("Probe <probe@notlocal>", Verdict::Cleared),
