@@ -4502,6 +4502,53 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn set_file_flags(path: &Path, flags: libc::c_uint) -> io::Result<()> {
+        let name = CString::new(path.as_os_str().as_bytes()).expect("a path without NUL");
+        // SAFETY: `name` is a CString that lives until this function returns, and chflags keeps no
+        // pointer to it.
+        if unsafe { libc::chflags(name.as_ptr(), flags) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    struct ClearFlags(PathBuf);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for ClearFlags {
+        fn drop(&mut self) {
+            let _ = set_file_flags(&self.0, 0);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retire_reports_a_retired_it_can_neither_read_nor_make_private_and_moves_nothing() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        let dir = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the cell is created");
+        let retired = root.join("retired");
+        fs::create_dir(&retired).expect("retired is made");
+        let _restore = restrict(&retired, 0o000);
+        set_file_flags(&retired, libc::UF_IMMUTABLE).expect("the owner sets the immutable flag");
+        let clear = ClearFlags(retired.clone());
+        let result = instance.retire(&lock, dir);
+        drop(clear);
+        expect_match!(result, Err(RetireError::Io { path, source }) => {
+            assert_eq!(path, retired);
+            assert_eq!(source.raw_os_error(), Some(libc::EPERM), "{source}");
+        });
+        assert_eq!(mode_of(&retired), 0o000);
+        assert!(exists(&root.join("cells/cell-1")));
+        assert!(!exists(&retired.join("cell-1")));
+    }
+
     #[test]
     fn every_marker_and_retirement_error_names_what_it_refused_and_keeps_its_cause() {
         let cause = Some(eio().to_string());
