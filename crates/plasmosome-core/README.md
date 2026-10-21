@@ -468,6 +468,10 @@ path is `/private/etc/...` or `/private/var/...`: `/etc` and `/var` are symlinks
 through them is `path`. Rule 5, no trusted file inside a Mount source, and rule 6, the content,
 are not checked here.
 
-The unit tests build their files under a canonical temp directory and walk from it, so they run
-on Linux below a sticky `/tmp`. The test that `/etc/hosts` is `parent` skips as root, because
-root owns `/etc`.
+Most unit tests build their files under a canonical temp directory and walk from it, so they run
+on Linux below a sticky `/tmp`. One test opens a file through the walk from `/`, so its test root
+must sit where every ancestor passes. It takes the bases the daemon's unit tests use. On macOS
+that is the per-user temp directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, whatever `TMPDIR`
+says. On Linux it is `XDG_RUNTIME_DIR` when that is set, else the test binary's directory. If no
+base passes, the test fails and names each base with the ancestor that refused it. The test that
+`/etc/hosts` is `parent` skips as root, because root owns `/etc`.
