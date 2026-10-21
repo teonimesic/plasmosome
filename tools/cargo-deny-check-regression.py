@@ -405,6 +405,7 @@ def outcomes():
         assert "Traceback" in result.stdout and "TypeError" in result.stdout, result.stdout
         assert len(summary.splitlines()) == 1 and summary.startswith(TOOL_FAILURE + " the wrapper crashed"), summary
         assert "`cargo-deny-check advisories`" in summary and "job log" in summary, summary
+        assert "Earlier lockfiles may have refused" in summary, summary
 
         directory_summary = Path(directory) / "summary-directory"
         directory_summary.mkdir()
