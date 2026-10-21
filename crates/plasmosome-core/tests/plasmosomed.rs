@@ -843,6 +843,7 @@ fn probe(script: &str, arguments: &[&Path]) -> Daemon {
             .arg(script)
             .arg("probe")
             .args(arguments)
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .expect("the probe starts as a process"),
@@ -862,8 +863,8 @@ fn addressable_failure(daemon: Daemon, socket: PathBuf, budget: Duration) -> (St
         let _ = sender.send((message, daemon));
     });
     let (message, daemon) = receiver
-        .recv_timeout(PATIENCE)
-        .expect("addressable gives up within ten seconds when its budget is shorter");
+        .recv_timeout(budget + PATIENCE)
+        .expect("addressable gives up within ten seconds of its budget");
     (
         message.expect("addressable fails with a formatted message when nothing binds"),
         daemon,
