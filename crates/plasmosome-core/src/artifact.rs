@@ -231,7 +231,7 @@ mod tests {
     use crate::protocol::ErrorCode;
     use crate::runtime::recipe::Artifact;
     use plasmosome_backend::Digest;
-    use serde_json::{Value, json};
+    use serde_json::json;
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
@@ -507,16 +507,16 @@ mod tests {
         );
         let wire = refusal.wire();
         assert_eq!(wire.code(), ErrorCode::ManifestInvalid);
-        let value = serde_json::to_value(&wire).expect("a wire error serializes");
-        assert_eq!(value["code"], Value::from(108), "{value}");
-        assert_eq!(value["path"], Value::from(shown), "{value}");
-        assert_eq!(value["detail"], Value::from(reason.as_str()), "{value}");
         assert_eq!(
-            value["message"],
-            Value::from(format!("`{shown}` is not a trusted artifact: {reason}")),
-            "{value}"
+            serde_json::to_value(&wire).expect("a wire error serializes"),
+            json!({
+                "code": 108,
+                "message": format!("`{shown}` is not a trusted artifact: {reason}"),
+                "detail": reason,
+                "path": shown,
+            }),
+            "the 108 carries exactly code, message, detail and path"
         );
-        assert_eq!(value.get("fix"), None, "{value}");
     }
 
     #[test]

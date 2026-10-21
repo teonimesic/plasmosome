@@ -874,16 +874,35 @@ mod tests {
         assert_names(&refusal, &collides);
         assert_names(&refusal, "root_image");
 
-        let library = format!("{ROOT}/cells/kept/libkrun.dylib");
-        assert_eq!(
-            refused(&with_template(|fields| {
-                fields.insert("libraries".into(), json!([artifact(&library, '5')]));
-            })),
-            CellRuntimeError::ArtifactInCells {
-                role: ArtifactRole::Library(0),
-                path: library,
-            }
-        );
+        for (key, role, name) in [
+            ("kernel", ArtifactRole::Kernel, "kernel"),
+            ("initramfs", ArtifactRole::Initramfs, "initramfs"),
+            ("root_image", ArtifactRole::RootImage, "root.raw"),
+            ("helper", ArtifactRole::Helper, "krun-helper"),
+            ("libraries", ArtifactRole::Library(0), "libkrun.dylib"),
+            ("host_policy", ArtifactRole::HostPolicy, "host.sb"),
+            ("guest_policy", ArtifactRole::GuestPolicy, "guest.json"),
+        ] {
+            let inside = format!("{ROOT}/cells/kept/{name}");
+            let pinned = artifact(&inside, '5');
+            let refusal = refused(&with_template(|fields| {
+                let value = if key == "libraries" {
+                    json!([pinned])
+                } else {
+                    pinned
+                };
+                fields.insert(key.into(), value);
+            }));
+            assert_eq!(
+                refusal,
+                CellRuntimeError::ArtifactInCells {
+                    role,
+                    path: inside.clone(),
+                },
+                "{key}"
+            );
+            assert_names(&refusal, &inside);
+        }
 
         for beside in [
             format!("{ROOT}/cells-old/kernel"),
