@@ -969,3 +969,92 @@ fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
         );
     });
 }
+
+#[test]
+fn reads_a_paragraph_both_ways_when_a_line_is_blank_only_to_another_reader() {
+    check_workspace(|root| {
+        let model = "Co-authored-by: Gemini <probe@corp.locale.io>";
+        let refused = "Co-authored-by \"Gemini <probe@corp.locale.io>\" credits a model: GitHub shows it on main as a co-author.";
+        let person = "Co-authored-by: A Colleague <colleague@corp.locale.io>";
+        let sign_off = "Signed-off-by: A Colleague <colleague@corp.locale.io>";
+        let untraceable = "Co-authored-by: Probe <me@laptop.local>";
+        let untraceable_refused = "Co-authored-by \"Probe <me@laptop.local>\" is untraceable: no account can be found for it, so the record on main names somebody no reader can trace.";
+        let prose = "Some prose that follows.";
+        let ambiguous: &[(&str, &str)] = &[
+            ("U+3000, an ideographic space", "\u{3000}"),
+            ("U+2003, an em space", "\u{2003}"),
+            ("U+00A0, a no-break space", "\u{a0}"),
+            ("a vertical tab", "\u{b}"),
+            ("a form feed", "\u{c}"),
+        ];
+        let mut rows: Vec<(String, String, Option<&str>)> = Vec::new();
+        for (name, line) in ambiguous {
+            rows.push((
+                format!("a model co-author, a line holding only {name}, then prose"),
+                format!("{model}\n{line}\n{prose}\n"),
+                Some(refused),
+            ));
+            rows.push((
+                format!("a person's co-author, a line holding only {name}, then prose"),
+                format!("{person}\n{line}\n{prose}\n"),
+                None,
+            ));
+            rows.push((
+                format!("a model co-author, a line holding only {name}, then a person's sign-off"),
+                format!("{model}\n{line}\n{sign_off}\n"),
+                Some(refused),
+            ));
+            rows.push((
+                format!("prose, a line holding only {name}, then a model co-author"),
+                format!("{prose}\n{line}\n{model}\n"),
+                Some(refused),
+            ));
+        }
+        rows.push((
+            "an untraceable co-author, a line holding only U+3000, then prose".into(),
+            format!("{untraceable}\n\u{3000}\n{prose}\n"),
+            Some(untraceable_refused),
+        ));
+        rows.push((
+            "a model co-author, a line of a space, U+3000 and a tab, then prose".into(),
+            format!("{model}\n \u{3000}\t\n{prose}\n"),
+            Some(refused),
+        ));
+        rows.push((
+            "a model co-author, a line of U+00A0 and a letter, then prose".into(),
+            format!("{model}\n\u{a0}x\n{prose}\n"),
+            None,
+        ));
+        rows.push((
+            "a model co-author, a line holding only U+30C0, then prose".into(),
+            format!("{model}\n\u{30c0}\n{prose}\n"),
+            None,
+        ));
+        for (name, line) in [
+            ("a space", " "),
+            ("a tab", "\t"),
+            ("a carriage return", "\r"),
+            ("a carriage return, a space and a carriage return", "\r \r"),
+        ] {
+            rows.push((
+                format!("a model co-author, a line holding only {name}, then prose"),
+                format!("{model}\n{line}\n{prose}\n"),
+                Some(refused),
+            ));
+        }
+        let probes: Vec<Probe> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, body, refusal))| Probe {
+                label,
+                message: format!("probe {index}\n\n{body}"),
+                refusal: refusal.map(str::to_owned),
+            })
+            .collect();
+        assert_each_probe_judged(
+            root,
+            "A line git reads as text but another reader may call blank splits the paragraph for that reader, so the guard must refuse what either reading refuses, and only once; so",
+            &probes,
+        );
+    });
+}
