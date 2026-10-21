@@ -835,6 +835,31 @@ mod tests {
         }
 
         #[test]
+        fn clearing_and_resetting_uchg_after_the_check_moves_only_ctime_and_is_refused() {
+            let root = with_immutable_file(0o444);
+            let path = root.join("lib/membraned");
+            let checked =
+                open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
+            let times = |path: &Path| {
+                let metadata = fs::metadata(path).expect("the file is still there");
+                (
+                    (metadata.size(), metadata.mtime(), metadata.mtime_nsec()),
+                    (metadata.ctime(), metadata.ctime_nsec()),
+                )
+            };
+            let (kept, changed) = times(&path);
+            after_the_clock_moves();
+            set_flags(&path, 0);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            assert_eq!(times(&path).0, kept, "the size and the mtime stay");
+            assert_ne!(times(&path).1, changed, "the ctime moves");
+            assert_eq!(
+                hash_checked(checked, &path, &Digest::of(BYTES)),
+                Err(ArtifactFault::ChangedWhileHashing)
+            );
+        }
+
+        #[test]
         fn a_file_that_grew_after_the_check_is_refused_as_changed_before_its_digest_is_compared() {
             let root = with_immutable_file(0o444);
             let path = root.join("lib/membraned");
