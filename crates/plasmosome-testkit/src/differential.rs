@@ -1,10 +1,14 @@
 mod judge;
+mod normalize;
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeSet;
 
+use plasmosome_core::runtime::strict_json;
 use serde::Deserialize;
+use serde::de::{self, Deserializer};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 pub use judge::{Finding, MountKey, NeutralName, Reason, RunRefusal, Subject, Verdict, judge};
@@ -64,20 +68,22 @@ impl Lane {
 /// itself set, such as a time set with `utimensat`, and no rule may cover them. Fields are the
 /// top-level keys of the probe's observation, and a rule covers a field's whole value, so a
 /// value the workload set needs a top-level field of its own.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeSpec {
     pub id: String,
     pub channel: Channel,
     pub step: String,
-    #[serde(default)]
     pub reach: Option<ReachKind>,
     pub workload_set: Vec<String>,
 }
 
-/// One row of the normalization table: the values of `field` in `probe` are to be replaced by
-/// placeholders of `kind`. [`judge`] does not apply rules yet, so it compares every field
-/// exactly, and its discrimination check leaves out the fields a rule covers.
+/// One row of the normalization table. [`judge`] replaces each value of `field` in `probe`
+/// with a placeholder of `kind`, numbered within that probe, field and run: by first
+/// appearance, or by order for system times and durations. So equal JSON values stay equal and
+/// distinct ones distinct, within that field only. Two fields are numbered apart, so values
+/// whose relation matters must be in one list field. The field must hold one value of `kind` or
+/// a list of them, or `judge` refuses the runs. No kind holds an object, so no workload-set
+/// field can sit under a ruled field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub probe: String,
@@ -85,7 +91,13 @@ pub struct Rule {
     pub kind: RuleKind,
 }
 
-/// The only normalization rules spec 027 §6 lists. A new one is an edit to that spec.
+/// The only normalization rules spec 027 §6 lists. A new one is an edit to that spec. A process
+/// ID, mount ID, parent mount ID, device, inode or memory counter holds a whole number; an
+/// ephemeral port a whole number up to 65535; a system time, duration or load counter any
+/// number; a boot ID a UUID; and a resolved address an IPv4 or IPv6 address. A list of system
+/// times or of durations must not mix integers with numbers held as `f64`: those written with a
+/// fraction or an exponent and, when read from JSON text, `-0` and integers outside the `i64` and
+/// `u64` range. A load counter list may mix, and `5` and `5.0` get two placeholders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuleKind {
     Pid,
@@ -139,12 +151,14 @@ impl RuleKind {
 }
 
 /// A difference the cell lane may show: in `field` of `probe`, the cell lane may hold exactly
-/// `cell_value` where the absent lane holds something else.
+/// `cell_value` where the absent lane holds something else. [`load`] refuses a key repeated
+/// inside `cell_value` at any depth, so the value a reader sees is the value compared.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Allowance {
     pub probe: String,
     pub field: String,
+    #[serde(deserialize_with = "strict_value")]
     pub cell_value: Value,
 }
 
@@ -190,6 +204,9 @@ pub enum ManifestRefusal {
     },
     DuplicateProbe {
         id: String,
+    },
+    WorkloadSetMissing {
+        probe: String,
     },
     ChannelShort {
         channel: Channel,
@@ -257,8 +274,8 @@ pub enum RequiredMount {
 }
 
 /// Parses a manifest from JSON and refuses it, before any comparison, if its own tables break
-/// spec 027 §6. Every key is required except `reach`, `rules` and `allowances`, and an unknown
-/// key at any level is refused.
+/// spec 027 §6. Every key is required except `reach`, `rules` and `allowances`. An unknown key
+/// at any level is refused, and so is a key repeated in one object at any depth.
 pub fn load(json: &str) -> Result<Manifest, ManifestRefusal> {
     let raw: RawManifest =
         serde_json::from_str(json).map_err(|error| ManifestRefusal::Malformed {
@@ -283,8 +300,27 @@ pub fn load(json: &str) -> Result<Manifest, ManifestRefusal> {
             })
         })
         .collect::<Result<Vec<Rule>, ManifestRefusal>>()?;
+    let probes = raw
+        .probes
+        .into_iter()
+        .map(|probe| {
+            let workload_set =
+                probe
+                    .workload_set
+                    .ok_or_else(|| ManifestRefusal::WorkloadSetMissing {
+                        probe: probe.id.clone(),
+                    })?;
+            Ok(ProbeSpec {
+                id: probe.id,
+                channel: probe.channel,
+                step: probe.step,
+                reach: probe.reach,
+                workload_set,
+            })
+        })
+        .collect::<Result<Vec<ProbeSpec>, ManifestRefusal>>()?;
     let manifest = Manifest {
-        probes: raw.probes,
+        probes,
         rules,
         allowances: raw.allowances,
         neutral: raw.neutral,
@@ -296,7 +332,7 @@ pub fn load(json: &str) -> Result<Manifest, ManifestRefusal> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
-    probes: Vec<ProbeSpec>,
+    probes: Vec<RawProbe>,
     #[serde(default)]
     rules: Vec<RawRule>,
     #[serde(default)]
@@ -306,10 +342,26 @@ struct RawManifest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawProbe {
+    id: String,
+    channel: Channel,
+    step: String,
+    #[serde(default)]
+    reach: Option<ReachKind>,
+    workload_set: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRule {
     probe: String,
     field: String,
     kind: String,
+}
+
+fn strict_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Value, D::Error> {
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    strict_json::parse_value(raw.get().as_bytes()).map_err(de::Error::custom)
 }
 
 const FUSE: &str = "fuse";
@@ -422,8 +474,8 @@ impl Manifest {
 
 /// What one probe reported in one run. `completed` is its completion marker, and
 /// `failed_before_step` says it failed before the step it observes. Each field is compared
-/// whole and exactly, except that the discrimination check leaves out the fields a rule covers.
-/// The manifest's normalization rules are not applied yet, so a rule never loosens a comparison.
+/// whole. A field a rule covers is compared after its values are replaced by placeholders, and
+/// every other field exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     pub probe: String,
