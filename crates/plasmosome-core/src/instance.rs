@@ -2016,7 +2016,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::thread;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     use tempfile::TempDir;
 
@@ -5308,6 +5308,22 @@ mod tests {
         root.join("cells/cell-1/membraned.log")
     }
 
+    /// Probes until a lock whose descriptors this test has closed reads `Free`. A process another
+    /// test thread is spawning holds a copy of every descriptor until its exec closes it, and the
+    /// lock stays held until then.
+    fn free_once_released(dir: &CellDir) -> SupervisorLock {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match dir.probe_supervisor_lock() {
+                Ok(LockProbe::Free(lock)) => return lock,
+                Ok(LockProbe::Held) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(1))
+                }
+                other => panic!("expected the released lock to probe Free, got {other:?}"),
+            }
+        }
+    }
+
     #[allow(unsafe_code)]
     fn descriptor_flags(fd: BorrowedFd<'_>, command: libc::c_int) -> libc::c_int {
         // SAFETY: fcntl with F_GETFD or F_GETFL takes no pointer, and the BorrowedFd keeps `fd`
@@ -5382,7 +5398,7 @@ mod tests {
                 .expect("the lock file is in place")
                 .is_file()
         );
-        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(_)) => ());
+        drop(free_once_released(&dir));
         expect_match!(dir.create_supervisor_lock(), Err(CellDirError::AlreadyExists { .. }) => ());
     }
 
@@ -5395,7 +5411,7 @@ mod tests {
             dir.create_supervisor_lock()
                 .expect("the supervisor lock is created"),
         );
-        let kept = expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(kept)) => kept);
+        let kept = free_once_released(&dir);
         expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
         assert!(
             !a_separate_open_can_lock(&path),
@@ -5403,7 +5419,7 @@ mod tests {
         );
         assert_close_on_exec(kept.as_fd(), "probed lock");
         drop(kept);
-        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(_)) => ());
+        drop(free_once_released(&dir));
     }
 
     #[test]
@@ -5431,11 +5447,10 @@ mod tests {
         drop(supervisor);
         expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
         drop(copy);
-        let kept = expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(kept)) => kept);
-        let handed = kept.into_owned_fd();
+        let handed = free_once_released(&dir).into_owned_fd();
         expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
         drop(handed);
-        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(_)) => ());
+        drop(free_once_released(&dir));
     }
 
     #[test]
