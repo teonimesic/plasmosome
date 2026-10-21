@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -8,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use plasmosome_cli::Env;
 use plasmosome_core::private_socket::{Accepted, PrivateDir, PrivateListener, effective_uid};
 use tempfile::TempDir;
 
@@ -15,15 +17,17 @@ pub const PATIENCE: Duration = Duration::from_secs(10);
 
 const POLL: Duration = Duration::from_millis(5);
 
+/// The directory private roots are made in: the canonical per-user temporary directory on macOS,
+/// and `XDG_RUNTIME_DIR`, else the target's tmp, on Linux. Every ancestor passes the path checks.
 #[cfg(target_os = "macos")]
-fn base() -> PathBuf {
+pub fn base() -> PathBuf {
     let base = std::env::temp_dir();
     base.canonicalize()
         .unwrap_or_else(|error| panic!("{} does not resolve: {error}", base.display()))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn base() -> PathBuf {
+pub fn base() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|base| !base.is_empty())
         .map_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")), PathBuf::from)
@@ -40,6 +44,23 @@ pub fn private_root() -> TempDir {
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
         .expect("the private root is made 0700");
     root
+}
+
+/// The two variables a test gives the command line, in place of the process's own.
+#[derive(Clone, Default)]
+pub struct Vars {
+    pub home: Option<OsString>,
+    pub kernel: Option<OsString>,
+}
+
+impl Env for Vars {
+    fn home(&self) -> Option<OsString> {
+        self.home.clone()
+    }
+
+    fn kernel(&self) -> Option<OsString> {
+        self.kernel.clone()
+    }
 }
 
 /// What the fake does once it has read a whole request line.

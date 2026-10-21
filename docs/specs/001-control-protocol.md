@@ -190,19 +190,28 @@ another effective UID (spec 025 §5 and §6). This does not change `membraned`'s
 - A **kernel instance** has a name (`plasmosome start --name work`); its state lives at
   `~/.plasmosome/instances/<name>/` (D1b). Verbs in the `plasmosome.*` group address the kernel
   organism; verbs in the `plasmid.*` group address plugin attachments. **No plasmid verb can
-  start the plasmosome** (D1a): if the addressed instance is not running, `plasmid.*` fails with
-  code `107`, it never boots one.
+  start the plasmosome** (D1a): if the addressed instance is not running, `plasmid.*` fails and
+  never boots one. Each instance has its own socket, so the command line notices a down instance
+  itself and exits 1 with client code `no_instance`, `not_running` or `unreachable` (spec 025
+  §4). Code `107` is for a service that answers for an instance it does not serve, which only a
+  host-level service could be; it also exits 1. Amended on 2026-10-21 (spec 025, amendment A):
+  this said "if the addressed instance is not running, `plasmid.*` fails with code `107`, it
+  never boots one."
 - A **cell** is a running session: one plasmosome + its attached plasmids + the workload (D1c).
   Its declarative definition is a **genome**, `~/.plasmosome`-relative to the project:
   `.plasmosome/genomes/<name>.toml`; the share/export form is `*.genome.toml`. That file is not yet
   a selection source: until a local genome grammar exists, `cell.new` selects a genome only by
   `artifact` (spec 022).
 - Addressing chains down `(kernel, cell, plasmid)`. `--kernel` / `--cell` are optional **only
-  when unambiguous**. One running instance → default; otherwise code `100` with the candidate
-  list. The server resolves; the client never guesses. The results of `plasmid.list`,
-  `plasmid.add`, `plasmid.remove`, `plasmid.reload` and `plasmid.renew` (spec 028 §8) each carry
-  `cell`, the cell the verb acted on, whether the request named it or the server resolved it.
-  Amended on 2026-10-20: this did not name `plasmid.renew`.
+  when unambiguous**. The server resolves a cell: one matching cell is the default, otherwise
+  code `100` with the candidate list. Each instance has its own socket, so no server can resolve
+  an instance; the command line does, under spec 025 §5. Exactly one instance is the default, and
+  more than one, reachable or not, is refused with the candidate list. Neither side guesses. The
+  results of `plasmid.list`, `plasmid.add`, `plasmid.remove`, `plasmid.reload` and
+  `plasmid.renew` (spec 028 §8) each carry `cell`, the cell the verb acted on, whether the request
+  named it or the server resolved it. Amended on 2026-10-20: this did not name `plasmid.renew`.
+  Amended on 2026-10-21 (spec 025, amendment A): this said "One running instance → default;
+  otherwise code `100` with the candidate list. The server resolves; the client never guesses."
 
 ## 3. Verb schemas (the v1 set)
 
