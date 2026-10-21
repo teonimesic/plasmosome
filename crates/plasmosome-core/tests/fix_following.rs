@@ -145,19 +145,19 @@ fn followed_from_the_wire(start: &str) -> PlasmidManifest {
 }
 
 fn granted(manifest: &PlasmidManifest) -> (Vec<String>, Vec<String>) {
+    let mut hosts = Vec::new();
+    let mut pins = Vec::new();
+    if let Some(network) = &manifest.network {
+        hosts.extend(network.hosts.iter().cloned());
+        pins.extend(network.pin_cidrs.iter().map(ToString::to_string));
+    }
     let commands = manifest
         .commands
         .iter()
         .flat_map(|commands| &commands.commands);
-    let networks = manifest
-        .network
-        .iter()
-        .chain(commands.filter_map(|command| command.network.as_ref()));
-    let mut hosts = Vec::new();
-    let mut pins = Vec::new();
-    for network in networks {
+    for network in commands.filter_map(|command| command.network.as_ref()) {
         hosts.extend(network.hosts.iter().cloned());
-        pins.extend(network.pin_cidrs.iter().map(ToString::to_string));
+        pins.extend(network.pin_cidrs.iter().cloned());
     }
     (hosts, pins)
 }

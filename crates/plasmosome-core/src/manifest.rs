@@ -1209,6 +1209,8 @@ fn string_list(value: Option<&toml::Value>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
 
     const PROVIDER: &str =
@@ -3784,6 +3786,210 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             let (_, manifest) = fixes_followed(&start);
             assert_eq!(pins(&manifest.network.unwrap()), kept, "{pins_written}");
         }
+    }
+
+    #[test]
+    fn a_cidr_parses_only_its_one_display_spelling_with_no_host_bits() {
+        for text in [
+            "192.0.2.0/24",
+            "2001:db8::/32",
+            "0.0.0.0/0",
+            "::/0",
+            "192.0.2.7/32",
+            "255.255.255.255/32",
+            "::1/128",
+            "2001:db8::1/128",
+            "10.0.0.0/8",
+        ] {
+            let cidr = Cidr::parse(text).unwrap_or_else(|error| panic!("{text}: {error:?}"));
+            assert_eq!(cidr.to_string(), text);
+        }
+        for (text, network) in [
+            ("192.0.2.1/24", "192.0.2.0/24"),
+            ("192.0.2.129/25", "192.0.2.128/25"),
+            ("10.1.2.3/8", "10.0.0.0/8"),
+            ("1.2.3.4/0", "0.0.0.0/0"),
+            ("2001:db8::1/32", "2001:db8::/32"),
+            ("2001:db8::8000/113", "2001:db8::/113"),
+        ] {
+            assert_eq!(
+                Cidr::parse(text),
+                Err(CidrError::HostBitsSet {
+                    network: Cidr::parse(network).unwrap()
+                }),
+                "{text}"
+            );
+        }
+        for text in [
+            "",
+            "nonsense",
+            "192.0.2.0",
+            "192.0.2.0/",
+            "/24",
+            "192.0.2.0/33",
+            "2001:db8::/129",
+            "192.0.2.0/024",
+            "192.0.2.0/00",
+            "192.0.2.0/+24",
+            "192.0.2.0/-1",
+            "192.0.2.0/2a",
+            "192.0.2.0/ 24",
+            "192.0.2.0/24 ",
+            " 192.0.2.0/24",
+            "192.0.2.0//24",
+            "192.0.2.0/24/24",
+            "192.0.2.0/99999999999999999999",
+            "192.000.002.000/24",
+            "::ffff:192.0.2.0/120",
+            "::c000:200/120",
+            "2001:DB8::/32",
+            "2001:0db8::/32",
+            "[2001:db8::]/32",
+            "api.github.com/24",
+        ] {
+            assert_eq!(Cidr::parse(text), Err(CidrError::Malformed), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_cidr_contains_only_addresses_of_its_own_family_inside_its_prefix() {
+        for (network, inside, outside) in [
+            (
+                "192.0.2.0/25",
+                vec!["192.0.2.0", "192.0.2.10", "192.0.2.127"],
+                vec![
+                    "192.0.2.128",
+                    "192.0.2.200",
+                    "192.0.3.10",
+                    "::ffff:192.0.2.10",
+                    "::192.0.2.10",
+                    "2001:db8::1",
+                ],
+            ),
+            (
+                "10.0.0.0/8",
+                vec!["10.0.0.0", "10.255.255.255"],
+                vec!["100.0.0.1", "11.0.0.0", "9.255.255.255"],
+            ),
+            (
+                "192.0.2.7/32",
+                vec!["192.0.2.7"],
+                vec!["192.0.2.6", "192.0.2.70"],
+            ),
+            (
+                "0.0.0.0/0",
+                vec!["0.0.0.0", "255.255.255.255"],
+                vec!["::", "::ffff:1.2.3.4"],
+            ),
+            (
+                "::/0",
+                vec!["::", "2001:db8::1", "::ffff:192.0.2.10"],
+                vec!["0.0.0.0", "192.0.2.10"],
+            ),
+            (
+                "2001:db8::/32",
+                vec!["2001:db8::", "2001:db8:ffff:ffff::1"],
+                vec!["2001:db9::1", "2001:db7:ffff::", "192.0.2.1"],
+            ),
+        ] {
+            let cidr = Cidr::parse(network).unwrap();
+            for address in inside {
+                let parsed: IpAddr = address.parse().unwrap();
+                assert!(cidr.contains(parsed), "{network} contains {address}");
+            }
+            for address in outside {
+                let parsed: IpAddr = address.parse().unwrap();
+                assert!(
+                    !cidr.contains(parsed),
+                    "{network} does not contain {address}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_proxy_host_is_a_lower_case_dns_name_and_never_an_ip_literal() {
+        let label = |length: usize| "a".repeat(length);
+        let longest_label = label(63);
+        let too_long_label = label(64);
+        let longest = [label(63), label(63), label(63), label(61)].join(".");
+        let too_long = [label(63), label(63), label(63), label(62)].join(".");
+        for host in [
+            "api.github.com",
+            "a",
+            "a-b.example",
+            "1a.example",
+            "xn--bcher-kva.example",
+            longest_label.as_str(),
+            longest.as_str(),
+        ] {
+            assert!(is_proxy_host(host), "{host}");
+        }
+        for host in [
+            "API.github.com",
+            "api.GitHub.com",
+            "192.0.2.1",
+            "0x7f000001",
+            "1.2.3",
+            "2001:db8::1",
+            "-a.example",
+            "a-.example",
+            "a..example",
+            ".a.example",
+            "a.example.",
+            "",
+            ".",
+            "a_b.example",
+            "a b.example",
+            "caf\u{e9}.example",
+            "api.github.com\n",
+            too_long_label.as_str(),
+            too_long.as_str(),
+        ] {
+            assert!(!is_proxy_host(host), "{host:?}");
+        }
+    }
+
+    #[test]
+    fn provides_lists_each_binding_key_in_file_order_as_written() {
+        let tools = |key: &str| format!("[provides.{key}.tools]\n\"t\" = \"Do t.\"\n");
+        for (bindings, keys) in [
+            (String::new(), vec![]),
+            (tools("\"github:tools\""), vec!["github:tools"]),
+            (
+                format!(
+                    "{}{}{}",
+                    tools("\"z:tools\""),
+                    tools("\"a:tools\""),
+                    tools("\"m:tools\"")
+                ),
+                vec!["z:tools", "a:tools", "m:tools"],
+            ),
+            (
+                "[provides]\n\"b:k\" = { tools = { t = \"Do t.\" } }\n\
+                 \"a:k\" = { tools = { t = \"Do t.\" } }\n"
+                    .to_string(),
+                vec!["b:k", "a:k"],
+            ),
+            (
+                "provides.\"b:k\".tools.t = \"Do t.\"\nprovides.\"a\\tk\".tools.t = \"Do t.\"\n"
+                    .to_string(),
+                vec!["b:k", "a\tk"],
+            ),
+        ] {
+            let manifest = PlasmidManifest::parse(&format!("{PROVIDER}{bindings}"))
+                .unwrap_or_else(|error| panic!("{bindings}: {error}"));
+            assert_eq!(manifest.provides, keys, "{bindings}");
+        }
+    }
+
+    #[test]
+    fn the_top_level_pins_are_cidrs() {
+        let manifest = PlasmidManifest::parse(GITHUB_PR).unwrap();
+        assert_eq!(
+            manifest.network.unwrap().pin_cidrs,
+            vec![Cidr::parse("140.82.112.0/20").unwrap()]
+        );
     }
 
     #[test]
