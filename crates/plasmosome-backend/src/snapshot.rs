@@ -692,6 +692,43 @@ mod tests {
     }
 
     #[test]
+    fn a_recipe_that_encoding_and_decoding_refuse_is_refused_by_the_constructor_for_that_reason() {
+        let invalid = op(mount("relative/source", "/workspace"));
+        let valid = at(&invalid, owner("github-pr"), mount("/code", "/workspace"));
+        let reason = invalid.validate().unwrap_err();
+        let held = EnforcementSnapshot::new(standing(&[&valid]), vec![issued(&valid)], Vec::new());
+        let patched = serde_json::to_string(&held.unwrap())
+            .unwrap()
+            .replace("/code", "relative/source");
+        for refused in [
+            serde_json::to_string(&invalid.capability()).unwrap_err(),
+            serde_json::from_str::<EnforcementSnapshot>(&patched).unwrap_err(),
+        ] {
+            assert!(
+                refused.to_string().contains(&reason.to_string()),
+                "{refused}"
+            );
+        }
+        let refusal = BackendError::InvalidOperation {
+            class: invalid.class().as_str(),
+            id: invalid.id(),
+            error: reason,
+        };
+        for (state, grants, unfinished) in [
+            (standing(&[&invalid]), Vec::new(), Vec::new()),
+            (standing(&[&invalid]), vec![issued(&invalid)], Vec::new()),
+            (standing(&[&valid]), vec![issued(&invalid)], Vec::new()),
+            (OsState::new(), Vec::new(), vec![incomplete(&invalid)]),
+        ] {
+            assert_eq!(
+                EnforcementSnapshot::new(state, grants.clone(), unfinished),
+                Err(refusal.clone()),
+                "{grants:?}"
+            );
+        }
+    }
+
+    #[test]
     fn decoding_sorts_records_and_effects_like_the_constructor() {
         let (state, grants, unfinished) = rows_of_every_class();
         let value = json!({
