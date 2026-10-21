@@ -298,7 +298,15 @@ impl crate::brokers::Probe for ControlSocketProbe {
     }
 }
 
-fn classify(frame: &[u8]) -> Readiness {
+/// Judges one broker reply line, `frame`, given without its newline.
+///
+/// A `result.ready` of `true` is [`Readiness::Ready`] and one of `false` is
+/// [`NotReady::Reported`], each carrying `result.state`, or an empty state when that is not a
+/// string. Anything else, a frame that is not UTF-8 or not JSON included, is
+/// [`NotReady::Malformed`], keeping at most the first 1,024 bytes of the frame, decoded lossily.
+/// It never returns [`NotReady::TimedOut`] or [`NotReady::Unreachable`], which only the socket
+/// side gives.
+pub fn classify(frame: &[u8]) -> Readiness {
     let malformed = |bytes: &[u8]| {
         Readiness::NotReady(NotReady::Malformed {
             line: diagnostic(bytes),
