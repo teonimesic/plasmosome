@@ -236,3 +236,30 @@ fn each_observation_row_is_tabled_after_the_verdicts_with_not_run_for_a_missing_
         "a judged row is not an observation: {text}"
     );
 }
+
+#[test]
+fn an_observation_row_with_every_record_reads_recorded_and_a_missing_verdict_reads_not_run() {
+    let names = row("Names", vec![run("real", Expect::Observe)]);
+    let records = [
+        record("real", &[("M1", Verdict::Pass)]),
+        record(
+            "simplified",
+            &[("M2", Verdict::NotRun("no console".to_string()))],
+        ),
+    ];
+
+    let text = render("", &[m1(), names], &records);
+
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| Names |") && line.ends_with("| **recorded** |")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| M1 | simplified |")
+                && line.ends_with("| not run: no verdict |")),
+        "{text}"
+    );
+    assert!(text.contains("- M2: not run: no console"), "{text}");
+}

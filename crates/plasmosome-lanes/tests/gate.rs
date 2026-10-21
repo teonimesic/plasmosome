@@ -923,3 +923,216 @@ fn the_name_pairs_are_the_eight_measured_on_apfs() {
     assert_eq!(codes(gate::NAME_PAIRS[7].1), [0x1e9e]);
     assert_eq!(codes(gate::NAME_PAIRS[7].2), [0xdf]);
 }
+
+fn ids_and_uids(probes: &[plasmosome_lanes::config::Probe]) -> Vec<(String, u32)> {
+    probes
+        .iter()
+        .map(|probe| (probe.id.clone(), probe.uid))
+        .collect()
+}
+
+fn owned(pairs: &[(&str, u32)]) -> Vec<(String, u32)> {
+    pairs
+        .iter()
+        .map(|(id, uid)| (id.to_string(), *uid))
+        .collect()
+}
+
+#[test]
+fn the_share_probes_are_the_ones_m1_m2_and_the_setuid_observation_read() {
+    assert_eq!(
+        ids_and_uids(&gate::m1_probes()),
+        owned(&[("m1-share", 1000), ("m1-file", 1000)])
+    );
+    assert_eq!(
+        ids_and_uids(&gate::m2_probes()),
+        owned(&[
+            ("m2-workload-create", 1000),
+            ("m2-root-create", 0),
+            ("m2-mountinfo", 1000)
+        ])
+    );
+    assert_eq!(
+        gate::m1_probes()[1].args,
+        ["stat", "/mnt/sw/opt/p/bin/tool"]
+    );
+    assert_eq!(
+        ids_and_uids(&gate::suid_probes()),
+        owned(&[("suid-hold", 1000), ("suid-release", 1000)])
+    );
+    assert_eq!(
+        gate::suid_probes()[0].args,
+        ["hold-exec", "suid", "/mnt/sw/opt/suid/tool"]
+    );
+}
+
+#[test]
+fn the_r1_probes_watch_await_and_release_each_trial_in_turn() {
+    let probes = gate::r1_probes(2);
+
+    assert_eq!(
+        ids_and_uids(&probes),
+        owned(&[
+            ("r1-watch-0", 1000),
+            ("r1-await-0", 1000),
+            ("r1-release-0", 1000),
+            ("r1-watch-1", 1000),
+            ("r1-await-1", 1000),
+            ("r1-release-1", 1000),
+        ])
+    );
+    assert_eq!(
+        probes[3].args,
+        ["hold-watch", "w1", "/mnt/sw/opt/r1-1/bin/x"]
+    );
+    assert_eq!(probes[4].args, ["await", "/mnt/ctl/r1-1", "30000"]);
+    assert_eq!(probes[5].args, ["release", "w1"]);
+    assert_eq!(gate::r1_path(1), "opt/r1-1/bin/x");
+    assert_eq!(gate::r1_flag(1), "r1-1");
+}
+
+#[test]
+fn the_r2_r3_and_r4_probes_run_as_the_uids_their_judges_read() {
+    assert_eq!(
+        ids_and_uids(&gate::r2_probes()),
+        owned(&[("r2-visible", 0), ("r2-private", 0), ("r2-unreachable", 0)])
+    );
+    assert_eq!(gate::r2_probes()[1].args, ["stage", "private"]);
+    let r3 = gate::r3_probes(1);
+    assert_eq!(
+        ids_and_uids(&r3),
+        owned(&[
+            ("r3-mount-0", 0),
+            ("r3-hold-fd-0", 1000),
+            ("r3-hold-map-0", 1000),
+            ("r3-detach-0", 0),
+            ("r3-lookup-0", 1000),
+            ("r3-release-fd-0", 1000),
+            ("r3-release-map-0", 1000),
+        ])
+    );
+    assert_eq!(r3[0].args, ["mount", "r3", "/mnt/r3/0", "virtiofs"]);
+    assert_eq!(r3[3].args, ["umount-detach", "/mnt/r3/0"]);
+    let r4 = gate::r4_probes(1);
+    assert_eq!(
+        ids_and_uids(&r4),
+        owned(&[
+            ("r4a-hold-0", 1000),
+            ("r4a-scan-0", 0),
+            ("r4a-release-0", 1000),
+            ("r4b-hold-0", 1000),
+            ("r4b-scan-0", 0),
+            ("r4b-release-0", 1000),
+        ])
+    );
+    assert_eq!(
+        r4[0].args,
+        [
+            "hold-thread",
+            "t0",
+            "/mnt/sw/opt/r4/data.txt",
+            "/mnt/sw/opt/r4/dir"
+        ]
+    );
+    assert_eq!(r4[4].args, ["scan", "/mnt/sw/opt/r4/data.txt"]);
+}
+
+#[test]
+fn the_name_probes_stat_both_spellings_of_each_pair_and_list_its_directory() {
+    let probes = gate::name_probes();
+
+    assert_eq!(probes.len(), 3 * gate::NAME_PAIRS.len());
+    let (_, placed, other) = gate::NAME_PAIRS[2];
+    assert_eq!(probes[6].id, "name-2-placed");
+    assert_eq!(
+        probes[6].args,
+        ["stat".to_string(), format!("/mnt/sw/names/2/{placed}")]
+    );
+    assert_eq!(
+        probes[7].args,
+        ["stat".to_string(), format!("/mnt/sw/names/2/{other}")]
+    );
+    assert_eq!(probes[8].args, ["list", "/mnt/sw/names/2"]);
+    assert_eq!(gate::name_dir(2), "names/2");
+}
+
+#[test]
+fn result_of_finds_a_probes_line_or_nothing() {
+    let results = vec![
+        framed("a", 1000, json!({"probe": "id", "ok": true})),
+        ProbeResult {
+            probe: "b".to_string(),
+            uid: 1000,
+            exit: None,
+            result: None,
+        },
+    ];
+
+    assert_eq!(
+        gate::result_of(&results, "a").map(|line| &line["ok"]),
+        Some(&json!(true))
+    );
+    assert_eq!(gate::result_of(&results, "b"), None);
+    assert_eq!(gate::result_of(&results, "c"), None);
+}
+
+#[test]
+fn a_probe_that_printed_no_result_line_is_not_run() {
+    let mut results = m1((0, 0));
+    results[0].result = None;
+
+    assert!(
+        matches!(judge_m1(&results), Verdict::NotRun(reason) if reason.contains("no result line"))
+    );
+}
+
+#[test]
+fn r1_is_not_run_when_the_first_lookup_failed_other_than_enoent() {
+    let tally = judge_r1(&r1_trial(0, refused("lookup", "EACCES"), file_found()), 1);
+
+    assert!(is_not_run(&tally.trials[0].outcome));
+}
+
+#[test]
+fn r4_fails_a_thread_with_no_working_directory_and_is_not_run_with_no_hit_list() {
+    let no_cwd = r4_thread(
+        0,
+        vec![hit(400, Some(401), "task", "fd/3")],
+        released("t0", "thread", &data()),
+    );
+    assert!(is_fail(
+        &judge_r4_thread(&no_cwd, 1, &data()).trials[0].outcome,
+        "working directory"
+    ));
+    let mut no_list = r4_thread(0, vec![], released("t0", "thread", &data()));
+    replace(
+        &mut no_list,
+        "r4a-scan-0",
+        0,
+        json!({"probe": "scan", "ok": true}),
+    );
+    assert!(is_not_run(
+        &judge_r4_thread(&no_list, 1, &data()).trials[0].outcome
+    ));
+}
+
+#[test]
+fn the_name_observation_reports_another_error_as_seen() {
+    let mut results = Vec::new();
+    for index in 0..gate::NAME_PAIRS.len() {
+        results.push(framed(
+            &format!("name-{index}-placed"),
+            1000,
+            stat(1000, 1000),
+        ));
+        results.push(framed(
+            &format!("name-{index}-other"),
+            1000,
+            refused("stat", "EACCES"),
+        ));
+    }
+
+    let seen = observe_names(&results);
+
+    assert_eq!(seen[0].1, "the other spelling gave EACCES");
+}

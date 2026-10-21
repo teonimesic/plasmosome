@@ -244,3 +244,25 @@ fn a_whole_result_line_with_no_newline_yet_does_not_start_a_step() {
     assert_eq!(finished(&run), ["a", "b"], "{:?}", run.run.status);
     assert_eq!(run.steps.len(), 1);
 }
+
+#[test]
+fn a_flag_that_cannot_be_written_is_recorded_as_the_steps_error() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let console = dir.path().join("console.log");
+    let flag = dir.path().join("missing/flag-a");
+    let body = format!("{}{}", header(&console, "a"), end(&console, 1));
+    let steps = vec![Step {
+        after: "a".to_string(),
+        flag,
+        action: Box::new(|| Ok("moved".to_string())),
+    }];
+
+    let run = run(dir.path(), &body, &["a"], steps);
+
+    assert_eq!(finished(&run), ["a"]);
+    let error = run.steps[0]
+        .outcome
+        .clone()
+        .expect_err("the flag error is recorded");
+    assert!(error.contains("could not be written"), "{error}");
+}
