@@ -127,6 +127,9 @@ fn home(env: &dyn Env) -> Result<String, ClientError> {
                 home.to_string_lossy()
             ))
         })?;
+    if home == "/" {
+        return Ok(String::new());
+    }
     let trimmed = home.strip_suffix('/').unwrap_or(&home);
     if !is_normal_absolute(trimmed) {
         return Err(invalid(format!(
