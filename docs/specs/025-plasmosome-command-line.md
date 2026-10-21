@@ -60,10 +60,11 @@ tests run in the Linux CI job, which is not a claim that Linux is supported.
   009's trigger requires, and the binary stays a thin `main`. `plasmid` uses the same library
   when it serves its first control verb.
 - The socket checks are not written twice. `plasmosome-cli` calls `plasmosome-core`'s
-  `check_private_path` and `check_peer_uid` from PR #124 (under review). The UID that the socket
+  `check_private_path` and `check_peer_uid` from PR #124. The UID that the socket
   owner and the peer must have is a parameter of `plasmosome-cli`'s functions. The binary always
   passes its own effective UID. No flag, environment variable or file reaches that parameter;
-  only tests that call the library set it.
+  only tests that call the library set it. Corrected on 2026-10-21: this said #124 was under
+  review.
 - Spec 001 §2 and spec 020 §6 put plasmid verbs under `plasmid` (`plasmid add NAME ...`). This
   spec keeps that split (open question 3), and both binaries follow every rule below.
 - The command line runs on the host as the operator's user. Nothing is placed inside a cell, no
@@ -375,10 +376,11 @@ cannot change its target.
 (amendment A), for a person at a terminal with one instance.
 
 - The client first checks `$HOME/.plasmosome/instances/` itself against #124's ancestor rules
-  and opens it for listing, through a public function in #124's module. #124 has no such
-  function yet: Task B adds it after #124 merges, and the client calls it rather than writing the
+  and opens it for listing, through a public function in #124's module. That function is
+  `list_trusted_dir`, added by #206 (`b26b1527`), and the client calls it rather than writing the
   rules itself. Its errors map through the table below. If `instances/` does not exist, the
-  command exits 1 with `no_instance`.
+  command exits 1 with `no_instance`. Corrected on 2026-10-21: this said #124 had no such
+  function yet, and that Task B would add it after #124 merged.
 - Entries that are not directories, such as a `.DS_Store` file, are ignored.
 - These refuse the whole selection rather than being skipped: an entry that is a symbolic link
   (`unsafe_socket`, rule `symlink`); an entry whose name is not UTF-8, breaks the name rules, or
@@ -399,29 +401,56 @@ cannot change its target.
 is spec 001 §4.1's path boundary for private sockets. It refuses a symbolic link in any
 component, an ancestor that another user could replace, a socket directory that is not the
 caller's own `0700` directory without an ACL, and a socket entry that is not the caller's socket
-with mode `0600`. The client maps #124's errors, as of `33f2eb6`, as below. Its only checks of
+with mode `0600`. The client maps #124's errors, as merged (`1f07313`), as below. Its only checks of
 its own run first: that a path is normal, and that it fits `sun_path`.
 
 | #124 error | Client code | `rule` | Exit |
 | --- | --- | --- | --- |
-| `NotAbsolute` | `invalid_argument` for `--socket`; `invalid_home` for a path built from `$HOME` | | 64 or 2 |
+| `BadPath` | `invalid_argument` from `--socket`; `invalid_home` from `$HOME` | | 64 or 2 |
 | `SymlinkInPath` | `unsafe_socket` | `symlink` | 2 |
+| `NoDirectory` | `no_instance` | | 1 |
+| `NoSocket` | `not_running` | | 1 |
 | `NotDirectory` | `unsafe_socket` | `not_directory` | 2 |
-| `NotASocket`, a symbolic link at the socket entry included | `unsafe_socket` | `not_socket` | 2 |
-| `ForeignOwner`, `SocketOwner` | `unsafe_socket` | `owner` | 2 |
-| `Replaceable`, `NotPrivate`, `SocketMode` | `unsafe_socket` | `mode` | 2 |
-| `ReplaceableByAcl`, `AclPresent` | `unsafe_socket` | `acl` | 2 |
+| `ForeignOwner` | `unsafe_socket` | `owner` | 2 |
+| `Replaceable` | `unsafe_socket` | `mode` | 2 |
+| `ReplaceableByAcl` | `unsafe_socket` | `acl` | 2 |
+| `OwnershipIgnored` | `unsafe_socket` | `owner` | 2 |
+| `NotPrivate` | `unsafe_socket` | `mode` | 2 |
+| `AclPresent` | `unsafe_socket` | `acl` | 2 |
+| `Replaced` | `internal` | | 70 |
 | `BadName` | `unsafe_socket` | `name` | 2 |
 | `PathTooLong` | `socket_path_too_long` | | 2 |
-| `Missing` | `no_instance` when a directory is missing; `not_running` when the socket entry is | | 1 |
+| `AddressInUse` | `internal` | | 70 |
+| `NotASocket`, a symbolic link at the socket entry included | `unsafe_socket` | `not_socket` | 2 |
+| `SocketOwner` | `unsafe_socket` | `owner` | 2 |
+| `SocketMode` | `unsafe_socket` | `mode` | 2 |
+| `BindEscaped` | `internal` | | 70 |
+| `PeerCredentials` | `peer_mismatch` | | 2 |
+| `PeerMismatch` | `peer_mismatch` | | 2 |
 | `Io` | `local_io` | | 1 |
-| `PeerCredentials`, `PeerMismatch` | `peer_mismatch` | | 2 |
-| any other | `internal` | | 70 |
 
 `path` names the component #124 reports. `NotPrivate` carries `fix`: `chmod 700 'PATH'`, with
 the path quoted for a POSIX shell (each single quote in it written as `'"'"'`). Because symbolic
 links are refused, `/tmp` and `/var` on macOS do not work; pass the canonical path, such as
 `/private/var/folders/...`.
+
+The table has one row per variant of `PrivateSocketError`, in the enum's order. A variant added
+later has no client code until this table gives it one. `Replaced`, `AddressInUse` and
+`BindEscaped` come only from `PrivateListener::bind` and `PrivateDir::reconfirm`, which the
+client never calls. If one reaches the client anyway, the client failed.
+
+`BadName` reports a name, not a path, so its `path` is the path the client passed to the check:
+the socket path for `check_private_path`, or `instances/` for `list_trusted_dir`.
+`peer_mismatch`'s `path` is the socket path, and its `uid` is the trusted UID. Its `peer_uid` is
+`PeerMismatch`'s `found`; `PeerCredentials` gives no `peer_uid`, because the UID could not be
+read. `socket_path_too_long`'s `max_bytes` is `PathTooLong`'s `max`. `local_io` carries `Io`'s
+`path` and `errno`. `invalid_argument` names `--socket` as its `argument`.
+
+Amended on 2026-10-21: this table was pinned to #124's draft head `33f2eb6`. It named
+`NotAbsolute`, which is now `BadPath`, and `Missing`, which is now `NoDirectory` and `NoSocket`.
+It had no row for `OwnershipIgnored`, which #124 added before it merged, or for `Replaced`,
+`AddressInUse` and `BindEscaped`. All four fell to its last row, "any other, `internal`, 70".
+The text did not say which fields each row carries.
 
 The path must fit the platform's `sun_path` field with its terminating NUL: at most 103 bytes on
 macOS and 107 on Linux. It must be valid UTF-8, because the envelope reports it as a JSON string.
