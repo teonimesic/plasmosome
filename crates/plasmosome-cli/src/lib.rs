@@ -15,6 +15,7 @@ mod help;
 pub mod json;
 mod refusal;
 pub mod reply;
+mod select;
 mod status;
 
 pub use cli::{Context, Invocation, Reading, handle, main_with, read};

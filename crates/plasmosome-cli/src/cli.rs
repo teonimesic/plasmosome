@@ -600,11 +600,11 @@ fn holds_its_value(flag: &OsStr) -> bool {
     bytes.starts_with(b"--") && bytes.contains(&b'=')
 }
 
-fn is_instance_name(text: &str) -> bool {
+pub(crate) fn is_instance_name(text: &str) -> bool {
     InstanceName::parse(text).is_ok() && !text.chars().any(json::is_terminal_control)
 }
 
-fn is_normal_absolute(path: &str) -> bool {
+pub(crate) fn is_normal_absolute(path: &str) -> bool {
     path.strip_prefix('/').is_some_and(|rest| {
         rest.split('/')
             .all(|component| !matches!(component, "" | "." | ".."))
