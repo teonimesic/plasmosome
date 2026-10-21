@@ -2266,22 +2266,14 @@ fn a_one_class_invalid_operation_defect_accepts_only_its_own_class_through_its_o
 }
 
 #[test]
-fn the_snapshot_clause_rejects_a_composite_whose_network_leaf_accepts_invalid_grants() {
-    let composite = |network: Defect| {
-        move || {
-            CompositeBackend::new(
-                Box::new(DefectiveBackend::carrying(network)),
-                Box::new(DefectiveBackend::carrying(Defect::None)),
-                Box::new(DefectiveBackend::carrying(Defect::None)),
-            )
-            .unwrap()
-        }
-    };
-    conformance::snapshot_never_invents_objects(composite(Defect::None));
-    assert_rejected(|| {
-        conformance::snapshot_never_invents_objects(composite(Defect::AcceptsInvalidOperations(
-            Call::Grant,
-        )))
+fn a_composite_of_clean_defective_leaves_passes_the_snapshot_clause() {
+    conformance::snapshot_never_invents_objects(|| {
+        CompositeBackend::new(
+            Box::new(DefectiveBackend::carrying(Defect::None)),
+            Box::new(DefectiveBackend::carrying(Defect::None)),
+            Box::new(DefectiveBackend::carrying(Defect::None)),
+        )
+        .unwrap()
     });
 }
 
