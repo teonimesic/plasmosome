@@ -184,8 +184,8 @@ step's error is in the record, and the judges that need the step read `not run`.
 Each test writes a JSON record to `target/tmp/q1a-records`, or to `LANES_RECORDS`, and
 `write_the_results_file` turns the records into the results file, beside the records or at
 `LANES_RESULTS`. It refuses records that name more than one test commit, or a tree with
-uncommitted changes, so re-run every lane at one commit before writing. The results of 2026-10-20 are in
-`docs/benchmarks/2026-10-20-spec027-q1a-gate.md`.
+uncommitted changes, so re-run every lane at one commit before writing. The results are in
+`docs/benchmarks/2026-10-20-spec027-q1a-gate.md`, named for the gate's first run.
 
 ## Building the guest binaries
 
