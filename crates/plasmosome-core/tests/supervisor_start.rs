@@ -64,7 +64,7 @@ fn main() -> ExitCode {
     if let Some(cell) = standin_cell(&arguments) {
         standin::run(&arguments, cell)
     }
-    if std::env::vars_os().next().is_none() {
+    if given_environment().is_empty() {
         eprintln!(
             "supervisor_start: an empty environment without spec 023's argv is a broken start, not a test run"
         );
@@ -160,7 +160,11 @@ fn starts_detached_with_only_0_to_4() {
         ],
         "{report}"
     );
-    assert_eq!(report.number("environment"), 0, "{report}");
+    assert_eq!(
+        report.strings("environment"),
+        Vec::<String>::new(),
+        "{report}"
+    );
     assert_descriptors(&report, &cell);
     assert_eq!(report.text("record"), String::from_utf8(record).unwrap());
     assert_eq!(report.text("decoded"), "cell-101", "{report}");
@@ -1099,6 +1103,16 @@ fn own_pgid() -> u32 {
     u32::try_from(unsafe { libc::getpgid(0) }).expect("a process group id")
 }
 
+/// The names in this process's environment, less `__LLVM_PROFILE_RT_INIT_ONCE`, which a coverage
+/// build's profile runtime sets in its own process as it starts. So a stand-in in a coverage run
+/// reports the environment its `execve` gave it.
+fn given_environment() -> Vec<String> {
+    std::env::vars_os()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .filter(|name| name != "__LLVM_PROFILE_RT_INIT_ONCE")
+        .collect()
+}
+
 fn standin_cell(arguments: &[OsString]) -> Option<&str> {
     let [_, config, lock, cell] = arguments else {
         return None;
@@ -1210,7 +1224,7 @@ mod standin {
         let ppid = reparented_parent();
         json!({
             "argv": arguments.iter().map(|argument| argument.to_string_lossy()).collect::<Vec<_>>(),
-            "environment": std::env::vars_os().count(),
+            "environment": given_environment(),
             "pid": process_id(),
             "sid": session_id(),
             "pgid": group_id(),
