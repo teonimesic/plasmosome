@@ -345,16 +345,16 @@ pub unsafe fn loaded_images() -> Vec<PathBuf> {
 
 unsafe extern "C" {
     /// dyld's count of mapped images. It takes nothing and only reads the loader's list.
-    /// A call from any thread is sound. `mach-o/dyld.h` and `dyld(3)` warn only that iterating
-    /// by the count is not thread safe, because another thread can add or remove an image
-    /// during the iteration. A stale count is only a wrong number (reasoned).
+    /// A call from any thread is sound (reasoned). `mach-o/dyld.h` and `dyld(3)` warn only that
+    /// iterating by the count is not thread safe, because another thread can add or remove an
+    /// image during the iteration. A stale count is only a wrong number.
     safe fn _dyld_image_count() -> u32;
     /// dyld's path for image `index`: null when `index` is not below the count, otherwise a
     /// NUL-terminated string the loader owns while that image stays loaded.
-    /// A call from any thread is sound. `mach-o/dyld.h` warns only that iterating is not thread
-    /// safe, and `dyld(3)` says an index out of range returns null. The call only returns a
-    /// pointer. Reading it needs `unsafe`, and `loaded_images` makes its caller promise that no
-    /// image is unloaded meanwhile (reasoned).
+    /// A call from any thread is sound (reasoned). `mach-o/dyld.h` warns only that iterating is
+    /// not thread safe, and `dyld(3)` says an index out of range returns null. The call only
+    /// returns a pointer. Reading it needs `unsafe`, and `loaded_images` makes its caller
+    /// promise that no image is unloaded meanwhile.
     safe fn _dyld_get_image_name(index: u32) -> *const c_char;
     /// libsystem_sandbox's SBPL entry point, deprecated but present on macOS 26. With `flags`
     /// 0, `profile` is SBPL source text. On failure it returns nonzero and stores a message in
