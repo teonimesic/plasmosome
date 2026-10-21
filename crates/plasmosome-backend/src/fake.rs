@@ -3,18 +3,37 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend::{
     BackendError, DrainSpec, EnforcementBackend, GrantKind, Handle, LedgerEntry, RevokePolicy,
 };
-use crate::snapshot::EnforcementSnapshot;
+use crate::snapshot::{EnforcementSnapshot, IncompleteEffect};
 use crate::universe::{CellOwner, OsObject, OsState, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Default)]
 pub struct FakeBackend {
     state: OsState,
     grants: BTreeMap<Handle, LedgerEntry>,
+    incomplete: BTreeMap<Handle, Unfinished>,
     stuck_handles: BTreeSet<Handle>,
     stalled_owners: BTreeSet<CellOwner>,
     revocations: Vec<Handle>,
     refused_owners: BTreeMap<CellOwner, String>,
+    doomed_owners: BTreeMap<CellOwner, String>,
+    failing_withdrawals: BTreeMap<Handle, String>,
     observation_fault: Option<String>,
+}
+
+#[derive(Debug)]
+struct Unfinished {
+    operation: UniverseOp,
+    detail: String,
+}
+
+impl Unfinished {
+    fn error(&self) -> BackendError {
+        BackendError::IncompleteEffect {
+            class: self.operation.class().as_str(),
+            id: self.operation.id(),
+            detail: self.detail.clone(),
+        }
+    }
 }
 
 impl FakeBackend {
@@ -36,16 +55,23 @@ impl FakeBackend {
         self.refused_owners.insert(owner, cause.to_string());
     }
 
-    /// Makes every later `grant` and `apply` of a valid operation owned by exactly `owner` fail
-    /// after its first effect, with `BackendError::IncompleteEffect` carrying `detail`.
+    /// Makes every later `grant` and `apply` of a valid operation owned by exactly `owner`, at an
+    /// address that holds nothing, fail after its first effect. The call returns
+    /// `BackendError::IncompleteEffect` carrying `detail` and issues no record, and the snapshot
+    /// lists the operation in `incomplete` until an exact `apply_removal` clears it. The same
+    /// plugin in another cell is not affected. An invalid operation still returns
+    /// `InvalidOperation`, and `fail_before_effect_for_owner` refuses first.
     pub fn fail_after_effect_for_owner(&mut self, owner: CellOwner, detail: &str) {
-        let _ = (owner, detail);
+        self.doomed_owners.insert(owner, detail.to_string());
     }
 
-    /// Makes the next withdrawal of the holding at this exact address fail after it released
-    /// something, with `BackendError::IncompleteEffect` carrying `detail`.
+    /// Makes the next withdrawal at this exact address, through `revoke` or `apply_removal` and
+    /// under either policy, fail after it released something. The call returns
+    /// `BackendError::IncompleteEffect` carrying `detail`. A standing holding moves to
+    /// `incomplete` and keeps its issued record. A graceful timeout comes first and leaves the
+    /// failure armed.
     pub fn fail_next_withdrawal(&mut self, handle: Handle, detail: &str) {
-        let _ = (handle, detail);
+        self.failing_withdrawals.insert(handle, detail.to_string());
     }
 
     /// Makes every graceful withdrawal of the holding at this exact address time out, through
@@ -75,11 +101,35 @@ impl FakeBackend {
         &self.revocations
     }
 
-    fn refusal_before_effect(&self, owner: &CellOwner) -> Result<(), BackendError> {
-        match self.refused_owners.get(owner) {
-            Some(cause) => Err(BackendError::Fault(cause.clone())),
+    fn admitted(&self, operation: &UniverseOp) -> Result<(), BackendError> {
+        checked(&operation.object())?;
+        if let Some(cause) = self.refused_owners.get(operation.owner()) {
+            return Err(BackendError::Fault(cause.clone()));
+        }
+        match self.incomplete.get(&operation.handle()) {
+            Some(unfinished) if unfinished.operation == *operation => Err(unfinished.error()),
+            Some(_) => Err(identity_conflict(operation.handle())),
             None => Ok(()),
         }
+    }
+
+    fn occupied(&self, handle: Handle) -> bool {
+        self.state
+            .objects()
+            .any(|held| held.class() == handle.class && held.id == handle.id)
+    }
+
+    fn fail_after_the_first_effect(&mut self, operation: &UniverseOp) -> Result<(), BackendError> {
+        let Some(detail) = self.doomed_owners.get(operation.owner()).cloned() else {
+            return Ok(());
+        };
+        let unfinished = Unfinished {
+            operation: operation.clone(),
+            detail,
+        };
+        let error = unfinished.error();
+        self.incomplete.insert(operation.handle(), unfinished);
+        Err(error)
     }
 }
 
@@ -89,29 +139,26 @@ impl EnforcementBackend for FakeBackend {
         operation: UniverseOp,
         kind: GrantKind,
     ) -> Result<LedgerEntry, BackendError> {
+        self.admitted(&operation)?;
         let object = operation.object();
-        checked(&object)?;
-        self.refusal_before_effect(&object.owner)?;
         let entry = LedgerEntry {
             handle: operation.handle(),
             owner: object.owner.clone(),
             capability: object.capability.clone(),
             kind,
         };
-        let conflict = BackendError::IdentityConflict {
-            class: entry.handle.class.as_str(),
-            id: entry.handle.id,
-        };
         if let Some(issued) = self.grants.get(&entry.handle) {
             return if *issued == entry {
                 Ok(issued.clone())
             } else {
-                Err(conflict)
+                Err(identity_conflict(entry.handle))
             };
         }
-        if !self.state.insert(object)? {
-            return Err(conflict);
+        if self.occupied(entry.handle) {
+            return Err(identity_conflict(entry.handle));
         }
+        self.fail_after_the_first_effect(&operation)?;
+        self.state.insert(object)?;
         self.grants.insert(entry.handle, entry.clone());
         Ok(entry)
     }
@@ -134,15 +181,21 @@ impl EnforcementBackend for FakeBackend {
         EnforcementSnapshot::new(
             self.state.clone(),
             self.grants.values().cloned().collect(),
-            Vec::new(),
+            self.incomplete
+                .values()
+                .map(|unfinished| IncompleteEffect {
+                    operation: unfinished.operation.clone(),
+                })
+                .collect(),
         )
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
-        let object = op.object();
-        checked(&object)?;
-        self.refusal_before_effect(&object.owner)?;
-        self.state.insert(object).map(|_| ())
+        self.admitted(&op)?;
+        if !self.occupied(op.handle()) {
+            self.fail_after_the_first_effect(&op)?;
+        }
+        self.state.insert(op.object()).map(|_| ())
     }
 
     fn apply_removal(
@@ -155,7 +208,16 @@ impl EnforcementBackend for FakeBackend {
             class: removal.class(),
             id: removal.id,
         };
-        if !self.state.selects(&removal, owner) {
+        let selected = OsObject {
+            id: removal.id,
+            owner: owner.clone(),
+            capability: removal.capability.clone(),
+        };
+        let unfinished = self
+            .incomplete
+            .get(&handle)
+            .is_some_and(|unfinished| unfinished.operation.object() == selected);
+        if !unfinished && !self.state.selects(&removal, owner) {
             return Err(BackendError::UnknownObject {
                 class: handle.class.as_str(),
                 key: removal.key(),
@@ -171,6 +233,16 @@ impl EnforcementBackend for FakeBackend {
             });
         }
         self.state.remove(&removal, owner);
+        if let Some(detail) = self.failing_withdrawals.remove(&handle) {
+            let failed = Unfinished {
+                operation: selected.operation(),
+                detail,
+            };
+            let error = failed.error();
+            self.incomplete.insert(handle, failed);
+            return Err(error);
+        }
+        self.incomplete.remove(&handle);
         self.grants.remove(&handle);
         self.stuck_handles.remove(&handle);
         Ok(())
@@ -178,7 +250,18 @@ impl EnforcementBackend for FakeBackend {
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
         checked(&object)?;
+        let handle = object.operation().handle();
+        if self.incomplete.contains_key(&handle) {
+            return Err(identity_conflict(handle));
+        }
         self.state.insert(object).map(|_| ())
+    }
+}
+
+fn identity_conflict(handle: Handle) -> BackendError {
+    BackendError::IdentityConflict {
+        class: handle.class.as_str(),
+        id: handle.id,
     }
 }
 
