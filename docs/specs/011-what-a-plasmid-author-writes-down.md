@@ -266,8 +266,11 @@ a change nobody reviewed.
   {"plasmid": "github-pr", "mock": "simulate", "generation": 3, "state": "active",
    "label": "github-pr [mock:simulate]",
    "denials": [{"denied": "api.example.com", "field": "network.hosts",
-                "fix": "hosts = [\"api.example.com\"]", "count": 3}]}
+                "fix": "\"api.example.com\"", "count": 3}]}
   ```
+
+  Corrected on 2026-10-21: the example's `fix` was the whole line `hosts = ["api.example.com"]`,
+  which the §1 bullet above forbids for a list-valued field. It is now the bare entry.
 
   §3.3 is untouched: its `plasmids` entries are labels, not objects, and the label grammar does
   not change here. This is a field added to two frozen response shapes, which is why it is named
@@ -387,6 +390,40 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   would have been. It is written to the cell's session log, one line per denial, and to the
   plasmid's `denials` status field, one entry per distinct denial carrying its count. The
   denial's own behavior is unchanged, and the report is not a channel the calling code reads.
+- **What is reported, whom it names, and its bounds.**
+  - *What.* A refusal is reported only when the line that would have allowed it can be named. On
+    the network there are two such refusals. A DNS lookup of a host that no grant of the cell
+    holds, on any port or transport, has `denied` the host, `field` `network.hosts` and `fix` the
+    host as a bare entry. A new flow to a held host on a port that no grant of the cell holds at
+    that host has `denied` written `host:port`, `field` `network.ports` and `fix` the port. Not
+    reported, because no declaration line changes them: a flow on a transport the operator's
+    entries do not carry for a held port (spec 022 sets the transport); a refusal of a grant
+    that stands but does not admit, whether staged, paused, fenced or being withdrawn (spec 001
+    §4.2, spec 028); a destination the host refuses after selection (spec 017); a Mount's access,
+    which the operator decides (spec 022); the guest kernel's own refusals (spec 024 §8); and a
+    name no declaration could hold.
+  - *Whom.* A report names a plasmid only when exactly one attached plasmid holds a grant at the
+    denied host. Otherwise it names the cell alone. The workload is one principal to the
+    boundary, so a report put on a plasmid it did not reach through sends the author to the wrong
+    declaration. A report that names no plasmid goes to the session log only, since `denials`
+    belongs to a plasmid's object.
+  - *The line.* Each line is a session log event of kind `denial` with `cell`; `plasmid` when it
+    names one; `denied`, `field` and `fix`; `count`, how many times this denial has been seen,
+    this one included; `at_ms`, when the boundary refused it; `membrane_seq`, the membrane's
+    number for the line; and `unlogged` when denials since the cell's previous line got no line
+    of their own. A line can repeat after a controller restart, with the same `membrane_seq`.
+  - *Bounds.* A cell keeps at most 16 distinct denials for each plasmid, 64 naming a plasmid in
+    all, and 32 naming none. A denial with no room gets no entry and no line. A distinct denial
+    writes at most 64 lines, a cell at most 4,096 over its life, and at most 256 wait for the
+    controller. A denial past these bounds writes no line, still raises its entry's `count`, and
+    is counted in the cell's next line's `unlogged`. So a looping workload adds at most about
+    4 MiB to the log for a cell, and at most 16 entries to a plasmid's object.
+  - *A failed append.* A denial line that cannot be appended refuses nothing and changes no reply:
+    the denial is already enforced, and no verb waits on its line. The line stays with the
+    membrane and is appended once the log is reopened under spec 008. Spec 001's 106 for a `now`
+    kill's line is unchanged. Amended on 2026-10-21: this bullet and its five parts are new. The
+    bullet before it named no bound, no rule for a report that names no plasmid, and no list of
+    what is reported.
 - **Attach is all-or-nothing.** On any failure the cell holds no record of the plasmid, no tool of
   its own, and no grant made on its behalf.
 - **A plasmid is reported active only when every tool its declaration names resolves.**
@@ -472,6 +509,25 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   the plasmid sees the denial unchanged.
 - A host denied three times appears in the plasmid's `denials` once, carrying `count` 3, and in
   the session log three times.
+- A host no attached plasmid holds, looked up once, gives one line naming the cell and no plasmid,
+  with field `network.hosts` and fix the bare host, and no plasmid's object gains `denials`.
+  Catches: a report put on the only attached plasmid. Amended on 2026-10-21: this item is new.
+- A held host reached on a port no grant holds gives its one holder an entry with field
+  `network.ports` and fix the port alone. With two plasmids holding the host, the line names
+  neither. Catches: a fix that names a granted port, and attribution to the first holder. Amended
+  on 2026-10-21: this item is new.
+- A refusal of a grant that stands but does not admit, and a flow refused on its transport alone,
+  report nothing. Catches: every refused selection read as a missing declaration. Amended on
+  2026-10-21: this item is new.
+- A plasmid's 17th distinct denial adds no entry; a denial's 65th line is not written while its
+  count still rises; the next line counts both in `unlogged`. Catches: an unbounded report.
+  Amended on 2026-10-21: this item is new.
+- A denial line whose append fails changes no reply, and the line is appended once after the log
+  is reopened. Catches: a status read refused over a log fault, and a line dropped on failure.
+  Amended on 2026-10-21: this item is new.
+- After a cell's membrane restarts, a request carrying the old book and its `after` is answered
+  with the new book's lines from the first. Catches: lines dropped because a restarted membrane
+  numbers from 1 again. Amended on 2026-10-21: this item is new.
 - An attach failed partway leaves no trace: the cell lists no such plasmid, the tool registry
   holds none of its tools, and the ledger records no grant for it.
 - An attach that could only succeed by granting more than the declaration names is refused, and
