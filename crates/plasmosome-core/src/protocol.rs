@@ -425,8 +425,10 @@ impl WireError {
     /// TOML to write in place of that field, a bare entry for the list the
     /// field names (written in place of the entry when the field ends in an
     /// index), or exactly `remove this entry`. `plasmid` is the declaration's
-    /// id itself, not the quoted form `detail` writes; a refusal of the `id`
-    /// carries none. A file that could not be read (`Io`), is not TOML
+    /// id itself, not the quoted form `detail` writes, and is present exactly
+    /// when the refusal names an id. A refusal of an `id` that is missing, not
+    /// a string or empty names none, so it carries `field` and `fix` and no
+    /// `plasmid`. A file that could not be read (`Io`), is not TOML
     /// (`Parse`, a syntax error included), is over `MAX_MANIFEST_BYTES`
     /// (`TooLarge`) or nests more than `MAX_MANIFEST_DEPTH` levels (`TooDeep`)
     /// carries no `field`, `fix` or `plasmid`.

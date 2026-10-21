@@ -248,8 +248,8 @@ a change nobody reviewed.
 - **§1, the error table.** No code is added, removed or renumbered — the closed set stands. The
   refusals an author can reach gain three structured fields on 108: `field`, the declaration field
   the refusal names, written as its path; `fix`, holding the line the author would write; and
-  `plasmid`, the declaration's id wherever it supplies one. The three refusals of the file as a
-  whole (Contract) gain none of them.
+  `plasmid`, the declaration's id, exactly when the refusal names one; no `id` refusal today does,
+  as no id parsed. The three refusals of the file as a whole (Contract) gain none of them.
   Where the field is list-valued, `fix` holds the entry to add, not the whole line: a
   replacement line would either drop the entries already there or name them, and naming what is
   already granted is what the report above forbids. Where the repair is to delete what `field`
@@ -542,12 +542,12 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   capability and no implementation; a command secret naming no subject; and a declaration with no
   `id`, which names `id` and carries no plasmid id.
 - A 108 built from each refusal in the item above carries `field` and `fix` as members of its
-  error object, equal to the refusal's own, and `plasmid`, the id itself, except for the `id`
-  refusal. Following each `fix` at its `field`, read from those members alone, ends where
-  following the refusals ends, also for a command key such as `"a: b"`. A TOML syntax error, a
-  declaration over 1 MiB and one nested more than 32 levels carry none of the three. Catches: a
-  field or plasmid only in `detail`, which a key or an id holding `: ` makes impossible to split,
-  and a member sent as `null`. Amended on 2026-10-21: this item is new.
+  error object, equal to the refusal's own, and `plasmid`, the id itself, except for the
+  declaration with no `id`. Following each `fix` at its `field`, read from those members alone,
+  ends where following the refusals ends, also for a command key such as `"a: b"`. A TOML syntax
+  error, a declaration over 1 MiB and one nested more than 32 levels carry none of the three.
+  Catches: a field or plasmid only in `detail`, which a key or an id holding `: ` makes impossible
+  to split, and a member sent as `null`. Amended on 2026-10-21: this item is new.
 - `requires.capabilities = ["a", 5, "b", "", " "]` is refused at `requires.capabilities[1]` with
   `fix` `remove this entry`. Each time the refused entry is removed, the next refusal is at
   `requires.capabilities[2]`, for `""` and then `" "`, and the result parses with requires `["a",
