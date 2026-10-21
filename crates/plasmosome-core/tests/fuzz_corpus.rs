@@ -1,5 +1,7 @@
 #[path = "fuzz/control_line.rs"]
 mod control_line;
+#[path = "fuzz/manifest.rs"]
+mod manifest;
 #[path = "fuzz/replay.rs"]
 mod replay;
 
@@ -149,4 +151,68 @@ fn inputs_arrive_in_name_order() {
 #[test]
 fn the_control_line_corpus_replays() {
     replay::replay("control_line", control_line::check);
+}
+
+#[test]
+fn the_manifest_corpus_replays() {
+    replay::replay("manifest", manifest::check);
+}
+
+#[test]
+fn the_tree_walk_counts_the_documented_levels() {
+    assert_eq!(manifest::tree_depth("a = 1"), Some(1));
+    assert_eq!(manifest::tree_depth("a.b = [{ c = 1 }]"), Some(4));
+    assert_eq!(manifest::tree_depth("[[a]]\n[a.b]\nc = []"), Some(5));
+    assert_eq!(manifest::tree_depth("a = "), None);
+}
+
+const LEVEL_BYTES: &[u8] = b"[{.";
+
+const MAX_LEVEL_BYTES: usize = 49;
+
+fn over_the_level_bytes(dir: &Path) -> Vec<String> {
+    let mut over = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("the corpus is listed") {
+        let path = entry.expect("the corpus is listed").path();
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("the input is read");
+        let opening = bytes.iter().filter(|byte| LEVEL_BYTES.contains(byte)).count();
+        if opening > MAX_LEVEL_BYTES {
+            over.push(format!("{}: {opening}", path.display()));
+        }
+    }
+    over
+}
+
+#[test]
+fn no_saved_declaration_can_nest_more_than_99_levels() {
+    let corpus = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fuzz/corpus/manifest"
+    ));
+    let over = over_the_level_bytes(corpus);
+    assert!(
+        over.is_empty(),
+        "a saved declaration holds more than {MAX_LEVEL_BYTES} of [, {{ and ., so it may nest \
+         more than 99 levels, and this public repository holds none deeper than 100: {over:?}"
+    );
+}
+
+#[test]
+fn a_declaration_holding_50_brackets_is_over_the_guard() {
+    let dir = corpus(&[
+        ("seed-49", vec![b'['; MAX_LEVEL_BYTES]),
+        ("seed-50", vec![b'['; MAX_LEVEL_BYTES + 1]),
+        ("seed-50-mixed", b"[{.".repeat(17)[..50].to_vec()),
+    ]);
+    let mut over = over_the_level_bytes(dir.path());
+    over.sort();
+    let mut expected = vec![
+        format!("{}: 50", dir.path().join("seed-50").display()),
+        format!("{}: 50", dir.path().join("seed-50-mixed").display()),
+    ];
+    expected.sort();
+    assert_eq!(over, expected);
 }

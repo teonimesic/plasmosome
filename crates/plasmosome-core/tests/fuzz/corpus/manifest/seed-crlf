@@ -1,0 +1,3 @@
+id = "crlf"
+description = "Windows line ends."
+impl.wasm = "c.wasm"
