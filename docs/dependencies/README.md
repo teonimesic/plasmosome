@@ -92,7 +92,8 @@ How the lists are made:
   closure holds serde_derive through a `cfg(any())` dependency that never builds, so
   serde_derive is in its `brings` and not in its `build_time_code`.
 - **`--all-features`** adds the features of workspace members that no default turns on. Today
-  the members declare none, so it gives the same resolve as leaving it out.
+  one member declares such a feature, plasmosome-backend's `test-fixture`, and it turns on
+  nothing else. So the resolve is the same as without the flag, apart from that one feature.
 
 **The fuzz workspace.** Today the records describe the root Cargo.lock only. Once
 `fuzz/Cargo.lock` exists, derive each record again with `--manifest-path fuzz/Cargo.toml` on both
