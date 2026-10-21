@@ -760,6 +760,36 @@ mod tests {
     }
 
     #[test]
+    fn a_record_whose_class_is_not_its_capabilitys_is_refused_for_the_reason_serde_gives() {
+        let reason = "ledger entry handle class does not match its capability";
+        let held = op(mount("/code", "/workspace"));
+        let mislabelled = LedgerEntry {
+            capability: broker("egressd"),
+            ..issued(&held)
+        };
+        let account = EnforcementSnapshot::new(standing(&[&held]), vec![issued(&held)], Vec::new());
+        let mut value = serde_json::to_value(account.unwrap()).unwrap();
+        value["grants"][0]["capability"] = serde_json::to_value(broker("egressd")).unwrap();
+        for refused in [
+            serde_json::to_string(&mislabelled).unwrap_err(),
+            serde_json::from_value::<EnforcementSnapshot>(value).unwrap_err(),
+        ] {
+            assert!(refused.to_string().contains(reason), "{refused}");
+        }
+        let refusal = BackendError::Fault(format!("issued record {}: {reason}", held.handle()));
+        for (state, unfinished) in [
+            (standing(&[&held]), Vec::new()),
+            (OsState::new(), Vec::new()),
+            (OsState::new(), vec![incomplete(&held), incomplete(&held)]),
+        ] {
+            assert_eq!(
+                EnforcementSnapshot::new(state, vec![mislabelled.clone()], unfinished),
+                Err(refusal.clone())
+            );
+        }
+    }
+
+    #[test]
     fn decoding_sorts_records_and_effects_like_the_constructor() {
         let (state, grants, unfinished) = rows_of_every_class();
         let value = json!({
