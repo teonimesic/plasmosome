@@ -144,6 +144,10 @@ mod tests {
         CompositeBackend::new(fake(), fake(), fake()).expect("empty leaves are valid")
     }
 
+    fn prepared(plugin: &str, capability: crate::backend::Capability) -> UniverseOp {
+        fixtures::op(GrantId::new(), cell_owner(plugin), capability)
+    }
+
     #[test]
     fn a_prepared_grant_reaches_the_leaf_of_its_class_at_its_own_address() {
         for (op, leaf) in [
@@ -236,16 +240,18 @@ mod tests {
     #[test]
     fn handles_route_by_class_without_rewriting_identity() {
         let mut backend = composite();
-        let file = backend.grant(Grant {
-            owner: cell_owner("github-pr"),
-            capability: session_file("/skills/pr.md"),
-            kind: GrantKind::Hot,
-        });
-        let proxy = backend.grant(Grant {
-            owner: cell_owner("network"),
-            capability: proxy_map("api.github.com", "splice"),
-            kind: GrantKind::Hot,
-        });
+        let file = backend
+            .grant(
+                prepared("github-pr", session_file("/skills/pr.md")),
+                GrantKind::Hot,
+            )
+            .unwrap();
+        let proxy = backend
+            .grant(
+                prepared("network", proxy_map("api.github.com", "splice")),
+                GrantKind::Hot,
+            )
+            .unwrap();
         assert_ne!(file.handle.id, proxy.handle.id);
         assert_eq!(file.handle.class, UniverseClass::SessionFile);
         assert_eq!(proxy.handle.class, UniverseClass::ProxyMap);
@@ -271,11 +277,12 @@ mod tests {
     #[test]
     fn failed_revoke_preserves_the_original_handle_and_leaf_state() {
         let mut network = FakeBackend::new();
-        let entry = network.grant(Grant {
-            owner: cell_owner("network"),
-            capability: uds_socket("/run/ak/egressd.uds"),
-            kind: GrantKind::Hot,
-        });
+        let entry = network
+            .grant(
+                prepared("network", uds_socket("/run/ak/egressd.uds")),
+                GrantKind::Hot,
+            )
+            .unwrap();
         network.mark_stuck(entry.handle);
         let mut backend =
             CompositeBackend::new(Box::new(network), fake(), fake()).expect("valid leaves");
@@ -296,14 +303,13 @@ mod tests {
 
     #[test]
     fn a_handle_from_another_backend_cannot_withdraw_an_equal_grant() {
-        let grant = Grant {
-            owner: cell_owner("network"),
-            capability: uds_socket("/run/ak/egressd.uds"),
-            kind: GrantKind::Hot,
-        };
-        let stale = FakeBackend::new().grant(grant.clone()).handle;
+        let socket = || prepared("network", uds_socket("/run/ak/egressd.uds"));
+        let stale = FakeBackend::new()
+            .grant(socket(), GrantKind::Hot)
+            .unwrap()
+            .handle;
         let mut backend = composite();
-        let live = backend.grant(grant);
+        let live = backend.grant(socket(), GrantKind::Hot).unwrap();
         assert_ne!(stale, live.handle);
         assert_eq!(
             backend.revoke(stale, DrainSpec::forcing()).unwrap_err(),

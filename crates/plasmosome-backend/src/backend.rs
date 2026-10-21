@@ -421,8 +421,11 @@ pub trait EnforcementBackend {
     /// Another owner, capability or kind at an issued address, or a grant at the address of an
     /// object that was applied or planted rather than granted, returns `IdentityConflict` and
     /// changes nothing: a grant never promotes an object into an issued record.
-    fn grant(&mut self, operation: UniverseOp, kind: GrantKind)
-    -> Result<LedgerEntry, BackendError>;
+    fn grant(
+        &mut self,
+        operation: UniverseOp,
+        kind: GrantKind,
+    ) -> Result<LedgerEntry, BackendError>;
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError>;
     fn snapshot_os_state(&self) -> OsState;
     /// Records `op` under the identity and owner it names. An operation whose `validate` fails
@@ -711,17 +714,6 @@ pub(crate) mod tests {
                 "kind": "Hot",
             });
             assert_refused(&entry, entry_json, &expected);
-            let grant = Grant {
-                owner: owner(),
-                capability: capability.clone(),
-                kind: GrantKind::Hot,
-            };
-            let grant_json = json!({
-                "owner": owner(),
-                "capability": capability_json(&capability),
-                "kind": "Hot",
-            });
-            assert_refused(&grant, grant_json, &expected);
         }
     }
 
