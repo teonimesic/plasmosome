@@ -21,7 +21,7 @@ static WARM_UP: LazyLock<Result<(), String>> =
 /// run, so every test run pays that cost. The first call in a test process
 /// runs membraned once with no arguments, so the cost is spent before any test
 /// deadline starts. A run still going after 60 seconds is killed and reaped.
-/// Every call panics unless that run exited with the usage status 2, and every
+/// Every call panics unless that run exited with the usage status 64, and every
 /// call reports a failure with the same message, which names the cause and up
 /// to 4096 bytes of the run's stderr.
 pub fn membraned() -> Command {
@@ -45,9 +45,9 @@ fn run_once(daemon: &str, mut command: Command, bound: Duration) -> Result<(), S
     let outcome = exit_within(&mut child, bound);
     let said = first_bytes(&mut stderr);
     match outcome {
-        Ok(Some(status)) if status.code() == Some(2) => Ok(()),
+        Ok(Some(status)) if status.code() == Some(64) => Ok(()),
         Ok(Some(status)) => Err(format!(
-            "warm-up of {daemon} exits with its usage status 2, not {status}; its stderr: {said:?}"
+            "warm-up of {daemon} exits with its usage status 64, not {status}; its stderr: {said:?}"
         )),
         Ok(None) => Err(format!(
             "warm-up of {daemon} did not exit within {bound:?}; its stderr: {said:?}"
