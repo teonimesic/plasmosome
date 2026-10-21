@@ -178,6 +178,10 @@ def classification():
     stale_and_broken = API["classify"](
         "sources", FIXTURES["stale-lockfile"]["stderr"] + FIXTURES["db-unreachable"]["stderr"], 1)
     assert stale_and_broken["status"] == "tool failure", stale_and_broken
+    stale_beside_summary = API["classify"](
+        "sources", records("stale-lockfile", "log")[:1] + records("clean-sources", "summary"), 0)
+    assert stale_beside_summary["status"] == "refusal" and stale_beside_summary["failures"] == [], stale_beside_summary
+    assert stale_beside_summary["refusals"][0].splitlines()[-1].strip() == LOCK_HINT, stale_beside_summary
 
     malformed = API["classify"]("advisories", ["", "[]", '{"type": "log"}'], 0)
     assert malformed["status"] == "tool failure" and len(malformed["failures"]) == 2, malformed
