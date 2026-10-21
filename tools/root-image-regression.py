@@ -409,6 +409,19 @@ def a_malformed_base_member_refuses():
         for target in ("bin", "usr"):
             detail = refusal("stage", stage_with, root, {"usr/bin/zz": h(target)})
             assert "/usr/bin/zz" in detail and "not an earlier file" in detail, detail
+        for headers, kind in [({"path": "etc/hostname\0junk"}, tarfile.REGTYPE),
+                              ({"linkpath": "etc/hostname\0junk"}, tarfile.SYMTYPE)]:
+            write_tar(base, DEBIAN)
+            with tarfile.open(base, "a", format=tarfile.PAX_FORMAT) as out:
+                info = tarfile.TarInfo("etc/zz")
+                info.type, info.pax_headers = kind, headers
+                out.addfile(info)
+            detail = refusal("stage", API["stage"], base, root / "out.tar", [], EPOCH, LIMIT)
+            assert "NUL" in detail and "etc/" in detail, detail
+        detail = refusal("stage", stage_with, root, {"var/long": s("a/" * 2048)})
+        assert "/var/long" in detail and "4095" in detail, detail
+        tree, _ = staged(root, {"var/long": s("a/" * 2047 + "b")})
+        assert len(tree["var/long"].link) == 4095
         base.write_bytes(b"not a tar archive" * 64)
         assert "tar" in refusal("stage", API["stage"], base, root / "out.tar", [], EPOCH, LIMIT)
 
@@ -1174,6 +1187,24 @@ def every_other_failure_prints_the_refused_line():
                 out.addfile(info, io.BytesIO(b""))
             detail = refusal("stage", API["stage"], base, root / f"stage-{mtime}.tar", [], EPOCH, LIMIT)
             assert "/etc/far-future" in detail and "mtime" in detail, detail
+        for headers, data in [({"GNU.sparse.map": "a,b"}, b""),
+                              ({"GNU.sparse.major": "1", "GNU.sparse.minor": "0", "GNU.sparse.realsize": "x"},
+                               b"0\n" + bytes(510))]:
+            base = root / "base-sparse.tar"
+            write_tar(base, DEBIAN)
+            with tarfile.open(base, "a", format=tarfile.PAX_FORMAT) as out:
+                info = tarfile.TarInfo("etc/sparse")
+                info.pax_headers, info.size = headers, len(data)
+                out.addfile(info, io.BytesIO(data))
+            detail = refusal("stage", API["stage"], base, root / "stage-sparse.tar", [], EPOCH, LIMIT)
+            assert "not a readable tar archive" in detail, (headers, detail)
+
+        def ends_early(source):
+            raise EOFError("the archive ended early")
+
+        with patched("base_members", ends_early):
+            detail = refusal("stage", API["stage"], base, root / "stage-sparse.tar", [], EPOCH, LIMIT)
+        assert "not a readable tar archive" in detail and "ended early" in detail, detail
         with patched("open_regular", lambda *args: Unreadable()):
             assert "Input/output error" in refusal("check", API["read_bounded"], root / "x", "check", 8, "x")
             assert "Input/output error" in refusal("check", API["hash_bounded"], root / "x", "check", 8, "x")
