@@ -287,18 +287,21 @@ mod tests {
     fn the_judge_accepts_a_regular_file_of_root_or_the_effective_uid_with_no_write_or_set_id_bit() {
         let path = PathBuf::from("/opt/membraned");
         let euid = effective_uid();
-        for (uid, mode) in [
+        for (row, (uid, mode)) in [
             (0, 0o555),
             (0, 0o444),
             (euid, 0o444),
             (euid, 0o400),
             (euid, 0o000),
             (euid, 0o1555),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             assert_eq!(
                 reached(&path, Kind::Regular, uid, mode),
                 Ok(()),
-                "uid {uid}, mode {mode:04o}"
+                "row {row}, mode {mode:04o}"
             );
         }
     }
@@ -316,7 +319,7 @@ mod tests {
                 "{kind:?}"
             );
         }
-        for (uid, mode, fault) in [
+        for (row, (uid, mode, fault)) in [
             (stranger, 0o444, ForeignOwner { uid: stranger }),
             (stranger, 0o6777, ForeignOwner { uid: stranger }),
             (euid, 0o644, Writable { mode: 0o644 }),
@@ -329,11 +332,14 @@ mod tests {
             (euid, 0o4555, SetIdBits { mode: 0o4555 }),
             (0, 0o2555, SetIdBits { mode: 0o2555 }),
             (euid, 0o6444, SetIdBits { mode: 0o6444 }),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             assert_eq!(
                 reached(&path, Kind::Regular, uid, mode),
                 Err(fault),
-                "uid {uid}, mode {mode:04o}"
+                "row {row}, mode {mode:04o}"
             );
         }
     }
