@@ -254,15 +254,18 @@ attached are not resolved again.
 108 under spec 011's author-refusal rule, with the field, a nonempty `fix` and the plasmid ID. That
 covers a port that is not an integer from 1 to 65535, a repeated port, hosts with no ports, a host
 that is not a lower-case DNS name, a repeated host, a CIDR that does not parse or has host bits set,
-a `[workspace]` with no `mount`, and a `dst` that is relative, has a trailing slash, contains `.`,
-`..` or NUL, or is `/`. Port faults follow spec 011 (`011:248-250`) and name the entry by its index
+a `[workspace]` with no `mount`, and a `dst` that is not a canonical path (§4). Port faults follow
+spec 011 (`011:252-254`) and name the entry by its index
 in its own section, such as `network.ports[i]`. A repeated port is the repeat, with `fix` exactly
 `remove this entry`. An entry that is not an integer from 1 to 65535 has `fix` the port the entry
 evidently means when the list does not already declare it, and otherwise `remove this entry`. Hosts
 with no ports is field `network.hosts[0]` with `fix` `remove this entry`, because no port line
 exists that would not be a guess. So following a `fix` never drops a declared port, repeats one, or
 adds one the author did not write. A parser that drops, wraps or truncates an entry does not meet
-this.
+this. Amended on 2026-10-21: this listed a `dst` that is relative, has a trailing slash, contains
+`.`, `..` or NUL, or is `/`. That left out an empty component, as in `/a//b`, which no Mount entry's
+`target` can equal, so the request refused with 103 as if the operator file lacked an entry. It
+could also be read as refusing every `.`, as in `/srv/work.d`, which a canonical path allows.
 
 #### Network becomes ProxyMap
 
@@ -677,11 +680,13 @@ ProxyMap (O-11) or Mount (O-7).
 10. Author refusals, each 108 with the field, a nonempty `fix` and the plasmid ID: ports `70000`,
     `-1`, `0`, `65536`, `"443"` and `443.5`; a repeated port or host; hosts with no ports; an
     upper-case or IP-literal host; a malformed CIDR; `192.0.2.1/24`; `[workspace]` with no `mount`;
-    `dst = "workspace"`. Each bad or repeated port names `network.ports[i]`. `["443"]` gives `443`;
+    `dst = "workspace"`; `dst = "/a//b"`. Each bad or repeated port names `network.ports[i]`.
+    `["443"]` gives `443`;
     `70000`, `-1`, `0`, `65536`, `443.5` and a repeat give `remove this entry`; hosts with
     `ports = []` give `network.hosts[0]` and `remove this entry`. Following the fixes in turn from
     `[65536]` with one host ends with no host and no port. Catches: a truncating parser, a missing
-    or whole-line `fix`, and a `fix` that invents a port.
+    or whole-line `fix`, a `fix` that invents a port, and a `dst` check that misses an empty
+    component. Amended on 2026-10-21: this item had no `dst` with an empty component.
 11. Pins, on a fixture the task adds with `pin_cidrs = ["192.0.2.0/25"]` and `[mock].hosts`
     naming its host; no in-tree fixture has both. `192.0.2.10` attaches. `192.0.2.200`,
     `192.0.2.10.example.com` and `2001:db8::1` are 103. `::192.0.2.10`, `::ffff:192.0.2.10` and

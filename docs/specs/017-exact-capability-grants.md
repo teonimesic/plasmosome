@@ -105,8 +105,9 @@ independently selectable class tag.
 
 `FileAccess` is exactly `read_only | read_write`; `ProxyTransport` is exactly `tcp | udp`.
 `port` is nonzero. Strings are NUL-free. Host paths (`SessionFile.path`, `UdsSocket.path`,
-`Mount.source`, upstream and broker endpoints) and guest paths (`guest_path`, `Mount.target`)
-are absolute. Managed guest projections may not replace the immutable system image, trusted
+`Mount.source`, upstream and broker endpoints) and guest paths (`guest_path`, `Mount.target`) are
+canonical paths as spec 022 §4 defines them. Managed guest projections may not replace the immutable
+system image, trusted
 shim/control paths or another unowned entry. File contents are at most 65,536 bytes. Complete
 serialized operations/inverses and enclosing messages must fit spec001's existing frame limit;
 oversize closure preparation refuses before effects rather than splitting one transaction.
@@ -115,6 +116,9 @@ an executable mode supplied by workload text.
 `contents` is the immutable initial seed in the recipe, not a snapshot that changes after an
 authorized write. Observation verifies the original inode/access association and independently
 effective permissions; it does not replace the prepared recipe with current file bytes.
+Amended on 2026-10-21: this said that host and guest paths are absolute. `Capability::validate`,
+which also runs each recipe's own check, already refused one that is not canonical, such as
+`/workspace/` or `/`.
 
 `destination` is one ASCII DNS hostname or numeric IP address, with no scheme, path, wildcard,
 userinfo or embedded port. A DNS name is resolved only for this authorized destination. Every
@@ -477,9 +481,9 @@ would leave an unlogged effect or change the durable operation. None is a permit
 
 `BrokerLaunch` is the strict serde record
 `{ command: Vec<String>, control_socket: String, data_socket: String }`.
-All fields are required; unknown fields refuse. `command` is nonempty, its first word is an
-absolute executable path, and every word is NUL-free and retained exactly. `control_socket` and
-`data_socket` are distinct absolute, NUL-free host-private endpoints. Only the controlled relay
+All fields are required; unknown fields refuse. `command` is nonempty, its first word is a canonical
+executable path (spec 022 §4), and every word is NUL-free and retained exactly. `control_socket` and
+`data_socket` are distinct canonical host-private endpoints. Only the controlled relay
 exposes the data service; the private control service never becomes workload authority.
 Structural decoding does not consult the filesystem;
 preflight separately validates the actual executable, private endpoint parents and ability to
@@ -490,6 +494,8 @@ its own environment entries afterward. Additional launch inputs require an accep
 not inherited credentials. Trusted configuration supplies non-secret launch inputs; structural
 validation cannot detect arbitrary secret values embedded in strings. This is not a new plasmid
 manifest grammar, credential transport or permission for workload text to execute host commands.
+Amended on 2026-10-21: this said the first word and both endpoints are absolute, while
+`BrokerLaunch::validate` already refused one that is not canonical.
 
 Both endpoints require spec001 §4.1's trusted-directory, socket-mode and mutual kernel peer-UID
 boundary for their host-private transports. The broker and controlled relay enforce that boundary
@@ -729,8 +735,9 @@ source acceptance still supplies neither deployed artifacts nor successful platf
   middle/final record never disappears; only an incomplete non-newline final JSON fragment may
   be discarded. No refused read changes its source file or yields a partial ledger.
   Format2 and PID-bearing broker records cannot acquire a guessed recipe; a malformed or
-  incomplete existing append target remains unchanged. Strict broker fields, absolute program
-  and endpoint, nonempty command and NUL refusal are exercised independently of OS preflight.
+  incomplete existing append target remains unchanged. Strict broker fields, canonical program and
+  endpoint, nonempty command and NUL refusal are exercised independently of OS preflight. Amended on
+  2026-10-21: this said an absolute program and endpoint.
 - **A10 — owner conformance:** the public owner clause rejects a same-key wrong-owner thief;
   post-removal assertions ask about the exact object and named owner's remaining holdings, never
   require another owner's key to disappear. Complete survivor snapshots are checked at each step.
