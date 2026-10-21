@@ -966,9 +966,12 @@ mod tests {
         vec![
             (
                 "SessionFile.recipe.contents",
-                session(fixtures::session_recipe()),
                 session(SessionFileRecipe {
                     contents: b"# Review\n".to_vec(),
+                    ..fixtures::session_recipe()
+                }),
+                session(SessionFileRecipe {
+                    contents: b"# Revise\n".to_vec(),
                     ..fixtures::session_recipe()
                 }),
             ),
@@ -1045,11 +1048,17 @@ mod tests {
             ),
             (
                 "Broker.launch.command",
-                broker(fixtures::launch()),
                 broker(BrokerLaunch {
                     command: vec![
                         "/usr/libexec/plasmosome-broker".to_string(),
                         "--audit".to_string(),
+                    ],
+                    ..fixtures::launch()
+                }),
+                broker(BrokerLaunch {
+                    command: vec![
+                        "/usr/libexec/plasmosome-broker".to_string(),
+                        "--trace".to_string(),
                     ],
                     ..fixtures::launch()
                 }),
