@@ -44,9 +44,10 @@ standing holdings, the original issued record of each grant whose withdrawal aut
 and its unfinished effects as `IncompleteEffect`s. An applied or planted object has no record, and
 a record is never rebuilt from an object. `EnforcementSnapshot::new` first refuses a row whose
 capability fails `validate` with `InvalidOperation`, and a record whose handle class is not its
-capability's class with `Fault`. Each names the rule encoding names. Decoding names the same rule
-for a row that breaks one; for a row that breaks two it can name the other, because it checks a
-nested recipe before the capability. `new` then refuses an address repeated in the unfinished
+capability's class with `Fault`. For a row that breaks one rule, encoding and decoding name that
+rule too. For a row that breaks two, the three can name different ones: decoding checks a nested
+recipe before the capability, encoding checks a record's class before its capability, and `new`
+checks the capability first. `new` then refuses an address repeated in the unfinished
 effects, an address both standing and unfinished, a repeated issued handle, and a record whose
 owner or capability disagrees with its row, each with `IdentityConflict`. It refuses a record with
 neither a standing nor an unfinished row with `Fault`. Decoding runs the same checks. A caller

@@ -52,9 +52,10 @@ impl EnforcementSnapshot {
     ///
     /// 1. a standing object, issued record or unfinished effect whose capability fails
     ///    `validate` returns `InvalidOperation` at its address, and an issued record whose handle
-    ///    class is not its capability's class returns `Fault`. Each names the rule encoding
-    ///    names. Decoding names the same rule for a row that breaks one. For a row that breaks
-    ///    two it can name the other, because it checks a nested recipe before the capability;
+    ///    class is not its capability's class returns `Fault`. For a row that breaks one rule,
+    ///    encoding and decoding name that rule too. For a row that breaks two, the three can name
+    ///    different ones: decoding checks a nested recipe before the capability, encoding checks
+    ///    a record's class before its capability, and `new` checks the capability first;
     /// 2. an address repeated in `incomplete` returns `IdentityConflict`;
     /// 3. an address both standing and in `incomplete` returns `IdentityConflict`;
     /// 4. a handle repeated in `grants` returns `IdentityConflict`;
