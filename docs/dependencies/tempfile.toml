@@ -6,10 +6,10 @@ reason = """\
   """
 write_it_instead.lines = 80
 write_it_instead.how = """\
-  On 2026-10-20, at main f93ff9a, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 47 files, all \
+  On 2026-10-20, at main 73d0471, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 48 files, all \
   of them tests, test modules or benchmarks, since eight of the eleven members declare tempfile, \
   all eight as a dev-dependency, and the other three do not declare it. `git grep -h -o -E \
-  'tempfile::[A-Za-z_:]+' -- '*.rs' | sort | uniq -c` gives tempdir 224, TempDir 27, Builder::new \
+  'tempfile::[A-Za-z_:]+' -- '*.rs' | sort | uniq -c` gives tempdir 225, TempDir 27, Builder::new \
   5 and tempfile 2. Reading the code shows that it calls path() on a TempDir and relies on its \
   drop to remove the tree, that each Builder::new() is followed by prefix("ps") or prefix("pd") \
   and tempdir_in, and that tempfile() opens an unnamed file for a child's stderr. A replacement \

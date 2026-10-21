@@ -6,7 +6,7 @@ reason = """\
   """
 write_it_instead.lines = 540
 write_it_instead.how = """\
-  On 2026-10-20, at main f93ff9a, `git grep -l toml_edit -- '*.rs' | wc -l` gives 1 file, \
+  On 2026-10-20, at main 73d0471, `git grep -l toml_edit -- '*.rs' | wc -l` gives 1 file, \
   crates/plasmosome-core/tests/fix_following.rs, and `git grep -n toml_edit -- '*.rs'` shows it \
   importing DocumentMut, Item, Key, TableLike and Value, and naming toml_edit::Array once. Since \
   #153, merged as 8fe24e3, that test is the only use, and toml_edit is a dev-dependency there with \
