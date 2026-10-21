@@ -685,8 +685,10 @@ mod tests {
         use crate::runtime::test_fixtures::{recipe, recipe_value};
         use std::fs;
         use std::io::Seek;
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::{FileExt, MetadataExt};
         use std::path::PathBuf;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         fn identity_of(path: &Path) -> FileIdentity {
             let metadata = fs::symlink_metadata(path).expect("stat");
@@ -700,6 +702,17 @@ mod tests {
             let mut bytes = vec![0; size];
             file.read_exact_at(&mut bytes, 0).expect("pread");
             bytes
+        }
+
+        fn reconfirmed(verified: &VerifiedArtifact) -> Result<(), ArtifactFault> {
+            verified.reconfirm().map_err(|refusal| refusal.fault)
+        }
+
+        #[allow(unsafe_code)]
+        fn close_on_exec(file: &File) -> bool {
+            // SAFETY: F_GETFD only reads the flags of a descriptor this File keeps open.
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+            flags != -1 && flags & libc::FD_CLOEXEC != 0
         }
 
         #[allow(unsafe_code)]
@@ -737,12 +750,13 @@ mod tests {
             }
         }
 
-        const ROLES: [(ArtifactRole, &str, &str); 7] = [
+        const ROLES: [(ArtifactRole, &str, &str); 8] = [
             (ArtifactRole::Kernel, "kernel", "kernel"),
             (ArtifactRole::Initramfs, "initramfs", "initramfs"),
             (ArtifactRole::RootImage, "root_image", "rootfs.raw"),
             (ArtifactRole::Helper, "helper", "krun-helper"),
             (ArtifactRole::Library(0), "libraries", "libkrun.dylib"),
+            (ArtifactRole::Library(1), "libraries", "libkrunfw.dylib"),
             (ArtifactRole::HostPolicy, "host_policy", "host-policy"),
             (ArtifactRole::GuestPolicy, "guest_policy", "guest-policy"),
         ];
@@ -756,10 +770,11 @@ mod tests {
             Bundle { _tree: tree, paths }
         }
 
-        fn recipe_pinning(bundle: &Bundle, tampered: Option<ArtifactRole>) -> RuntimeRecipe {
+        fn recipe_pinning(bundle: &Bundle, tampered: &[ArtifactRole]) -> RuntimeRecipe {
             let mut value = recipe_value("/opt/cell/helper");
+            value["libraries"] = serde_json::json!([]);
             for ((role, field, name), (_, path)) in ROLES.iter().zip(&bundle.paths) {
-                let pinned = if Some(*role) == tampered {
+                let pinned = if tampered.contains(role) {
                     Digest::of(b"tampered")
                 } else {
                     Digest::of(name.as_bytes())
@@ -768,11 +783,10 @@ mod tests {
                     "path": path.to_str().expect("UTF-8"),
                     "sha256": pinned.hex(),
                 });
-                value[*field] = if *field == "libraries" {
-                    serde_json::json!([artifact])
-                } else {
-                    artifact
-                };
+                match value[*field].as_array_mut() {
+                    Some(libraries) => libraries.push(artifact),
+                    None => value[*field] = artifact,
+                }
             }
             recipe(&value)
         }
@@ -846,6 +860,56 @@ mod tests {
         }
 
         #[test]
+        fn only_uchg_or_schg_counts_as_immutable() {
+            use libc::{SF_APPEND, SF_IMMUTABLE, UF_APPEND, UF_HIDDEN, UF_IMMUTABLE, UF_NODUMP};
+            for flags in [
+                UF_IMMUTABLE,
+                SF_IMMUTABLE,
+                UF_IMMUTABLE | SF_IMMUTABLE,
+                UF_IMMUTABLE | UF_NODUMP,
+            ] {
+                assert_eq!(judge_flags(flags), Ok(()), "{flags:#x}");
+            }
+            for flags in [0, UF_NODUMP, UF_HIDDEN, UF_APPEND, SF_APPEND] {
+                let refused = Err(ArtifactFault::NotImmutable);
+                assert_eq!(judge_flags(flags), refused, "{flags:#x}");
+            }
+        }
+
+        #[test]
+        fn a_held_writer_rewriting_the_same_bytes_while_the_file_is_hashed_refuses() {
+            let tree = ArtifactTree::new();
+            let bytes = vec![7; 4 << 20];
+            let path = tree.file("rootfs.raw", &bytes, 0o644);
+            let writer = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("a writer opened before the lock");
+            set_mode(&path, 0o444);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            let writing = AtomicBool::new(true);
+            let writes = AtomicUsize::new(0);
+            let outcome = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    while writing.load(Ordering::Relaxed) {
+                        let rewrote = writer.write_all_at(&bytes[..16], 0);
+                        writes.fetch_add(1, Ordering::Relaxed);
+                        if rewrote.is_err() {
+                            break;
+                        }
+                    }
+                });
+                while writes.load(Ordering::Relaxed) == 0 {
+                    std::thread::yield_now();
+                }
+                let outcome = verify_pinned(&path, &Digest::of(&bytes)).map(|_| ());
+                writing.store(false, Ordering::Relaxed);
+                outcome.map_err(|refusal| refusal.fault)
+            });
+            assert_eq!(outcome, Err(ArtifactFault::ChangedWhileHashing));
+        }
+
+        #[test]
         fn an_acl_entry_granting_write_refuses() {
             let tree = ArtifactTree::new();
             let path = tree.file("kernel", b"kernel", 0o444);
@@ -901,6 +965,53 @@ mod tests {
         }
 
         #[test]
+        fn reconfirm_refuses_a_file_whose_uchg_was_cleared_or_that_was_made_writable() {
+            let tree = ArtifactTree::new();
+            let path = tree.immutable_file("kernel", b"kernel");
+            let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
+            set_flags(&path, 0);
+            assert_eq!(reconfirmed(&verified), Err(ArtifactFault::NotImmutable));
+            set_mode(&path, 0o644);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            let writable = ArtifactFault::Writable { mode: 0o644 };
+            assert_eq!(reconfirmed(&verified), Err(writable));
+        }
+
+        #[test]
+        fn reconfirm_refuses_a_parent_made_group_writable() {
+            let tree = ArtifactTree::new();
+            let boot = tree.dir("boot", 0o700);
+            let path = tree.immutable_file("boot/kernel", b"kernel");
+            let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
+            set_mode(&boot, 0o775);
+            assert_eq!(
+                reconfirmed(&verified),
+                Err(ArtifactFault::Walk(WalkRefusal::Replaceable {
+                    path: boot,
+                    mode: 0o775
+                }))
+            );
+        }
+
+        #[test]
+        fn reconfirm_refuses_a_symlinked_parent_even_when_it_reaches_the_same_inode() {
+            let tree = ArtifactTree::new();
+            let boot = tree.dir("boot", 0o700);
+            let other = tree.dir("other", 0o700);
+            let path = tree.file("boot/kernel", b"kernel", 0o444);
+            fs::hard_link(&path, other.join("kernel")).expect("a link made before the lock");
+            set_flags(&path, libc::UF_IMMUTABLE);
+            let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
+            fs::rename(&boot, tree.join("boot.old")).expect("rename");
+            symlink(&other, &boot).expect("symlink");
+            assert_eq!(identity_of(&path), verified.identity());
+            assert_eq!(
+                reconfirmed(&verified),
+                Err(ArtifactFault::Walk(WalkRefusal::Symlink { path: boot }))
+            );
+        }
+
+        #[test]
         fn the_file_reads_the_verified_bytes_after_the_path_names_another_file() {
             let tree = ArtifactTree::new();
             let path = tree.immutable_file("kernel", b"kernel");
@@ -914,7 +1025,7 @@ mod tests {
         #[test]
         fn the_recipe_verifies_every_role_in_field_order_and_holds_each_file_open() {
             let bundle = bundle();
-            let verified = verify_recipe_artifacts(&recipe_pinning(&bundle, None))
+            let verified = verify_recipe_artifacts(&recipe_pinning(&bundle, &[]))
                 .expect("every artifact verifies");
             let all: Vec<&VerifiedArtifact> = [
                 &verified.kernel,
@@ -931,7 +1042,10 @@ mod tests {
                 .map(|artifact| (artifact.role(), artifact.path().as_path().to_path_buf()))
                 .collect();
             assert_eq!(found, bundle.paths);
-            assert_eq!(descriptors_naming(&bundle.identities()).len(), 7);
+            for artifact in &all {
+                assert!(close_on_exec(artifact.file()), "{}", artifact.role());
+            }
+            assert_eq!(descriptors_naming(&bundle.identities()).len(), 8);
             drop(verified);
             assert_eq!(descriptors_naming(&bundle.identities()), Vec::<i32>::new());
         }
@@ -940,7 +1054,7 @@ mod tests {
         fn the_recipe_stops_at_a_tampered_root_image_and_leaves_no_descriptor_open() {
             let bundle = bundle();
             let refusal =
-                verify_recipe_artifacts(&recipe_pinning(&bundle, Some(ArtifactRole::RootImage)))
+                verify_recipe_artifacts(&recipe_pinning(&bundle, &[ArtifactRole::RootImage]))
                     .expect_err("the root image is tampered");
             assert_eq!(refusal.role, ArtifactRole::RootImage);
             assert_eq!(
@@ -951,6 +1065,19 @@ mod tests {
                 }
             );
             assert_eq!(descriptors_naming(&bundle.identities()), Vec::<i32>::new());
+        }
+
+        #[test]
+        fn of_two_tampered_artifacts_the_first_in_field_order_is_reported() {
+            let bundle = bundle();
+            let tampered = [ArtifactRole::GuestPolicy, ArtifactRole::RootImage];
+            let refusal = verify_recipe_artifacts(&recipe_pinning(&bundle, &tampered))
+                .expect_err("two artifacts are tampered");
+            assert_eq!(refusal.role, ArtifactRole::RootImage);
+            let library = [ArtifactRole::Library(1)];
+            let refusal = verify_recipe_artifacts(&recipe_pinning(&bundle, &library))
+                .expect_err("the second library is tampered");
+            assert_eq!(refusal.role, ArtifactRole::Library(1));
         }
     }
 }
