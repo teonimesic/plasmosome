@@ -77,13 +77,18 @@ pub struct ProbeSpec {
     pub workload_set: Vec<String>,
 }
 
-/// One row of the normalization table. [`judge`] replaces each value of `field` in `probe`
-/// with a placeholder of `kind`, numbered within that probe, field and run: by first
-/// appearance, or by order for system times and durations. So equal JSON values stay equal and
-/// distinct ones distinct, within that field only. Two fields are numbered apart, so values
-/// whose relation matters must be in one list field. The field must hold one value of `kind` or
-/// a list of them, or `judge` refuses the runs. No kind holds an object, so no workload-set
-/// field can sit under a ruled field.
+/// One row of the normalization table. In each run, [`judge`] replaces each value of `field` in
+/// `probe` with a placeholder, numbered within that probe and run. A placeholder names `kind`,
+/// such as `<pid:2>`, except that a parent mount ID prints `<mount_id:N>`. A value that names
+/// something, such as a process ID or an inode, is numbered by first appearance across every
+/// field of the probe ruled with its kind, taking the fields in the byte order of their names,
+/// so equal values stay equal and distinct ones distinct, even in two fields. A parent mount ID
+/// is numbered with the mount IDs. A system time is numbered by rank within its field, earliest
+/// first, and equal times share a number. A memory or load counter is numbered by first
+/// appearance within its field. Every duration becomes `<duration>`, with no number, so
+/// durations keep no relation. The field must hold one value of `kind` or a list of them, or
+/// `judge` refuses the runs. No kind holds an object, so no workload-set field can sit under a
+/// ruled field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub probe: String,
@@ -95,9 +100,10 @@ pub struct Rule {
 /// ID, mount ID, parent mount ID, device, inode or memory counter holds a whole number; an
 /// ephemeral port a whole number up to 65535; a system time, duration or load counter any
 /// number; a boot ID a UUID; and a resolved address an IPv4 or IPv6 address. A list of system
-/// times or of durations must not mix integers with numbers held as `f64`: those written with a
-/// fraction or an exponent and, when read from JSON text, `-0` and integers outside the `i64` and
-/// `u64` range. A load counter list may mix, and `5` and `5.0` get two placeholders.
+/// times must not mix integers with numbers held as `f64`: those written with a fraction or an
+/// exponent and, when read from JSON text, `-0` and integers outside the `i64` and `u64` range.
+/// A duration or load counter list may mix, and in a load counter list `5` and `5.0` get two
+/// placeholders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuleKind {
     Pid,
