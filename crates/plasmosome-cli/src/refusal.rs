@@ -38,7 +38,7 @@ pub fn map_refusal(
         PrivateSocketError::BadPath { .. } => match origin {
             PathOrigin::SocketFlag => (
                 ClientCode::InvalidArgument,
-                vec![("argument", text("--socket"))],
+                vec![("argument", text(&checked.to_string_lossy()))],
             ),
             PathOrigin::Home => (ClientCode::InvalidHome, Vec::new()),
         },
