@@ -172,6 +172,9 @@ jobs:
       - name: root image regression
         run: python3 tools/root-image-regression.py
 
+      - name: quickstart regression
+        run: python3 tools/quickstart-regression.py
+
       - name: download pinned beads
         id: beads
         timeout-minutes: 5
