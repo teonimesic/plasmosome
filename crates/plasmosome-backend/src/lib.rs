@@ -17,6 +17,7 @@ pub mod fake;
 pub mod lifetime;
 pub mod paging;
 pub mod recipe;
+pub mod snapshot;
 pub mod software;
 pub mod universe;
 mod wire;
