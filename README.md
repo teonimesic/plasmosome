@@ -171,8 +171,16 @@ for directory in [*reversed(private_base.parents), private_base]:
             f"{directory} has mode {stat.S_IMODE(info.st_mode):04o}: group or other can replace "
             "entries in it"
         )
-if not os.access(private_base, os.W_OK | os.X_OK):
+if not os.access(private_base, os.W_OK | os.X_OK, effective_ids=True):
     refuse_base(f"you cannot create entries in {private_base}")
+if os.statvfs(private_base).f_flag & getattr(os, "ST_NOEXEC", 0):
+    refuse_base(f"{private_base} is on a noexec mount, and the build runs programs from it")
+longest_socket = private_base / "plasmosome-status-XXXXXXXX" / "membrane.uds"
+if len(os.fsencode(longest_socket)) >= 100:
+    refuse_base(
+        f"{private_base} is too long: a socket path such as {longest_socket} must stay under "
+        "100 bytes"
+    )
 print(f"private base: {private_base}")
 
 failure = None
