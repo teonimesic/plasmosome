@@ -154,9 +154,8 @@ impl GrantClosure {
         self.prepare_with(GrantId::new)
     }
 
-    /// Prepares every grant with identities from `next_id`, in attach order. It draws every
-    /// identity before it builds any operation, so a source that fails panics before anything
-    /// is prepared.
+    /// Prepares every grant with identities from `next_id`, in attach order. A source that fails
+    /// panics inside this call, before the caller has recorded or granted anything.
     pub fn prepare_with(self, mut next_id: impl FnMut() -> GrantId) -> Vec<PreparedGrant> {
         let ids: Vec<GrantId> = self.requests.iter().map(|_| next_id()).collect();
         let owner = self.owner;

@@ -23,27 +23,33 @@ returned entry, in the recorded object, or in both, and `snapshot_never_invents_
 reject each. A fourth, `RevokeReturnsAnotherRecipe`, makes a revoke return the issued entry with
 another recipe, and `grant_is_replayable` must reject it.
 
-Six defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
-`GrantReturnsAnotherRecipe`, `GrantRecordsAnotherRecipe`, `RevokeReturnsAStranger` and
-`RevokeReturnsAnotherRecipe`. Their witnesses run each of them once for each of the five classes,
-against `snapshot_never_invents_objects` or `grant_is_replayable`. So those two clauses fail a
-witness if they check only their first grant. Every other defect runs once, and no other clause
-is held to that.
+Seven defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
+`GrantReturnsAnotherRecipe`, `GrantRecordsAnotherRecipe`, `RevokeReturnsAStranger`,
+`RevokeReturnsAnotherRecipe` and `AcceptsInvalidOperationsOf`, which also names the call. Their
+witnesses run each of them once for each of the five classes, against
+`snapshot_never_invents_objects` or `grant_is_replayable`. So those two clauses fail a witness if
+they check only their first grant or only one class of invalid operation. Every other defect runs
+once, and no other clause is held to that.
 
-Callers prepare grants. `GrantClosure` collects one owner's capabilities in attach order, and
-`prepare` draws every identity before it builds any operation. Each `PreparedGrant` therefore
-knows its handle and its inverse, `backend_effect`, before `grant` runs, and an identity source
-that fails panics before any operation exists. `grant_retry_returns_the_original_entry` holds a backend to spec
-017's retry rules: the same standing operation and kind returns the original entry; another kind,
-owner or capability at an issued address, and a grant at an applied or planted address, return
-`IdentityConflict` and change nothing. `fresh_backends_share_no_authority`, and the last step of
-`snapshot_never_invents_objects`, check that a backend fresh from the factory observes nothing an
-earlier instance did, so a backend that keeps its own durable record of grants fails both.
-`snapshot_never_invents_objects` also sends an invalid operation through `grant`, `apply` and
-`plant`, and each must return `InvalidOperation`. A private backend that refuses another launch at
-an occupied broker endpoint, as spec 017 allows a real adapter to do, passes every clause, so the
-relaunched broker in `repeated_grants_are_independently_removable` must keep its own command and
-sockets.
+Callers prepare grants. `GrantClosure` collects one owner's capabilities in attach order. Each
+`PreparedGrant` knows its handle and its inverse, `backend_effect`, before `grant` runs. An
+identity source that fails panics inside `prepare`, before anything is recorded or granted.
+`grant_retry_returns_the_original_entry` holds a backend to spec 017's retry rules. The same
+standing operation and kind returns the original entry. Another kind, owner or capability at an
+issued address returns `IdentityConflict` and changes nothing. A grant at an applied or planted
+address returns `IdentityConflict`, changes nothing and issues no record, whether it carries the
+same payload, another owner or another capability. `fresh_backends_share_no_authority`, and the
+last step of `snapshot_never_invents_objects`, check that a backend fresh from the factory
+observes nothing an earlier instance did, so a backend that keeps its own durable record of grants
+fails both. The first instance then revokes its grants in both orders.
+
+`snapshot_never_invents_objects` also sends an invalid operation of every class through `grant`,
+`apply` and `plant`, each at a fresh address and at an issued one. Each call must return
+`InvalidOperation` and leave the state as it was just before that call. A later check therefore
+cannot hide what an earlier refusal changed, and a refusal that clears what stands at its address
+fails. A private backend that refuses another launch at an occupied broker endpoint, as spec 017
+allows a real adapter to do, passes every clause, so the relaunched broker in
+`repeated_grants_are_independently_removable` must keep its own command and sockets.
 
 A clause earns its place by being watched failing against a backend built to carry the defect it
 names. The suite started at five, and the three added by task 009 came from asking what a broken

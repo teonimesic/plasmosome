@@ -77,7 +77,8 @@ and launch checks itself while it decodes, so decoding names a broken recipe bef
 or name of the same capability, and a zero port before a NUL in its host. The value is refused on
 every path either way.
 The trait's `grant`, `apply` and `plant` refuse an invalid value before any change, with
-`BackendError::InvalidOperation` naming the address and the broken rule; `FakeBackend` does.
+`BackendError::InvalidOperation` naming the address and the broken rule; `FakeBackend` does, at a
+fresh address and at an issued one alike.
 
 A software tree is a plasmid's files, pinned before attach has any effect. `software::pin`
 reads a directory against every file the verified package lists, as spec 020's

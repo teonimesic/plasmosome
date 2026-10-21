@@ -243,9 +243,9 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
 }
 
 /// Checks that snapshots contain every and only requested grant or planted object; that a
-/// grant, apply or plant of an invalid operation returns `InvalidOperation` and changes nothing;
-/// and that a backend fresh from the factory, made after another instance was used, observes
-/// nothing.
+/// grant, apply or plant of an invalid operation of any class, at a fresh address or at an issued
+/// one, returns `InvalidOperation` and leaves the state as it was just before that call; and that
+/// a backend fresh from the factory, made after another instance was used, observes nothing.
 pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut backend = make();
     let mut expected = Vec::new();
@@ -656,8 +656,9 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
 /// Checks, for every sample capability, both kinds and both revoke policies, that a retry of a
 /// standing issued grant returns the original entry and changes nothing; that another kind,
 /// owner or capability at an issued address returns `IdentityConflict` and changes nothing; that
-/// a grant at the address of an applied or planted object returns `IdentityConflict` and issues
-/// no record; and that applying or planting the identical object of a live grant changes
+/// a grant at the address of an applied or planted object, with the identical payload, another
+/// owner or another capability, returns `IdentityConflict`, changes nothing and issues no record;
+/// and that applying or planting the identical object of a live grant changes
 /// nothing, so its revoke still returns the original entry. The clause withdraws one holding and
 /// leaves the rest standing, so it has no withdrawal order to walk.
 pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl Fn() -> B) {
@@ -807,7 +808,7 @@ pub fn grant_retry_returns_the_original_entry<B: EnforcementBackend>(make: impl 
 
 /// Checks that a backend fresh from the factory observes nothing an earlier instance did and
 /// refuses that instance's handles with `UnknownHandle`, even while it holds an equal grant of
-/// its own, and that the earlier instance keeps and can revoke what it granted.
+/// its own, and that the earlier instance keeps what it granted and can revoke it in both orders.
 pub fn fresh_backends_share_no_authority<B: EnforcementBackend>(make: impl Fn() -> B) {
     for (order, drain) in orders()
         .into_iter()
