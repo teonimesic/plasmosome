@@ -4489,10 +4489,9 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 &format!("[mock] stands in for \"x{ESCAPE}y\", which is not a lower-case DNS name"),
             ),
             (
-                format!(
-                    "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
-                     [mock]\nhosts = [\"uploads.github.com\"]"
-                ),
+                "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+                 [mock]\nhosts = [\"uploads.github.com\"]"
+                    .to_string(),
                 "[mock] stands in for \"uploads.github.com\", which [network] does not declare",
             ),
             (
