@@ -8,12 +8,13 @@ intents: [012, 011, 006]
 ## Behavior
 
 A cell uses a credential without ever holding it. The real value stays on the host, in a file the
-operator names. Only the cell's `membraned` reads it, when it applies the grant the credential
-serves. The cell's egress relay then attaches it to requests the relay itself sends to the granted
-destination, and to no others. A component names the credential by its reference and never holds
-more than that name. A workload holds at most a **surrogate**: a random stand-in that works only in
-its own cell's relay, for its own attachment. When the attachment ends, the binding ends with it,
-and nothing the guest holds works any more.
+operator names. Only the cell's `membraned` reads it to use it, when it applies the grant the
+credential serves; the controller only checks it, and drops what it read. The cell's egress relay
+then attaches it to requests the relay itself sends to the granted destination, and to no others.
+A component names the credential by its reference and never holds more than that name. A workload
+holds at most a **surrogate**: a random stand-in that works only in its own cell's relay, for its
+own attachment. When the attachment ends, the binding ends with it, and nothing the guest holds
+works any more.
 
 This is the gap spec 026 names: "A harness that makes its own TLS connections needs the real
 credential in the guest, or an intercepting proxy on the host. Neither is designed."
@@ -193,7 +194,7 @@ attachment. It is a record of the attachment, never of a recipe: spec 008's repl
 - `source`, the secret file's path;
 - `surrogate`, for `inject` only.
 
-It never holds a value, a digest of a value, or anything else computed from one.
+It never holds a value or a digest of one. Only its surrogate's length comes from the value (Q8).
 
 **Why the attachment.** Spec 028 makes the attachment the unit of lifetime: "A lifetime belongs to
 an **attachment**: one plasmid in one cell, one change in spec 008's journal." (`028:41`). Recipes
