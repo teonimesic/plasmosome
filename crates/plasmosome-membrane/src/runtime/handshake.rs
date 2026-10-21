@@ -943,6 +943,7 @@ mod tests {
             shim.request(normal);
         });
         let (clock, flag) = (FakeClock::new(), AtomicBool::new(false));
+        let advance = clock.clone();
         let lane_waited = Rc::new(Cell::new(false));
         let ended = Rc::clone(&lane_waited);
         let listeners = endpoints.listeners();
@@ -960,6 +961,7 @@ mod tests {
             |fd, interest, limit| {
                 if !listeners.contains(&fd) {
                     lane_waited.set(true);
+                    advance.advance(limit);
                 }
                 wait_fd(fd, interest, limit)
             },
@@ -1095,24 +1097,25 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    struct RepliesOnInherited {
+    struct RepliesWhenTold {
+        told: libc::c_int,
         connection: libc::c_int,
         reply: *const u8,
         length: usize,
     }
 
     #[cfg(target_os = "macos")]
-    impl Launch for RepliesOnInherited {
+    impl Launch for RepliesWhenTold {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
-            let mut request = [0u8; 256];
+            let mut byte = [0u8; 1];
             let mut sent = 0;
             // SAFETY: read, write, pause and _exit are async-signal-safe and allocate nothing. read
-            // writes at most 256 bytes into `request`, a local of 256 bytes. Each write reads
-            // bytes `sent..length` of `reply`, a buffer the parent made before the fork, which
-            // this child's copy of the address space still holds.
+            // writes at most one byte into `byte`, a local of one byte. Each write reads bytes
+            // `sent..length` of `reply`, a buffer the parent made before the fork, which this
+            // child's copy of the address space still holds.
             unsafe {
-                if libc::read(self.connection, request.as_mut_ptr().cast(), request.len()) <= 0 {
+                if libc::read(self.told, byte.as_mut_ptr().cast(), 1) != 1 {
                     libc::_exit(1)
                 }
                 while sent < self.length {
@@ -1139,21 +1142,44 @@ mod tests {
         let endpoints = Endpoints::new();
         let connection = UnixStream::connect(endpoints.control_path()).expect("connects");
         let answer = reply(ControlLane::Normal, BOOT, &policy());
-        let child = VmmChild::spawn(RepliesOnInherited {
+        let (told, tell) = std::io::pipe().expect("a pipe is made");
+        let child = VmmChild::spawn(RepliesWhenTold {
+            told: told.as_raw_fd(),
             connection: connection.as_raw_fd(),
             reply: answer.as_ptr(),
             length: answer.len(),
         })
         .expect("the fork succeeds");
-        let flag = AtomicBool::new(false);
+        let (clock, flag) = (FakeClock::new(), AtomicBool::new(false));
+        let advance = clock.clone();
+        let listeners = endpoints.listeners();
+        let mut tell = Some(tell);
+        let result = faked(
+            &endpoints,
+            &clock.budget(&flag),
+            running,
+            clock.now(),
+            |fd, interest, _| {
+                if !listeners.contains(&fd)
+                    && let Some(mut tell) = tell.take()
+                {
+                    tell.write_all(b"g").expect("the child is told to reply");
+                }
+                let ready = wait_fd(fd, interest, PATIENCE)?;
+                if !ready {
+                    advance.set(ALLOWANCE);
+                }
+                Ok(ready)
+            },
+        );
         assert_eq!(
-            real(&endpoints, &flag, running).err(),
+            result.err(),
             Some(HandshakeFailure::ForeignPeer {
                 stage: Stage::NormalReply,
                 expected: this_process(),
                 found: child.pid()
             }),
-            "this process connected, but another process sent the reply"
+            "this process connected, and another process sent the reply after the accept"
         );
         drop(connection);
     }
@@ -1279,6 +1305,7 @@ mod tests {
             "a trickle cannot renew the allowance"
         );
         assert!(clock.elapsed() >= ALLOWANCE);
+        drop(step);
         assert!(closed(shim));
     }
 
@@ -1316,6 +1343,7 @@ mod tests {
             shim.request(normal);
         });
         let (clock, flag) = (FakeClock::new(), AtomicBool::new(false));
+        let advance = clock.clone();
         let listeners = endpoints.listeners();
         let result = faked(
             &endpoints,
@@ -1325,6 +1353,7 @@ mod tests {
             |fd, interest, limit| {
                 if !listeners.contains(&fd) {
                     flag.store(true, Ordering::Relaxed);
+                    advance.advance(limit);
                 }
                 wait_fd(fd, interest, limit)
             },
