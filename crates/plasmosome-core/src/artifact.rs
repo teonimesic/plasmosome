@@ -2,12 +2,12 @@ use std::fmt;
 use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::os::fd::AsFd;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
 use plasmosome_backend::Digest;
 
-use crate::nofollow::{Kind, Reached, Walk, WalkRefusal, acl_grants_write, effective_uid};
+use crate::nofollow::{Facts, Kind, Reached, Walk, WalkRefusal, acl_grants_write, effective_uid};
 use crate::operator::trusted::kind_name;
 use crate::protocol::WireError;
 use crate::runtime::path::RecipePath;
@@ -59,10 +59,11 @@ pub enum ArtifactFault {
 /// or the effective UID, with no write bit at all, no set-user-ID or set-group-ID bit, no ACL
 /// allow entry granting write, and `uchg` or `schg` set. Off macOS, a file that passes every
 /// earlier rule is refused as `ImmutabilityUnverifiable`, because this build cannot verify
-/// immutability there. These are the file rules the membrane repeats at launch. Only then is the
-/// file read, through the descriptor that was checked, and hashed: a file that breaks a rule is
-/// refused, never trusted because its digest matches. The read stops one byte past the size
-/// `fstat` reported at the check, so it ends even when the file grows while it is read.
+/// immutability there. The membrane's launch check calls [`verify_file`] and its `reconfirm` calls
+/// [`check_file`], so these are its file rules too. Only then is the file read, through the
+/// descriptor that was checked, and hashed: a file that breaks a rule is refused, never trusted
+/// because its digest matches. The read stops one byte past the size `fstat` reported at the
+/// check, so it ends even when the file grows while it is read.
 ///
 /// The check records the file's size, modification time and change time when it passes, and
 /// again after the hash, and refuses `ChangedWhileHashing` if any moved, before the digest is
@@ -71,82 +72,161 @@ pub enum ArtifactFault {
 /// A `MAP_SHARED` mapping made before the file was locked, from a descriptor opened for writing,
 /// can change the bytes whatever protection it had when the file was locked, because `mprotect`
 /// can add write later. Such a write moves the times only at `msync` or `munmap`, if at all, so
-/// neither this check nor the membrane's sees it.
+/// neither this check nor the membrane's `reconfirm` sees it.
 ///
 /// A pass describes the file as it was during the check. Whoever opens it later by path must
 /// guard its own open.
 pub fn verify_artifact(artifact: &Artifact) -> Result<(), ArtifactRefusal> {
     let walk = Walk::from_root(artifact.path().as_path())
         .map_err(|refusal| refused(artifact, ArtifactFault::Walk(refusal)))?;
-    verify_walk(walk, artifact)
+    verify_walk(&walk, artifact)
 }
 
-fn verify_walk(walk: Walk, artifact: &Artifact) -> Result<(), ArtifactRefusal> {
-    let path = artifact.path().as_path();
-    open_checked(walk, path)
-        .and_then(|checked| hash_checked(checked, path, artifact.sha256()))
+fn verify_walk(walk: &Walk, artifact: &Artifact) -> Result<(), ArtifactRefusal> {
+    verify_file(walk, artifact.sha256())
+        .map(drop)
         .map_err(|reason| refused(artifact, reason))
 }
 
-struct Checked {
+/// A file that passed [`check_file`]: its open descriptor, what `fstat` on it reported, and its
+/// [`Stamp`] at the check. Only this module makes one, so holding one means the file passed the
+/// rule. The file is open read-only at offset 0. Do not write through it.
+#[derive(Debug)]
+pub struct CheckedFile {
     file: File,
+    facts: Facts,
     stamp: Stamp,
 }
 
+impl CheckedFile {
+    /// The type, owner, mode, device and inode of the file that was checked.
+    pub fn facts(&self) -> Facts {
+        self.facts
+    }
+
+    /// The file's size and times when the check passed.
+    pub fn stamp(&self) -> Stamp {
+        self.stamp
+    }
+
+    /// The descriptor the check went through.
+    pub fn into_file(self) -> File {
+        self.file
+    }
+}
+
+/// A file's size, modification time and change time, as one `fstat` reported them. Two stamps
+/// are equal only when all three are, and that equality is what "unchanged" means to this check
+/// and to the membrane's `reconfirm`. A stamp is a record that a later read is compared with, not
+/// proof that the file passed the rule: only a [`CheckedFile`] is that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Stamp {
+pub struct Stamp {
     size: u64,
     modified: (i64, i64),
     changed: (i64, i64),
 }
 
-fn open_checked(walk: Walk, path: &Path) -> Result<Checked, ArtifactFault> {
+impl Stamp {
+    /// The stamp of what `metadata` reports.
+    pub fn of(metadata: &Metadata) -> Stamp {
+        Stamp {
+            size: metadata.size(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+
+    /// The size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// Opens the file at the end of `walk` and applies the file rules of [`verify_artifact`], in its
+/// order, without the hash: a regular file owned by root or the effective UID, with no write bit,
+/// no set-user-ID or set-group-ID bit, no ACL allow entry granting write, and `uchg` or `schg`
+/// set. The walk's own ancestor rule applies first. Off macOS a file that passes the rest is
+/// refused as `ImmutabilityUnverifiable`.
+///
+/// It returns the open file with its facts and stamp. Its bytes are not read, so a pass says
+/// nothing about what they hash to: use [`verify_file`] for that. A failed `acl` or `fstat` call is
+/// `Walk(Io)` naming the walk's path.
+pub fn check_file(walk: &Walk) -> Result<CheckedFile, ArtifactFault> {
     let euid = effective_uid();
     let opened = walk.open_file(|reached| judge(reached, euid))?;
     let file = File::from(opened.fd);
-    if acl_grants_write(file.as_fd()).map_err(|error| io_fault("acl", path, &error))? {
+    if acl_grants_write(file.as_fd()).map_err(|error| io_fault("acl", &walk.path(), &error))? {
         return Err(ArtifactFault::WriteAcl);
     }
     let metadata = file
         .metadata()
-        .map_err(|error| io_fault("fstat", path, &error))?;
+        .map_err(|error| io_fault("fstat", &walk.path(), &error))?;
     judge_immutability(&metadata)?;
-    Ok(Checked {
-        stamp: stamp(&metadata),
+    Ok(CheckedFile {
+        stamp: Stamp::of(&metadata),
+        facts: opened.facts,
         file,
     })
 }
 
-fn hash_checked(checked: Checked, path: &Path, pinned: &Digest) -> Result<(), ArtifactFault> {
-    let found = digest_checked(&checked, path)?;
+/// [`check_file`], then the hash of [`verify_artifact`]: the file's bytes, read through the checked
+/// descriptor with positioned reads up to one byte past the checked size, must hash to `pinned`,
+/// and its stamp must be the same after the read as at the check, or it is refused as
+/// `ChangedWhileHashing` before the digests are compared. The descriptor's offset stays 0.
+///
+/// On a pass it returns the checked file, its stamp the one taken at the check. A failed `pread`
+/// or `fstat` is `Walk(Io)` naming the walk's path.
+pub fn verify_file(walk: &Walk, pinned: &Digest) -> Result<CheckedFile, ArtifactFault> {
+    let checked = check_file(walk)?;
+    let path = walk.path();
+    hash_checked(checked, &path, pinned, |checked| {
+        digest_checked(checked, &path)
+    })
+}
+
+fn hash_checked(
+    checked: CheckedFile,
+    path: &Path,
+    pinned: &Digest,
+    read: impl FnOnce(&CheckedFile) -> Result<Digest, ArtifactFault>,
+) -> Result<CheckedFile, ArtifactFault> {
+    let found = read(&checked)?;
     let after = checked
         .file
         .metadata()
         .map_err(|error| io_fault("fstat", path, &error))?;
-    judge_unchanged(checked.stamp, stamp(&after))?;
+    judge_unchanged(checked.stamp, Stamp::of(&after))?;
     if found != *pinned {
         return Err(ArtifactFault::Digest { found });
     }
-    Ok(())
+    Ok(checked)
 }
 
-fn digest_checked(checked: &Checked, path: &Path) -> Result<Digest, ArtifactFault> {
-    digest_within(&checked.file, checked.stamp.size).map_err(|error| io_fault("read", path, &error))
+fn digest_checked(checked: &CheckedFile, path: &Path) -> Result<Digest, ArtifactFault> {
+    let reader = Positioned {
+        file: &checked.file,
+        offset: 0,
+    };
+    digest_within(reader, checked.stamp.size).map_err(|error| io_fault("pread", path, &error))
 }
 
-fn stamp(metadata: &Metadata) -> Stamp {
-    Stamp {
-        size: metadata.size(),
-        modified: (metadata.mtime(), metadata.mtime_nsec()),
-        changed: (metadata.ctime(), metadata.ctime_nsec()),
+/// Reads `file` from `offset` with `pread`, moving `offset` past what each read returned. The
+/// descriptor's own offset never moves, so readers of one file do not share an offset.
+pub struct Positioned<'a> {
+    pub file: &'a File,
+    pub offset: u64,
+}
+
+impl Read for Positioned<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.file.read_at(buffer, self.offset)?;
+        self.offset += read as u64;
+        Ok(read)
     }
 }
 
 fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
-    let unchanged = before.size == after.size
-        && before.modified == after.modified
-        && before.changed == after.changed;
-    if unchanged {
+    if before == after {
         Ok(())
     } else {
         Err(ArtifactFault::ChangedWhileHashing)
@@ -299,7 +379,7 @@ mod tests {
     }
 
     fn verify_in(root: &TestRoot, relative: &str, bytes: &[u8]) -> Result<(), ArtifactRefusal> {
-        verify_walk(root.walk(relative), &pinned(&root.join(relative), bytes))
+        verify_walk(&root.walk(relative), &pinned(&root.join(relative), bytes))
     }
 
     fn fault_in(root: &TestRoot, relative: &str, bytes: &[u8]) -> ArtifactFault {
@@ -370,13 +450,28 @@ mod tests {
                 "{kind:?}"
             );
         }
+        for (kind, uid, mode) in [
+            (Kind::Directory, euid, 0o555),
+            (Kind::Other, euid, 0o444),
+            (Kind::Socket, euid, 0o444),
+            (Kind::Symlink, euid, 0o444),
+            (Kind::Other, stranger, 0o666),
+        ] {
+            assert_eq!(
+                reached(&path, kind, uid, mode),
+                Err(NotRegular { kind }),
+                "{kind:?}, uid {uid}, mode {mode:04o}"
+            );
+        }
         for (row, (uid, mode, fault)) in [
             (stranger, 0o444, ForeignOwner { uid: stranger }),
+            (stranger, 0o4777, ForeignOwner { uid: stranger }),
             (stranger, 0o6777, ForeignOwner { uid: stranger }),
             (euid, 0o644, Writable { mode: 0o644 }),
             (euid, 0o755, Writable { mode: 0o755 }),
             (euid, 0o600, Writable { mode: 0o600 }),
             (euid, 0o200, Writable { mode: 0o200 }),
+            (euid, 0o464, Writable { mode: 0o464 }),
             (0, 0o464, Writable { mode: 0o464 }),
             (0, 0o446, Writable { mode: 0o446 }),
             (euid, 0o4755, Writable { mode: 0o4755 }),
@@ -484,7 +579,7 @@ mod tests {
         make_fifo(&fifo);
         let walk = root.walk("lib/fifo");
         let artifact = pinned(&fifo, BYTES);
-        let outcome = within_a_second(&fifo, move || verify_walk(walk, &artifact))
+        let outcome = within_a_second(&fifo, move || verify_walk(&walk, &artifact))
             .expect("a FIFO does not block the check");
         assert_eq!(
             outcome.map_err(|refusal| refusal.reason),
@@ -666,9 +761,7 @@ mod tests {
         use super::*;
         use crate::nofollow::fixtures::{add_acl, set_flags, set_mode};
         use std::fs::{self, OpenOptions};
-        use std::io::Write;
-        use std::os::unix::fs::FileExt;
-        use std::time::Duration;
+        use std::io::{Seek, Write};
 
         fn with_immutable_file(mode: u32) -> TestRoot {
             let root = with_file(mode);
@@ -795,16 +888,84 @@ mod tests {
                 .expect("the file grows by two bytes");
         }
 
-        fn after_the_clock_moves() {
-            std::thread::sleep(Duration::from_millis(20));
+        const CLOCK_PROBE_WRITES: u32 = 100_000;
+
+        fn change_time_after_a_write(probe: &File) -> (i64, i64) {
+            probe
+                .write_all_at(b"tick", 0)
+                .expect("the probe is written");
+            let probed = probe.metadata().expect("fstat");
+            (probed.ctime(), probed.ctime_nsec())
+        }
+
+        fn after_the_clock_passes(root: &TestRoot, stamp: Stamp) {
+            let clock = root.join("clock");
+            write_file(&clock, b"", 0o644);
+            let probe = OpenOptions::new()
+                .write(true)
+                .open(&clock)
+                .expect("the clock probe opens");
+            let mut probed = change_time_after_a_write(&probe);
+            let mut writes = 1;
+            while probed <= stamp.changed {
+                assert!(
+                    writes < CLOCK_PROBE_WRITES,
+                    "the file clock does not move on writes: after {writes} probe writes, far \
+                     more than the one APFS needs, the probe's change time {probed:?} is not past \
+                     the checked change time {:?}",
+                    stamp.changed
+                );
+                probed = change_time_after_a_write(&probe);
+                writes += 1;
+            }
+        }
+
+        fn checked(root: &TestRoot) -> CheckedFile {
+            check_file(&root.walk("lib/membraned")).expect("the file passes the rule")
+        }
+
+        fn hashed(checked: CheckedFile, path: &Path) -> Result<(), ArtifactFault> {
+            hash_checked(checked, path, &Digest::of(BYTES), |checked| {
+                digest_checked(checked, path)
+            })
+            .map(drop)
+        }
+
+        fn locked_with_a_writer(root: &TestRoot) -> File {
+            let path = root.join("lib/membraned");
+            let writer = OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("a writer opened before the file is locked");
+            set_mode(&path, 0o444);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            writer
+        }
+
+        #[test]
+        fn verify_file_returns_the_checked_descriptor_at_offset_0_with_its_facts_and_stamp() {
+            let root = with_immutable_file(0o444);
+            let path = root.join("lib/membraned");
+            let verified = verify_file(&root.walk("lib/membraned"), &Digest::of(BYTES))
+                .expect("the file verifies");
+            let metadata = fs::metadata(&path).expect("stat");
+            let facts = verified.facts();
+            assert_eq!((facts.kind, facts.mode), (Kind::Regular, 0o444));
+            assert_eq!((facts.dev, facts.ino), (metadata.dev(), metadata.ino()));
+            assert_eq!(verified.stamp(), Stamp::of(&metadata));
+            assert_eq!(verified.stamp().size(), BYTES.len() as u64);
+            let mut file = verified.into_file();
+            assert_eq!(file.stream_position().expect("the offset"), 0);
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).expect("read");
+            assert_eq!(bytes, BYTES);
         }
 
         #[test]
         fn the_hash_reads_the_checked_descriptor_and_stops_one_byte_past_the_checked_size() {
             let root = with_immutable_file(0o444);
             let path = root.join("lib/membraned");
-            let checked =
-                open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
+            let checked = checked(&root);
             grow_by_two_bytes(&path);
             write_file(&root.join("lib/other"), b"another file", 0o444);
             fs::rename(root.join("lib/other"), &path).expect("another file takes the path");
@@ -818,20 +979,40 @@ mod tests {
         fn a_held_writer_rewriting_the_same_bytes_after_the_check_is_refused_as_changed() {
             let root = with_file(0o644);
             let path = root.join("lib/membraned");
-            let writer = OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .expect("a writer opened before the file is locked");
-            set_mode(&path, 0o444);
-            set_flags(&path, libc::UF_IMMUTABLE);
-            let checked = open_checked(root.walk("lib/membraned"), &path)
-                .expect("the locked file passes the rule");
-            after_the_clock_moves();
+            let writer = locked_with_a_writer(&root);
+            let checked = checked(&root);
+            after_the_clock_passes(&root, checked.stamp());
             writer
                 .write_all_at(BYTES, 0)
                 .expect("the held writer still writes under uchg");
             assert_eq!(
-                hash_checked(checked, &path, &Digest::of(BYTES)),
+                hashed(checked, &path),
+                Err(ArtifactFault::ChangedWhileHashing)
+            );
+        }
+
+        #[test]
+        fn a_held_writer_rewriting_the_same_bytes_inside_the_read_step_is_refused_as_changed() {
+            let root = with_file(0o644);
+            let path = root.join("lib/membraned");
+            let writer = locked_with_a_writer(&root);
+            assert_eq!(
+                hashed(checked(&root), &path),
+                Ok(()),
+                "with no write it verifies"
+            );
+            let checked = checked(&root);
+            let stamp = checked.stamp();
+            let rewriting = |checked: &CheckedFile| {
+                let found = digest_checked(checked, &path);
+                after_the_clock_passes(&root, stamp);
+                writer
+                    .write_all_at(BYTES, 0)
+                    .expect("the held writer still writes under uchg");
+                found
+            };
+            assert_eq!(
+                hash_checked(checked, &path, &Digest::of(BYTES), rewriting).map(drop),
                 Err(ArtifactFault::ChangedWhileHashing)
             );
         }
@@ -840,8 +1021,7 @@ mod tests {
         fn clearing_and_resetting_uchg_after_the_check_moves_only_ctime_and_is_refused() {
             let root = with_immutable_file(0o444);
             let path = root.join("lib/membraned");
-            let checked =
-                open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
+            let checked = checked(&root);
             let times = |path: &Path| {
                 let metadata = fs::metadata(path).expect("the file is still there");
                 (
@@ -850,13 +1030,13 @@ mod tests {
                 )
             };
             let (kept, changed) = times(&path);
-            after_the_clock_moves();
+            after_the_clock_passes(&root, checked.stamp());
             set_flags(&path, 0);
             set_flags(&path, libc::UF_IMMUTABLE);
             assert_eq!(times(&path).0, kept, "the size and the mtime stay");
             assert_ne!(times(&path).1, changed, "the ctime moves");
             assert_eq!(
-                hash_checked(checked, &path, &Digest::of(BYTES)),
+                hashed(checked, &path),
                 Err(ArtifactFault::ChangedWhileHashing)
             );
         }
@@ -865,11 +1045,10 @@ mod tests {
         fn a_file_that_grew_after_the_check_is_refused_as_changed_before_its_digest_is_compared() {
             let root = with_immutable_file(0o444);
             let path = root.join("lib/membraned");
-            let checked =
-                open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
+            let checked = checked(&root);
             grow_by_two_bytes(&path);
             assert_eq!(
-                hash_checked(checked, &path, &Digest::of(BYTES)),
+                hashed(checked, &path),
                 Err(ArtifactFault::ChangedWhileHashing)
             );
         }
@@ -878,12 +1057,11 @@ mod tests {
         fn a_path_that_names_another_file_after_the_check_leaves_the_checked_file_verified() {
             let root = with_immutable_file(0o444);
             let path = root.join("lib/membraned");
-            let checked =
-                open_checked(root.walk("lib/membraned"), &path).expect("the file passes the rule");
+            let checked = checked(&root);
             fs::rename(root.join("lib"), root.join("lib.old")).expect("the directory moves away");
             make_dir(&root.join("lib"), 0o755);
             write_file(&path, b"another file", 0o444);
-            assert_eq!(hash_checked(checked, &path, &Digest::of(BYTES)), Ok(()));
+            assert_eq!(hashed(checked, &path), Ok(()));
         }
     }
 }
