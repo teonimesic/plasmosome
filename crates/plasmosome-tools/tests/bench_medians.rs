@@ -107,17 +107,101 @@ fn a_median_prints_as_python_prints_it() {
         ("1234", "1234.000000"),
         ("-0.0", "-0.000000"),
         ("1e30", "1000000000000000019884624838656.000000"),
+        (
+            "123456789012345678901234567890",
+            "123456789012345677877719597056.000000",
+        ),
+        ("9007199254740993", "9007199254740992.000000"),
+    ] {
+        assert_eq!(printed_for(median), printed, "{median}");
+    }
+}
+
+/// Each median is the text serde_json writes for a double, as criterion writes it, and that double
+/// lies beside a tie at the sixth decimal. serde_json's own conversion, without its
+/// `float_roundtrip` feature, reads each of these one double away, on the tie's other side.
+#[test]
+fn a_median_beside_a_sixth_decimal_tie_prints_as_python_prints_it() {
+    let wrong: Vec<String> = [
+        ("1198.8574505000001", "1198.857451"),
+        ("22717.054650500002", "22717.054651"),
+        ("97027.32520050001", "97027.325201"),
+        ("29191.989560500002", "29191.989561"),
+        ("1927.6589004999998", "1927.658900"),
+        ("260176.12600050002", "260176.126001"),
+        ("941874.4580005001", "941874.458001"),
+        ("32365.932700499998", "32365.932700"),
+        ("14173757.850406501", "14173757.850407"),
+        ("927669.9315965001", "927669.931597"),
+        ("9198282.690333499", "9198282.690333"),
+    ]
+    .into_iter()
+    .filter_map(|(median, printed)| {
+        let got = printed_for(median);
+        (got != printed).then(|| format!("{median} printed {got}, not {printed}"))
+    })
+    .collect();
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// Python reads a number with no fraction or exponent as an `int`, which has no negative zero, and
+/// every other number as a float, which keeps the sign.
+#[test]
+fn only_the_integer_zero_loses_its_sign() {
+    for (median, printed) in [
+        ("-0", "0.000000"),
+        ("0", "0.000000"),
+        ("-0e0", "-0.000000"),
+        ("-0E0", "-0.000000"),
+        ("-0E+0", "-0.000000"),
+        ("-0.0e0", "-0.000000"),
+        ("-1e-400", "-0.000000"),
+    ] {
+        assert_eq!(printed_for(median), printed, "{median}");
+    }
+}
+
+#[test]
+fn a_repeated_key_is_read_at_its_last_value() {
+    for (text, printed) in [
+        (
+            "{\"median\":{\"point_estimate\":\"1.5\"},\"median\":{\"point_estimate\":2.5}}",
+            "2.500000",
+        ),
+        (
+            "{\"median\":{\"point_estimate\":1.5,\"point_estimate\":0.25}}",
+            "0.250000",
+        ),
     ] {
         let criterion = criterion();
-        write_estimates(criterion.path(), "manifest_parse", &estimates(median));
-        let summary = criterion.path().join("summary.md");
+        write_estimates(criterion.path(), "manifest_parse", text);
 
-        let outcome = run_on(criterion.path(), Some(&summary));
-
-        assert_eq!(outcome.code, 0, "{median}: {}", outcome.err);
-        let line = format!("- `manifest_parse` {printed} ns\n");
-        assert!(outcome.out.contains(&line), "{median}: {}", outcome.out);
+        assert_eq!(printed_of(criterion.path()), printed, "{text}");
     }
+}
+
+/// What the tool prints as `manifest_parse`'s median when its `estimates.json` holds `median`.
+fn printed_for(median: &str) -> String {
+    let criterion = criterion();
+    write_estimates(criterion.path(), "manifest_parse", &estimates(median));
+    printed_of(criterion.path())
+}
+
+/// What the tool prints as `manifest_parse`'s median from `root`, or how it failed.
+fn printed_of(root: &Path) -> String {
+    let outcome = run_on(root, Some(&root.join("summary.md")));
+    if outcome.code != 0 {
+        return format!("exit {}: {}", outcome.code, outcome.err);
+    }
+    outcome
+        .out
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("- `manifest_parse` ")?
+                .strip_suffix(" ns")
+        })
+        .unwrap_or("no manifest_parse line")
+        .to_owned()
 }
 
 #[test]
