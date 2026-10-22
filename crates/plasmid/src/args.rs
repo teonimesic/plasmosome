@@ -2,6 +2,7 @@ use std::ffi::{OsStr, OsString};
 
 use crate::envelope::{Form, Refusal};
 use crate::help;
+use crate::values::{MAX_DEADLINE_MS, is_deadline_ms, is_instance_name, is_normal_absolute};
 
 const SHORT_HELP: &str = "-h";
 
@@ -13,20 +14,24 @@ const JSON: &str = "--json";
 
 const HUMAN: &str = "--human";
 
-const VALUE_FLAGS: [&str; 3] = ["--kernel", "--socket", "--deadline-ms"];
+const KERNEL: &str = "--kernel";
 
-const FLAGS: [&str; 5] = ["--kernel", "--socket", "--deadline-ms", JSON, HUMAN];
+const SOCKET: &str = "--socket";
+
+const DEADLINE: &str = "--deadline-ms";
+
+const VALUE_FLAGS: [&str; 3] = [KERNEL, SOCKET, DEADLINE];
+
+const FLAGS: [&str; 5] = [KERNEL, SOCKET, DEADLINE, JSON, HUMAN];
 
 const KNOWN_FLAGS: [&str; 8] = [
-    "--kernel",
-    "--socket",
-    "--deadline-ms",
-    JSON,
-    HUMAN,
-    SHORT_HELP,
-    HELP,
-    VERSION,
+    KERNEL, SOCKET, DEADLINE, JSON, HUMAN, SHORT_HELP, HELP, VERSION,
 ];
+
+const NAME_RULE: &str = "an instance name is not empty, `.` or `..`, and holds no `/`, backslash, \
+                         NUL or terminal control";
+
+const PATH_RULE: &str = "a socket path is absolute, with no empty, `.` or `..` component";
 
 const NAME_LIMIT: usize = 64;
 
@@ -298,7 +303,7 @@ impl<'a> Line<'a> {
         let mut seen: Vec<&str> = Vec::new();
         let mut at_command = false;
         let mut name: Option<&'a str> = None;
-        for &(kind, argument) in &self.head {
+        for (index, &(kind, argument)) in self.head.iter().enumerate() {
             let Some(text) = argument.to_str() else {
                 return self.usage(
                     format!(
@@ -309,7 +314,11 @@ impl<'a> Line<'a> {
                 );
             };
             match (kind, command) {
-                (Kind::Value, _) => {}
+                (Kind::Value, _) => {
+                    if let Some(fault) = self.value_fault(self.head[index - 1].1, text) {
+                        return fault;
+                    }
+                }
                 (Kind::Flag, _) if !FLAGS.contains(&text) => {
                     return self.usage(
                         format!("unknown flag `{text}`; see plasmid --help"),
@@ -352,6 +361,25 @@ impl<'a> Line<'a> {
             ),
             (Some(_), Some(name)) => Reading::New(name),
         }
+    }
+
+    fn value_fault(&self, flag: &OsStr, value: &str) -> Option<Reading<'a>> {
+        let rule = if flag == KERNEL && !is_instance_name(value) {
+            NAME_RULE.to_string()
+        } else if flag == SOCKET && !is_normal_absolute(value) {
+            PATH_RULE.to_string()
+        } else if flag == DEADLINE && !is_deadline_ms(value) {
+            format!("a deadline is an integer from 1 to {MAX_DEADLINE_MS}")
+        } else {
+            return None;
+        };
+        Some(self.usage(
+            format!(
+                "`{value}` is refused for {}: {rule}",
+                flag.to_string_lossy()
+            ),
+            Some(OsStr::new(value)),
+        ))
     }
 
     fn missing_value(&self) -> Option<Reading<'a>> {
