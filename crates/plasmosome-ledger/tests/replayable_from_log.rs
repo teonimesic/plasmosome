@@ -2,11 +2,14 @@ use std::io::Write;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    BrokerLaunch, Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend,
-    FileAccess, GrantId, GrantKind, LedgerEntry, MountRecipe, PluginId, ProxyRecipe,
-    ProxyTransport, SessionFileRecipe, UdsRecipe, UniverseClass, UniverseOp, UniverseRemoval,
+    BackendError, BrokerLaunch, Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend,
+    EnforcementSnapshot, FakeBackend, FileAccess, GrantId, GrantKind, IncompleteEffect,
+    LedgerEntry, MountRecipe, OsState, PluginId, ProxyRecipe, ProxyTransport, SessionFileRecipe,
+    UdsRecipe, UniverseClass, UniverseOp, UniverseRemoval,
 };
-use plasmosome_ledger::{Closure, Effect, Inverse, InverseVia, Ledger, LogRecord, Reversibility};
+use plasmosome_ledger::{
+    Closure, DetachError, Effect, Inverse, InverseVia, Ledger, LogRecord, Reversibility,
+};
 
 fn cell() -> CellId {
     CellId::from("cell-1")
@@ -1276,4 +1279,74 @@ fn append_to_file_reads_and_checks_the_whole_of_a_long_target() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("on line 1:"), "{error}");
     assert_eq!(std::fs::read(&refused).unwrap(), bytes);
+}
+
+#[test]
+fn a_detach_interrupted_by_a_failed_withdrawal_keeps_its_cursor_and_a_retry_empties_the_account() {
+    let drain = DrainSpec::graceful(Duration::from_millis(50));
+    for through_handles in [false, true] {
+        for armed_first in [true, false] {
+            let mut backend = FakeBackend::new();
+            let capability = uds_socket("/run/plasmosome/egressd.uds");
+            let operations: Vec<UniverseOp> = (0..2)
+                .map(|_| op(GrantId::new(), cell_owner("network"), capability.clone()))
+                .collect();
+            let mut ledger = Ledger::new("network");
+            let mut records = Vec::new();
+            for (operation, description) in operations.iter().zip(["first socket", "second socket"])
+            {
+                let via = if through_handles {
+                    let entry = backend.grant(operation.clone(), GrantKind::Hot).unwrap();
+                    records.push(entry.clone());
+                    InverseVia::Backend(entry.handle)
+                } else {
+                    backend.apply(operation.clone()).unwrap();
+                    InverseVia::Universe(operation.removal())
+                };
+                ledger.push(Effect::exact(description, via));
+            }
+            let (armed, peer) = if armed_first { (1, 0) } else { (0, 1) };
+            backend.fail_next_withdrawal(operations[armed].handle(), "relay end still open");
+            let Closure::ExternalFree(mut sealed) = ledger.close() else {
+                panic!("exact effects close external-free");
+            };
+            let stopped = sealed.detach(&mut backend, &cell(), drain).unwrap_err();
+            assert!(
+                matches!(
+                    &stopped,
+                    DetachError::Backend(BackendError::IncompleteEffect { class, id, .. })
+                        if *class == UniverseClass::UdsPath.as_str() && *id == operations[armed].id()
+                ),
+                "{stopped}"
+            );
+            let mut standing = OsState::new();
+            if armed_first {
+                standing.insert(operations[peer].object()).unwrap();
+            } else {
+                records.retain(|record| record.handle == operations[armed].handle());
+            }
+            let interrupted = backend.snapshot_os_state().unwrap();
+            assert_eq!(
+                interrupted,
+                EnforcementSnapshot::new(
+                    standing,
+                    records,
+                    vec![IncompleteEffect {
+                        operation: operations[armed].clone()
+                    }],
+                )
+                .unwrap(),
+                "handles {through_handles}, armed first {armed_first}"
+            );
+            assert!(!interrupted.is_empty());
+            let resumed = sealed.detach(&mut backend, &cell(), drain).unwrap();
+            let expected = if armed_first {
+                vec!["second socket", "first socket"]
+            } else {
+                vec!["first socket"]
+            };
+            assert_eq!(resumed.replayed, expected);
+            assert!(backend.snapshot_os_state().unwrap().is_empty());
+        }
+    }
 }
