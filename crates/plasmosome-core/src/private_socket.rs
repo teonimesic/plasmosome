@@ -201,15 +201,27 @@ fn gone_or_failed(errno: i32) -> RemoveOutcome {
 impl PrivateListener {
     /// Binds `name` inside `dir` for peers whose effective UID is `trusted_uid`. Production
     /// passes `effective_uid()`; a test passes another value to force a real mismatch. `name` is
-    /// one path component. Any existing entry at the name is refused and left untouched. `dir`
-    /// is walked and judged again before the socket is created, and again after it is bound; if
-    /// that second check fails, its error is returned and the socket at the name in the held
-    /// directory is removed, but only if the effective UID owns it. `BindEscaped` means no
-    /// socket owned by the effective UID is at the name in the held directory after bind. The
-    /// socket is owned by the effective UID and set to mode 0600 before it listens; umask plays
-    /// no part. The listener is nonblocking. A caller that forks from another thread must hold
-    /// its descriptor lock around this call, because on macOS the socket is created before it
-    /// is marked close-on-exec.
+    /// one path component. Any existing entry at the name is refused and left untouched.
+    ///
+    /// The socket is bound at a temporary name in `dir`, owned by the effective UID, set to mode
+    /// 0600, made listening and nonblocking there, and only then renamed to `name` by a rename
+    /// that never replaces an entry. So a client that finds `name` finds a 0600 socket that
+    /// accepts; umask plays no part. An entry that appears at `name` during the call is
+    /// `AddressInUse` and is left as it was. The temporary is `.` and then up to 15 characters
+    /// from `0-9a-z`, as many as the socket address has room for, or one such character when one
+    /// byte is left. A temporary that is taken, or that equals `name` ignoring ASCII case, is
+    /// drawn again, eight draws in all; then the result is `Io` from `bind` with `EADDRINUSE`.
+    ///
+    /// `dir` is walked and judged again before the socket is created, and again after it is
+    /// bound; if that second check fails, its error is returned and the socket at the temporary
+    /// name in the held directory is removed, but only if the effective UID owns it.
+    /// `BindEscaped` means no socket owned by the effective UID is at the temporary name in the
+    /// held directory after bind. `PathTooLong` and `AddressInUse` name `name`'s path; errors
+    /// after the bind name the temporary's path. A hard exit before the rename leaves the
+    /// temporary, which nothing removes. The socket's own address, as `getsockname` reports it,
+    /// is the temporary name. A caller that forks from another thread must hold its descriptor
+    /// lock around this call, because on macOS the socket is created before it is marked
+    /// close-on-exec.
     pub fn bind(
         dir: PrivateDir,
         name: &str,

@@ -165,10 +165,16 @@ socket's name in the directory it opened and checked at start, which it holds op
 the identity only of a socket its effective UID owns, and if that directory is renamed while it
 runs, teardown removes the socket under the directory's new name and leaves whatever is then at
 the configured path. A `plasmosomed` start that fails at any step after the capture removes the
-just-bound socket as any later error does. Those steps are, in order, the repeated path check, the
-change to mode 0600, the re-inspection of the socket after that change, `listen`, and the switch
-to nonblocking. Amended on 2026-10-20: this paragraph said each daemon removes the configured
-path, and described only `membraned`'s capture and teardown.
+just-bound socket as any later error does. Until those steps finish, the socket is bound at a
+temporary name in that directory, not at the configured name. Those steps are, in order, the
+repeated path check, the change to mode 0600, the re-inspection of the socket after that change,
+`listen`, the switch to nonblocking, and the move from the temporary name to the configured name.
+The move never replaces an entry: one already there is refused and left as it was. Amended on
+2026-10-20: this paragraph said each daemon removes the configured path, and described only
+`membraned`'s capture and teardown. Amended on 2026-10-21: this read "Those steps are, in order,
+the repeated path check, the change to mode 0600, the re-inspection of the socket after that
+change, `listen`, and the switch to nonblocking."; the steps ended at the switch to nonblocking,
+and the socket was bound at the configured name.
 
 These are host-conditioned guarantees, not race-free protection. The caller supplies a trusted,
 stable directory and coordinated namespace writers: parent, ancestors and their symlink targets
@@ -178,7 +184,10 @@ included. The final inspect-then-unlink pair is two steps, not one atomic one. D
 distinguishes a later socket at the same name only while the original inode stays allocated;
 the file-type check still rejects regular files and symlinks even if inode numbers are recycled.
 `SIGKILL` and equivalent hard exits run no destructor; the resulting residue is observed by the
-next start's refusal, not prevented, and no verb observes or repairs it.
+next start's refusal, not prevented, and no verb observes or repairs it. A hard exit while
+`plasmosomed`'s socket still has its temporary name leaves it under that name, which no start
+refuses and nothing removes. Amended on 2026-10-21: this paragraph ended at "no verb observes or
+repairs it.", and did not cover a hard exit before the socket reaches its configured name.
 
 `plasmosomed`'s control socket is held to a stricter rule: it is bound under §4.1's path
 boundary for private sockets. The daemon refuses to start when the configured path fails that
@@ -1070,14 +1079,18 @@ Recovery sockets are restricted to the instance's trusted host UID: the controll
 membranes run under that same effective UID. Before binding, the membrane opens and validates
 the socket's private parent directory without following symlinks: it is owned by that UID,
 mode0700, with no ACL granting access to another principal. Ancestors cannot be replaced by
-an untrusted principal. The bound socket is owned by that UID and mode0600 before listening;
+an untrusted principal. The bound socket is owned by that UID, mode 0600 and listening before it
+appears at its configured name, so a client that finds the name finds a socket it may connect to;
 umask alone is not the boundary. An existing unsafe directory/socket is refused, not silently
 adopted, chmodded or unlinked. The controller validates this same path boundary before connecting.
 Both endpoints obtain the connected peer's effective UID from the kernel (`getpeereid` on
 macOS, `SO_PEERCRED` on Linux) and require it to equal their own. Missing credentials, a mismatch,
 or failure to establish the path boundary closes/refuses the connection before request parsing,
 method dispatch or trusting a response. No recovery result is returned on an unauthorized
-connection. Client-supplied cell, PID, operator or UID fields are not authentication.
+connection. Client-supplied cell, PID, operator or UID fields are not authentication. Amended on
+2026-10-21: this read "The bound socket is owned by that UID and mode0600 before listening; umask
+alone is not the boundary.", which said only that the socket is mode 0600 before listening, so a
+client could find it at its name before it was either.
 
 Processes under that host UID, and host root, are inside the trusted boundary; this is not
 protection against their compromise or a multi-user authorization service. A cell workload must
