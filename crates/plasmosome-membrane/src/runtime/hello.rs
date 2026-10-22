@@ -1,19 +1,9 @@
 use super::digest::{Digest, DigestError};
 use super::strict_json::{StrictJsonError, parse_value};
+pub use plasmosome_backend::guest_protocol::{BootToken, BootTokenError, ControlLane};
 use serde_json::{Map, Value};
 
 const GUEST_TEXT_LIMIT: usize = 1024;
-
-/// One of the two connections the guest shim opens to the host's 4090
-/// control port. The shim opens the normal lane first and the withdrawal lane
-/// after the normal lane's hello.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ControlLane {
-    /// The lane that carries every 4090 verb.
-    Normal,
-    /// The prioritized lane that admits only hello, observe and remove.
-    Withdrawal,
-}
 
 /// The hello request line the host writes on `lane`, ending in one newline.
 ///
@@ -38,56 +28,6 @@ pub fn request_id(lane: ControlLane) -> u64 {
         ControlLane::Withdrawal => 2,
     }
 }
-
-/// The guest's boot token: 32 random bytes the shim draws once per boot and
-/// returns on both lanes as 64 lowercase hexadecimal digits.
-///
-/// `Debug` prints those 64 digits.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct BootToken([u8; 32]);
-
-/// Why a text is not a boot token. It holds the same fault a digest's text
-/// can have, but describes it as a boot token's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BootTokenError(pub DigestError);
-
-impl BootToken {
-    /// Reads exactly 64 lowercase hexadecimal digits. Uppercase digits, any
-    /// other byte and any other length are refused with the first fault.
-    pub fn parse_hex(text: &str) -> Result<BootToken, BootTokenError> {
-        Digest::parse_hex(text)
-            .map(|digest| BootToken(*digest.as_bytes()))
-            .map_err(BootTokenError)
-    }
-
-    /// The 64 lowercase hexadecimal digits.
-    pub fn hex(&self) -> String {
-        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
-}
-
-impl std::fmt::Debug for BootToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.hex())
-    }
-}
-
-impl std::fmt::Display for BootTokenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            DigestError::WrongLength { bytes } => write!(
-                f,
-                "a boot token is 64 lowercase hexadecimal digits, not {bytes} bytes"
-            ),
-            DigestError::NotLowercaseHex { at } => write!(
-                f,
-                "byte {at} of a boot token is not a lowercase hexadecimal digit"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for BootTokenError {}
 
 /// Why a hello reply was refused.
 ///
@@ -424,6 +364,25 @@ mod tests {
         }
         assert_eq!(request_id(ControlLane::Normal), 1);
         assert_eq!(request_id(ControlLane::Withdrawal), 2);
+    }
+
+    #[test]
+    fn the_shared_envelope_writes_and_reads_the_hello_requests_unchanged() {
+        use plasmosome_backend::guest_protocol::{RequestId, encode_request, split_request};
+        for lane in LANES {
+            let mut encoded = encode_request(request_id(lane), "hello", &json!({"lane": lane}));
+            encoded.push(b'\n');
+            assert_eq!(encoded, hello_request(lane), "{lane:?}");
+            let line = hello_request(lane);
+            let (id, method, params) =
+                split_request(&line[..line.len() - 1]).expect("the shim reads the hello request");
+            assert_eq!(id, RequestId::number(request_id(lane)));
+            assert_eq!(method, "hello");
+            let decoded: Value = serde_json::from_str(params.get()).expect("params are JSON");
+            let named: ControlLane =
+                serde_json::from_value(decoded["lane"].clone()).expect("the lane decodes");
+            assert_eq!(named, lane);
+        }
     }
 
     #[test]
