@@ -6524,10 +6524,12 @@ mod tests {
         let (_dir, root) = temp_root();
         let dir = opened(&root, "cell-1");
         let path = lock_path(&root);
-        let temporary = lock_temporary_path(&root);
+        let mut swap = Some(lock_temporary_path(&root));
         on_naming_the_lock(move || {
-            fs::remove_file(&temporary).expect("this call's temporary is removed");
-            fs::File::create(&temporary).expect("a second creator's file is made");
+            if let Some(temporary) = swap.take() {
+                fs::remove_file(&temporary).expect("this call's temporary is removed");
+                fs::File::create(&temporary).expect("a second creator's file is made");
+            }
         });
         let test = dir.test_supervisor_lock();
         assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
@@ -6549,6 +6551,9 @@ mod tests {
         let racer = Rc::new(RefCell::new(None));
         let (kept, planted) = (Rc::clone(&racer), path.clone());
         on_naming_the_lock(move || {
+            if kept.borrow().is_some() {
+                return;
+            }
             let file = fs::File::create(&planted).expect("a file is planted at the name");
             lock_exclusive_nonblocking(file.as_fd()).expect("the planter locks its file");
             *kept.borrow_mut() = Some(file);
@@ -6569,6 +6574,31 @@ mod tests {
         );
         assert!(!exists(&lock_temporary_path(&root)));
         drop(planter);
+    }
+
+    #[test]
+    fn a_temporary_named_by_a_second_creator_makes_a_missing_lock_untestable() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        let mut rename = Some((lock_temporary_path(&root), path.clone()));
+        on_naming_the_lock(move || {
+            if let Some((temporary, lock)) = rename.take() {
+                fs::rename(&temporary, &lock).expect("a second creator names the temporary");
+            }
+        });
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(test, LockTest::Untestable(CellDirError::Io { path: named, source }) => {
+            assert_eq!(named, path);
+            assert_eq!(source.kind(), io::ErrorKind::NotFound, "{source}");
+        });
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("the second creator's rename left a file at the name")
+                .is_file()
+        );
+        assert!(!exists(&lock_temporary_path(&root)));
     }
 
     #[test]
