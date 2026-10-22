@@ -105,7 +105,7 @@ fn plasmosome(line: &[OsString]) -> Run {
 fn is_terminal_control(character: char) -> bool {
     matches!(
         u32::from(character),
-        0x00..=0x1f | 0x7f..=0x9f | 0x202a..=0x202e | 0x2066..=0x2069
+        0x00..=0x1f | 0x7f..=0x9f | 0x061c | 0x200e..=0x200f | 0x202a..=0x202e | 0x2066..=0x2069
     )
 }
 
@@ -346,7 +346,7 @@ fn edges() -> Vec<Row> {
     let owned = |values: &[&str]| values.iter().map(|value| value.to_string()).collect();
     let mut kernel_refused: Vec<String> = owned(&[".", "..", "a/b"]);
     kernel_refused.push(format!("a{}b", char::from(0x5c_u8)));
-    kernel_refused.extend([0x1b, 0x7f, 0x9b, 0x202e, 0x2066].map(around));
+    kernel_refused.extend([0x1b, 0x7f, 0x9b, 0x200e, 0x202e, 0x2066].map(around));
     let mut kernel_accepted: Vec<String> = owned(&["work", "Work_1", "...", "-x"]);
     kernel_accepted.push(around(0x2028));
     kernel_accepted.push("a".repeat(200));
@@ -444,8 +444,8 @@ fn plasmid_and_plasmosome_name_the_same_argument_on_every_line() {
         .collect();
     assert_eq!(
         rows.len(),
-        72,
-        "the design's 69 lines, --kernel -- --help, a 200-byte name and the socket path //a"
+        73,
+        "the design's 69 lines, --kernel -- --help, a 200-byte name, socket path //a, a U+200E name"
     );
     let mut differ = Vec::new();
     for row in &rows {
