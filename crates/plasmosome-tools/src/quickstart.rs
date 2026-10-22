@@ -150,8 +150,8 @@ impl Host for System {
     }
 }
 
-/// Checks `base` as the README's quickstart does before it builds, in the same order, then makes
-/// the private directory the quickstart keeps its files in.
+/// Checks `base` with the README quickstart's checks and refusal lines, in its order except that
+/// the write check comes last, then makes the private directory the quickstart keeps its files in.
 ///
 /// `base` must be absolute, with no link in it, as `std::fs::canonicalize` returns it. The checks,
 /// in order: its path is UTF-8; `/`, each directory below it and `base` itself is a directory, not
@@ -222,9 +222,8 @@ pub fn check_base(base: &Path, host: &dyn Host) -> Result<PathBuf, Refusal> {
 /// `mountinfo`, a file in the format of `/proc/self/mountinfo`.
 ///
 /// The mount is the one whose mount point is the longest whole-component prefix of `base`; of two
-/// on the same point, the later line, which is mounted on top. `Err` says why it cannot tell: the
-/// file cannot be read or is over [`MOUNTINFO_LIMIT`], a line has fewer than six fields, or no
-/// mount holds `base`.
+/// on the same point, the later line. `Err` says why it cannot tell: the file cannot be read or is
+/// over [`MOUNTINFO_LIMIT`], a line has fewer than six fields, or no mount holds `base`.
 pub fn noexec_in(mountinfo: &Path, base: &Path) -> Result<bool, String> {
     let shown = mountinfo.display();
     let mut bytes = Vec::new();

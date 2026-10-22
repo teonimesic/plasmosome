@@ -172,7 +172,7 @@ fn passes(base: &Path, host: &dyn Host) {
     );
     let metadata = std::fs::symlink_metadata(&made).expect("the directory is made");
     assert!(
-        metadata.is_dir() && metadata.mode() & 0o077 == 0,
+        metadata.is_dir() && metadata.mode() & 0o777 == 0o700,
         "{metadata:?}"
     );
     assert!(made.join("membrane.uds").as_os_str().len() < 100);
@@ -383,6 +383,27 @@ fn the_noexec_answer_comes_before_the_length() {
         ..fake(euid())
     };
     refused(&base.0, &noexec(&base.0), &host);
+}
+
+#[test]
+fn the_directory_chain_comes_before_the_noexec_answer() {
+    let base = base_of(LONGEST_BASE, 0o770, true, "");
+    let host = Fake {
+        noexec: Some(base.0.clone()),
+        ..fake(euid())
+    };
+    let reason = format!(
+        "{} has mode 0770: group or other can replace entries in it",
+        base.0.display()
+    );
+    refused(&base.0, &reason, &host);
+}
+
+#[test]
+fn a_file_others_can_write_is_refused_as_not_a_directory() {
+    let base = base_of(LONGEST_BASE, 0o666, false, "");
+    let reason = format!("{} is not a directory", base.0.display());
+    refused(&base.0, &reason, system());
 }
 
 #[test]

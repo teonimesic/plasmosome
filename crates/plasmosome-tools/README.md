@@ -25,6 +25,7 @@ no product crate, so a product crate that does not compile does not stop a tool 
 | `bench-medians` | the `bench` job in `ci.yml`, after `cargo bench --locked --workspace -- --quick` | Reads the median of each of spec 005's eight benchmark ids from `<directory>/<id>/new/estimates.json`, each file through a 1 MiB bound, prints them as Markdown, and appends the same text to the file `GITHUB_STEP_SUMMARY` names. Exits 0 when both writes succeed; 1 when a median cannot be read, with nothing written, when stdout cannot be written, or when the summary cannot be written; 2 unless it is given exactly one argument. Each failure is one line on stderr naming what failed |
 
 The `quickstart` module has no binary yet. Its `check_base` makes the root README quickstart's
-checks of the base directory, in the README's order, and then makes the private directory inside
-the base, which is how it checks that the base can be written. The README still runs its Python
-block until the rest of that program moves here.
+checks of the base directory, in the same order and with the same refusal lines, except that the
+write check comes last: it makes the private directory inside the base. A few rare bases get a
+different answer, and PR #337 lists them. The README still runs its Python block until the rest
+of that program moves here.
