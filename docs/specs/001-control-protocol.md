@@ -116,12 +116,14 @@ allows and otherwise a quoted string, with `[i]` after a list to name its entry 
 108 carries `field` and `fix` together or not at all. `plasmid` is the declaration's `id` itself,
 not quoted or escaped as `detail` writes it, and a 108 carries it exactly when the refusal names
 that id. Today no refusal of the `id` field names one, because no id parsed: the id is missing,
-not a string or empty. Such a refusal carries `field` `id` and its `fix`, and no `plasmid`. A
-client reads these members and never splits `detail`: a key or an id may hold `: `.
+not a string, empty or only whitespace. Such a refusal carries `field` `id` and its `fix`, and no
+`plasmid`. A client reads these members and never splits `detail`: a key or an id may hold `: `.
 Amended on 2026-10-21: the first sentence here read "The 108 `fix` is spec 011's amendment to
 this table.", and row 108's fields read "`detail`, `path`; `fix` when the refusal names a
-declaration field"; the field and the plasmid id travelled only inside `detail`. A 108 whose
-refusal names a declaration field carries a `fix` in one of three forms:
+declaration field"; the field and the plasmid id travelled only inside `detail`. Amended on
+2026-10-22: the sentence on why no `id` refusal names a plasmid read "the id is missing, not a
+string or empty". A 108 whose refusal names a declaration field carries a `fix` in one of three
+forms:
 
 - TOML to write in place of that field: a line such as `hosts = ["api.github.com"]`, or a
   section such as `[impl]` followed by `wasm = "component.wasm"`;

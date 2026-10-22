@@ -427,8 +427,8 @@ impl WireError {
     /// index), or exactly `remove this entry`. `plasmid` is the declaration's
     /// id itself, not the quoted form `detail` writes, and is present exactly
     /// when the refusal names an id. A refusal of an `id` that is missing, not
-    /// a string or empty names none, so it carries `field` and `fix` and no
-    /// `plasmid`. A file that could not be read (`Io`), is not TOML
+    /// a string, empty or only whitespace names none, so it carries `field`
+    /// and `fix` and no `plasmid`. A file that could not be read (`Io`), is not TOML
     /// (`Parse`, a syntax error included), is over `MAX_MANIFEST_BYTES`
     /// (`TooLarge`) or nests more than `MAX_MANIFEST_DEPTH` levels (`TooDeep`)
     /// carries no `field`, `fix` or `plasmid`.
@@ -640,7 +640,7 @@ mod tests {
 
     type Named = Option<(&'static str, &'static str)>;
 
-    fn declaration_refusals() -> [(ManifestError, Named, Option<&'static str>); 6] {
+    fn declaration_refusals() -> [(ManifestError, Named, Option<&'static str>); 7] {
         [
             (
                 author_refusal(),
@@ -652,6 +652,14 @@ mod tests {
                     "id = \"\"\ndescription = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"",
                 )
                 .expect_err("an empty id is refused"),
+                Some(("id", "id = \"choose-a-stable-id\"")),
+                None,
+            ),
+            (
+                PlasmidManifest::parse(
+                    "id = \"\u{3000}\"\ndescription = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"",
+                )
+                .expect_err("an id of only whitespace is refused"),
                 Some(("id", "id = \"choose-a-stable-id\"")),
                 None,
             ),

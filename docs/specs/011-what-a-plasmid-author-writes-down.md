@@ -391,8 +391,9 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   Nothing inside a string or a comment counts. The bound is 32 because toml parses a
   declaration that counts 32 with room to spare on a 2 MiB thread stack in a debug build, and
   the deepest declaration the manifest grammar reads counts 13. Apart from those three
-  refusals, a declaration with no `id` is the single case that cannot name a plasmid; it names
-  the missing `id` instead. Where a refusal must name more than one plasmid —
+  refusals, a declaration with no usable `id` is the single case that cannot name a plasmid: its
+  `id` is missing, not a string, empty or only whitespace. It names `id` instead. Where a refusal
+  must name more than one plasmid —
   the requirers a detach would strand — it names them in the message, sorted, not in a new
   structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
   fourth amendment this spec does not make. That refusal is spec 001's 105 and carries no `fix`.
@@ -400,7 +401,16 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   and spec 001's closed table gives `fix` only to 108. Corrected on 2026-10-20: this said the
   requirers are named in the message and the `fix`, and did not say why a detach refusal carries
   none. Amended on 2026-10-20: this named two whole-file refusals, and said a detach refusal is
-  not a third exception, before the depth bound.
+  not a third exception, before the depth bound. Amended on 2026-10-22: this read "a declaration
+  with no `id` is the single case that cannot name a plasmid; it names the missing `id` instead".
+- **A declaration's `id` is a string that is not empty or only whitespace.** An `id` that is
+  missing, not a string, empty or only whitespace is refused naming `id`, with `fix`
+  `id = "choose-a-stable-id"` and no plasmid id, before any other field is checked. So no refusal
+  names a plasmid by a blank id. Whitespace is Unicode White_Space, as for a capability key: an
+  `id` made only of U+3000, or of U+00A0, U+0085 and U+2028, is blank, and one made only of U+FEFF
+  is not. The parsed `id` is what the author wrote: `" a"` stays `" a"`. Amended on 2026-10-22:
+  this had no rule for an empty or blank `id`; the parser refused an empty one and accepted a blank
+  one.
 - **Each `[requires].capabilities` entry is a capability key: a string that is not empty or only
   whitespace.** An entry that is not a string, or is blank, is refused naming
   `requires.capabilities[i]`, where `i` is the entry's own index in the declaration, with `fix`
@@ -548,6 +558,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   error, a declaration over 1 MiB and one nested more than 32 levels carry none of the three.
   Catches: a field or plasmid only in `detail`, which a key or an id holding `: ` makes impossible
   to split, and a member sent as `null`. Amended on 2026-10-21: this item is new.
+- `id = " "`, `id = "\t"`, an `id` of U+3000, and an `id` of U+00A0, U+0085 and U+2028 written as
+  TOML escapes are each refused naming `id`, with `fix` `id = "choose-a-stable-id"` and no plasmid
+  id, both in a declaration that is otherwise valid and in one with no `description`. `id = " a"`
+  and an `id` of U+FEFF parse, each with the id exactly as written. Catches: a parser that refuses
+  only the empty id, one that trims only spaces or knows only ASCII whitespace, one that checks
+  `description` first, one that names the blank id as the plasmid, and one that trims the id it
+  keeps. Amended on 2026-10-22: this item is new.
 - `requires.capabilities = ["a", 5, "b", "", " "]` is refused at `requires.capabilities[1]` with
   `fix` `remove this entry`. Each time the refused entry is removed, the next refusal is at
   `requires.capabilities[2]`, for `""` and then `" "`, and the result parses with requires `["a",
