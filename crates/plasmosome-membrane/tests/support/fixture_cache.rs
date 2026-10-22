@@ -769,13 +769,13 @@ fn a_fixture_that_set_up_returns_its_path_to_every_caller() {
 #[test]
 fn a_setup_keeps_a_formatted_message_and_names_a_payload_that_is_not_text() {
     const KIND: &str = "formatted";
-    static FORMATTED: fixture::Fixture = fixture::Fixture::new(|| panic!("a {KIND} cause"));
-    static NOT_TEXT: fixture::Fixture = fixture::Fixture::new(|| std::panic::panic_any(7_u8));
+    let formatted = fixture::Fixture::new(|| panic!("a {KIND} cause"));
+    let not_text = fixture::Fixture::new(|| std::panic::panic_any(7_u8));
 
     for (fixture, expected) in [
-        (&FORMATTED, "a formatted cause"),
+        (&formatted, "a formatted cause"),
         (
-            &NOT_TEXT,
+            &not_text,
             "the fixture's setup panicked with a payload that is not text",
         ),
     ] {
