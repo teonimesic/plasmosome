@@ -151,12 +151,12 @@ pub enum HandshakeFailure {
 /// last to use it once the reply had arrived, so a reply sent by another
 /// process fails unless the helper used the socket after it. On neither
 /// platform does a pid show that the process still runs. None of these reads
-/// stops a process of the supervisor's uid that holds a copy of the shim's
-/// socket: on Linux it can send both replies, on Darwin its reply passes if
-/// the helper uses the socket after it, nothing checks who writes once this
-/// returns, and any process of that uid can connect first and fail the
-/// handshake with [`HandshakeFailure::ForeignPeer`]; the crate's README says
-/// more.
+/// stops a process of the supervisor's uid that holds a copy of a lane's
+/// socket: on Linux, with a copy of each lane's, it can send both replies, and
+/// on Darwin its reply passes if the helper uses the socket after it. Nothing
+/// checks who writes once this returns, and any process of that uid can
+/// connect first and fail the handshake with
+/// [`HandshakeFailure::ForeignPeer`]; the crate's README says more.
 ///
 /// Pass the listeners the cell bound before it launched the helper. On a
 /// failure this closes what it accepted but not the listeners: a connection
@@ -1591,35 +1591,57 @@ mod tests {
         assert!(closed(shim));
     }
 
-    #[test]
-    fn time_spent_at_each_control_accept_comes_out_of_the_one_allowance() {
+    fn the_allowance_runs_out_at(stage: Stage) {
+        let ordinal = match stage {
+            Stage::NormalAccept => 1,
+            Stage::NormalReply => 2,
+            Stage::WithdrawalAccept => 3,
+            Stage::WithdrawalReply => 4,
+            Stage::DataAccept => 5,
+        };
         let endpoints = Endpoints::new();
         let (turn, turns) = mpsc::channel::<()>();
         let shim = spawn_shim(&endpoints, move |shim| {
-            turns
-                .recv_timeout(PATIENCE)
-                .expect("the normal accept waits");
+            let next = || turns.recv_timeout(PATIENCE).is_ok();
+            if !next() {
+                return;
+            }
             let normal = shim.control();
-            shim.hello(normal, &reply(ControlLane::Normal, BOOT, &policy()));
-            turns
-                .recv_timeout(PATIENCE)
-                .expect("the withdrawal accept waits");
-            shim.control();
+            shim.request(normal);
+            if !next() {
+                return;
+            }
+            shim.send(normal, &reply(ControlLane::Normal, BOOT, &policy()));
+            if !next() {
+                return;
+            }
+            let withdrawal = shim.control();
+            shim.request(withdrawal);
+            if !next() {
+                return;
+            }
+            shim.send(withdrawal, &reply(ControlLane::Withdrawal, BOOT, &policy()));
+            if next() {
+                shim.data();
+            }
         });
         let (clock, flag) = (FakeClock::new(), AtomicBool::new(false));
         let advance = clock.clone();
-        let control = endpoints.control.as_raw_fd();
-        let spent = Cell::new(0);
+        let previous = Cell::new(None::<RawFd>);
+        let reached = Cell::new(0);
         let result = faked(
             &endpoints,
             &clock.budget(&flag),
             running,
             clock.now(),
             |fd, interest, _| {
-                if fd == control && spent.get() < 2 {
-                    advance.advance(Duration::from_millis(600));
-                    spent.set(spent.get() + 1);
-                    turn.send(()).expect("the shim waits for its turn");
+                if previous.get() != Some(fd) {
+                    previous.set(Some(fd));
+                    reached.set(reached.get() + 1);
+                    if reached.get() == 1 || reached.get() == ordinal {
+                        advance.advance(Duration::from_millis(600));
+                    }
+                    let _ = turn.send(());
                 }
                 let ready = wait_fd(fd, interest, PATIENCE)?;
                 if !ready {
@@ -1628,15 +1650,93 @@ mod tests {
                 Ok(ready)
             },
         );
-        assert_eq!(spent.get(), 2, "600 ms was spent at each control accept");
+        drop(turn);
+        assert_eq!(
+            reached.get(),
+            ordinal,
+            "the handshake waited at each stage up to {stage}"
+        );
         assert_eq!(
             result.err(),
-            Some(HandshakeFailure::TimedOut {
-                stage: Stage::WithdrawalAccept
-            }),
-            "1,200 ms of a 1,000 ms allowance were spent across two stages"
+            Some(HandshakeFailure::TimedOut { stage }),
+            "600 ms at the normal accept and 600 ms at {stage} spend a 1,000 ms allowance"
         );
-        assert!(closed(shim), "both lanes are closed");
+        assert!(closed(shim), "every stream the shim opened is closed");
+    }
+
+    #[test]
+    fn one_allowance_covers_the_normal_accept_and_the_normal_reply() {
+        the_allowance_runs_out_at(Stage::NormalReply);
+    }
+
+    #[test]
+    fn one_allowance_covers_the_normal_accept_and_the_withdrawal_accept() {
+        the_allowance_runs_out_at(Stage::WithdrawalAccept);
+    }
+
+    #[test]
+    fn one_allowance_covers_the_normal_accept_and_the_withdrawal_reply() {
+        the_allowance_runs_out_at(Stage::WithdrawalReply);
+    }
+
+    #[test]
+    fn one_allowance_covers_the_normal_accept_and_the_data_accept() {
+        the_allowance_runs_out_at(Stage::DataAccept);
+    }
+
+    #[test]
+    fn time_spent_while_a_reply_is_judged_is_timed_out_at_that_reply() {
+        for lane in [ControlLane::Normal, ControlLane::Withdrawal] {
+            let (mut host, mut shim) = UnixStream::pair().expect("a pair is made");
+            host.set_nonblocking(true)
+                .expect("the host end is nonblocking");
+            shim.write_all(&reply(lane, BOOT, &policy()))
+                .expect("the reply is queued");
+            let (clock, flag) = (FakeClock::new(), AtomicBool::new(false));
+            let (in_judge, in_wait) = (clock.clone(), clock.clone());
+            let budget = clock.budget(&flag);
+            let now = clock.now();
+            let mut wait = |fd: RawFd, interest: Interest, _: Duration| {
+                let ready = wait_fd(fd, interest, PATIENCE)?;
+                if !ready {
+                    in_wait.advance(ALLOWANCE);
+                }
+                Ok(ready)
+            };
+            let ended = Cell::new(None);
+            let (expected_policy, normal_boot) = (policy(), boot(BOOT));
+            let mut steps = Steps {
+                expected: Expected {
+                    peer: this_process(),
+                    policy: &expected_policy,
+                },
+                budget: &budget,
+                now: &now,
+                wait: &mut wait,
+                ended: &ended,
+            };
+            let stage = match lane {
+                ControlLane::Normal => Stage::NormalReply,
+                ControlLane::Withdrawal => Stage::WithdrawalReply,
+            };
+            let judged = Cell::new(false);
+            let result = steps.hello(&mut host, lane, stage, |frame| {
+                judged.set(true);
+                in_judge.set(ALLOWANCE);
+                match lane {
+                    ControlLane::Normal => judge_normal(frame, &expected_policy).map(|_| ()),
+                    ControlLane::Withdrawal => {
+                        judge_withdrawal(frame, &expected_policy, &normal_boot)
+                    }
+                }
+            });
+            assert!(judged.get(), "{stage}'s reply reached the judge");
+            assert_eq!(
+                result.err(),
+                Some(HandshakeFailure::TimedOut { stage }),
+                "the allowance ran out while {stage} was judged"
+            );
+        }
     }
 
     #[test]
