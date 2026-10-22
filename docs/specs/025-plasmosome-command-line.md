@@ -301,13 +301,16 @@ stderr and an exit code from the table, except `plasmid new`'s own outcomes, whi
 on 2026-10-21: this did not name that exception.
 
 **Terminal controls are escaped in both forms.** The terminal controls are U+0000 to U+001F,
-U+007F, U+0080 to U+009F, and the bidirectional controls U+202A to U+202E and U+2066 to U+2069.
+U+007F, U+0080 to U+009F, and the bidirectional controls U+061C, U+200E, U+200F, U+202A to
+U+202E and U+2066 to U+2069, the twelve characters of Unicode's Bidi_Control property.
 The JSON form writes each one, wherever it appears in a key or a value, as JSON's six-character
 escape (a backslash, `u`, four hex digits). Standard JSON writers, `serde_json` among them,
 escape only U+0000 to U+001F, so the client uses its own formatter. The output stays valid JSON
 and parses to the same values, so a person reading it at a terminal never receives a raw
 control, whichever process wrote the string. Registry commands' JSON goes through the same
 formatter: spec 020 escapes only its human form, and this escaping keeps the data it preserves.
+Amended on 2026-10-22: this said "the bidirectional controls U+202A to U+202E and U+2066 to
+U+2069", which left out U+061C, U+200E and U+200F.
 
 **The human form.** `--human` selects output for a person. A success prints the envelope
 indented, one key per line. A failure prints the message, then a `fix:` line when the error has
