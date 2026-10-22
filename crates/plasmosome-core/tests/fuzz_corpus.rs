@@ -178,7 +178,10 @@ fn over_the_level_bytes(dir: &Path) -> Vec<String> {
             continue;
         }
         let bytes = std::fs::read(&path).expect("the input is read");
-        let opening = bytes.iter().filter(|byte| LEVEL_BYTES.contains(byte)).count();
+        let opening = bytes
+            .iter()
+            .filter(|byte| LEVEL_BYTES.contains(byte))
+            .count();
         if opening > MAX_LEVEL_BYTES {
             over.push(format!("{}: {opening}", path.display()));
         }
