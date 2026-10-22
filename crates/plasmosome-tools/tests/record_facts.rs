@@ -446,6 +446,36 @@ fn the_leaves_line_says_none_it_stays_when_another_path_keeps_the_crate() {
     );
 }
 
+/// Cargo refuses a normal cycle, but the block left the crate out of its own closure.
+#[test]
+fn the_crate_is_not_in_its_own_brings() {
+    let (mut fixture, root) = rooted("1.0.0", NORMAL);
+    let back = fixture.package("back", "1.0.0");
+    fixture.edge(&root, &back, NORMAL);
+    fixture.edge(&back, &root, NORMAL);
+
+    assert_eq!(
+        fixture.run(&["root"]).line("brings"),
+        "brings = [\"back@1\"]"
+    );
+}
+
+#[test]
+fn a_package_without_a_source_is_brought_but_never_leaves() {
+    let (mut fixture, root) = rooted("1.0.0", NORMAL);
+    let local = "path+file:///local#0.1.0";
+    fixture.add(local, "local", "0.1.0", Value::Null);
+    fixture.edge(&root, local, NORMAL);
+
+    let outcome = fixture.run(&["root"]);
+
+    assert_eq!(outcome.line("brings"), "brings = [\"local@0.1\"]");
+    assert_eq!(
+        outcome.line("# leaves"),
+        "# leaves Cargo.lock with it: 1: root@1"
+    );
+}
+
 #[test]
 fn the_hints_list_links_keys_native_build_dependencies_and_link_attributes() {
     let (mut fixture, root) = rooted("1.0.0", NORMAL);
