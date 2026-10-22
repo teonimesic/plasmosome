@@ -1512,6 +1512,10 @@ mod tests {
                         Err(incomplete(&op, relay))
                     );
                 }
+                assert_eq!(
+                    backend.grant(op.clone(), GrantKind::GenerationBound),
+                    Err(incomplete(&op, relay))
+                );
                 assert_eq!(backend.snapshot_os_state(), Ok(failed));
                 let drain = DrainSpec::graceful(Duration::from_millis(3));
                 if cleans_up_in_revoke {
