@@ -2096,6 +2096,27 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_fixture_dropped_by_a_panic_panics_no_second_time_and_ends_its_worker() {
+        let mut release = None;
+        let mut liveness = None;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut fixture = spawn_with_worker(true);
+            liveness = Some(open_liveness(&fixture.dir.path().join(LIVENESS)));
+            release = fixture.release.take();
+            panic!("a test fails while its fixture's worker runs and is not released");
+        }));
+        assert!(unwound.is_err(), "the test body panicked");
+        assert_eof_within(
+            liveness.as_ref().expect("the body opened a reader"),
+            DEADLINE,
+        );
+        assert!(
+            release.is_some(),
+            "the body kept the control pipe's write end, so only the fixture's teardown ended the worker"
+        );
+    }
+
+    #[test]
     fn immediate_drop_kills_execed_leader_and_worker() {
         let mut fixture = spawn_with_worker(false);
         let pid = fixture.child().pid();
