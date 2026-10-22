@@ -1,0 +1,25 @@
+id = "commands-seed"
+description = "Run git with declared network access."
+version = "0.1.0"
+
+[network]
+hosts = ["alpha.example"]
+ports = [443]
+
+[commands]
+address_plan = "10.29.0.0/24"
+
+[commands.commands.git]
+exec = ["git"]
+subject = "git"
+
+[commands.commands.git.network]
+hosts = ["alpha.example", "github.example"]
+ports = [443]
+
+[[commands.commands.git.secrets.refs]]
+id = "github:token:git"
+consumer = "http"
+delivery = ["inject"]
+scope = { path_scope = ["/repos/"] }
+subject = "git"
