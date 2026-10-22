@@ -32,7 +32,8 @@ pub struct Association {
     pub boot: BootToken,
     /// The guest policy digest both hellos named, equal to the one expected.
     pub policy: Digest,
-    /// The helper's process id, which every stream's peer read matched.
+    /// The helper's process id, which every stream's peer read matched. It
+    /// does not show who writes on the streams after the handshake.
     pub peer: libc::pid_t,
     #[cfg_attr(
         not(test),
@@ -149,11 +150,20 @@ pub enum HandshakeFailure {
 /// not that it connected. A match after a reply shows that the helper was the
 /// last to use it once the reply had arrived, so a reply sent by another
 /// process fails unless the helper used the socket after it. On neither
-/// platform does a pid show that the process still runs.
+/// platform does a pid show that the process still runs. None of these reads
+/// stops a process of the supervisor's uid that holds a copy of the shim's
+/// socket: on Linux it can send both replies, on Darwin its reply passes if
+/// the helper uses the socket after it, nothing checks who writes once this
+/// returns, and any process of that uid can connect first and fail the
+/// handshake with [`HandshakeFailure::ForeignPeer`]; the crate's README says
+/// more.
 ///
 /// Pass the listeners the cell bound before it launched the helper. On a
 /// failure this closes what it accepted but not the listeners: a connection
 /// still in a listener's queue closes when the caller closes the listener.
+/// When it returns an [`Association`], it has not checked that the helper
+/// still runs or that the three streams are still open; the caller observes
+/// the helper.
 pub fn handshake(
     control: &RuntimeListener,
     data: &RuntimeListener,
@@ -314,7 +324,10 @@ where
         if trailing {
             return Err(HandshakeFailure::UnexpectedBytes { stage });
         }
-        judge(&bytes).map_err(|refusal| HandshakeFailure::Refused { stage, refusal })
+        let judged =
+            judge(&bytes).map_err(|refusal| HandshakeFailure::Refused { stage, refusal })?;
+        self.gate(stage)?;
+        Ok(judged)
     }
 
     fn authenticate(&self, stage: Stage, found: libc::pid_t) -> Result<(), HandshakeFailure> {
@@ -437,13 +450,13 @@ mod tests {
     use crate::runtime::test_fixtures::private_root;
     use crate::vmm::{Launch, SupervisionOperation, VmmChild};
     use plasmosome_core::private_socket::effective_uid;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::io::{ErrorKind, Read, Write};
     use std::net::Shutdown;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
+    use std::sync::{Arc, mpsc};
     use std::thread::JoinHandle;
 
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -530,9 +543,14 @@ mod tests {
     impl Shim {
         fn connect(&mut self, path: &Path) -> usize {
             let stream = UnixStream::connect(path).expect("the shim connects");
-            stream
-                .set_read_timeout(Some(PATIENCE))
-                .expect("a read timeout is set");
+            if let Err(error) = stream.set_read_timeout(Some(PATIENCE)) {
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(libc::EINVAL),
+                    "a read timeout is set, unless Darwin refuses it because the host already \
+                     closed the stream"
+                );
+            }
             self.opened.push(stream);
             self.opened.len() - 1
         }
@@ -1020,6 +1038,71 @@ mod tests {
         );
     }
 
+    fn a_stranger_connects_at(stage: Stage) {
+        let endpoints = Endpoints::new();
+        let answered = Arc::new(AtomicBool::new(false));
+        let told = Arc::clone(&answered);
+        let shim = spawn_shim(&endpoints, move |shim| {
+            let normal = shim.control();
+            shim.hello(normal, &reply(ControlLane::Normal, BOOT, &policy()));
+            if stage == Stage::DataAccept {
+                let withdrawal = shim.control();
+                shim.hello(withdrawal, &reply(ControlLane::Withdrawal, BOOT, &policy()));
+            }
+            told.store(true, Ordering::SeqCst);
+        });
+        let (listener, path) = if stage == Stage::DataAccept {
+            (endpoints.data.as_raw_fd(), endpoints.data_path())
+        } else {
+            (endpoints.control.as_raw_fd(), endpoints.control_path())
+        };
+        let stranger = RefCell::new(None::<VmmChild>);
+        let flag = AtomicBool::new(false);
+        let result = faked(
+            &endpoints,
+            &ProbeBudget::new(PATIENCE, &flag),
+            running,
+            Instant::now,
+            |fd, interest, limit| {
+                if fd == listener && answered.load(Ordering::SeqCst) && stranger.borrow().is_none()
+                {
+                    let child = VmmChild::spawn(Connects {
+                        address: address(&path),
+                        then: Then::ReadsToEnd,
+                    })
+                    .expect("the fork succeeds");
+                    *stranger.borrow_mut() = Some(child);
+                }
+                wait_fd(fd, interest, limit)
+            },
+        );
+        let mut child = stranger.into_inner().expect("the stranger was started");
+        assert_eq!(
+            result.err(),
+            Some(HandshakeFailure::ForeignPeer {
+                stage,
+                expected: this_process(),
+                found: child.pid()
+            })
+        );
+        assert_eq!(
+            child.wait_terminal(PATIENCE),
+            Ok(VmmState::Exited { code: 0 }),
+            "the stranger read end of file, so its stream was closed"
+        );
+        assert!(closed(shim), "every lane the shim opened is closed");
+    }
+
+    #[test]
+    fn a_stranger_at_the_withdrawal_accept_is_a_foreign_peer_and_is_closed() {
+        a_stranger_connects_at(Stage::WithdrawalAccept);
+    }
+
+    #[test]
+    fn a_stranger_at_the_data_accept_is_a_foreign_peer_and_is_closed() {
+        a_stranger_connects_at(Stage::DataAccept);
+    }
+
     #[test]
     fn a_peer_pid_of_0_or_below_never_matches() {
         assert!(authentic(42, 42));
@@ -1185,6 +1268,82 @@ mod tests {
             "this process connected, and another process sent the reply after the accept"
         );
         drop(connection);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_darwin_a_withdrawal_reply_sent_by_another_process_is_a_foreign_peer() {
+        use std::os::fd::AsRawFd;
+        let endpoints = Endpoints::new();
+        let (normal_turn, normal_turns) = mpsc::channel::<()>();
+        let (lane_sent, lane) = mpsc::channel::<RawFd>();
+        let shim = spawn_shim(&endpoints, move |shim| {
+            let normal = shim.control();
+            shim.request(normal);
+            normal_turns
+                .recv_timeout(PATIENCE)
+                .expect("the normal reply is awaited");
+            shim.send(normal, &reply(ControlLane::Normal, BOOT, &policy()));
+            let withdrawal = shim.control();
+            lane_sent
+                .send(shim.opened[withdrawal].as_raw_fd())
+                .expect("the test listens");
+        });
+        let answer = reply(ControlLane::Withdrawal, BOOT, &policy());
+        let (told, mut tell) = std::io::pipe().expect("a pipe is made");
+        let (clock, flag) = (FakeClock::new(), AtomicBool::new(false));
+        let advance = clock.clone();
+        let listeners = endpoints.listeners();
+        let normal_lane = Cell::new(None::<RawFd>);
+        let replier = RefCell::new(None::<VmmChild>);
+        let result = faked(
+            &endpoints,
+            &clock.budget(&flag),
+            running,
+            clock.now(),
+            |fd, interest, _| {
+                if !listeners.contains(&fd) {
+                    match normal_lane.get() {
+                        None => {
+                            normal_lane.set(Some(fd));
+                            normal_turn.send(()).expect("the shim waits for its turn");
+                        }
+                        Some(normal) if normal != fd && replier.borrow().is_none() => {
+                            let connection = lane
+                                .recv_timeout(PATIENCE)
+                                .expect("the shim connected its withdrawal lane");
+                            let child = VmmChild::spawn(RepliesWhenTold {
+                                told: told.as_raw_fd(),
+                                connection,
+                                reply: answer.as_ptr(),
+                                length: answer.len(),
+                            })
+                            .expect("the fork succeeds");
+                            *replier.borrow_mut() = Some(child);
+                            tell.write_all(b"g").expect("the child is told to reply");
+                        }
+                        Some(_) => {}
+                    }
+                }
+                let ready = wait_fd(fd, interest, PATIENCE)?;
+                if !ready {
+                    advance.set(ALLOWANCE);
+                }
+                Ok(ready)
+            },
+        );
+        let child = replier.into_inner().expect("the replier was started");
+        assert_eq!(
+            result.err(),
+            Some(HandshakeFailure::ForeignPeer {
+                stage: Stage::WithdrawalReply,
+                expected: this_process(),
+                found: child.pid()
+            }),
+            "the shim connected both lanes, and another process sent the withdrawal reply"
+        );
+        drop(child);
+        shim.join().expect("the shim thread ends");
     }
 
     #[cfg(target_os = "macos")]
@@ -1430,6 +1589,54 @@ mod tests {
         assert!(clock.elapsed() >= ALLOWANCE);
         drop(step);
         assert!(closed(shim));
+    }
+
+    #[test]
+    fn time_spent_at_each_control_accept_comes_out_of_the_one_allowance() {
+        let endpoints = Endpoints::new();
+        let (turn, turns) = mpsc::channel::<()>();
+        let shim = spawn_shim(&endpoints, move |shim| {
+            turns
+                .recv_timeout(PATIENCE)
+                .expect("the normal accept waits");
+            let normal = shim.control();
+            shim.hello(normal, &reply(ControlLane::Normal, BOOT, &policy()));
+            turns
+                .recv_timeout(PATIENCE)
+                .expect("the withdrawal accept waits");
+            shim.control();
+        });
+        let (clock, flag) = (FakeClock::new(), AtomicBool::new(false));
+        let advance = clock.clone();
+        let control = endpoints.control.as_raw_fd();
+        let spent = Cell::new(0);
+        let result = faked(
+            &endpoints,
+            &clock.budget(&flag),
+            running,
+            clock.now(),
+            |fd, interest, _| {
+                if fd == control && spent.get() < 2 {
+                    advance.advance(Duration::from_millis(600));
+                    spent.set(spent.get() + 1);
+                    turn.send(()).expect("the shim waits for its turn");
+                }
+                let ready = wait_fd(fd, interest, PATIENCE)?;
+                if !ready {
+                    advance.advance(ALLOWANCE);
+                }
+                Ok(ready)
+            },
+        );
+        assert_eq!(spent.get(), 2, "600 ms was spent at each control accept");
+        assert_eq!(
+            result.err(),
+            Some(HandshakeFailure::TimedOut {
+                stage: Stage::WithdrawalAccept
+            }),
+            "1,200 ms of a 1,000 ms allowance were spent across two stages"
+        );
+        assert!(closed(shim), "both lanes are closed");
     }
 
     #[test]
