@@ -11,7 +11,7 @@ pub const LIBKRUNFW: &str = "libkrunfw.5.dylib";
 /// `docs/dependencies/native/libkrun.toml`.
 pub const LIBKRUN_RPATHS: &[&str] = &["/opt/homebrew/opt/llvm/lib"];
 
-/// The OS cryptex prefix. Before a path itself, dyld tries this prefix followed by the path, with
+/// The OS cryptex prefix. Right after a path, dyld tries this prefix followed by that path, with
 /// no separator between them, so a leaf name `L` becomes `/System/Volumes/Preboot/Cryptexes/OSL`.
 /// Measured on macOS 26.6.2 (25G83).
 pub const CRYPTEX_PREFIX: &str = "/System/Volumes/Preboot/Cryptexes/OS";
