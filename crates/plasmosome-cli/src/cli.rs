@@ -16,11 +16,9 @@ use crate::env::{Env, ProcessEnv};
 use crate::envelope::{ClientError, Envelope, ErrorBody, Form, emit};
 use crate::help;
 use crate::json::{self, Json, Number};
-use crate::status;
+use crate::verb;
 
 pub(crate) const INVALID: &str = "invalid";
-
-const STATUS: &str = "plasmosome.status";
 
 const SHORT_HELP: &str = "-h";
 
@@ -611,38 +609,46 @@ impl<'a> Line<'a> {
 
     fn args(&self, command: &Command, words: &Words<'a>) -> CommandArgs {
         let mut args = CommandArgs::default();
+        let ties = !command.flags.is_empty() || !command.operands.is_empty() || command.takes_argv;
         for (index, text) in self.flags() {
+            if text == KERNEL && ties {
+                args.kernel_at(index);
+            }
             let Some(own) = served_flag(self.commands, text) else {
                 continue;
             };
+            let text = text.to_string_lossy();
             let value = || self.head[index + 1].text.to_string_lossy().into_owned();
-            let sent = match own.kind {
-                FlagKind::Text => Sent::Text(value()),
-                FlagKind::Integer => Sent::Number(value()),
-                FlagKind::Bare => Sent::True,
+            let (argument, sent) = match own.kind {
+                FlagKind::Text => (value(), Sent::Text(value())),
+                FlagKind::Integer => (value(), Sent::Number(value())),
+                FlagKind::Bare => (text.to_string(), Sent::True),
                 FlagKind::Mock => {
-                    let text = text.to_string_lossy();
                     let mode = text
                         .strip_prefix(own.name)
                         .and_then(|rest| rest.strip_prefix('='));
-                    Sent::Text(mode.unwrap_or("simulate").to_string())
+                    let mode = mode.unwrap_or("simulate").to_string();
+                    (text.to_string(), Sent::Text(mode))
                 }
             };
-            args.give(ArgSource::Flag(own.name), sent);
+            args.give(ArgSource::Flag(own.name), index, &argument, sent);
         }
-        for (text, operand) in words.texts[command.words.len()..]
+        let given = command.words.len();
+        for ((position, text), operand) in words.positions[given..]
             .iter()
+            .zip(&words.texts[given..])
             .zip(command.operands)
         {
-            let text = text.to_string_lossy().into_owned();
-            args.give(ArgSource::Positional(operand), Sent::Text(text));
+            let text = text.to_string_lossy();
+            let sent = Sent::Text(text.to_string());
+            args.give(ArgSource::Positional(operand), *position, &text, sent);
         }
         if command.takes_argv && !self.tail.is_empty() {
             let argv = self.tail[1..]
                 .iter()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
-            args.give(ArgSource::Argv, Sent::Argv(argv));
+            args.give(ArgSource::Argv, self.head.len(), "--", Sent::Argv(argv));
         }
         args
     }
@@ -760,10 +766,20 @@ fn act(
             error,
             form,
         } => refuse(command, error, form, stdout, stderr),
-        Reading::Run(invocation) if invocation.command.command == STATUS => {
-            status::run(invocation, context, start, stdout, stderr)
-        }
         Reading::Run(invocation) => {
+            if let Some(build) = invocation.command.build {
+                return match build(&invocation.args) {
+                    Ok(call) => verb::run(&call, invocation, context, start, stdout, stderr),
+                    Err(error) => {
+                        let named = if error.code() == ClientCode::InvalidArgument {
+                            INVALID
+                        } else {
+                            invocation.command.command
+                        };
+                        refuse(named.to_string(), error, invocation.form, stdout, stderr)
+                    }
+                };
+            }
             let error = client(
                 ClientCode::Internal,
                 format!(

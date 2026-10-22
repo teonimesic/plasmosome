@@ -3,7 +3,7 @@ use std::io::{self, BufRead, Read};
 
 use plasmosome_cli::json::{Json, MAX_REPLY_BYTES, Number, scan, write_compact};
 use plasmosome_cli::reply::{
-    ReadFailure, Reply, cut_off, judge_reply, kernel_exit, read_reply, request_line, unanswered,
+    ReadFailure, Reply, cut_off, judge_reply, kernel_exit, read_reply, unanswered,
 };
 use plasmosome_cli::{ClientCode, ClientError, Envelope, ErrorBody, Form, KernelError, emit};
 
@@ -745,82 +745,4 @@ fn a_transport_failure_names_its_errno_in_the_message() {
         "{}",
         unnamed.message()
     );
-}
-
-#[test]
-fn the_request_line() {
-    assert_eq!(
-        request_line("plasmosome.status", Vec::new()),
-        Ok("{\"id\":1,\"method\":\"plasmosome.status\",\"params\":{}}\n".to_string())
-    );
-    assert_eq!(
-        request_line(
-            "plasmosome.status",
-            vec![("name".to_string(), text("work"))]
-        ),
-        Ok(
-            "{\"id\":1,\"method\":\"plasmosome.status\",\"params\":{\"name\":\"work\"}}\n"
-                .to_string()
-        )
-    );
-}
-
-#[test]
-fn a_request_line_escapes_controls_and_is_one_line() {
-    let escape = char::from_u32(0x1b).expect("U+001B is a character");
-    let line = request_line(
-        "cell.exec",
-        vec![(
-            "argv".to_string(),
-            Json::Array(vec![text(&format!("a{escape}\nb"))]),
-        )],
-    )
-    .expect("the params repeat no key");
-    assert!(line.ends_with('\n'));
-    assert_eq!(line.matches('\n').count(), 1);
-    assert!(!line.contains(escape));
-    let parsed_back: serde_json::Value =
-        serde_json::from_str(line.trim_end()).expect("the request line is JSON");
-    assert_eq!(parsed_back["params"]["argv"][0], format!("a{escape}\nb"));
-}
-
-#[test]
-fn a_request_line_escapes_its_method() {
-    let backslash = char::from_u32(0x5c).expect("U+005C is a character");
-    let escape = char::from_u32(0x1b).expect("U+001B is a character");
-    let newline = char::from_u32(0x0a).expect("U+000A is a character");
-    let method = format!("a\"b{backslash}c{escape}d{newline}e");
-    let line = request_line(&method, Vec::new()).expect("no params repeat a key");
-    let written =
-        format!("\"a{backslash}\"b{backslash}{backslash}c{backslash}u001bd{backslash}u000ae\"");
-    assert_eq!(
-        line,
-        format!("{{\"id\":1,\"method\":{written},\"params\":{{}}}}{newline}")
-    );
-    let parsed_back: serde_json::Value =
-        serde_json::from_str(line.trim_end()).expect("the request line is JSON");
-    assert_eq!(parsed_back["method"], method);
-}
-
-#[test]
-fn a_request_line_refuses_a_repeated_key() {
-    let repeated = vec![
-        ("name".to_string(), text("a")),
-        ("name".to_string(), text("b")),
-    ];
-    assert_eq!(
-        request_line("plasmosome.status", repeated),
-        Err(vec![
-            ("name".to_string(), text("a")),
-            ("name".to_string(), text("b")),
-        ])
-    );
-    let nested = vec![(
-        "x".to_string(),
-        Json::Object(vec![
-            ("k".to_string(), Json::Null),
-            ("k".to_string(), Json::Null),
-        ]),
-    )];
-    assert!(request_line("plasmosome.status", nested).is_err());
 }

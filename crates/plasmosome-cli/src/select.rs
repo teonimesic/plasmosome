@@ -91,7 +91,7 @@ pub(crate) fn target(
     }))
 }
 
-fn variable(env: &dyn Env) -> Result<Option<String>, ClientError> {
+pub(crate) fn variable(env: &dyn Env) -> Result<Option<String>, ClientError> {
     let Some(value) = env.kernel() else {
         return Ok(None);
     };
@@ -194,31 +194,34 @@ fn unconnected(socket: &Path, error: &io::Error) -> ClientError {
 }
 
 /// Spec 025 section 5's default selection over `instances`. Every entry is judged before any
-/// connection is made, so a refused selection contacts no instance. With one candidate, the
-/// connection is returned unwritten, and the caller's exchange checks its peer. With several,
-/// each is connected and its peer checked, and none is written to.
-pub(crate) fn select_default(instances: &str, trusted_uid: u32) -> Result<Selected, Unselected> {
+/// connection is made, so a refused selection contacts no instance. With one candidate, it is
+/// returned unconnected, for `connect_chosen`. With several, each is connected and its peer
+/// checked, and none is written to.
+pub(crate) fn select_default(instances: &str, trusted_uid: u32) -> Result<Instance, Unselected> {
     let found = judge(instances, trusted_uid).map_err(Unselected::unchosen)?;
     match found.candidates.as_slice() {
         [] => Err(Unselected::unchosen(no_candidate(instances, &found.seen))),
-        [name] => {
-            let instance = Instance {
-                name: Some(name.clone()),
-                socket: socket_of(instances, name),
-            };
-            match UnixStream::connect(&instance.socket) {
-                Ok(stream) => Ok(Selected { stream, instance }),
-                Err(error) => Err(Unselected {
-                    error: unconnected(Path::new(&instance.socket), &error),
-                    instance: Some(instance),
-                }),
-            }
-        }
+        [name] => Ok(Instance {
+            name: Some(name.clone()),
+            socket: socket_of(instances, name),
+        }),
         names => Err(Unselected::unchosen(ambiguous(
             instances,
             names,
             trusted_uid,
         ))),
+    }
+}
+
+/// Connects to the one instance default selection chose. The connection is returned unwritten,
+/// and the caller's exchange checks its peer.
+pub(crate) fn connect_chosen(instance: Instance) -> Result<Selected, Unselected> {
+    match UnixStream::connect(&instance.socket) {
+        Ok(stream) => Ok(Selected { stream, instance }),
+        Err(error) => Err(Unselected {
+            error: unconnected(Path::new(&instance.socket), &error),
+            instance: Some(instance),
+        }),
     }
 }
 
