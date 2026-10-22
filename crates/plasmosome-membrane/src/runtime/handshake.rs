@@ -440,7 +440,6 @@ mod tests {
     use std::cell::Cell;
     use std::io::{ErrorKind, Read, Write};
     use std::net::Shutdown;
-    use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1139,6 +1138,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn on_darwin_a_hello_reply_sent_by_another_process_is_a_foreign_peer() {
+        use std::os::fd::AsRawFd;
         let endpoints = Endpoints::new();
         let connection = UnixStream::connect(endpoints.control_path()).expect("connects");
         let answer = reply(ControlLane::Normal, BOOT, &policy());
