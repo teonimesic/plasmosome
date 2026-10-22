@@ -1,4 +1,4 @@
-use crate::brokers::{BrokerSet, BrokerSpec, SpawnFailed};
+use crate::brokers::{BrokerSet, BrokerSpec, Probe, SpawnFailed};
 use crate::control;
 use crate::control::ListenerFailed;
 use crate::exec::{ExecCommand, ExecError};
@@ -10,7 +10,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEFAULT_STATUS_DEADLINE: Duration = Duration::from_millis(500);
 
@@ -351,13 +351,21 @@ impl Drop for BoundSocket {
 /// two threads of one process, as the tests run them, can leak one's connection into the other's
 /// broker.
 pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonError> {
-    run_with(config, shutdown, VmmChild::spawn)
+    run_with(
+        config,
+        shutdown,
+        VmmChild::spawn,
+        ControlSocketProbe,
+        Instant::now,
+    )
 }
 
-fn run_with(
+fn run_with<P: Probe>(
     config: DaemonConfig,
     shutdown: &AtomicBool,
     mut spawn: impl FnMut(ExecCommand) -> Result<VmmChild, SpawnError>,
+    prober: P,
+    now: impl Fn() -> Instant,
 ) -> Result<(), DaemonError> {
     let listener =
         UnixListener::bind(&config.control_socket).map_err(|source| DaemonError::Bind {
@@ -395,12 +403,14 @@ fn run_with(
                 spec.name
             )))),
         },
-        ControlSocketProbe,
+        prober,
     )
     .map_err(DaemonError::Spawn)?;
 
-    control::serve(listener, shutdown, || set.status(deadline, shutdown))
-        .map_err(DaemonError::Listener)?;
+    control::serve(listener, shutdown, || {
+        set.status_with(deadline, shutdown, &now)
+    })
+    .map_err(DaemonError::Listener)?;
     Ok(())
 }
 
@@ -415,7 +425,6 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Instant;
 
     const STATUS_REQUEST: &str = r#"{"id":1,"method":"membrane.status","params":{}}"#;
     const PATIENCE: Duration = Duration::from_secs(10);
@@ -710,6 +719,8 @@ mod tests {
                 forked.push(child.pid());
                 Ok(child)
             },
+            ControlSocketProbe,
+            Instant::now,
         )
         .expect_err("an occupied control socket path refuses the start");
 
@@ -789,6 +800,8 @@ mod tests {
                 forked.push(child.pid());
                 Ok(child)
             },
+            ControlSocketProbe,
+            Instant::now,
         )
         .expect_err("two brokers may not share one control socket");
 
