@@ -90,7 +90,12 @@ before anything inside it is checked. Its fix is `remove this entry`: no key is 
 following the fix deletes the binding and its tools. A key is blank when every character in it is
 Unicode White_Space, the characters `str::trim` removes. A key made only of U+3000 or U+00A0 is
 blank. A key such as `" a"` is not, and neither is one made only of U+FEFF, U+200B or U+180E, which
-are not White_Space.
+are not White_Space. A tool name blank in the same sense is refused at its own path, such as
+`provides."a:tools".tools.""`, before its description is checked. Its fix is `remove this entry`:
+no name is guessed, so following the fix deletes the tool. A names list is refused as a whole, and
+its entries have no descriptions. If its first entry is blank, the refusal is at that entry,
+`provides."a:tools".tools[0]`, with fix `remove this entry`. A blank entry after the first is not
+refused at its own index: the list's fix writes at most the first entry, so it drops the blank one.
 
 For a network section that is not a table, or a `hosts` that is not a list, the fix uses the
 string the author wrote there. For the top-level `[network]`, it then uses the `[mock]` hosts.

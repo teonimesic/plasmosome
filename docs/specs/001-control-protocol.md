@@ -1727,7 +1727,9 @@ is a claim that the text above may not be corrected.
    exact cleanup are **not yet implemented**.
    Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
    format3 records. Its grant takes the operation and kind its caller prepared, keeps that
-   address, mints no identity and can fail; every failure it has today comes before any effect.
+   address, mints no identity and can fail. In the model, a grant or apply can fail after its
+   first effect, and a withdrawal after it released something; either failure leaves a typed
+   incomplete effect in the account, which only its exact removal clears.
    No product code calls grant yet. In tests, the testkit's attach-detach fixture writes the
    inverse of every prepared grant to a format3 log before the first grant. The new contract permits
    complete prepare/inverse before fork and defines cleanup after partial launch; it does not
@@ -1738,6 +1740,8 @@ is a claim that the text above may not be corrected.
    Amended on 2026-10-21, when plasmosome-kpm shipped the caller-prepared fallible grant. Until
    then this item listed it as not yet implemented, and said the model code still had
    infallible backend-minted grants.
+   Amended on 2026-10-22, when plasmosome-wswv shipped typed incomplete effects in the exact-ID
+   model. Until then this sentence read "every failure it has today comes before any effect".
 9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
    **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
    recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest
