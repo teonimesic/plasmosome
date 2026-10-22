@@ -465,13 +465,17 @@ arrives early stays in the data listener's queue until both hellos have passed.
 
 One allowance covers every accept, write and read, and nothing renews it. Before every wait the
 handshake checks the budget, with shutdown winning over expiry, then the liveness check. A helper
-that ended, or whose state cannot be read, fails at once. Waits last at most 25 ms of what is left,
-and a budget check after the data accept refuses a handshake that finished after its allowance.
+that ended, or whose state cannot be read, fails at once. Waits last at most 25 ms of what is left.
+The budget is checked again after each accept and after each reply is judged, so a step that
+finished after the allowance is `TimedOut` at that step's stage. The check after the data accept
+refuses a handshake that finished after its allowance.
 
 A reply is read with the readiness probe's reader, through a limit of 1,048,576 bytes before the
 newline plus one byte. One byte more is `FrameTooLarge`, before any parsing. End of file before
 the newline is `Closed`. Bytes after the newline in the same read are `UnexpectedBytes`: the shim
-sends one line and then waits, and the reader would drop those bytes.
+sends one line and then waits, and the reader would drop those bytes. Only bytes that same read
+returns are refused. A line sent in a later write, or after a frame of exactly 1,048,576 bytes,
+stays queued on its lane for the next reader.
 
 Every accepted stream's peer pid must equal the helper's, and the pid is read again after each
 reply. A pid of 0 or below never matches; Linux reports 0 for a peer outside the supervisor's pid
@@ -485,10 +489,28 @@ last once the reply had arrived, so a reply sent by another process fails, unles
 the socket after it. Measured on macOS 26.6.2, after the accept the pid followed a child that only
 sent, in 20 of 20 runs.
 
+These checks do not stop a process of the supervisor's own uid. That is the same-uid limit the
+plasmosome-qep plan records as owner gate O-4, whose handling is "proceed; document". A process
+that holds a copy of the shim's socket, inherited or passed to it, can still do this:
+
+- On Linux it can read both requests and send both replies, because `SO_PEERCRED` keeps the
+  connector for the life of the socket.
+- On Darwin its reply passes if the helper then sends or receives on that socket before the host
+  reads the pid. In a review of this change on macOS 26.6.2, a forked child sent a forged normal
+  reply, the connector then read on its end, and the reply passed the pid read and was judged, in
+  2 of 2 runs.
+- On both, nothing checks the sender once `handshake` returns, so `Association.peer` does not show
+  who wrote later bytes on any of the three streams.
+
+Any process of that uid can also connect to either listener first and fail the handshake with
+`ForeignPeer`.
+
 The `Association` stands for both hellos and the data association. Spec 001 §4.2 also asks for
 the workload namespaces and the workload control group before readiness, and this handshake does
 not observe them. On a failure it closes every stream it accepted. A connection still waiting in a
-listener's queue closes when the caller closes that listener.
+listener's queue closes when the caller closes that listener. When `handshake` returns an
+`Association`, it has not checked that the helper still runs or that the three streams are still
+open; the caller observes the helper.
 
 ## Control-socket ownership
 
