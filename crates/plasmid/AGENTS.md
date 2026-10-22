@@ -31,6 +31,17 @@ which spec 010 requires it to keep doing. Whether plasmid moves onto `plasmosome
 open question (plasmosome-4t24). Both writers escape the terminal controls spec 025 section 3
 names.
 
+## The value rules
+
+`src/values.rs` is plasmid's copy of `plasmosome-cli`'s three value rules: the instance name for
+`--kernel`, the normal absolute path for `--socket` and the deadline for `--deadline-ms`. It is a
+copy for the reason the envelope writer is one. The name rule reads the terminal controls from
+`src/envelope.rs`, so the escaping and the name rule follow one list. `tests/value_parity.rs`
+runs the same lines through this binary and through `plasmosome_cli::handle`, and compares the
+argument each names and the message of each refused value. It fails a rule changed in one crate
+and not the other only when the change moves the answer on one of its lines. So change both rules
+together, and add a line that shows the change.
+
 ## Testing
 
 `cargo test -p plasmid`. The verbs are exercised by running the built binary through
@@ -39,8 +50,9 @@ names.
 The tests read the envelopes with `serde_json`, which is a dev-dependency only, through the
 helpers in `tests/support/mod.rs`. They parse what `plasmid new` writes with `plasmosome-core`'s
 parser, so a printed section that drifts from the refusals the parser gives fails a test.
-`plasmosome-core` is a path-only dev-dependency, which `cargo package` drops. As a normal
-dependency it would stop this crate from packaging, because `plasmosome-core` is not published.
+`plasmosome-core` and `plasmosome-cli` are path-only dev-dependencies, which `cargo package`
+drops. As a normal dependency either would stop this crate from packaging, because neither is
+published.
 
 The tests that write to a closed pipe live in `tests/closed_streams.rs`, a test binary with one
 `#[test]`, so no other thread spawns a child while one of those pipes exists. When they shared a

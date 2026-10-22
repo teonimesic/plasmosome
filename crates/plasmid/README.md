@@ -46,8 +46,8 @@ A command line that is wrong exits 64 with an `invalid` envelope. `argument` nam
 at fault when there is one. With `-h` or `--help` before `--`, only the command words are judged:
 no flag is a fault, known or unknown, with or without a value, given once or twice, and the
 envelope names the first bad word. Without them, `--version` anywhere before `--` but as the sole
-argument is the fault named. Otherwise the envelope names the first fault on the line, flag or
-word, reading from the left:
+argument is the fault named. Otherwise the envelope names the first fault on the line, flag, value
+or word, reading from the left:
 
 ```console
 $ plasmid frobnicate
@@ -56,9 +56,12 @@ $ echo $?
 64
 ```
 
-plasmid does not yet check the values of `--kernel`, `--socket` and `--deadline-ms`, because no
-served command reads them. So where the `plasmosome` binary names a bad value, plasmid names the
-next fault, if there is one: `plasmid --kernel ../x frobnicate` names `frobnicate`.
+A value is judged where it stands, by the rules the `plasmosome` binary uses, though no served
+plasmid command reads one yet. `--kernel` takes an instance name: not empty, `.` or `..`, and with
+no `/`, backslash, NUL or terminal control. `--socket` takes an absolute path with no empty, `.` or
+`..` component. `--deadline-ms` takes an integer from 1 to 3,600,000, in at most seven digits. The
+argument after one of these flags is its value even when it starts with `-`, but `--` never is. So
+`plasmid --kernel ../x frobnicate` names `../x`, and `plasmid --kernel -- --help` names `--kernel`.
 
 Help or the version that cannot be written to stdout exits 1 with a third envelope, `local_io`,
 under `command` `--help` or `--version`, with the `errno` when there is one. All three envelopes

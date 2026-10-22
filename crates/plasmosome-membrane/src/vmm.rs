@@ -606,14 +606,40 @@ impl VmmChild {
             } => "direct child reaped; group cleanup failed",
             Lifecycle::Finished { failure: None, .. } => "cleanup completed",
         };
-        let _ = writeln!(
-            std::io::stderr(),
+        let line = format!(
             "VmmChild pid {} drop cleanup error: {}; later={later:?}; {disposition}; \
              further signalling forbidden={signalling_forbidden}",
-            self.pid,
-            error
+            self.pid, error
         );
+        if let Some(line) = unless_a_test_captures(line) {
+            let _ = writeln!(std::io::stderr(), "{line}");
+        }
     }
+}
+
+fn unless_a_test_captures(line: String) -> Option<String> {
+    #[cfg(test)]
+    let line = unless_this_thread_captures(line)?;
+    Some(line)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CAPTURED_DROP_REPORTS: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn unless_this_thread_captures(line: String) -> Option<String> {
+    let mut line = Some(line);
+    let _ = CAPTURED_DROP_REPORTS.try_with(|captured| {
+        if let Ok(mut captured) = captured.try_borrow_mut()
+            && let Some(lines) = captured.as_mut()
+        {
+            lines.extend(line.take());
+        }
+    });
+    line
 }
 
 #[cfg(test)]
@@ -1111,6 +1137,76 @@ mod tests {
         }
     }
 
+    struct DropReports;
+
+    impl DropReports {
+        fn capture() -> DropReports {
+            CAPTURED_DROP_REPORTS.set(Some(Vec::new()));
+            DropReports
+        }
+
+        fn take(&self) -> Vec<String> {
+            CAPTURED_DROP_REPORTS.with_borrow_mut(|captured| {
+                std::mem::take(
+                    captured
+                        .as_mut()
+                        .expect("this thread captures drop reports while the guard lives"),
+                )
+            })
+        }
+    }
+
+    impl Drop for DropReports {
+        fn drop(&mut self) {
+            for line in CAPTURED_DROP_REPORTS.take().unwrap_or_default() {
+                let _ = writeln!(std::io::stderr(), "{line}");
+            }
+        }
+    }
+
+    fn assert_one_loss_report(lines: Vec<String>, pid: i32, expected: SupervisionError) {
+        let [line] = lines.as_slice() else {
+            panic!("expected one drop report for pid {pid}, got {lines:?}");
+        };
+        assert!(
+            line.starts_with(&format!("VmmChild pid {pid} ")),
+            "the drop report {line:?} names pid {pid}"
+        );
+        assert_report_names(line, expected);
+    }
+
+    fn assert_report_names(line: &str, expected: SupervisionError) {
+        let errno = match expected.observed {
+            Some(state) => format!("errno {} after observing {state:?};", expected.errno),
+            None => format!("errno {};", expected.errno),
+        };
+        for fragment in [
+            format!("{:?} failed", expected.operation),
+            errno,
+            "workers may remain live".to_string(),
+            "further signalling forbidden=true".to_string(),
+        ] {
+            assert!(
+                line.contains(&fragment),
+                "the drop report {line:?} contains {fragment:?}"
+            );
+        }
+        if expected.observed.is_none() {
+            assert!(
+                !line.contains("after observing"),
+                "the drop report {line:?} names no observed exit"
+            );
+        }
+    }
+
+    fn assert_no_report(reports: &DropReports, after: &str) {
+        assert_eq!(
+            reports.take(),
+            Vec::<String>::new(),
+            "{after} made a drop report"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     struct DarwinOwnedGroup {
         pids: Vec<i32>,
@@ -1337,6 +1433,7 @@ mod tests {
 
     #[test]
     fn every_entry_point_fails_closed_after_external_reap() {
+        let reports = DropReports::capture();
         for entry in ["state", "wait", "kill", "drop"] {
             let mut fixture = spawn_with_worker(true);
             let pid = fixture.child().pid();
@@ -1371,18 +1468,29 @@ mod tests {
                 "{entry} signalled after exact-child authority was lost"
             );
             if fixture.child.is_some() {
+                assert_no_report(&reports, entry);
                 drop(fixture.take_child());
                 assert!(
                     holds_open(&fixture.liveness, SETTLE),
                     "cached loss signalled during Drop"
                 );
             }
+            assert_one_loss_report(
+                reports.take(),
+                pid,
+                SupervisionError {
+                    operation: SupervisionOperation::Observe,
+                    errno: libc::ECHILD,
+                    observed: None,
+                },
+            );
             fixture.release_live_worker();
         }
     }
 
     #[test]
     fn loss_after_a_peek_preserves_the_exit_and_forbids_future_signals() {
+        let reports = DropReports::capture();
         let mut fixture = spawn_with_worker(true);
         let pid = fixture.child().pid();
         witness_unconsumed_exit(pid, VmmState::Exited { code: 7 });
@@ -1396,13 +1504,16 @@ mod tests {
         assert_eq!(fixture.child().state(), Err(expected));
         assert_eq!(fixture.child().kill(), Err(expected));
         assert!(holds_open(&fixture.liveness, SETTLE));
+        assert_no_report(&reports, "state or kill");
         drop(fixture.take_child());
         assert!(holds_open(&fixture.liveness, SETTLE));
+        assert_one_loss_report(reports.take(), pid, expected);
         fixture.release_live_worker();
     }
 
     #[test]
     fn completed_and_lost_handles_do_not_touch_an_owned_sentinel() {
+        let reports = DropReports::capture();
         let mut sentinel = spawn_with_worker(false);
         let mut completed = VmmChild::spawn(ExitWith(3)).expect("fork succeeds");
         assert_eq!(
@@ -1412,17 +1523,30 @@ mod tests {
         assert_eq!(completed.state(), Ok(VmmState::Exited { code: 3 }));
         completed.kill().expect("completed kill is a no-op");
         let mut lost = VmmChild::spawn(ExitWith(4)).expect("fork succeeds");
-        witness_unconsumed_exit(lost.pid(), VmmState::Exited { code: 4 });
-        reap_externally(lost.pid());
+        let lost_pid = lost.pid();
+        witness_unconsumed_exit(lost_pid, VmmState::Exited { code: 4 });
+        reap_externally(lost_pid);
         assert_eq!(lost.state(), Ok(VmmState::Lost));
         assert_eq!(lost.state(), Ok(VmmState::Lost));
+        assert_no_report(&reports, "a lifecycle call");
         drop(completed);
+        assert_no_report(&reports, "dropping a completed handle");
         drop(lost);
+        assert_one_loss_report(
+            reports.take(),
+            lost_pid,
+            SupervisionError {
+                operation: SupervisionOperation::Observe,
+                errno: libc::ECHILD,
+                observed: None,
+            },
+        );
         assert!(
             holds_open(&sentinel.liveness, SETTLE),
             "released identities affected an independently owned group"
         );
         sentinel.child().kill().expect("sentinel cleanup succeeds");
+        assert_no_report(&reports, "killing the sentinel");
         assert_eof_within(&sentinel.liveness, DEADLINE);
         sentinel.discard_release();
     }
@@ -1468,6 +1592,7 @@ mod tests {
 
     #[test]
     fn completed_group_disposition_never_resignals_after_reap_loss() {
+        let reports = DropReports::capture();
         for entry in ["state", "wait", "kill", "drop"] {
             let mut fixture = spawn_with_worker(true);
             let pid = fixture.child().pid();
@@ -1492,15 +1617,18 @@ mod tests {
                 "{entry} repeated a completed group disposition"
             );
             if fixture.child.is_some() {
+                assert_no_report(&reports, entry);
                 drop(fixture.take_child());
                 assert!(holds_open(&fixture.liveness, SETTLE));
             }
+            assert_one_loss_report(reports.take(), pid, expected);
             fixture.release_live_worker();
         }
     }
 
     #[test]
     fn leader_signal_esrch_is_not_wait_authority_loss() {
+        let reports = DropReports::capture();
         let mut fixture = spawn_with_worker(false);
         let pid = fixture.child().pid();
         reset_reap_record();
@@ -1538,7 +1666,149 @@ mod tests {
                 signal: libc::SIGKILL
             })
         );
+        assert_no_report(&reports, "a failed or a completed kill");
+        drop(fixture.take_child());
+        assert_no_report(&reports, "dropping a completed handle");
         fixture.discard_release();
+    }
+
+    #[test]
+    fn a_drop_report_is_kept_only_by_the_thread_that_captures_it() {
+        assert_eq!(
+            unless_a_test_captures("x".to_string()),
+            Some("x".to_string()),
+            "with no capture the report goes to stderr"
+        );
+        {
+            let reports = DropReports::capture();
+            assert_eq!(
+                unless_a_test_captures("x".to_string()),
+                None,
+                "a capture on this thread keeps the report"
+            );
+            assert_eq!(reports.take(), vec!["x".to_string()]);
+            let elsewhere = std::thread::spawn(|| unless_a_test_captures("y".to_string()))
+                .join()
+                .expect("the other thread reports without panicking");
+            assert_eq!(
+                elsewhere,
+                Some("y".to_string()),
+                "this thread's capture kept another thread's report"
+            );
+            assert_eq!(reports.take(), Vec::<String>::new());
+        }
+        assert_eq!(
+            unless_a_test_captures("x".to_string()),
+            Some("x".to_string()),
+            "a dropped guard left its capture installed"
+        );
+    }
+
+    const DROP_PROBE: &str = "PLASMOSOME_VMM_DROP_PROBE";
+    const PROBE_PID: &str = "probe drops lost pid ";
+    const PROBE_DEADLINE: Duration = DEADLINE.saturating_mul(2);
+
+    #[test]
+    #[ignore = "helper process for an_uncaptured_drop_report_reaches_stderr"]
+    fn probe_drop_of_a_lost_handle() {
+        if std::env::var_os(DROP_PROBE).is_none() {
+            return;
+        }
+        let mut child = VmmChild::spawn(ExitWith(4)).expect("fork succeeds");
+        let pid = child.pid();
+        println!("{PROBE_PID}{pid}");
+        witness_unconsumed_exit(pid, VmmState::Exited { code: 4 });
+        reap_externally(pid);
+        assert_eq!(child.state(), Ok(VmmState::Lost));
+        drop(child);
+    }
+
+    fn read_from_start(mut file: std::fs::File) -> String {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut text = String::new();
+        file.seek(SeekFrom::Start(0))
+            .and_then(|_| file.read_to_string(&mut text))
+            .expect("the probe's output file reads back");
+        text
+    }
+
+    #[test]
+    fn an_uncaptured_drop_report_reaches_stderr() {
+        let stdout = tempfile::tempfile().expect("the probe has a file for its stdout");
+        let stderr = tempfile::tempfile().expect("the probe has a file for its stderr");
+        let mut command = std::process::Command::new(
+            std::env::current_exe().expect("the test executable has a path"),
+        );
+        command
+            .args([
+                "--exact",
+                "vmm::tests::probe_drop_of_a_lost_handle",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(DROP_PROBE, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(stdout.try_clone().expect("the stdout file is shared"))
+            .stderr(stderr.try_clone().expect("the stderr file is shared"));
+        let spawned = {
+            let _no_pipe_mid_creation = crate::spawn_lock::hold_fork_side();
+            command.spawn()
+        };
+        let mut probe = spawned.expect("the probe process starts");
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = probe.try_wait().expect("the probe's status is readable") {
+                break status;
+            }
+            if started.elapsed() >= PROBE_DEADLINE {
+                let _ = probe.kill();
+                let _ = probe.wait();
+                panic!(
+                    "the probe did not finish within {PROBE_DEADLINE:?}\n{}\n{}",
+                    read_from_start(stdout),
+                    read_from_start(stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let said = read_from_start(stdout);
+        let reported = read_from_start(stderr);
+        assert!(
+            status.success(),
+            "the probe failed: {status}\n{said}\n{reported}"
+        );
+        assert!(
+            said.contains("test result: ok. 1 passed"),
+            "the probe ran its one test\n{said}"
+        );
+        let pid: i32 = said
+            .lines()
+            .find_map(|line| line.split_once(PROBE_PID))
+            .and_then(|(_, pid)| pid.parse().ok())
+            .unwrap_or_else(|| panic!("the probe names its child's pid\n{said}"));
+        let lines: Vec<&str> = reported
+            .split_inclusive('\n')
+            .filter(|line| line.contains("drop cleanup error"))
+            .collect();
+        let [line] = lines.as_slice() else {
+            panic!("expected one drop report on the probe's stderr, got {reported:?}");
+        };
+        let Some(line) = line.strip_suffix('\n') else {
+            panic!("the drop report {line:?} ends with a newline");
+        };
+        assert!(
+            line.starts_with(&format!("VmmChild pid {pid} ")),
+            "the drop report {line:?} names pid {pid}"
+        );
+        assert_report_names(
+            line,
+            SupervisionError {
+                operation: SupervisionOperation::Observe,
+                errno: libc::ECHILD,
+                observed: None,
+            },
+        );
     }
 
     #[test]
