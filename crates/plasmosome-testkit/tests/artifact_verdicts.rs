@@ -462,39 +462,15 @@ fn by_membrane(row: &Row) -> Outcome {
         Err(refusal) if refusal.role != ArtifactRole::Kernel => {
             Err(format!("the refusal names the role {:?}", refusal.role))
         }
-        Err(refusal) => as_core(refusal.fault, &row.artifact).map(Err),
+        Err(refusal) => as_core(refusal.fault).map(Err),
     }
 }
 
-fn as_core(fault: MembraneFault, artifact: &Artifact) -> Result<ArtifactFault, String> {
-    Ok(match fault {
-        MembraneFault::Walk(refusal) => ArtifactFault::Walk(refusal),
-        MembraneFault::NotRegular { kind } => ArtifactFault::NotRegular { kind },
-        MembraneFault::ForeignOwner { uid } => ArtifactFault::ForeignOwner { uid },
-        MembraneFault::Writable { mode } => ArtifactFault::Writable { mode },
-        MembraneFault::SetIdBits { mode } => ArtifactFault::SetIdBits { mode },
-        MembraneFault::WriteAcl => ArtifactFault::WriteAcl,
-        MembraneFault::NotImmutable => ArtifactFault::NotImmutable,
-        MembraneFault::ImmutabilityUnverifiable => ArtifactFault::ImmutabilityUnverifiable,
-        MembraneFault::ChangedWhileHashing => ArtifactFault::ChangedWhileHashing,
-        MembraneFault::DigestMismatch { expected, actual } if expected == *artifact.sha256() => {
-            ArtifactFault::Digest { found: actual }
-        }
-        MembraneFault::DigestMismatch { expected, .. } => {
-            return Err(format!(
-                "the refusal names the pin {expected}, not {}",
-                artifact.sha256()
-            ));
-        }
-        MembraneFault::Io { op, errno } => ArtifactFault::Walk(WalkRefusal::Io {
-            op,
-            path: artifact.path().as_path().to_path_buf(),
-            errno,
-        }),
-        fault @ (MembraneFault::ChangedSinceVerification | MembraneFault::Replaced { .. }) => {
-            return Err(format!("only reconfirm gives {fault:?}"));
-        }
-    })
+fn as_core(fault: MembraneFault) -> Result<ArtifactFault, String> {
+    match fault {
+        MembraneFault::Rule(fault) => Ok(fault),
+        fault => Err(format!("only reconfirm gives {fault:?}")),
+    }
 }
 
 #[test]

@@ -4,18 +4,28 @@ use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+mod target_cache {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/target_cache.rs"
+    ));
+}
+
+pub use target_cache::{Fixture, cache_root, declared_target};
 
 const COMPILER_ARGUMENTS: [&str; 4] = ["-std=c11", "-Wall", "-Wextra", "-Werror"];
 
-static FIXTURE: LazyLock<PathBuf> = LazyLock::new(|| {
+static FIXTURE: Fixture = Fixture::new(build_supervision_fixture);
+
+fn build_supervision_fixture() -> PathBuf {
     let executable = std::env::current_exe().expect("the running test executable has a path");
     compile_supervision_fixture(
         &fixture_cache_root(&executable),
         &supervision_worker_source(),
     )
-});
+}
 
 /// Takes no arguments and returns the path of the supervision worker fixture.
 ///
@@ -25,11 +35,12 @@ static FIXTURE: LazyLock<PathBuf> = LazyLock::new(|| {
 /// arguments before its path is returned. macOS charges the first exec of a
 /// freshly linked binary up to seconds under load, so the warm-up spends that
 /// cost here, where no test deadline is running.
+/// When setup fails, every call panics with the first failure's message.
 /// Callers must not remove or replace the returned executable. Production
 /// builds of the crate never compile the fixture; the build script compiles
 /// only the product Darwin helper.
 pub fn supervision_fixture() -> PathBuf {
-    FIXTURE.clone()
+    FIXTURE.path()
 }
 
 /// Takes the path of a running test executable and returns the directory the
@@ -39,21 +50,18 @@ pub fn supervision_fixture() -> PathBuf {
 /// holding the `CACHEDIR.TAG` file Cargo writes at the root of its target
 /// directory. It therefore stays inside the user's own target directory
 /// whether test executables sit in `deps` or in Cargo's newer
-/// `build/<package>/<hash>/out` layout, and `cargo clean` removes it. Panics,
-/// naming the path, when no ancestor is tagged; it never falls back to a
-/// shared temporary directory.
+/// `build/<package>/<hash>/out` layout, and `cargo clean` removes it. Panics
+/// when no ancestor is tagged, with `cache_root`'s message naming the path and
+/// the command that writes the tag; it never falls back to a shared temporary
+/// directory.
 pub fn fixture_cache_root(executable: &Path) -> PathBuf {
-    executable
-        .ancestors()
-        .skip(1)
-        .find(|directory| directory.join("CACHEDIR.TAG").is_file())
-        .unwrap_or_else(|| {
-            panic!(
-                "the test executable {} is not inside a Cargo target directory tagged with CACHEDIR.TAG, so the supervision fixture has no cache there",
-                executable.display()
-            )
-        })
-        .join("plasmosome-supervision-fixture")
+    cache_root(
+        executable,
+        "plasmosome-supervision-fixture",
+        "the supervision fixture",
+        declared_target().as_deref(),
+    )
+    .unwrap_or_else(|message| panic!("{message}"))
 }
 
 pub fn supervision_worker_source() -> PathBuf {
