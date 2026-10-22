@@ -62,7 +62,7 @@ impl.wasm = "github-pr.wasm"
 }
 ```
 
-Missing or invalid purpose, tool declarations and missing, empty or non-string IDs return
+Missing or invalid purpose, tool declarations and missing, non-string, empty or blank IDs return
 `ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
 repair. Credential-reference refusals use that same form, including the indexed reference and,
 for command credentials, the quoted command key. So does a `ports` value that is not a list, or an
@@ -90,7 +90,9 @@ A `[provides]` binding whose key is empty or only whitespace is refused at its o
 guessed, so following the fix deletes the binding and its tools. A key is blank when every
 character in it is Unicode White_Space, the characters `str::trim` removes. A key made only of
 U+3000 or U+00A0 is blank. A key such as `" a"` is not, and neither is one made only of U+FEFF,
-U+200B or U+180E, which are not White_Space. A tool name blank in the same sense is refused at its
+U+200B or U+180E, which are not White_Space. An ID is blank when it is only Unicode White_Space,
+as for a binding key. It is refused at `id` with no plasmid, before any other field, and an ID such
+as `" a"` is kept as written. A tool name blank in the same sense is refused at its
 own path, such as `provides."a:tools".tools.""`, before its description is checked. Its fix is
 `remove this entry`: no name is guessed, so following the fix deletes the tool. A names list is
 refused as a whole, and its entries have no descriptions. If its first entry is blank, the refusal
@@ -176,8 +178,9 @@ about twice it: a 16-part table header with a key under it counts 33 and is refu
 tree is 17 deep.
 `WireError::manifest_refusal` turns any of them into code 108. A `Field` refusal carries its
 `field` and its `fix`, and its `plasmid` exactly when it names one, as members a client reads
-without parsing `detail`. A refusal of an `id` that is missing, not a string or empty names no
-plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three members.
+without parsing `detail`. A refusal of an `id` that is missing, not a string, empty or only
+whitespace names no plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three
+members.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description. `PlasmidManifest::provides` lists the `[provides]` binding keys, such as
 `github:tools`, as written. A binding with its own `[provides."<key>"]` header is listed where
