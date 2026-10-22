@@ -846,6 +846,8 @@ fn a_peer_group_rule_holds_only_whole_numbers() {
             json!("master:5"),
             json!("shared:5"),
             json!("propagate_from:5"),
+            json!(-5),
+            json!(5.5),
         ],
     );
 }
