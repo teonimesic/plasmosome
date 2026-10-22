@@ -57,19 +57,22 @@ in `src/lib.rs`, or on a single item:
   private read-only `mmap` read with `read_volatile` and released with `munmap`.
 
 These are the FFI modules spec 026 §2 lets this file name for a module-wide allow. Everything
-else takes the per-item allow that `plasmosome-core` and `plasmosome-membrane` use. Two items
+else takes the per-item allow that `plasmosome-core` and `plasmosome-membrane` use. Three items
 outside the modules carry it:
 
 - `images` in `src/bin/lane_vmm.rs` calls the unsafe `krun::loaded_images`, whose caller must
   promise no image is unloaded during the call.
 - `kill_group` in `src/run.rs` calls `kill(-group, SIGKILL)` on the launcher's process group.
   std kills one process only.
+- `live::dyld_tries_exactly_the_leaf_search_for_a_name_that_exists_nowhere` in `tests/dyld.rs`
+  (macOS) calls `dlopen` on a leaf name that exists nowhere, then reads `dlerror`: dyld's own
+  list of the paths it tried, which the test compares with `leaf_search`.
 
 Every `unsafe` block has a `// SAFETY:` comment, every `unsafe fn` a `# Safety` section, private
 ones included, and the `unsafe extern` block documents what each declaration assumes. No safe
 route exists. libkrun is a C library. std offers none of those Linux calls, no `sync`, no
 process-group kill, no stable way to pass a descriptor over `SCM_RIGHTS`, and nothing that lists
-dyld's loaded images or asks its shared cache.
+dyld's loaded images, asks its shared cache or reports the paths it tried.
 `nix` and `rustix` wrap some of the Linux calls, but each would be a new dependency under spec
 026 §1, and neither reaches libkrun or dyld.
 

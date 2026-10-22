@@ -12,6 +12,7 @@ members = [
     "crates/plasmosome-testkit",
     "crates/plasmosome-cli",
     "crates/plasmosome-lanes",
+    "crates/plasmosome-tools",
 ]
 
 [workspace.package]

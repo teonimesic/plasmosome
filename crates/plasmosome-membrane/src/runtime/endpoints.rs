@@ -22,8 +22,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// launches the helper, and keeps until teardown.
 ///
 /// Get one from [`RuntimeListener::bind`]. It is core's `PrivateListener`: its
-/// socket file sits in a directory core's walk found private, has mode 0600
-/// before it listens, and its descriptor is nonblocking and close-on-exec.
+/// socket file sits in a directory core's walk found private, appears at its
+/// path only once it is 0600 and listening, and its descriptor is nonblocking
+/// and close-on-exec.
 /// Closing or dropping it does what [`RuntimeListener::close`] says.
 #[derive(Debug)]
 pub struct RuntimeListener {
@@ -75,9 +76,9 @@ impl RuntimeListener {
     /// uid and writable by neither group nor other, the directory itself owned
     /// by this uid with no group or other bits. Core's `PrivateListener` then
     /// binds the name inside that held directory, refusing any entry already
-    /// there and leaving it as it was, and sets the socket to 0600 before it
-    /// listens. The bind holds the write side of the spawn lock, so no
-    /// `VmmChild::spawn` forks while the socket is still inheritable.
+    /// there and leaving it as it was. The socket reaches `path` only once it
+    /// is 0600 and listening. The bind holds the write side of the spawn lock,
+    /// so no `VmmChild::spawn` forks while the socket is still inheritable.
     pub fn bind(path: &RecipePath) -> Result<RuntimeListener, EndpointRefusal> {
         Self::bind_trusting(path, effective_uid())
     }
