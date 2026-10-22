@@ -2,11 +2,15 @@ use std::ffi::{CStr, CString, OsString};
 use std::fmt;
 use std::io::Read;
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::{ffi::c_char, fs::File, io};
 
 use plasmosome_core::runtime::supervisor_config::MAX_RECORD_BYTES;
 
 #[cfg(any(target_os = "macos", test))]
 use super::closure::{self, ClosureFault};
+#[cfg(target_os = "macos")]
+use super::path::RecipePath;
 use super::recipe::{HostLimitsError, PlatformLimits, RecipeRefusal, RuntimeRecipe};
 
 /// The one argument the helper takes after its own path.
@@ -49,7 +53,8 @@ pub enum HelperExit {
     /// The host policy is too long, unreadable or not one NUL-terminated profile, was not
     /// applied, or did not deny.
     HostPolicy = 67,
-    /// A loaded image is not the helper, a listed library or a sealed system library.
+    /// A loaded image is not the helper, a listed library or a sealed system library, or no
+    /// loaded image is the helper.
     Inventory = 68,
     /// A libkrun call failed, or `krun_start_enter` returned.
     Krun = 69,
@@ -145,10 +150,12 @@ pub fn judge_invocation(args: &[OsString], env_is_empty: bool) -> Result<(), Hel
     Ok(())
 }
 
-/// What `fstat` says a descriptor is.
+/// What a descriptor names. On macOS `observe_descriptors` takes it from the kernel's descriptor
+/// type and, for a file, from `fstat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorKind {
     CharDevice,
+    /// A pipe. A named FIFO is `Other`.
     Fifo,
     Socket,
     Regular,
@@ -625,6 +632,290 @@ pub fn run_plan(
     refuse(HelperExit::Krun, "the plan ended without krun_start_enter")
 }
 
+/// Lists every descriptor this process has open, with what each one names, without opening one:
+/// the list is `proc_pidinfo`'s `PROC_PIDLISTFDS`. A pipe is `Fifo`, and a named FIFO, which is a
+/// file, is `Other`. A file is classified by `fstat`, and only a character device has a nonzero
+/// `rdev`, its `st_rdev`. A socket is `Socket`, and any other kernel object is `Other`. Call it
+/// before anything opens a descriptor, and judge the list with [`judge_descriptors`]. It reads
+/// what is open while it runs, so a descriptor another thread opens or closes meanwhile may be
+/// missed. An error is the one `proc_pidinfo` or `fstat` gave.
+#[cfg(target_os = "macos")]
+pub fn observe_descriptors() -> io::Result<Vec<DescriptorFacts>> {
+    open_descriptors()?.iter().map(descriptor_facts).collect()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn open_descriptors() -> io::Result<Vec<libc::proc_fdinfo>> {
+    let pid = std::process::id().cast_signed();
+    let entry = size_of::<libc::proc_fdinfo>();
+    // SAFETY: with a null buffer and a size of 0, proc_pidinfo writes nothing. It returns the bytes
+    // the list needs, with room for 20 more descriptors, or 0 on failure.
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    let mut slots = usize::try_from(needed).unwrap_or(0) / entry;
+    while slots > 0 {
+        let room = slots * entry;
+        let size = libc::c_int::try_from(room)
+            .map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+        let mut list = vec![
+            libc::proc_fdinfo {
+                proc_fd: -1,
+                proc_fdtype: 0,
+            };
+            slots
+        ];
+        // SAFETY: `list` holds `slots` proc_fdinfo records, `size` bytes in all. proc_pidinfo writes
+        // at most `size` bytes of whole records into it, returns how many it wrote or 0 on failure,
+        // and keeps no pointer.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                list.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        let written = usize::try_from(written).unwrap_or(0);
+        if written == 0 {
+            break;
+        }
+        if written < room {
+            list.truncate(written / entry);
+            return Ok(list);
+        }
+        slots *= 2;
+    }
+    Err(io::Error::last_os_error())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn descriptor_facts(entry: &libc::proc_fdinfo) -> io::Result<DescriptorFacts> {
+    let fd = entry.proc_fd;
+    let (kind, rdev) = match entry.proc_fdtype.cast_signed() {
+        libc::PROX_FDTYPE_PIPE => (DescriptorKind::Fifo, 0),
+        libc::PROX_FDTYPE_SOCKET => (DescriptorKind::Socket, 0),
+        libc::PROX_FDTYPE_VNODE => {
+            // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: fstat writes only the local `stat` and keeps no pointer. A descriptor closed
+            // since the list was read fails with EBADF, which is returned.
+            if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            match stat.st_mode & libc::S_IFMT {
+                libc::S_IFCHR => (DescriptorKind::CharDevice, stat.st_rdev as u64),
+                libc::S_IFREG => (DescriptorKind::Regular, 0),
+                libc::S_IFDIR => (DescriptorKind::Directory, 0),
+                _ => (DescriptorKind::Other, 0),
+            }
+        }
+        _ => (DescriptorKind::Other, 0),
+    };
+    Ok(DescriptorFacts { fd, kind, rdev })
+}
+
+/// Opens the writable root at `path` read-only and reads its facts with `fstat` through that
+/// descriptor; judge them with [`judge_writable_root`]. The open uses `O_NOFOLLOW` and
+/// `O_NONBLOCK`, so a symlink at the path refuses and a FIFO is judged, not waited on. Keep the
+/// file it returns open until [`reconfirm_writable_root`] has passed: while it is open its inode
+/// cannot be reused, so an equal device and inode there is this file. A path it cannot open or
+/// `fstat` refuses `Verify`.
+#[cfg(target_os = "macos")]
+pub fn writable_root_facts(path: &RecipePath) -> Result<(File, WritableRootFacts), HelperRefusal> {
+    use std::os::macos::fs::MetadataExt as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let failed = |what: &str, error: io::Error| {
+        let detail = format!(
+            "the writable root {:?} could not be {what}: {error}",
+            path.as_str()
+        );
+        refuse(HelperExit::Verify, detail)
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path.as_path())
+        .map_err(|error| failed("opened", error))?;
+    let metadata = file.metadata().map_err(|error| failed("read", error))?;
+    let facts = WritableRootFacts {
+        regular: metadata.file_type().is_file(),
+        uid: metadata.uid(),
+        mode: metadata.mode(),
+        nlink: metadata.nlink(),
+        immutable: metadata.st_flags() & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0,
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    };
+    Ok((file, facts))
+}
+
+/// Checks with `lstat` that `path` still names the file `checked` describes, by device and inode.
+/// Call it just before the first libkrun call, which opens the writable root by its path, while
+/// the file [`writable_root_facts`] returned is still open. A path that is gone, or names another
+/// file or a symlink, refuses `Verify`.
+#[cfg(target_os = "macos")]
+pub fn reconfirm_writable_root(
+    path: &RecipePath,
+    checked: &WritableRootFacts,
+) -> Result<(), HelperRefusal> {
+    use std::os::unix::fs::MetadataExt as _;
+    let shown = path.as_str();
+    let found = std::fs::symlink_metadata(path.as_path()).map_err(|error| {
+        let detail = format!("the writable root {shown:?} could not be found again: {error}");
+        refuse(HelperExit::Verify, detail)
+    })?;
+    if (found.dev(), found.ino()) == (checked.dev, checked.ino) {
+        return Ok(());
+    }
+    Err(refuse(
+        HelperExit::Verify,
+        format!(
+            "the writable root {shown:?} was replaced: it is device {} inode {}, not the checked device {} inode {}",
+            found.dev(),
+            found.ino(),
+            checked.dev,
+            checked.ino
+        ),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    /// libsystem_sandbox's SBPL entry point, which libSystem re-exports; deprecated, and present
+    /// on macOS 26. With `flags` 0, `profile` is NUL-terminated SBPL text, read during the call
+    /// only. It returns 0 once the profile applies to the calling process. Otherwise it returns
+    /// nonzero and may store a NUL-terminated message at `*errorbuf`, which `sandbox_free_error`
+    /// releases.
+    fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> libc::c_int;
+    /// Releases a message `sandbox_init` stored. `errorbuf` must be that pointer, freed once.
+    fn sandbox_free_error(errorbuf: *mut c_char);
+    /// dyld's count of loaded images, from `mach-o/dyld.h`. It takes nothing and only reads
+    /// dyld's list. Declared here because libc marks its own declaration deprecated.
+    fn _dyld_image_count() -> u32;
+    /// dyld's name for image `index`, from `mach-o/dyld.h`: null for an index that is not below
+    /// the count, otherwise a NUL-terminated path dyld keeps while that image stays loaded.
+    fn _dyld_get_image_name(index: u32) -> *const c_char;
+}
+
+/// Applies `profile`, the host policy [`read_host_policy`] returned, to this whole process with
+/// `sandbox_init`. Nothing lifts it afterwards. A profile `sandbox_init` does not apply refuses
+/// `HostPolicy` with its status and message, whose whitespace is folded so the refusal is one
+/// line. `sandbox_init` may also write lines of its own to descriptor 2. Success says nothing
+/// about what the profile denies: call [`probe_denials`] next.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn apply_host_policy(profile: &CStr) -> Result<(), HelperRefusal> {
+    let mut message: *mut c_char = std::ptr::null_mut();
+    // SAFETY: `profile` is NUL-terminated and outlives the call, which reads it during the call
+    // only, and `message` is a local place for sandbox_init to store a message pointer.
+    let status = unsafe { sandbox_init(profile.as_ptr(), 0, &mut message) };
+    if status == 0 {
+        return Ok(());
+    }
+    let text = if message.is_null() {
+        "no message".to_owned()
+    } else {
+        // SAFETY: sandbox_init stored a NUL-terminated message at `message`, copied out here
+        // before it is freed.
+        let text = one_line(&unsafe { CStr::from_ptr(message) }.to_string_lossy());
+        // SAFETY: `message` is the pointer sandbox_init stored, freed once here and not used again.
+        unsafe { sandbox_free_error(message) };
+        text
+    };
+    Err(refuse(
+        HelperExit::HostPolicy,
+        format!("sandbox_init refused the host policy: it returned {status}: {text}"),
+    ))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Tries the two operations the applied host policy must deny and judges each outcome with
+/// [`judge_denial`]. The first creates `/private/tmp/plasmosome-vmm-probe-<pid>` with
+/// `O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC`; a file it did create is closed and unlinked before
+/// the refusal. The second connects over TCP to 127.0.0.1 port 9, and a refused `socket` call is
+/// its answer too. Refuses `HostPolicy`, naming the first probe that was not denied with `EPERM`.
+#[cfg(target_os = "macos")]
+pub fn probe_denials() -> Result<(), HelperRefusal> {
+    judge_denial(DeniedProbe::FreshFileWrite, fresh_file_write())?;
+    judge_denial(DeniedProbe::TcpConnect, tcp_connect())
+}
+
+#[cfg(target_os = "macos")]
+fn fresh_file_write() -> Result<(), i32> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let path = format!("/private/tmp/plasmosome-vmm-probe-{}", std::process::id());
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path);
+    match created {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            Ok(())
+        }
+        Err(error) => Err(errno(&error)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn tcp_connect() -> Result<(), i32> {
+    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, 9))
+        .map(drop)
+        .map_err(|error| errno(&error))
+}
+
+#[cfg(target_os = "macos")]
+fn errno(error: &io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
+}
+
+/// The name of every image dyld has loaded into this process, in dyld's order, the main
+/// executable first; judge them with [`judge_loaded_images`]. Every index below
+/// `_dyld_image_count` is listed. An image whose name is null or not UTF-8 is listed as
+/// `image <index> has no name` or `image <index> has a name that is not UTF-8: ...`, which is not
+/// an absolute path, so the judge refuses it. Each call reads the list again, so a call after
+/// `krun_create_ctx` sees what it loaded. Do not call it while another thread may unload an image
+/// with `dlclose`.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub fn loaded_images() -> Vec<String> {
+    // SAFETY: _dyld_image_count takes nothing and only reads dyld's image list.
+    let count = unsafe { _dyld_image_count() };
+    image_names(count, |index| {
+        // SAFETY: _dyld_get_image_name only reads dyld's image list, and returns null for an index
+        // that is not below the count.
+        let name = unsafe { _dyld_get_image_name(index) };
+        // SAFETY: a non-null name is a NUL-terminated path dyld keeps while its image is loaded,
+        // and it is copied out at once. Only dlclose unloads an image, an unsafe call whose caller
+        // must know nothing still uses the image, so only another thread's dlclose during the copy
+        // could free it. The helper has one thread.
+        (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) }.to_bytes().to_vec())
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn image_names(count: u32, mut name_at: impl FnMut(u32) -> Option<Vec<u8>>) -> Vec<String> {
+    (0..count)
+        .map(|index| match name_at(index) {
+            None => format!("image {index} has no name"),
+            Some(bytes) => String::from_utf8(bytes).unwrap_or_else(|error| {
+                let shown = String::from_utf8_lossy(error.as_bytes());
+                format!("image {index} has a name that is not UTF-8: {shown:?}")
+            }),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,11 +1262,9 @@ mod tests {
             (b"(version \xff)\0", "is not UTF-8"),
         ];
         for (bytes, broken) in cases {
-            let detail = format!("the host policy {broken}");
-            assert_eq!(
-                judge_host_policy_bytes(bytes),
-                Err(refuse(HostPolicy, detail))
-            );
+            let refused = Err(refuse(HostPolicy, format!("the host policy {broken}")));
+            assert_eq!(judge_host_policy_bytes(bytes), refused);
+            assert_eq!(read_host_policy(bytes), refused);
         }
     }
 
@@ -1095,7 +1384,8 @@ mod tests {
     #[test]
     fn an_inventory_without_the_helper_refuses() {
         let system_only = names(&["/usr/lib/libSystem.B.dylib"]);
-        for images in [Vec::new(), system_only, names(&[LIBRARY])] {
+        let helper_suffix = names(&["/usr/lib/opt/cell/bin/krun-helper"]);
+        for images in [Vec::new(), system_only, names(&[LIBRARY]), helper_suffix] {
             let refusal = judge_images_with(&images, &fixture(), sealed);
             let detail = format!(
                 "the helper {HELPER:?} is not among the {} loaded images",
@@ -1103,6 +1393,37 @@ mod tests {
             );
             assert_eq!(refusal, Err(refuse(Inventory, detail)));
         }
+    }
+
+    #[test]
+    fn every_image_index_is_listed_and_an_unreadable_name_refuses_by_it() {
+        let source = [
+            Some(HELPER.as_bytes().to_vec()),
+            None,
+            Some(b"/opt/cell/lib/\xff.dylib".to_vec()),
+            Some(LIBRARY.as_bytes().to_vec()),
+        ];
+        let listed = image_names(4, |index| source[index as usize].clone());
+        let replaced = char::REPLACEMENT_CHARACTER;
+        let not_utf8 =
+            format!("image 2 has a name that is not UTF-8: \"/opt/cell/lib/{replaced}.dylib\"");
+        assert_eq!(
+            listed,
+            [HELPER, "image 1 has no name", not_utf8.as_str(), LIBRARY]
+        );
+        for name in &listed[1..3] {
+            let refusal = judge_images_with(&names(&[HELPER, name]), &fixture(), sealed);
+            let detail =
+                format!("{name:?} is not the helper, a listed library or a sealed system library");
+            assert_eq!(refusal, Err(refuse(Inventory, detail)));
+        }
+    }
+
+    #[test]
+    fn a_sandbox_message_is_folded_onto_one_line() {
+        let message = "unbound variable: x at <input string>, line 1\nBacktrace: \n\tx\n";
+        let folded = "unbound variable: x at <input string>, line 1 Backtrace: x";
+        assert_eq!(one_line(message), folded);
     }
 
     #[test]
@@ -1404,5 +1725,383 @@ mod tests {
         assert_eq!(outcome.calls.len(), 13);
         let detail = "the plan ended without krun_start_enter";
         assert_eq!(outcome.refusal, refuse(Krun, detail));
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use super::*;
+        use crate::runtime::digest::Digest;
+        use crate::runtime::test_fixtures::host_policy::{
+            HOST_POLICY, HOST_POLICY_SHA256, WORK_SUBPATH,
+        };
+        use crate::runtime::test_fixtures::tree::{ArtifactTree, make_fifo, set_flags, set_mode};
+        use std::fs::{self, OpenOptions};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::unix::net::UnixStream;
+        use std::path::PathBuf;
+        use std::process::{Command, Stdio};
+
+        fn listed(open: &[DescriptorFacts], fd: &impl AsRawFd) -> Option<(DescriptorKind, u64)> {
+            let fd = fd.as_raw_fd();
+            let mut found = open.iter().filter(|facts| facts.fd == fd);
+            let first = found.next().map(|facts| (facts.kind, facts.rdev));
+            assert!(found.next().is_none(), "descriptor {fd} is listed once");
+            first
+        }
+
+        #[test]
+        fn observe_descriptors_sees_an_opened_file() {
+            let tree = ArtifactTree::new();
+            let file = File::open(tree.file("opened", b"x", 0o600)).expect("the file opens");
+            let open = observe_descriptors().expect("the descriptor list is read");
+            assert_eq!(listed(&open, &file), Some((DescriptorKind::Regular, 0)));
+            assert!(open.iter().all(|facts| facts.fd >= 0), "{open:?}");
+        }
+
+        #[test]
+        fn the_descriptor_observer_tells_a_pipe_from_a_named_fifo() {
+            use DescriptorKind::*;
+            let tree = ArtifactTree::new();
+            let (reader, writer) = std::io::pipe().expect("a pipe is made");
+            let path = tree.join("fifo");
+            make_fifo(&path);
+            let fifo = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .expect("a named FIFO opens for reading without a writer");
+            let (socket, _peer) = UnixStream::pair().expect("a socket pair is made");
+            let null = File::open("/dev/null").expect("/dev/null opens");
+            let directory = File::open(tree.join(".")).expect("the directory opens");
+            let null_rdev = fs::metadata("/dev/null").expect("stat /dev/null").rdev();
+            let open = observe_descriptors().expect("the descriptor list is read");
+            assert_eq!(listed(&open, &reader), Some((Fifo, 0)));
+            assert_eq!(listed(&open, &writer), Some((Fifo, 0)));
+            assert_eq!(listed(&open, &fifo), Some((Other, 0)));
+            assert_eq!(listed(&open, &socket), Some((Socket, 0)));
+            assert_eq!(listed(&open, &null), Some((CharDevice, null_rdev)));
+            assert_eq!(listed(&open, &directory), Some((Directory, 0)));
+        }
+
+        fn recipe_path(path: &Path) -> RecipePath {
+            RecipePath::parse(path.to_str().expect("a UTF-8 test path"))
+                .expect("the test path is canonical")
+        }
+
+        fn root_in(tree: &ArtifactTree) -> (PathBuf, RecipePath) {
+            let path = tree.file("root.raw", b"root", 0o600);
+            let root = recipe_path(&path);
+            (path, root)
+        }
+
+        #[test]
+        fn writable_root_facts_are_read_through_the_open_file() {
+            let tree = ArtifactTree::new();
+            let (path, root) = root_in(&tree);
+            let (file, facts) = writable_root_facts(&root).expect("the writable root opens");
+            let named = fs::symlink_metadata(&path).expect("lstat");
+            let expected = WritableRootFacts {
+                regular: true,
+                uid: named.uid(),
+                mode: named.mode(),
+                nlink: 1,
+                immutable: false,
+                dev: named.dev(),
+                ino: named.ino(),
+            };
+            assert_eq!(facts, expected);
+            assert_eq!(facts.mode & 0o7777, 0o600);
+            let held = file.metadata().expect("fstat");
+            assert_eq!((held.dev(), held.ino()), (facts.dev, facts.ino));
+            assert_eq!(judge_writable_root(&facts, named.uid()), Ok(()));
+        }
+
+        #[test]
+        fn writable_root_facts_show_a_second_link_a_wider_mode_and_uchg() {
+            let tree = ArtifactTree::new();
+            let (path, root) = root_in(&tree);
+            let euid = fs::metadata(&path).expect("stat").uid();
+            let judged = || {
+                let (_file, facts) = writable_root_facts(&root).expect("the writable root opens");
+                judge_writable_root(&facts, euid).map_err(|refusal| refusal.detail)
+            };
+            let refused = |broken: &str| Err(format!("the writable root is refused: {broken}"));
+            let second = tree.join("second");
+            fs::hard_link(&path, &second).expect("a second link is made");
+            assert_eq!(judged(), refused("it has 2 links, not 1"));
+            fs::remove_file(&second).expect("the second link is removed");
+            set_mode(&path, 0o644);
+            assert_eq!(judged(), refused("it has mode 0644, not 0600"));
+            set_mode(&path, 0o600);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            assert_eq!(judged(), refused("it is immutable"));
+        }
+
+        #[test]
+        fn a_writable_root_that_is_a_symlink_a_fifo_or_missing_refuses() {
+            let tree = ArtifactTree::new();
+            let (path, _root) = root_in(&tree);
+            let link = tree.join("link");
+            std::os::unix::fs::symlink(&path, &link).expect("a symlink is made");
+            let missing = tree.join("missing");
+            for (path, errno) in [(&link, libc::ELOOP), (&missing, libc::ENOENT)] {
+                let error = io::Error::from_raw_os_error(errno);
+                let detail = format!(
+                    "the writable root {:?} could not be opened: {error}",
+                    path.to_str().expect("UTF-8")
+                );
+                let refusal = writable_root_facts(&recipe_path(path)).map(|(_, facts)| facts);
+                assert_eq!(refusal, Err(refuse(Verify, detail)));
+            }
+            let fifo = tree.join("fifo");
+            make_fifo(&fifo);
+            let (_file, facts) =
+                writable_root_facts(&recipe_path(&fifo)).expect("a FIFO opens without blocking");
+            let detail = "the writable root is refused: it is not a regular file";
+            assert_eq!(
+                judge_writable_root(&facts, facts.uid),
+                Err(refuse(Verify, detail))
+            );
+        }
+
+        #[test]
+        fn the_writable_root_is_reconfirmed_by_identity() {
+            let tree = ArtifactTree::new();
+            let (path, root) = root_in(&tree);
+            let (_held, facts) = writable_root_facts(&root).expect("the writable root opens");
+            assert_eq!(reconfirm_writable_root(&root, &facts), Ok(()));
+            let shown = root.as_str();
+            let replaced_by = |path: &Path| {
+                let found = fs::symlink_metadata(path).expect("lstat");
+                let detail = format!(
+                    "the writable root {shown:?} was replaced: it is device {} inode {}, not the checked device {} inode {}",
+                    found.dev(),
+                    found.ino(),
+                    facts.dev,
+                    facts.ino
+                );
+                Err(refuse(Verify, detail))
+            };
+            let moved = tree.join("moved");
+            fs::rename(&path, &moved).expect("the root is moved away");
+            std::os::unix::fs::symlink(&moved, &path).expect("a symlink to it takes its name");
+            assert_eq!(reconfirm_writable_root(&root, &facts), replaced_by(&path));
+            fs::remove_file(&path).expect("the symlink is removed");
+            let other = tree.file("other", b"root", 0o600);
+            fs::rename(&other, &path).expect("another file takes the name");
+            assert_eq!(reconfirm_writable_root(&root, &facts), replaced_by(&path));
+            fs::remove_file(&path).expect("the other file is removed");
+            let gone = io::Error::from_raw_os_error(libc::ENOENT);
+            let detail = format!("the writable root {shown:?} could not be found again: {gone}");
+            assert_eq!(
+                reconfirm_writable_root(&root, &facts),
+                Err(refuse(Verify, detail))
+            );
+            fs::rename(&moved, &path).expect("the root comes back");
+            assert_eq!(reconfirm_writable_root(&root, &facts), Ok(()));
+        }
+
+        #[allow(unsafe_code)]
+        fn image_count() -> usize {
+            // SAFETY: _dyld_image_count takes nothing and only reads dyld's image list.
+            unsafe { _dyld_image_count() as usize }
+        }
+
+        #[test]
+        fn loaded_images_include_libsystem() {
+            let counted = image_count();
+            let images = loaded_images();
+            assert!(images.len() >= counted, "{images:?}");
+            let executable = std::env::current_exe()
+                .and_then(fs::canonicalize)
+                .expect("the test executable has a canonical path");
+            assert_eq!(
+                fs::canonicalize(&images[0]).ok(),
+                Some(executable),
+                "{images:?}"
+            );
+            assert!(
+                images
+                    .iter()
+                    .any(|name| name == "/usr/lib/libSystem.B.dylib")
+            );
+            let recipe = recipe(&recipe_value(&images[0]));
+            let count = judge_loaded_images(&images, &recipe).expect("the test runner passes");
+            let expected = ImageCount {
+                total: images.len(),
+                system: images.len() - 1,
+                listed: 1,
+            };
+            assert_eq!(count, expected);
+        }
+
+        #[allow(unsafe_code)]
+        fn load(path: &CStr) {
+            // SAFETY: `path` is NUL-terminated and outlives the call. The image is a system
+            // library that is never unloaded, and its initializers are dyld's to run.
+            let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            assert!(!handle.is_null(), "{path:?} loads");
+        }
+
+        #[test]
+        fn a_second_inventory_lists_an_image_loaded_after_the_first() {
+            let late = c"/usr/lib/libsqlite3.dylib";
+            let named =
+                |images: &[String]| images.iter().any(|name| name.as_bytes() == late.to_bytes());
+            let first = loaded_images();
+            assert!(!named(&first), "{late:?} is not loaded yet: {first:?}");
+            load(late);
+            let second = loaded_images();
+            assert!(named(&second), "{second:?}");
+            assert!(second.len() > first.len());
+        }
+
+        const POLICY_CHILD: &str = "PLASMOSOME_VMM_POLICY_CHILD";
+
+        fn child_profile(mode: &str) -> String {
+            match mode {
+                "deny" => {
+                    let work = std::env::temp_dir().join("plasmosome-vmm-policy-child");
+                    let subpath = format!("(subpath \"{}\")", work.display());
+                    HOST_POLICY.replace(WORK_SUBPATH, &subpath)
+                }
+                "allow" => "(version 1)(allow default)".to_owned(),
+                "network" => "(version 1)(allow default)(deny file-write*)".to_owned(),
+                _ => "(version 1)(no-such-rule)".to_owned(),
+            }
+        }
+
+        #[test]
+        fn the_deny_child_applies_the_qualified_host_policy() {
+            let file = [HOST_POLICY.as_bytes(), b"\0"].concat();
+            assert_eq!(Digest::of(&file).hex(), HOST_POLICY_SHA256);
+            let profile = child_profile("deny");
+            assert_eq!(HOST_POLICY.matches(WORK_SUBPATH).count(), 1);
+            assert!(!profile.contains(WORK_SUBPATH));
+            assert_eq!(profile.matches("(subpath ").count(), 1, "{profile}");
+        }
+
+        #[test]
+        fn policy_child() {
+            let mode = std::env::var(POLICY_CHILD).ok().and_then(|value| {
+                let (mode, parent) = value.split_once(':')?;
+                let ours = parent.parse::<u32>().ok() == Some(std::os::unix::process::parent_id());
+                ours.then(|| mode.to_owned())
+            });
+            let Some(mode) = mode else {
+                return;
+            };
+            let profile = CString::new(child_profile(&mode)).expect("the profile has no NUL");
+            if let Err(refusal) = apply_host_policy(&profile) {
+                eprintln!("{refusal}");
+                std::process::exit(refusal.exit.code());
+            }
+            eprintln!("policy child: fresh file write {:?}", fresh_file_write());
+            eprintln!("policy child: TCP connect {:?}", tcp_connect());
+            let code = match probe_denials() {
+                Ok(()) => 0,
+                Err(refusal) => {
+                    eprintln!("{refusal}");
+                    refusal.exit.code()
+                }
+            };
+            std::process::exit(code);
+        }
+
+        struct ChildRun {
+            pid: u32,
+            code: Option<i32>,
+            stderr: String,
+        }
+
+        impl ChildRun {
+            fn probes(&self) -> Vec<&str> {
+                self.stderr
+                    .lines()
+                    .filter(|line| line.starts_with("policy child: "))
+                    .collect()
+            }
+
+            fn refused(&self) -> Option<&str> {
+                self.stderr
+                    .lines()
+                    .find(|line| line.starts_with("refused "))
+            }
+        }
+
+        fn run_policy_child(mode: &str) -> ChildRun {
+            let test = "runtime::vmm_helper::tests::macos::policy_child";
+            let child = Command::new(std::env::current_exe().expect("the test binary has a path"))
+                .args(["--exact", test, "--test-threads=1", "--nocapture"])
+                .env(POLICY_CHILD, format!("{mode}:{}", std::process::id()))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("the test binary runs again as a policy child");
+            let pid = child.id();
+            let output = child
+                .wait_with_output()
+                .expect("the policy child is reaped");
+            ChildRun {
+                pid,
+                code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }
+        }
+
+        #[test]
+        fn host_policy_in_a_child_denies_both_probes() {
+            let run = run_policy_child("deny");
+            let eperm = libc::EPERM;
+            let expected = [
+                format!("policy child: fresh file write Err({eperm})"),
+                format!("policy child: TCP connect Err({eperm})"),
+            ];
+            assert_eq!(run.probes(), expected, "{}", run.stderr);
+            assert_eq!((run.code, run.refused()), (Some(0), None), "{}", run.stderr);
+        }
+
+        #[test]
+        fn allow_default_policy_fails_the_probes() {
+            let run = run_policy_child("allow");
+            assert_eq!(run.code, Some(HostPolicy.code()), "{}", run.stderr);
+            let probes = run.probes();
+            assert_eq!(
+                probes[0], "policy child: fresh file write Ok(())",
+                "{}",
+                run.stderr
+            );
+            let detail = "the host policy did not deny a fresh file write: it succeeded";
+            let refused = refuse(HostPolicy, detail).to_string();
+            assert_eq!(run.refused(), Some(refused.as_str()));
+            let probe = PathBuf::from(format!("/private/tmp/plasmosome-vmm-probe-{}", run.pid));
+            assert!(!probe.exists(), "{} was unlinked", probe.display());
+        }
+
+        #[test]
+        fn a_policy_that_allows_tcp_fails_the_connect_probe() {
+            let run = run_policy_child("network");
+            assert_eq!(run.code, Some(HostPolicy.code()), "{}", run.stderr);
+            let eperm = format!("policy child: fresh file write Err({})", libc::EPERM);
+            assert_eq!(run.probes()[0], eperm, "{}", run.stderr);
+            let refused =
+                "refused host-policy exit=67: the host policy did not deny a TCP connect: ";
+            let shown = run.refused().unwrap_or_default();
+            assert!(shown.starts_with(refused), "{}", run.stderr);
+        }
+
+        #[test]
+        fn a_profile_sandbox_init_refuses_exits_67_before_any_probe() {
+            let run = run_policy_child("invalid");
+            assert_eq!(run.code, Some(HostPolicy.code()), "{}", run.stderr);
+            assert_eq!(run.probes(), Vec::<&str>::new(), "{}", run.stderr);
+            let refused = "refused host-policy exit=67: sandbox_init refused the host policy: ";
+            let shown = run.refused().unwrap_or_default();
+            assert!(shown.starts_with(refused), "{}", run.stderr);
+            assert!(shown.contains("no-such-rule"), "{}", run.stderr);
+            assert_eq!(run.stderr.lines().last(), Some(shown), "{}", run.stderr);
+        }
     }
 }
