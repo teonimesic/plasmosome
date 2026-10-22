@@ -19,7 +19,8 @@ pub struct Command {
     pub command: &'static str,
     /// Whether `command` is a wire method. A registry command has none.
     pub is_method: bool,
-    /// Whether the request changes state, which decides exit 3.
+    /// Whether the request changes state. Help says so, and once such a request's first byte is
+    /// written, an answer lost is exit 3. The verb call has no copy of it.
     pub changes_state: bool,
     /// Whether this build serves it. An unserved command exits 2 with `not_served`.
     pub served: bool,
@@ -36,21 +37,32 @@ pub struct Command {
 
 impl PartialEq for Command {
     fn eq(&self, other: &Command) -> bool {
-        let builds = match (self.build, other.build) {
+        let Command {
+            words,
+            operands,
+            command,
+            is_method,
+            changes_state,
+            served,
+            flags,
+            takes_argv,
+            default_deadline_ms,
+            build,
+        } = *self;
+        let builds = match (build, other.build) {
             (Some(ours), Some(theirs)) => std::ptr::fn_addr_eq(ours, theirs),
             (ours, theirs) => ours.is_none() && theirs.is_none(),
         };
         builds
-            && (self.words, self.operands, self.command, self.is_method)
-                == (other.words, other.operands, other.command, other.is_method)
-            && (self.changes_state, self.served, self.flags, self.takes_argv)
-                == (
-                    other.changes_state,
-                    other.served,
-                    other.flags,
-                    other.takes_argv,
-                )
-            && self.default_deadline_ms == other.default_deadline_ms
+            && words == other.words
+            && operands == other.operands
+            && command == other.command
+            && is_method == other.is_method
+            && changes_state == other.changes_state
+            && served == other.served
+            && flags == other.flags
+            && takes_argv == other.takes_argv
+            && default_deadline_ms == other.default_deadline_ms
     }
 }
 
@@ -68,7 +80,6 @@ fn status(_: &CommandArgs) -> Result<VerbCall, ClientError> {
         method: "plasmosome.status",
         instance: InstanceParam::Name,
         params: Vec::new(),
-        changes_state: false,
         deadline: None,
     })
 }

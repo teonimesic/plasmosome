@@ -89,11 +89,11 @@ never ships on its own.
   each `outcome_unknown`. Nothing is retried: one command sends one request on one connection.
 - **What the client measures, it measures before connecting.** The path's length, the path
   boundary and the request line's size are refused with no connection made, so a refused command
-  never reaches a daemon. The request line is measured before `HOME` is read, with `deadline_ms`
-  at its widest and the name as given, or a 1-byte name when default selection will find it, so
-  a line refused there is over whatever name is found. Default selection measures the line again
-  with the name it found, after judging and before connecting. Only that line and the instance's
-  name wait for the socket to be chosen before they are refused.
+  never reaches a daemon. The request line is measured before `HOME` is read, with the widest
+  `deadline_ms` the call can send and the name as given, or a 1-byte name when default selection
+  will find it, so a line refused there is over whatever name is found. Default selection
+  measures the line again with the name it found, after judging and before connecting. Only that
+  line and the instance's name wait for the socket to be chosen before they are refused.
 - **No `unsafe` and no direct third-party dependency.** The package keeps `lints.workspace = true`.
   Its one normal dependency is `plasmosome-core`, for `InstanceName` and the private-socket
   checks, and that brings third-party dependencies of its own into the library's build,
@@ -125,5 +125,8 @@ fails them. The tests in `tests/flags.rs` read lines against a test-only table t
 commands with own flags, since no command of `COMMANDS` has any yet. The tests in `tests/verb.rs`
 run `handle` against the same kind of table, each entry with a build that makes a test-only
 `VerbCall`, and `FakeDaemon`s. They read the clock through a scripted `Clock` to check
-`deadline_ms`, and `HOME` through an `Env` that records the read. The request cut off after 10
-bytes is a unit test in `verb.rs`, over a test-only `Transport`.
+`deadline_ms`, and `HOME` through an `Env` that records the read. One clock moves when `HOME` is
+read and one when the connection is made, so a `deadline_ms` worked out too early is sent too
+large. A request cut off after 10 bytes, a write that takes nothing, and a refused peer check
+that leaves the clock unread are unit tests in `verb.rs`, over a test-only `Transport` or a
+socket pair.

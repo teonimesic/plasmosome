@@ -87,7 +87,8 @@ pub struct VerbDeadline {
 }
 
 /// The one request a served command sends. The client adds the instance's name, from socket
-/// selection, and `deadline_ms`, from the time left.
+/// selection, and `deadline_ms`, from the time left. Whether the request changes state is its
+/// table entry's [`changes_state`](crate::Command::changes_state).
 #[derive(Debug, PartialEq, Eq)]
 pub struct VerbCall {
     pub method: &'static str,
@@ -95,9 +96,6 @@ pub struct VerbCall {
     /// The parameters, which must not repeat a key, use the instance's key or `deadline_ms`, or
     /// hold an object that repeats a key.
     pub params: Vec<Param>,
-    /// Whether the request changes state, which turns an answer lost after the first byte into
-    /// exit 3.
-    pub changes_state: bool,
     /// `None` for a verb that takes no `deadline_ms`.
     pub deadline: Option<VerbDeadline>,
 }

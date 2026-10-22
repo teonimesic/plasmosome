@@ -186,9 +186,6 @@ before the request was written whole. Any other failed write has `cause` `transp
 message says writing failed after part of the request was sent and names the error. The code and
 exit follow `unanswered`'s: `no_reply`, exit 1, or `outcome_unknown`, exit 3.
 
-`reply::request_line` writes `{"id":1,"method":...,"params":{...}}` and a newline through the
-compact writer. It hands the params back when a key repeats among them or inside a value.
-
 ## Writing output
 
 `json::write_compact` writes a value on one line with no whitespace outside strings. A quote and
@@ -310,44 +307,48 @@ contacts no instance:
    `ambiguous_instance`: `candidates` names every candidate in order, and `unreachable` those
    whose connect failed, left out when none did.
 
-No envelope from default selection has `instance` unless it found exactly one candidate. The request
-line is built after the connection, because the name comes from `instances/`, so it is measured
-again between judging and connecting, below. A candidate's socket path has passed the client's own
-`sun_path` check, so its name is at most 68 bytes on macOS and 72 on Linux, less the length of
-`HOME`. Nothing is written but stdout and stderr: the client keeps no cache, state file or history
-between runs.
+No envelope from default selection has `instance` unless it found exactly one candidate. The name
+comes from `instances/`, so the request line is measured again between judging and connecting,
+below. A candidate's socket path has passed the client's own `sun_path` check, so its name is at
+most 68 bytes on macOS and 72 on Linux, less the length of `HOME`. Nothing is written but stdout
+and stderr: the client keeps no cache, state file or history between runs.
 
 ## Running a served command
 
 A served command's entry has a `build`, which turns its `CommandArgs` into a `VerbCall`: the wire
-method, whether the instance's name goes in `name` or `kernel`, the parameters, whether the
-request changes state, and whether the verb takes `deadline_ms`, with the verb's own maximum.
-`status`'s build is a call of `plasmosome.status` with no parameters. `verb::run` runs every call
-the same way. The deadline, `--deadline-ms` or the entry's `default_deadline_ms`, 10,000 ms on
-every entry today, is counted on the `Context`'s clock from the start of `handle`. In order:
+method, whether the instance's name goes in `name` or `kernel`, the parameters, and whether the
+verb takes `deadline_ms`, with the verb's own maximum. Whether the request changes state is the
+entry's `changes_state`, which help prints too, and no call holds a copy of it. `status`'s build
+is a call of `plasmosome.status` with no parameters. `verb::run` runs every call the same way.
+The deadline, `--deadline-ms` or the entry's `default_deadline_ms`, 10,000 ms on every entry
+today, is counted on the `Context`'s clock from the start of `handle`. In order:
 
 1. A call whose parameters repeat a key, use the instance's key or `deadline_ms`, or hold an
    object that repeats a key is `internal`, exit 70: the build has a bug. A build that refuses its
    arguments returns a `ClientError`, written under `invalid` when it is `invalid_argument`.
 2. It measures the request line before selection reads `HOME` or anything is opened. The line is
-   written once with `deadline_ms` at its widest, 3600000, when the verb takes one. The name is
-   the one `--kernel` or `PLASMOSOME_KERNEL` gives. With `--socket` alone there is none. When
-   default selection will find the name, a 1-byte name stands in for it, the shortest a name can
-   be, so a line refused here is over the bound whatever name is found. A line over 1,048,576
-   bytes before its newline, spec 001's request limit, is a usage error. Its `argument` is the
-   argument that contributed the most bytes, as given: a value flag's value, the whole
-   `--mock=MODE` argument, a positional argument's text, or `--` for the argv. Of two that
-   contribute the same, it names the one given first. A parameter is refused there and then,
-   with `instance` only when `--socket` gave the socket. The instance's name is refused once the
-   socket is chosen, so the error carries `instance`, as `socket_path_too_long` does, and names
-   `--kernel`'s name, or `PLASMOSOME_KERNEL` when the variable gave the name. An argument can
-   reach the bound from a shell: a terminal control writes six bytes on the line, so about
-   175 KB of them fill it, well inside macOS's `ARG_MAX` of 1,048,576 bytes.
+   written once with the widest `deadline_ms` the call can send, when the verb takes one: step
+   7's formula applied to the whole deadline. The time left is never more than the whole
+   deadline, and the formula never gives less for more time, so the value sent is never longer
+   than the value measured. The name is the one `--kernel` or `PLASMOSOME_KERNEL` gives. With
+   `--socket` alone there is none. When default selection will find the name, a 1-byte name
+   stands in for it, the shortest a name can be, so a line refused here is over the bound
+   whatever name is found. A line over 1,048,576 bytes before its newline, spec 001's request
+   limit, is a usage error. Its `argument` is the argument that contributed the most bytes, as
+   given: a value flag's value, the whole `--mock=MODE` argument, a positional argument's text,
+   or `--` for the argv. Of two that contribute the same, it names the one given first, and a
+   name from `PLASMOSOME_KERNEL`, which is not on the line, comes after every argument. A
+   parameter is refused there and then, with `instance` only when `--socket` gave the socket.
+   The instance's name is refused once the socket is chosen, after `HOME` is read, so the error
+   carries `instance`, as `socket_path_too_long` does, and names `--kernel`'s name, or
+   `PLASMOSOME_KERNEL` when the variable gave the name. An argument can reach the bound from a
+   shell: a terminal control writes six bytes on the line, so about 175 KB of them fill it, well
+   inside macOS's `ARG_MAX` of 1,048,576 bytes.
 3. It finds the socket, above. A usage error is under `command` `invalid`, and `invalid_home`
    under the command. Under default selection, once its one candidate is judged and before it
    connects, the line is measured again with the name found, and a line over the bound is
    refused as in step 2, with `instance`. So no line over the bound is sent, and a line is
-   refused only when it is over with `deadline_ms` at its widest.
+   refused only when it is over with the widest `deadline_ms` the call can send.
 4. A path longer than `sun_path` holds, 103 bytes on macOS and 107 on Linux, is
    `socket_path_too_long` with `path` and `max_bytes`, exit 2, before any system call.
 5. `check_private_path` with the trusted UID. A refusal goes through `map_refusal` with
@@ -357,18 +358,20 @@ every entry today, is counted on the `Context`'s clock from the start of `handle
 6. It connects. A refused connection is `unreachable` with `path`, exit 1, and the entry stays
    where it is, with no `fix`: on macOS a live daemon whose backlog is full refuses connections
    too. No entry is `not_running`. Any other failure is `transport` with `path` and `errno`.
-7. It checks the peer, writes the request and reads the reply, as `exchange` does, below. For a
-   verb that takes `deadline_ms`, the value is worked out after the peer check, right before the
-   first byte: with `left` the command's time left in whole milliseconds, it is
+7. It checks the peer, writes the request and reads the reply, as `exchange` does, below. The
+   line is built after the peer check, right before the first byte, by `verb`'s `request`, the one
+   writer of a request line. For a verb that takes `deadline_ms`, the value is worked out then:
+   with `left` the command's time left in whole milliseconds, it is
    max(1, min(left - min(1000, left / 10), max_ms)). So 10,000 ms left sends 9,000, 300 sends
-   270 and 1 sends 1, and the daemon's budget ends no later than the client's. A verb without
-   it gets none.
+   270 and 1 sends 1. The margin is a tenth of the time left, at most 1,000 ms, and the value is
+   never less than 1. Under 10 ms left the margin is 0, so the daemon's budget can outlast the
+   client's. A verb without it gets none.
 8. The reply goes through `judge_reply` and `kernel_exit`, a missing one through `unanswered`,
-   and a request cut off midway through `cut_off`, each with the call's `changes_state`.
+   and a request cut off midway through `cut_off`, each with the entry's `changes_state`.
 9. It writes the envelope. Once a socket is chosen, every envelope has `instance` with
    `socket`, and `name` when a name was known. A failed write to stdout is `local_io` with
-   `errno`, exit 1, on stderr. For a call that changes state it is `outcome_unknown` with
-   `cause` `local_io`, exit 3: the daemon has acted, and only its answer is lost. Rust ignores
+   `errno`, exit 1, on stderr. For a command that changes state it is `outcome_unknown` with
+   `cause` `local_io`, exit 3: the daemon has answered, and only its answer is lost. Rust ignores
    `SIGPIPE`, so a closed pipe returns `EPIPE`.
 
 So once any byte of a state change is written, a lost answer is exit 3 whatever lost it, and the
@@ -411,7 +414,6 @@ On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it 
 | `reply::kernel_exit` | A kernel error's exit, by its code |
 | `reply::unanswered` | `no_reply`, `reply_too_large` or `outcome_unknown`, by whether the command changes state |
 | `reply::cut_off` | `no_reply` or `outcome_unknown` for a request cut off midway, by whether the command changes state |
-| `reply::request_line` | The request line, `id` 1, ended with a newline |
 | `json::write_compact` | The JSON form, with every terminal control escaped |
 | `json::write_human` | The human form, with every terminal control shown as `<U+XXXX>` |
 | `Envelope`, `Instance` | Spec 025's success and failure envelopes |

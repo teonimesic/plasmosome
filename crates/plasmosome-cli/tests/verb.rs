@@ -3,9 +3,9 @@ mod support;
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -49,38 +49,36 @@ fn call(
     method: &'static str,
     args: &CommandArgs,
     flags: &[Flag],
-    changes_state: bool,
     max_ms: Option<Option<u64>>,
 ) -> VerbCall {
     VerbCall {
         method,
         instance: InstanceParam::Kernel,
         params: flags.iter().filter_map(|flag| args.flag(flag)).collect(),
-        changes_state,
         deadline: max_ms.map(|max_ms| VerbDeadline { max_ms }),
     }
 }
 
 fn kill(args: &CommandArgs) -> Result<VerbCall, ClientError> {
-    Ok(call("cell.kill", args, &[CELL], true, None))
+    Ok(call("cell.kill", args, &[CELL], None))
 }
 
 fn look(args: &CommandArgs) -> Result<VerbCall, ClientError> {
-    Ok(call("cell.status", args, &[CELL], false, None))
+    Ok(call("cell.status", args, &[CELL], None))
 }
 
 fn wait(args: &CommandArgs) -> Result<VerbCall, ClientError> {
-    Ok(call("exec.status", args, &[], false, Some(None)))
+    Ok(call("exec.status", args, &[CELL], Some(None)))
 }
 
 fn exec(args: &CommandArgs) -> Result<VerbCall, ClientError> {
-    let mut call = call("cell.exec", args, &[CELL], true, Some(Some(600_000)));
+    let mut call = call("cell.exec", args, &[CELL], Some(Some(600_000)));
     call.params.extend(args.argv("argv"));
     Ok(call)
 }
 
 fn germinate(args: &CommandArgs) -> Result<VerbCall, ClientError> {
-    let mut call = call("cell.new", args, &[CELL, NOW, MOCK], true, None);
+    let mut call = call("cell.new", args, &[CELL, NOW, MOCK], None);
     if let Some(genome) = args.positional("GENOME", "genome") {
         call.params.insert(0, genome);
     }
@@ -117,7 +115,7 @@ fn repeats(args: &CommandArgs) -> Result<VerbCall, ClientError> {
             vec![param("a", Json::Object(inner))]
         }
     };
-    let mut call = call("plasmosome.recovery", args, &[], false, Some(None));
+    let mut call = call("plasmosome.recovery", args, &[], Some(None));
     call.instance = InstanceParam::Name;
     call.params = params;
     Ok(call)
@@ -131,7 +129,7 @@ fn table() -> Vec<Command> {
                 match command.words {
                     ["cell", "kill"] => (&[CELL], false, 10_000, kill),
                     ["cell", "status"] => (&[CELL], false, 10_000, look),
-                    ["exec", "status"] => (&[], false, 10_000, wait),
+                    ["exec", "status"] => (&[CELL], false, 10_000, wait),
                     ["cell", "exec"] => (&[CELL], true, 30_000, exec),
                     ["germinate"] => (&[CELL, NOW, MOCK], false, 10_000, germinate),
                     ["cell", "new"] => (&[], false, 10_000, refuses),
@@ -318,6 +316,8 @@ impl Home {
 #[derive(Clone)]
 struct Watched {
     home: Option<OsString>,
+    kernel: Option<OsString>,
+    moves: Option<&'static Moving>,
     read: Arc<AtomicBool>,
 }
 
@@ -325,7 +325,16 @@ impl Watched {
     fn home(home: Option<&Path>) -> Watched {
         Watched {
             home: home.map(OsString::from),
+            kernel: None,
+            moves: None,
             read: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn naming(self, kernel: &str) -> Watched {
+        Watched {
+            kernel: Some(kernel.into()),
+            ..self
         }
     }
 
@@ -337,12 +346,63 @@ impl Watched {
 impl Env for Watched {
     fn home(&self) -> Option<OsString> {
         self.read.store(true, Ordering::SeqCst);
+        if let Some(clock) = self.moves {
+            clock.moved.store(true, Ordering::SeqCst);
+        }
         self.home.clone()
     }
 
     fn kernel(&self) -> Option<OsString> {
-        None
+        self.kernel.clone()
     }
+}
+
+struct Moving {
+    start: Instant,
+    by_ms: u64,
+    moved: AtomicBool,
+    daemon: Option<(UnixListener, mpsc::Sender<Vec<u8>>)>,
+}
+
+impl Clock for Moving {
+    fn now(&self) -> Instant {
+        if let Some((listener, requests)) = &self.daemon
+            && let Ok((stream, _)) = listener.accept()
+        {
+            self.moved.store(true, Ordering::SeqCst);
+            let requests = requests.clone();
+            thread::spawn(move || answer_one(&stream, &requests));
+        }
+        let offset = if self.moved.load(Ordering::SeqCst) {
+            self.by_ms
+        } else {
+            0
+        };
+        self.start + Duration::from_millis(offset)
+    }
+}
+
+fn moving(by_ms: u64, daemon: Option<(UnixListener, mpsc::Sender<Vec<u8>>)>) -> &'static Moving {
+    Box::leak(Box::new(Moving {
+        start: Instant::now(),
+        by_ms,
+        moved: AtomicBool::new(false),
+        daemon,
+    }))
+}
+
+fn answer_one(stream: &UnixStream, requests: &mpsc::Sender<Vec<u8>>) {
+    stream.set_nonblocking(false).expect("the stream blocks");
+    stream.set_read_timeout(Some(PATIENCE)).expect("a timeout");
+    let mut request = Vec::new();
+    BufReader::new(stream)
+        .read_until(b'\n', &mut request)
+        .expect("the request arrives");
+    let mut writer = stream;
+    writer
+        .write_all(b"{\"id\":1,\"result\":{}}\n")
+        .expect("the answer is written");
+    let _ = requests.send(request);
 }
 
 struct Scripted {
@@ -436,6 +496,10 @@ fn a_state_change_that_loses_its_answer_exits_3() {
             } else if changes_state {
                 assert_eq!(error["code"], "outcome_unknown", "{case}");
                 assert_eq!(error["cause"], cause, "{case}");
+                if cause == "local_io" {
+                    let message = error["message"].as_str().unwrap_or_default();
+                    assert!(message.starts_with("the daemon answered, but"), "{case}");
+                }
             } else if cause == "closed" || cause == "deadline" {
                 assert_eq!(error["code"], "no_reply", "{case}");
                 assert_eq!(error["cause"], cause, "{case}");
@@ -455,6 +519,36 @@ fn a_state_change_that_loses_its_answer_exits_3() {
             assert_eq!(the_one_request(&fake), request.as_bytes(), "{case}");
         }
     }
+    let root = private_root();
+    let socket = root.path().join("control.uds");
+    let fake = FakeDaemon::start(&socket, vec![Answer::Close]);
+    let error = &outcome(
+        &run(&["germinate", "g", "--socket", text(&socket)]),
+        Exit::OutcomeUnknown,
+    )["error"];
+    assert_eq!(error["code"], "outcome_unknown", "{error}");
+    assert_eq!(error["cause"], "closed", "{error}");
+    assert_eq!(
+        the_one_request(&fake),
+        b"{\"id\":1,\"method\":\"cell.new\",\"params\":{\"genome\":\"g\"}}\n"
+    );
+}
+
+#[test]
+fn a_sent_line_escapes_every_control_and_is_one_line() {
+    let [escape, newline, backslash] =
+        [0x1b, 0x0a, 0x5c].map(|code| char::from_u32(code).expect("a character"));
+    let root = private_root();
+    let socket = root.path().join("control.uds");
+    let fake = FakeDaemon::start(&socket, vec![ok()]);
+    let cell = format!("a{escape}{newline}b\"c{backslash}");
+    let line = ["cell", "kill", "--cell", &cell, "--socket", text(&socket)];
+    outcome(&run(&line), Exit::Done);
+    let written =
+        format!("\"a{backslash}u001b{backslash}u000ab{backslash}\"c{backslash}{backslash}\"");
+    let expected =
+        format!("{{\"id\":1,\"method\":\"cell.kill\",\"params\":{{\"cell\":{written}}}}}{newline}");
+    assert_eq!(String::from_utf8(the_one_request(&fake)), Ok(expected));
 }
 
 #[test]
@@ -507,6 +601,32 @@ fn the_verb_deadline_is_the_time_left_before_the_first_byte() {
     }
 }
 
+#[test]
+fn the_verb_deadline_is_read_after_home_and_after_the_connect() {
+    let home = Home::new();
+    let work = FakeDaemon::start(&home.socket("work"), vec![ok()]);
+    let clock = moving(5_000, None);
+    let env = Watched {
+        moves: Some(clock),
+        ..Watched::home(Some(home.0.path()))
+    };
+    let line = ["exec", "status", "--kernel", "work"];
+    outcome(&run_with(&line, env.clone(), clock, false), Exit::Done);
+    assert!(env.was_read(), "HOME was not read");
+    let request: Value = serde_json::from_slice(&the_one_request(&work)).expect("JSON");
+    assert_eq!(request["params"]["deadline_ms"], 4_500, "{request}");
+
+    let root = private_root();
+    let socket = root.path().join("control.uds");
+    let (requests, sent) = mpsc::channel();
+    let clock = moving(5_000, Some((listening(&socket), requests)));
+    let line = ["exec", "status", "--socket", text(&socket)];
+    outcome(&run_with(&line, Vars::default(), clock, false), Exit::Done);
+    let request = sent.recv_timeout(PATIENCE).expect("one request");
+    let request: Value = serde_json::from_slice(&request).expect("JSON");
+    assert_eq!(request["params"]["deadline_ms"], 4_500, "{request}");
+}
+
 fn filler(empty_line: &str, line_bytes: usize) -> String {
     "a".repeat(line_bytes - empty_line.len())
 }
@@ -516,14 +636,22 @@ fn an_oversized_request_is_refused_before_home_is_read() {
     let control = char::from_u32(1).expect("U+0001 is a code point");
     let genome: String = std::iter::repeat_n(control, 180_000).collect();
     let base = base();
-    for extra in [&[][..], &["--kernel", "work"]] {
+    for (extra, variable) in [
+        (&[][..], None),
+        (&["--kernel", "work"], None),
+        (&[], Some("work")),
+    ] {
         let watched = Watched::home(Some(&base));
+        let watched = variable.map_or(watched.clone(), |name| watched.naming(name));
         let mut line = vec!["germinate", genome.as_str()];
         line.extend(extra);
         let envelope = usage(&run_with(&line, watched.clone(), &SystemClock, false));
         assert_eq!(envelope["error"]["argument"], genome.as_str());
-        assert!(envelope.get("instance").is_none(), "{extra:?}");
-        assert!(!watched.was_read(), "HOME was read for {extra:?}");
+        assert!(envelope.get("instance").is_none(), "{extra:?} {variable:?}");
+        assert!(
+            !watched.was_read(),
+            "HOME was read for {extra:?} {variable:?}"
+        );
     }
     let root = private_root();
     let socket = root.path().join("control.uds");
@@ -579,6 +707,29 @@ fn a_line_of_exactly_the_bound_is_sent() {
     assert!(envelope.get("instance").is_none());
     assert!(!watched.was_read(), "HOME was read");
     assert_eq!(named.connections(), 2);
+
+    let home = Home::new();
+    let work = FakeDaemon::start(&home.socket("work"), vec![ok()]);
+    let genome = filler(&genome_line("work"), BOUND);
+    let ran = run_with(
+        &["germinate", &genome],
+        home.vars(Some("work")),
+        &SystemClock,
+        false,
+    );
+    outcome(&ran, Exit::Done);
+    assert_eq!(the_one_request(&work).len(), BOUND + 1);
+    let watched = Watched::home(Some(home.0.path())).naming("work");
+    let longer = format!("{genome}a");
+    let ran = run_with(
+        &["germinate", &longer],
+        watched.clone(),
+        &SystemClock,
+        false,
+    );
+    assert_eq!(usage(&ran)["error"]["argument"], longer.as_str());
+    assert!(!watched.was_read(), "HOME was read");
+    assert_eq!(work.connections(), 1);
 }
 
 fn genome_line(kernel: &str) -> String {
@@ -618,42 +769,35 @@ fn default_selection_measures_the_found_name_before_connecting() {
 }
 
 #[test]
-fn the_bound_measures_the_widest_deadline() {
-    let root = private_root();
-    let socket = root.path().join("control.uds");
-    let fake = FakeDaemon::start(&socket, vec![ok()]);
-    let empty =
-        "{\"id\":1,\"method\":\"cell.exec\",\"params\":{\"cell\":\"\",\"deadline_ms\":3600000}}";
-    let cell = filler(empty, BOUND);
-    let line = [
-        "cell",
-        "exec",
-        "--cell",
-        &cell,
-        "--deadline-ms",
-        "3600000",
-        "--socket",
-        text(&socket),
-    ];
-    outcome(&run(&line), Exit::Done);
-    let sent = the_one_request(&fake);
-    assert_eq!(sent.len(), BOUND);
-    assert!(sent.ends_with(b",\"deadline_ms\":600000}}\n"));
-    drop(fake);
-    let listener = listening(&socket);
-    let longer = format!("{cell}a");
-    let line = [
-        "cell",
-        "exec",
-        "--cell",
-        &longer,
-        "--deadline-ms",
-        "3600000",
-        "--socket",
-        text(&socket),
-    ];
-    assert_eq!(usage(&run(&line))["error"]["argument"], longer.as_str());
-    assert_never_reached(&listener);
+fn the_bound_counts_the_deadline_the_call_can_send() {
+    for (words, extra, sent_ms) in [
+        (["exec", "status"], &[][..], "9000"),
+        (["cell", "exec"], &["--deadline-ms", "3600000"], "600000"),
+    ] {
+        let root = private_root();
+        let socket = root.path().join("control.uds");
+        let fake = FakeDaemon::start(&socket, vec![ok()]);
+        let method = words.join(".");
+        let empty = format!(
+            "{{\"id\":1,\"method\":\"{method}\",\"params\":{{\"cell\":\"\",\"deadline_ms\":{sent_ms}}}}}"
+        );
+        let cell = filler(&empty, BOUND);
+        let tail = [&["--socket", text(&socket)][..], extra].concat();
+        let exact = [&[words[0], words[1], "--cell", &cell][..], &tail].concat();
+        let ran = run_with(&exact, Vars::default(), scripted(&[0, 0]), false);
+        outcome(&ran, Exit::Done);
+        let sent = the_one_request(&fake);
+        assert_eq!(sent.len(), BOUND + 1, "{words:?}");
+        let ending = format!(",\"deadline_ms\":{sent_ms}}}}}\n");
+        assert!(sent.ends_with(ending.as_bytes()), "{words:?}");
+        drop(fake);
+        let listener = listening(&socket);
+        let longer = format!("{cell}a");
+        let over = [&[words[0], words[1], "--cell", &longer][..], &tail].concat();
+        let envelope = usage(&run(&over));
+        assert_eq!(envelope["error"]["argument"], longer.as_str(), "{words:?}");
+        assert_never_reached(&listener);
+    }
 }
 
 #[test]
@@ -691,6 +835,10 @@ fn the_argument_that_contributes_most_is_named_and_the_first_of_equals() {
     ));
     assert_eq!(envelope["error"]["argument"], b.as_str());
     assert!(!watched.was_read(), "HOME was read");
+    let variable = Watched::home(Some(home.0.path())).naming(&a);
+    let ran = run_with(&["germinate", &b], variable.clone(), &SystemClock, false);
+    assert_eq!(usage(&ran)["error"]["argument"], b.as_str());
+    assert!(!variable.was_read(), "HOME was read");
     let ran = run_with(
         &["germinate", "--kernel", &a, &b],
         home.vars(None),
@@ -713,11 +861,47 @@ fn two_commands_are_equal_only_with_the_same_build() {
     assert_ne!(with(Some(look)), entry);
     assert_ne!(with(None), entry);
     assert_eq!(with(None), with(None));
-    let slower = Command {
-        default_deadline_ms: 10_001,
-        ..entry
-    };
-    assert_ne!(slower, entry);
+    let others = [
+        Command {
+            words: &["cell", "status"],
+            ..entry
+        },
+        Command {
+            operands: &["CELL"],
+            ..entry
+        },
+        Command {
+            command: "cell.status",
+            ..entry
+        },
+        Command {
+            is_method: false,
+            ..entry
+        },
+        Command {
+            changes_state: false,
+            ..entry
+        },
+        Command {
+            served: false,
+            ..entry
+        },
+        Command {
+            flags: &[],
+            ..entry
+        },
+        Command {
+            takes_argv: true,
+            ..entry
+        },
+        Command {
+            default_deadline_ms: 10_001,
+            ..entry
+        },
+    ];
+    for (field, other) in others.iter().enumerate() {
+        assert_ne!(*other, entry, "field {field}");
+    }
 }
 
 #[test]

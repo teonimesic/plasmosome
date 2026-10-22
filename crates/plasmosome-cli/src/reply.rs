@@ -242,25 +242,3 @@ fn max_bytes() -> Json {
         Number::new(MAX_REPLY_BYTES.to_string()).expect("a decimal integer is a JSON number"),
     )
 }
-
-/// Builds the request line for `method` with `params`: `{"id":1,"method":...,"params":{...}}`,
-/// written by [`json::write_compact`] and ended with a newline.
-///
-/// Hands `params` back when a key repeats among them or at any depth of a value, since the line
-/// would then repeat a key.
-pub fn request_line(
-    method: &str,
-    params: Vec<(String, Json)>,
-) -> Result<String, Vec<(String, Json)>> {
-    let repeats = params.iter().enumerate().any(|(index, (key, value))| {
-        json::member(&params[..index], key).is_some() || json::repeats_a_key(value)
-    });
-    if repeats {
-        return Err(params);
-    }
-    let method = json::write_compact(&Json::String(method.to_string()));
-    let params = json::write_compact(&Json::Object(params));
-    Ok(format!(
-        "{{\"id\":1,\"method\":{method},\"params\":{params}}}\n"
-    ))
-}

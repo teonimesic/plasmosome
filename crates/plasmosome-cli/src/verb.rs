@@ -18,8 +18,6 @@ use crate::select::{self, Named, Selected, Target, Unselected, VARIABLE};
 
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 
-const WIDEST_DEADLINE_MS: u64 = 3_600_000;
-
 const SHORTEST_NAME: &str = "x";
 
 pub(crate) fn run(
@@ -34,7 +32,7 @@ pub(crate) fn run(
         command,
         kernel,
         socket,
-        deadline_ms,
+        deadline_ms: total_ms,
         form,
         args,
     } = invocation;
@@ -46,7 +44,10 @@ pub(crate) fn run(
         );
         return refuse(command.command.to_string(), error, form, stdout, stderr);
     }
-    let over = measure(call, &args, early(&kernel, &socket, context.env, &args));
+    let total_ms = total_ms.unwrap_or(command.default_deadline_ms);
+    let total = Duration::from_millis(u64::from(total_ms));
+    let given = early(&kernel, &socket, context.env, &args);
+    let over = measure(call, &args, given, total);
     if let Some(Over {
         bytes,
         culprit: Culprit::Param(index),
@@ -70,11 +71,8 @@ pub(crate) fn run(
             return refuse(named.to_string(), error, form, stdout, stderr);
         }
     };
-    let deadline = Deadline::new(
-        context.clock,
-        start,
-        deadline_ms.unwrap_or(command.default_deadline_ms),
-    );
+    let deadline = Deadline::new(context.clock, start, total_ms);
+    let changes_state = command.changes_state;
     let uid = context.trusted_uid;
     let (instance, outcome) = match target {
         Target::Named(named) => {
@@ -85,7 +83,9 @@ pub(crate) fn run(
             let name = named.instance.name.as_deref();
             let outcome = select::connect(socket, uid, named.origin)
                 .map_err(ErrorBody::Client)
-                .and_then(|stream| answer(call, stream, socket, name, uid, &deadline));
+                .and_then(|stream| {
+                    answer(call, changes_state, stream, socket, name, uid, &deadline)
+                });
             (Some(named.instance), outcome)
         }
         Target::Default(instances) => {
@@ -94,7 +94,12 @@ pub(crate) fn run(
                 && let Some(Over {
                     bytes,
                     culprit: Culprit::Param(index),
-                }) = measure(call, &args, instance.name.clone().map(Name::not_given))
+                }) = measure(
+                    call,
+                    &args,
+                    instance.name.clone().map(Name::not_given),
+                    total,
+                )
             {
                 let (subject, argument) = described(&call.params[index], &args);
                 return too_large(&subject, bytes, argument, chosen.ok(), form, stdout, stderr);
@@ -103,7 +108,7 @@ pub(crate) fn run(
                 Ok(Selected { stream, instance }) => {
                     let socket = Path::new(&instance.socket);
                     let name = instance.name.as_deref();
-                    let outcome = answer(call, stream, socket, name, uid, &deadline);
+                    let outcome = answer(call, changes_state, stream, socket, name, uid, &deadline);
                     (Some(instance), outcome)
                 }
                 Err(Unselected { error, instance }) => (instance, Err(ErrorBody::Client(error))),
@@ -127,7 +132,7 @@ pub(crate) fn run(
     else {
         return exit;
     };
-    let lost = if call.changes_state {
+    let lost = if changes_state {
         lost_answer(&error)
     } else {
         local_io(&error)
@@ -196,8 +201,13 @@ struct Over {
     culprit: Culprit,
 }
 
-fn measure(call: &VerbCall, args: &CommandArgs, name: Option<Name>) -> Option<Over> {
-    let widest = call.deadline.map(|_| WIDEST_DEADLINE_MS);
+fn measure(
+    call: &VerbCall,
+    args: &CommandArgs,
+    name: Option<Name>,
+    total: Duration,
+) -> Option<Over> {
+    let widest = call.deadline.map(|verb| deadline_ms(total, verb.max_ms));
     let shown = name.as_ref().map(|name| name.text.as_str());
     let bytes = request(call, shown, widest).len() - 1;
     if bytes <= MAX_REQUEST_BYTES {
@@ -300,6 +310,7 @@ fn too_large(
 
 fn answer(
     call: &VerbCall,
+    changes_state: bool,
     stream: UnixStream,
     socket: &Path,
     name: Option<&str>,
@@ -312,7 +323,7 @@ fn answer(
             .map(|verb| deadline_ms(deadline.left(), verb.max_ms));
         request(call, name, left)
     })
-    .map_err(|unreplied| ErrorBody::Client(unreplied_error(unreplied, call.changes_state)))?;
+    .map_err(|unreplied| ErrorBody::Client(unreplied_error(unreplied, changes_state)))?;
     match judge_reply(&line).map_err(ErrorBody::Client)? {
         Reply::Result(result) => Ok(result),
         Reply::Kernel(error) => Err(ErrorBody::Kernel(error)),
@@ -337,8 +348,8 @@ fn lost_answer(error: &io::Error) -> ClientError {
     client(
         ClientCode::OutcomeUnknown,
         format!(
-            "could not write the answer to stdout: {error}; the request may still take effect, \
-             so observe before repeating it"
+            "the daemon answered, but its answer could not be written to stdout: {error}; observe \
+             before repeating the request"
         ),
         vec![("cause".to_string(), Json::String("local_io".to_string()))],
     )
@@ -347,11 +358,15 @@ fn lost_answer(error: &io::Error) -> ClientError {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use plasmosome_core::private_socket::effective_uid;
+
     use super::*;
+    use crate::args::{InstanceParam, VerbDeadline};
     use crate::cli::is_instance_name;
-    use crate::clock::SystemClock;
+    use crate::clock::{Clock, SystemClock};
     use crate::exchange::{Transport, converse};
     use crate::json::Style;
 
@@ -372,33 +387,61 @@ mod tests {
     }
 
     #[test]
-    fn the_stand_in_writes_no_more_than_any_name_and_a_name_at_most_two_bytes_a_byte() {
+    fn the_stand_in_writes_no_more_than_any_name() {
         assert!(is_instance_name(SHORTEST_NAME) && !is_instance_name(""));
         assert_eq!(written(&Json::String(SHORTEST_NAME.to_string())), 3);
-        let quotes = "\"".repeat(255);
-        assert!(is_instance_name(&quotes));
-        assert_eq!(written(&Json::String(quotes)), 512);
         let mut out = String::new();
         for one in (0..=0x10_FFFF).filter_map(char::from_u32) {
             out.clear();
             json::write_string(&mut out, one.encode_utf8(&mut [0; 4]), Style::Compact);
             assert!(out.len() - 2 >= one.len_utf8(), "U+{:04X}", u32::from(one));
-            if out.len() - 2 > 2 * one.len_utf8() {
-                assert!(
-                    !is_instance_name(&format!("a{one}")),
-                    "U+{:04X}",
-                    u32::from(one)
-                );
-            }
         }
     }
 
-    struct TakesThenFails {
-        takes: usize,
-        taken: Cell<usize>,
+    struct Counted(AtomicUsize);
+
+    impl Clock for Counted {
+        fn now(&self) -> Instant {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Instant::now()
+        }
     }
 
-    impl Transport for TakesThenFails {
+    #[test]
+    fn the_time_left_is_not_read_before_the_peer_check() {
+        let call = VerbCall {
+            method: "exec.status",
+            instance: InstanceParam::Kernel,
+            params: Vec::new(),
+            deadline: Some(VerbDeadline { max_ms: None }),
+        };
+        let socket = Path::new("/x/control.uds");
+        for (trusted_uid, peer_checked) in [(effective_uid() + 1, false), (effective_uid(), true)] {
+            let clock = Counted(AtomicUsize::new(0));
+            let deadline = Deadline::new(&clock, Instant::now(), 10_000);
+            let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+            theirs
+                .write_all(b"{\"id\":1,\"result\":{}}\n")
+                .expect("the answer waits in the pair");
+            let answered = answer(&call, true, ours, socket, None, trusted_uid, &deadline);
+            let refused = matches!(
+                &answered,
+                Err(ErrorBody::Client(error)) if error.code() == ClientCode::PeerMismatch
+            );
+            assert_eq!(refused, !peer_checked, "{answered:?}");
+            let reads = clock.0.load(Ordering::Relaxed);
+            assert_eq!(reads > 0, peer_checked, "the clock was read {reads} times");
+        }
+    }
+
+    struct TakesThen {
+        takes: usize,
+        taken: Cell<usize>,
+        refuses: Option<i32>,
+        writes: Cell<usize>,
+    }
+
+    impl Transport for TakesThen {
         fn bound(&self, _: Duration, _: bool) -> io::Result<()> {
             Ok(())
         }
@@ -408,9 +451,12 @@ mod tests {
         }
 
         fn write_some(&self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes.set(self.writes.get() + 1);
             let room = self.takes - self.taken.get();
             if room == 0 {
-                return Err(io::Error::from_raw_os_error(EPIPE));
+                return self
+                    .refuses
+                    .map_or(Ok(0), |errno| Err(io::Error::from_raw_os_error(errno)));
             }
             let count = room.min(bytes.len());
             self.taken.set(self.taken.get() + count);
@@ -418,16 +464,19 @@ mod tests {
         }
     }
 
-    fn failed_after(takes: usize, changes_state: bool) -> ClientError {
-        let transport = TakesThenFails {
+    fn failed_after(takes: usize, refuses: Option<i32>, changes_state: bool) -> ClientError {
+        let transport = TakesThen {
             takes,
             taken: Cell::new(0),
+            refuses,
+            writes: Cell::new(0),
         };
         let deadline = Deadline::new(&SystemClock, Instant::now(), 10_000);
         let request = b"{\"id\":1,\"method\":\"cell.kill\",\"params\":{}}\n";
         let unreplied = converse(&transport, Path::new("/x/control.uds"), request, &deadline)
             .expect_err("a write that fails gives no reply");
         assert_eq!(transport.taken.get(), takes);
+        assert_eq!(transport.writes.get(), usize::from(takes > 0) + 1);
         unreplied_error(unreplied, changes_state)
     }
 
@@ -439,24 +488,27 @@ mod tests {
     }
 
     #[test]
-    fn a_write_that_fails_part_way() {
-        let error = failed_after(10, true);
-        assert_eq!(error.code(), ClientCode::OutcomeUnknown);
-        assert_eq!(error.code().exit(), Exit::OutcomeUnknown);
-        assert_eq!(cause(&error), Some("transport"));
-        let error = failed_after(10, false);
-        assert_eq!(error.code(), ClientCode::NoReply);
-        assert_eq!(error.code().exit(), Exit::Unavailable);
-        assert_eq!(cause(&error), Some("transport"));
-        for changes_state in [true, false] {
-            let error = failed_after(0, changes_state);
-            assert_eq!(error.code(), ClientCode::Transport, "{changes_state}");
+    fn a_write_that_fails_or_takes_nothing() {
+        for refuses in [Some(EPIPE), None] {
+            let error = failed_after(10, refuses, true);
+            assert_eq!(error.code(), ClientCode::OutcomeUnknown, "{refuses:?}");
+            assert_eq!(error.code().exit(), Exit::OutcomeUnknown);
+            assert_eq!(cause(&error), Some("transport"), "{refuses:?}");
+            let error = failed_after(10, refuses, false);
+            assert_eq!(error.code(), ClientCode::NoReply, "{refuses:?}");
             assert_eq!(error.code().exit(), Exit::Unavailable);
-            assert_eq!(
-                json::member(error.fields(), "errno"),
-                Some(&number(EPIPE)),
-                "{changes_state}"
-            );
+            assert_eq!(cause(&error), Some("transport"), "{refuses:?}");
+            for changes_state in [true, false] {
+                let error = failed_after(0, refuses, changes_state);
+                let case = format!("{refuses:?}, {changes_state}");
+                assert_eq!(error.code(), ClientCode::Transport, "{case}");
+                assert_eq!(error.code().exit(), Exit::Unavailable);
+                assert_eq!(
+                    json::member(error.fields(), "errno"),
+                    refuses.map(number).as_ref(),
+                    "{case}"
+                );
+            }
         }
     }
 }
