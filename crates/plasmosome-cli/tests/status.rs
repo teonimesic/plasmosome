@@ -16,7 +16,7 @@ use plasmosome_cli::{
 };
 use plasmosome_core::private_socket::effective_uid;
 use serde_json::{Value, json};
-use support::{Answer, FakeDaemon, PATIENCE, private_root};
+use support::{Answer, FakeDaemon, PATIENCE, Vars, private_root};
 
 #[cfg(target_os = "macos")]
 const MAX_PATH: usize = 103;
@@ -49,6 +49,7 @@ fn run_on(line: Vec<OsString>, clock: &'static dyn Clock) -> Ran {
             commands: COMMANDS,
             trusted_uid: effective_uid(),
             clock,
+            env: &Vars::default(),
         };
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let started = Instant::now();
@@ -495,6 +496,7 @@ fn a_closed_stdout_is_local_io() {
         commands: COMMANDS,
         trusted_uid: effective_uid(),
         clock: &SystemClock,
+        env: &Vars::default(),
     };
     let mut stderr = Vec::new();
     let exit = handle(&line(&socket, &[]), &context, &mut Closed, &mut stderr);
@@ -678,21 +680,6 @@ fn daemon_text_is_escaped() {
         for code in ["<U+001B>", "<U+009B>", "<U+007F>", "<U+202E>"] {
             assert!(shown.contains(code), "{code} is not shown in {shown:?}");
         }
-    }
-}
-
-#[test]
-fn status_needs_a_socket_in_this_build() {
-    for line in [&["status"][..], &["status", "--kernel", "a"]] {
-        let ran = run(line.iter().map(OsString::from).collect());
-        assert_eq!(ran.exit, Exit::Usage, "{line:?}");
-        let envelope = failure(&ran);
-        assert_eq!(envelope["command"], "invalid");
-        assert_eq!(envelope["error"]["code"], "invalid_argument", "{line:?}");
-        assert!(envelope["error"].get("argument").is_none(), "{envelope}");
-        assert!(envelope.get("instance").is_none(), "{envelope}");
-        let message = envelope["error"]["message"].as_str().expect("a message");
-        assert!(message.contains("--socket"), "{message}");
     }
 }
 

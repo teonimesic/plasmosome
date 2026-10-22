@@ -11,9 +11,9 @@ answer its exit, writes JSON that never carries a raw terminal control, builds t
 lists the client's own error codes with their exits. The `plasmosome` binary in
 `crates/plasmosome` is a thin `main` over `main_with`.
 
-One command is served: `plasmosome status --socket PATH`. Every other command refuses with
-`not_served`. `status` without `--socket` is a usage error until default selection lands, so
-this build reaches an instance only through `--socket`.
+One command is served: `plasmosome status`. Every other command refuses with `not_served`.
+`status` finds its instance as spec 025 §5 says: by `--socket`, else `--kernel`, else
+`PLASMOSOME_KERNEL`, else the one instance under `$HOME/.plasmosome/instances/`.
 
 ## Reading the command line
 
@@ -90,15 +90,15 @@ before `--`, a flag's value aside, hold `--human` once and `--json` not at all, 
 included. So `cell exec --human -- tool --human` answers in the human form: what follows `--` is a
 workload's argv, and its `--human` is not this client's.
 
-`handle` reads a line against a `Context` and writes the outcome. The `Context` holds the
-version, the command table, the trusted UID and the clock. `main_with` passes the package
-version, `COMMANDS`, the process's own effective UID and `SystemClock`. No flag, variable or file
-reaches the trusted UID, so `--trusted-uid 0` is an unknown flag. A failure to write help or the
-version to stdout is `local_io`, exit 1, with `errno` when the system gave one, under `command`
-`--help` or `--version`, a failed flush included. A panic prints nothing of its own: it ends in one
-`internal` envelope on stderr, in the form the line chose, and exit 70. The first call to `handle`
-installs a panic hook for the whole process. The hook is silent on a thread while it runs
-`handle`, and passes every other panic to the hook set before it, a panic on a helper thread
+`handle` reads a line against a `Context` and writes the outcome. The `Context` holds the version,
+the command table, the trusted UID, the clock and the environment. `main_with` passes the package
+version, `COMMANDS`, the process's own effective UID, `SystemClock` and `ProcessEnv`. No flag,
+variable or file reaches the trusted UID, so `--trusted-uid 0` is an unknown flag. A failure to
+write help or the version to stdout is `local_io`, exit 1, with `errno` when the system gave one,
+under `command` `--help` or `--version`, a failed flush included. A panic prints nothing of its own:
+it ends in one `internal` envelope on stderr, in the form the line chose, and exit 70. The first
+call to `handle` installs a panic hook for the whole process. The hook is silent on a thread while
+it runs `handle`, and passes every other panic to the hook set before it, a panic on a helper thread
 included. A hook set after that first call replaces it.
 
 ## Reading a reply
@@ -206,10 +206,13 @@ The caller passes the refusal, the path it passed to the check, where that path 
 trusted UID it passed to the check. The path is the socket path for `check_private_path` and
 `check_peer_uid`, and `instances/` for `list_trusted_dir`. `PathOrigin::SocketFlag` says the path
 is `--socket`'s value, and `PathOrigin::Home` says it was built from `$HOME`. Only `BadPath` reads
-the origin: from `--socket` it is `invalid_argument`, exit 64, with `argument` `--socket`; from
-`$HOME` it is `invalid_home`, exit 2. `status` never reaches the `--socket` arm: `BadPath` means a
-path that is not absolute and normal, and the parse refuses every such `--socket` value first,
-naming the value.
+the origin: from `--socket` it is `invalid_argument`, exit 64, and its `argument` is the path
+passed in, the value given to `--socket`, as the parse names a value it refuses; from `$HOME` it
+is `invalid_home`, exit 2. The binary's `status` never reaches the `--socket` arm: `BadPath`
+means a path that is not absolute and normal, or one with a NUL byte. The parse refuses every
+`--socket` value of the first kind, naming the value, and a process argument holds no NUL. A
+library caller that passes `handle` a `--socket` value with a NUL reaches the arm, and gets that
+value as its `argument`.
 
 Each code carries only the fields spec 025's client-code table lists for it. `path` is the
 component the check reports. `BadName`, `PeerCredentials` and `PeerMismatch` report none, so their
@@ -227,17 +230,75 @@ would then name another path. `list_trusted_dir`'s `Io` refusal for an entry it 
 joins `instances/` with the entry's raw name, so on Linux its `path` can hold U+FFFD whatever the
 caller passed.
 
+## Finding the instance
+
+`select::target` finds the socket from the flags and the environment alone, before anything on
+disk is looked at. The environment comes in through `Context`'s `Env`, which reads only `HOME`
+and `PLASMOSOME_KERNEL`. `main_with` passes `ProcessEnv`, the process's own, which is private
+to this crate; tests pass their own. Help, the version and `not_served` never read it.
+
+1. `--socket PATH` is the socket. `--kernel` beside it only adds the `name` param, and
+   `PLASMOSOME_KERNEL` is not read.
+2. Otherwise the name is `--kernel`'s, else `PLASMOSOME_KERNEL`'s. The variable is judged before
+   `HOME` is read. Empty, not UTF-8, or not an instance name, it is a usage error whose
+   `argument` is `PLASMOSOME_KERNEL`, with no `instance`.
+3. `HOME` must be an absolute path with no empty, `.` or `..` component, in UTF-8. One trailing
+   `/` is dropped, so `/` and `//` are the root, and `///` is refused. Otherwise the command
+   exits 2 with `invalid_home`, no `instance` and nothing looked at. The client never falls back
+   to the password database.
+4. A name gives `$HOME/.plasmosome/instances/NAME/control.uds`, which `status` checks as it
+   checks `--socket`'s path, below, with `PathOrigin::Home`.
+5. With no name, `select::select_default` runs spec 025's default selection over
+   `$HOME/.plasmosome/instances`.
+
+Default selection judges every entry before it connects anywhere, so a selection it refuses
+contacts no instance:
+
+1. `list_trusted_dir` lists `instances/` under the ancestor rules. A missing `instances/`, or a
+   missing directory above it, is `no_instance` with that directory as `path` and `seen: []`.
+   Its other refusals go through `map_refusal` with `instances/` as the checked path, so
+   `BadName`'s `path` is `instances/`.
+2. Each entry, in name order. One that is not a directory, such as a `.DS_Store` file or a
+   socket, is ignored. A symbolic link refuses the selection: `unsafe_socket`, rule `symlink`, at
+   the entry. So does a directory whose name is not UTF-8, breaks `InstanceName`'s rules or holds
+   a terminal control: `unsafe_socket`, rule `name`, at `instances/`. Every other directory's
+   socket path goes through `check_private_path`. A directory with no socket entry is a stopped
+   instance, listed in `seen`, however long its socket path would be. Any other refusal refuses
+   the selection with `map_refusal`'s code. A directory that passes is a candidate once its
+   socket path fits `sun_path`. A candidate whose path does not fit refuses the selection with
+   `socket_path_too_long`, `path` and `max_bytes`.
+3. No candidate: `no_instance`, exit 1, with `path` `instances/` and `seen`, the stopped
+   instances in name order.
+4. One candidate: the client connects, and that connection carries the request. `exchange`
+   checks its peer before the first byte. A connect that fails with `ECONNREFUSED` is
+   `unreachable` with `path`, exit 1, and the entry stays. One that fails with `ENOENT`, the
+   socket gone since its path check, is `not_running` with `path`, exit 1. Any other failure is
+   `transport` with `path` and `errno`, exit 1. The envelope's `instance` and the request's
+   `name` are the candidate's.
+5. More than one, reachable or not: the client connects to each, checks its peer, writes
+   nothing and closes it. A peer mismatch refuses the selection with `peer_mismatch`. A connect
+   that fails, whatever its errno, leaves the entry a candidate. The command exits 2 with
+   `ambiguous_instance`: `candidates` names every candidate in order, and `unreachable` those
+   whose connect failed, left out when none did.
+
+No envelope from default selection has `instance` unless it found exactly one candidate. The request
+line is built after the connection, because the name comes from `instances/`. A candidate's socket
+path has passed the client's own `sun_path` check, so its name is at most 68 bytes on macOS and 72
+on Linux, less the length of `HOME`. The line stays far under the bound. Nothing is written but
+stdout and stderr: the client keeps no cache, state file or history between runs.
+
 ## Serving status
 
-`status::run` serves `plasmosome status --socket PATH`. The deadline, `--deadline-ms` or 10,000
-ms, is counted on the `Context`'s clock from the start of `handle`. In order:
+`status::run` serves `plasmosome status`. The deadline, `--deadline-ms` or 10,000 ms, is counted
+on the `Context`'s clock from the start of `handle`. In order:
 
-1. Without `--socket`, it is a usage error whose message names `--socket`, with no `argument`.
-   `--kernel` beside `--socket` only adds the `name` param.
-2. It builds the request line and measures it. A line over 1,048,576 bytes before its newline,
-   spec 001's request limit, is a usage error whose `argument` is `--kernel`'s name, the one
-   argument the line holds. `--socket` has passed selection by then, so the error carries
-   `instance`, as `socket_path_too_long` does. With `--socket` alone the line is a fixed 49 bytes
+1. It finds the socket, above. A usage error is under `command` `invalid`, and `invalid_home`
+   under `plasmosome.status`.
+2. For a socket from `--socket` or a name, it builds the request line and measures it. A line
+   over 1,048,576 bytes before its newline, spec 001's request limit, is a usage error whose
+   `argument` is `--kernel`'s name, the one argument the line holds, or `PLASMOSOME_KERNEL` when
+   the variable gave the name. The socket is chosen by then, so the error carries `instance`, as
+   `socket_path_too_long` does. With `--socket` alone the line is a fixed 49 bytes
    before its newline. A name is written with each `"` as two bytes, so half a megabyte of quotes
    passes the bound. Through a process, macOS's `ARG_MAX` of 1,048,576 bytes covers every
    argument and the environment together, and Linux caps one argument at 131,072 bytes, so on
@@ -245,16 +306,18 @@ ms, is counted on the `Context`'s clock from the start of `handle`. In order:
 3. A path longer than `sun_path` holds, 103 bytes on macOS and 107 on Linux, is
    `socket_path_too_long` with `path` and `max_bytes`, exit 2, before any system call.
 4. `check_private_path` with the trusted UID. A refusal goes through `map_refusal` with
-   `PathOrigin::SocketFlag`.
+   `PathOrigin::SocketFlag` for `--socket`'s path and `PathOrigin::Home` for one built from
+   `$HOME`. So a missing instance directory is `no_instance`, with the missing directory as
+   `path`, and one with no socket entry is `not_running`.
 5. It connects. A refused connection is `unreachable` with `path`, exit 1, and the entry stays
    where it is, with no `fix`: on macOS a live daemon whose backlog is full refuses connections
    too. No entry is `not_running`. Any other failure is `transport` with `path` and `errno`.
 6. `exchange` checks the peer, writes the request and reads the reply, below.
 7. The reply goes through `judge_reply` and `kernel_exit`, a missing one through `unanswered`,
    and a request cut off midway through `cut_off`, each with `changes_state` false.
-8. It writes the envelope. From step 2 on, every envelope has `instance` with `socket`, and
-   `name` when `--kernel` was given. A failed write to stdout is `local_io` with `errno`, exit 1,
-   on stderr. Rust ignores `SIGPIPE`, so a closed pipe returns `EPIPE`.
+8. It writes the envelope. Once a socket is chosen, every envelope has `instance` with
+   `socket`, and `name` when a name was known. A failed write to stdout is `local_io` with
+   `errno`, exit 1, on stderr. Rust ignores `SIGPIPE`, so a closed pipe returns `EPIPE`.
 
 `exchange` takes a connected stream, the path it connected to, the trusted UID, the request and
 the deadline. It calls `check_peer_uid` before writing a byte. A peer that runs as another UID,
@@ -297,7 +360,8 @@ On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it 
 | `Command`, `COMMANDS` | Spec 025 §2's command table: words, operands, wire method or registry name, whether it changes state, whether this build serves it |
 | `read`, `Reading`, `Invocation` | One command line read in spec 025's order, and a served command's checked flags |
 | `handle`, `main_with` | Read a line, write its outcome and return the exit, with a panic ending as `internal`; `main_with` does it on the process's own streams |
-| `Context` | What `handle` reads a line against and runs a command with: the version, the table, the trusted UID and the clock |
+| `Context` | What `handle` reads a line against and runs a command with: the version, the table, the trusted UID, the clock and the environment |
+| `Env` | Where socket selection reads `HOME` and `PLASMOSOME_KERNEL`; `main_with` passes the process's own environment |
 | `Clock`, `SystemClock`, `Deadline` | The monotonic clock a command's deadline is counted on, the production one, and the time left on it |
 | `exchange`, `Unreplied` | One request and one reply line on a connected stream: the peer check first, each write and read bounded by the time left |
 
