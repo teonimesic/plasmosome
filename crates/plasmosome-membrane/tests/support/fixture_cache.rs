@@ -760,11 +760,15 @@ fn every_test_needing_the_fixture_fails_with_the_first_cause_outside_a_tagged_ta
     let outside = untagged_temporary_directory();
     let copy = outside.path().join("debug/deps/membraned-copy");
     std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
-    std::fs::copy(
-        std::env::current_exe().expect("the running test executable has a path"),
-        &copy,
-    )
-    .expect("the test executable is copied outside the target directory");
+    let copied = Command::new("cp")
+        .arg(std::env::current_exe().expect("the running test executable has a path"))
+        .arg(&copy)
+        .status()
+        .expect("cp starts");
+    assert!(
+        copied.success(),
+        "the test executable is copied outside the target directory: {copied}"
+    );
 
     let child = Command::new(&copy)
         .args(["--exact", "--test-threads=1"])
