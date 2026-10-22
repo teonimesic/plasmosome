@@ -93,25 +93,19 @@ fn median(path: &Path) -> Result<f64, String> {
 
 /// Reads `median.point_estimate` from the text of an `estimates.json` as Python's `json` read it.
 ///
-/// `Value` refuses what is not JSON and checks that the field is a number, but it holds the number
-/// as serde_json converted it, which without the `float_roundtrip` feature can be one double off
-/// the nearest. So the value is the number's own text parsed by `str::parse`, which is correctly
-/// rounded, as Python's `json` is, and `{:.6}` rounds the double that `.6f` rounded. Python reads
-/// a number with no fraction or exponent as an `int`, which has no `-0`, so an integer zero is 0.
+/// `Value` refuses what is not JSON, as before: a syntax error, a number out of range, or nesting
+/// deeper than 128. The number is then read from its own text by `str::parse`, which is correctly
+/// rounded, as Python's `json` is. serde_json's own conversion, without its `float_roundtrip`
+/// feature, can land one double off the nearest, and `{:.6}` would then round a different double
+/// than `.6f` did. `str::parse` refuses the text of every other JSON value: a string keeps its
+/// quotes, and `true`, `false` and `null` are not numbers to it. Python reads a number with no
+/// fraction or exponent as an `int`, which has no `-0`, so an integer zero is 0.
 fn point_estimate(bytes: &[u8]) -> Result<f64, String> {
-    let estimates: Value =
-        serde_json::from_slice(bytes).map_err(|error| format!("is not JSON: {error}"))?;
-    let missing = || "has no number at median.point_estimate".to_owned();
-    if !estimates
-        .pointer("/median/point_estimate")
-        .is_some_and(Value::is_number)
-    {
-        return Err(missing());
-    }
+    serde_json::from_slice::<Value>(bytes).map_err(|error| format!("is not JSON: {error}"))?;
     let (text, nearest) = member(bytes, "median")
         .and_then(|median| member(median.get().as_bytes(), "point_estimate"))
         .and_then(|number| Some((number.get(), number.get().parse::<f64>().ok()?)))
-        .ok_or_else(missing)?;
+        .ok_or_else(|| "has no number at median.point_estimate".to_owned())?;
     let integer = !text.contains(['.', 'e', 'E']);
     Ok(if integer && nearest == 0.0 {
         0.0

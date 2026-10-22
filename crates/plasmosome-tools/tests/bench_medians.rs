@@ -227,6 +227,9 @@ fn a_median_that_is_missing_or_not_a_number_is_named() {
         estimates("null"),
         estimates("\"2.5\""),
         estimates("true"),
+        estimates("false"),
+        estimates("[2.5]"),
+        estimates("{\"point_estimate\":2.5}"),
     ] {
         let criterion = criterion();
         write_estimates(criterion.path(), "session_log_read", &text);
@@ -248,13 +251,20 @@ fn a_median_that_is_missing_or_not_a_number_is_named() {
 #[test]
 fn a_file_that_is_not_json_is_named() {
     for text in [
-        "",
-        "{\"median\":",
-        "NaN",
-        "{\"median\":{\"point_estimate\":NaN}}",
+        String::new(),
+        "{\"median\":".to_string(),
+        "NaN".to_string(),
+        "{\"median\":{\"point_estimate\":NaN}}".to_string(),
+        estimates("Infinity"),
+        estimates("1e400"),
+        format!(
+            "{{\"median\":{{\"point_estimate\":1.5,\"deep\":{}{}}}}}",
+            "[".repeat(129),
+            "]".repeat(129)
+        ),
     ] {
         let criterion = criterion();
-        write_estimates(criterion.path(), "attach_detach", text);
+        write_estimates(criterion.path(), "attach_detach", &text);
 
         let outcome = run_on(criterion.path(), None);
 
