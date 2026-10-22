@@ -352,7 +352,7 @@ fn resolve(
             .args(["--format-version", "1", "--manifest-path"])
             .arg(&manifest),
     )?;
-    let metadata: serde_json::Value = serde_json::from_slice(&output)
+    let metadata: serde_json::Value = serde_json::from_reader(&output[..])
         .map_err(|error| format!("its JSON does not parse: {error}"))?;
     let text = |value: &serde_json::Value| value.as_str().map(str::to_string);
     let mut packages = BTreeMap::new();
@@ -686,8 +686,8 @@ fn each_missing_or_malformed_field_is_named() {
         cases.push((edited(&[], &[(field, value)]), said(field, what)));
     }
     for (record, expected) in cases {
-        let found = findings(&[], &[], std::slice::from_ref(&record));
-        assert_eq!(found, [expected], "{}", record.text);
+        let text = record.text.clone();
+        assert_eq!(findings(&[], &[], &[record]), [expected], "{text}");
     }
     let broken = Record {
         file: file.clone(),
