@@ -208,7 +208,8 @@ field the workload set can have no rule. A ruled field must hold one value of th
 a list of them, or the runs are refused, naming the lane, probe, field and kind:
 
 - a process ID, mount ID, parent mount ID, peer group, device, inode or memory counter is a whole
-  number, so a peer group rule refuses the tag `master:5` and holds only its `5`;
+  number. So a probe reports the `5` of `master:5` as a bare number, and a peer group rule
+  refuses the tag text itself;
 - an ephemeral port is a whole number up to 65535;
 - a system time, duration or load counter is any number, but a list of system times must not mix
   integers with numbers serde_json holds as floats, since the two do not compare exactly. Floats
