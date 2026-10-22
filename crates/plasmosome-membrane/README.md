@@ -22,7 +22,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. `vmm_helper` holds the decisions the VMM helper of spec 001 §4.2 makes: its exit codes, the judges of its argv, descriptors, recipe, writable root, host policy, denial probes and loaded images, and its 14 libkrun calls with a runner that stops at the first failure. The helper binary that uses them is not built yet. Nothing here boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. `vmm_helper` holds the decisions the VMM helper of spec 001 §4.2 makes: its exit codes, the judges of its argv, descriptors, recipe, writable root, host policy, denial probes and loaded images, and its 14 libkrun calls with a runner that stops at the first failure. The helper binary that uses them is not built yet. Nothing here boots a cell yet |
 
 ## Use
 
@@ -277,6 +277,54 @@ moved. A mapping made from a descriptor opened read-only cannot gain write (`mpr
 `EACCES`), and neither can a mapping made after the lock: `mmap` with `PROT_WRITE` fails with
 `EPERM`, and adding write with `mprotect` fails with `EACCES`. Hashing again in `reconfirm()` would
 only narrow the window, because the mapping can write after any hash, so it does not.
+
+## Checking the initramfs binding
+
+Spec 001 §4.2 boots the guest from the pinned initramfs: an uncompressed Linux newc archive whose
+protected regular entries `init` and `plasmosome/guest-policy` become `/init` and
+`/plasmosome/guest-policy`, the second holding exactly the guest policy's bytes. Before launch the
+supervisor checks that binding and refuses duplicate, escaping, symlinked or mismatching entries.
+`runtime::initramfs::verify_initramfs` does that check. Pass it the verified initramfs and the
+verified guest policy. It returns an `InitramfsBinding`: the size and SHA-256 of `init`, the
+policy's SHA-256 and the number of entries. Otherwise it returns an `InitramfsRefusal` naming the
+first rule the archive broke.
+
+It reads the archive through the verified descriptor, never by path, and at most 256 MiB
+(`MAX_INITRAMFS_BYTES`). A larger file is refused before any read, and so is a read that gets more
+than the bound. Every entry must start with the magic `070701` and have 13 header fields of 8
+hexadecimal digits in either case, a check field of 0, and zero bytes as padding. A name must end
+in its only NUL, be UTF-8, be at most 4,096 bytes with that NUL, and be one plain relative
+spelling: not absolute, with no empty, `.` or `..` part and no trailing `/`. Each name appears
+once, after an earlier directory entry for its parent. Only regular files with one link and
+directories pass; a symlink, a device, a FIFO, a socket or an unknown type is refused. `init` must
+have an execute bit and some bytes. The last entry is a `TRAILER!!!` with no body and no symlink
+mode, and only zero bytes may follow it.
+
+Some rules follow how Linux unpacks the archive, in `init/initramfs.c` at 6.12.91, the guest
+kernel's version, and at master as read on 2026-10-21. Line numbers below are 6.12.91's, then
+master's. The kernel never stops at `TRAILER!!!`: there it only frees its hard-link table (372-375,
+384-387), and its unpack loop reads any later `0` at a 4-byte boundary as the start of another
+entry (519-525, 544-550). So the rule that only zero bytes follow the trailer is the one that keeps
+a second archive from being unpacked over the first. The kernel reads an entry's name only when
+the entry is a symlink (296-304, 308-316), a regular file, or has no body (305, 317). A directory
+with a body is skipped unread, so nothing under it is made, and the audit refuses it. The audit
+also refuses a trailer with a body, which only fails closed: the kernel skips that body to the
+same next header the audit would read. A `TRAILER!!!` with a symlink mode takes the symlink branch
+before its name is compared, so the kernel tries to make a link and never sees a trailer; the
+audit refuses it as a symlink. The kernel keeps a mode in a 16-bit `umode_t` (181, 191), and the
+audit reads the type from the same low 16 bits. The kernel also skips an entry whose name is over
+4,096 bytes (294, 306), and it keeps the last of two entries with one name. It skips zero bytes
+between entries; the audit refuses them, and the qualified archive has none. 6.12.91 parses a
+header field with `simple_strtoul` and master with `hex2bin`; the audit takes exactly 8
+hexadecimal digits, which both read the same way.
+
+It reads the bytes the descriptor holds now and does not hash them again, so the limit stated for
+`reconfirm()` above holds here too: a write through a shared writable mapping made before the file
+was locked can change them unseen. Non-zero bytes appended after verification are read and refused
+as data after the trailer; appended zero bytes pass, as the kernel skips them. The cell,
+plasmosome-7em, which is not built yet, must call `reconfirm()` after this check, just before the
+launch that opens the initramfs by path. Off macOS no artifact verifies, so `verify_initramfs`
+runs only in tests, on artifacts that `artifacts::verified_for_test` builds.
 
 ## Launching the VMM helper
 

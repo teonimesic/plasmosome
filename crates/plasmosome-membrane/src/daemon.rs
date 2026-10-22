@@ -451,11 +451,11 @@ mod tests {
     struct Running {
         shutdown: Arc<AtomicBool>,
         finished: mpsc::Receiver<()>,
-        handle: Option<thread::JoinHandle<Result<(), DaemonError>>>,
+        handle: Option<thread::JoinHandle<Result<Vec<libc::pid_t>, DaemonError>>>,
     }
 
     impl Running {
-        fn stop(mut self) -> Result<(), DaemonError> {
+        fn stop(mut self) -> Result<Vec<libc::pid_t>, DaemonError> {
             self.shutdown.store(true, Ordering::Relaxed);
             self.finished
                 .recv_timeout(PATIENCE)
@@ -483,8 +483,9 @@ mod tests {
         let (done, finished) = mpsc::channel();
         let handle = thread::spawn(move || {
             let outcome = run(config, &flag);
+            let reaped = crate::vmm::take_reap_record();
             let _ = done.send(());
-            outcome
+            outcome.map(|()| reaped)
         });
         Running {
             shutdown,
@@ -540,15 +541,6 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(25));
         }
-    }
-
-    #[allow(unsafe_code)]
-    fn is_reaped(pid: i32) -> bool {
-        let mut status: libc::c_int = 0;
-        // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of this
-        // process.
-        let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        observed == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
     }
 
     #[test]
@@ -661,11 +653,12 @@ mod tests {
 
         let pid = recorded_pid(&pidfile);
         drop(client);
-        daemon.stop().expect("a clean shutdown is not an error");
+        let reaped = daemon.stop().expect("a clean shutdown is not an error");
 
         assert!(
-            is_reaped(pid),
-            "the broker was killed and reaped, not orphaned"
+            reaped.contains(&pid),
+            "no handle on the daemon thread consumed the broker's exit at pid {pid}, so it was \
+             orphaned or left unreaped"
         );
         assert!(
             !control.exists(),
@@ -766,6 +759,7 @@ mod tests {
 
     #[test]
     fn a_spawn_refusal_reaps_the_spawned_and_removes_the_socket() {
+        crate::vmm::reset_reap_record();
         let dir = tempfile::tempdir().unwrap();
         let control = dir.path().join("c.uds");
         let shared = dir.path().join("shared.uds");
@@ -808,9 +802,9 @@ mod tests {
             "only egressd is forked; dnsd is refused before its fork"
         );
         assert!(
-            is_reaped(forked[0]),
-            "egressd at pid {} was still a child of this process after run returned, so the \
-             refusal left it running or unreaped",
+            crate::vmm::reaped_by_a_handle(forked[0]),
+            "no handle consumed egressd's exit at pid {} before run returned, so the refusal left \
+             it running or unreaped",
             forked[0]
         );
         assert!(!control.exists(), "the socket path is removed on a refusal");
