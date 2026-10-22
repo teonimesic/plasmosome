@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, LazyLock, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -452,6 +452,7 @@ fn refusal_run_with(temporary: &Path) -> (bool, String) {
     let child = Command::new(std::env::current_exe().expect("the test executable has a path"))
         .args(["--exact", REFUSAL])
         .env("TMPDIR", temporary)
+        .env_remove("RUST_TEST_NOCAPTURE")
         .output()
         .expect("a second test process starts");
     (
@@ -637,6 +638,35 @@ fn a_target_named_through_a_symbolic_link_still_holds_the_executable() {
 }
 
 #[test]
+fn a_relative_cargo_target_dir_gets_the_generic_command() {
+    let target = untagged_temporary_directory();
+    let executable = target.path().join("debug/deps/plasmosome_membrane-0123");
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::write(&executable, "").expect("a stand-in executable is written");
+    let here = std::env::current_dir().expect("the test has a working directory");
+    let relative: PathBuf = here
+        .components()
+        .skip(1)
+        .map(|_| "..")
+        .collect::<PathBuf>()
+        .join(target.path().strip_prefix("/").unwrap());
+    assert_eq!(
+        std::fs::canonicalize(&relative).ok(),
+        std::fs::canonicalize(target.path()).ok(),
+        "from this test's working directory, {} names the target",
+        relative.display()
+    );
+
+    let refusal = fixture::cache_root(&executable, "a-cache", "the test fixture", Some(&relative))
+        .expect_err("an untagged tree holds no cache");
+
+    assert!(
+        refusal.ends_with(GENERIC_FIX),
+        "a relative CARGO_TARGET_DIR is not resolved from a directory Cargo may not have run in: {refusal}"
+    );
+}
+
+#[test]
 fn a_tagged_target_still_holds_the_cache() {
     let target = tempfile::tempdir().unwrap();
     tag(target.path());
@@ -700,11 +730,14 @@ fn a_directory_named_cachedir_tag_is_not_a_tag() {
 
 #[test]
 fn a_failed_fixture_setup_fails_every_caller_with_its_own_message() {
-    static FAILING: LazyLock<Result<PathBuf, String>> =
-        LazyLock::new(|| fixture::set_up(|| panic!("the first cause")));
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    static FAILING: fixture::Fixture = fixture::Fixture::new(|| {
+        RUNS.fetch_add(1, Ordering::Relaxed);
+        panic!("the first cause")
+    });
 
     for caller in ["first", "second"] {
-        let refused = std::panic::catch_unwind(|| fixture::prepared(&FAILING))
+        let refused = std::panic::catch_unwind(|| FAILING.path())
             .expect_err("a fixture whose setup failed fails its caller");
         assert_eq!(
             panic_message(refused),
@@ -712,29 +745,44 @@ fn a_failed_fixture_setup_fails_every_caller_with_its_own_message() {
             "the {caller} caller fails with the setup's own message, not a poisoned lock"
         );
     }
+    assert_eq!(
+        RUNS.load(Ordering::Relaxed),
+        1,
+        "the failed build ran once, not once per caller"
+    );
 }
 
 #[test]
 fn a_fixture_that_set_up_returns_its_path_to_every_caller() {
-    static READY: LazyLock<Result<PathBuf, String>> =
-        LazyLock::new(|| fixture::set_up(|| PathBuf::from("/a/fixture")));
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    static READY: fixture::Fixture = fixture::Fixture::new(|| {
+        RUNS.fetch_add(1, Ordering::Relaxed);
+        PathBuf::from("/a/fixture")
+    });
 
     for _ in 0..2 {
-        assert_eq!(fixture::prepared(&READY), PathBuf::from("/a/fixture"));
+        assert_eq!(READY.path(), PathBuf::from("/a/fixture"));
     }
+    assert_eq!(RUNS.load(Ordering::Relaxed), 1, "the fixture is built once");
 }
 
 #[test]
 fn a_setup_keeps_a_formatted_message_and_names_a_payload_that_is_not_text() {
     const KIND: &str = "formatted";
-    assert_eq!(
-        fixture::set_up(|| panic!("a {KIND} cause")),
-        Err("a formatted cause".to_owned())
-    );
-    assert_eq!(
-        fixture::set_up(|| std::panic::panic_any(7_u8)),
-        Err("the fixture's setup panicked with a payload that is not text".to_owned())
-    );
+    static FORMATTED: fixture::Fixture = fixture::Fixture::new(|| panic!("a {KIND} cause"));
+    static NOT_TEXT: fixture::Fixture = fixture::Fixture::new(|| std::panic::panic_any(7_u8));
+
+    for (fixture, expected) in [
+        (&FORMATTED, "a formatted cause"),
+        (
+            &NOT_TEXT,
+            "the fixture's setup panicked with a payload that is not text",
+        ),
+    ] {
+        let refused = std::panic::catch_unwind(|| fixture.path())
+            .expect_err("a fixture whose setup failed fails its caller");
+        assert_eq!(panic_message(refused), expected);
+    }
 }
 
 const NEEDS_THE_FIXTURE: [&str; 2] = [
@@ -769,32 +817,42 @@ fn every_test_needing_the_fixture_fails_with_the_first_cause_outside_a_tagged_ta
         copied.success(),
         "the test executable is copied outside the target directory: {copied}"
     );
-
-    let child = Command::new(&copy)
-        .args(["--exact", "--test-threads=1"])
-        .args(NEEDS_THE_FIXTURE)
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .expect("the copied test executable starts");
-
-    let report = String::from_utf8_lossy(&child.stdout);
-    assert!(
-        !child.status.success() && report.contains("test result: FAILED. 0 passed; 2 failed"),
-        "both tests fail when the fixture has no cache:\n{report}"
-    );
-    assert!(
-        !report.contains("poisoned"),
-        "no test fails with a poisoned lock:\n{report}"
-    );
     let cause = format!(
         "the test executable {} has no ancestor holding CACHEDIR.TAG, so the supervision fixture has no cache inside a Cargo target directory. ",
         copy.display()
     );
-    for test in NEEDS_THE_FIXTURE {
-        let failure = failure_of(&report, test);
+    let declared = declared_fix(&format!("'{}/CACHEDIR.TAG'", outside.path().display()));
+
+    for (target, fix) in [
+        (None, GENERIC_FIX),
+        (Some(outside.path()), declared.as_str()),
+    ] {
+        let mut command = Command::new(&copy);
+        command
+            .args(["--exact", "--test-threads=1"])
+            .args(NEEDS_THE_FIXTURE)
+            .env_remove("RUST_TEST_NOCAPTURE");
+        match target {
+            Some(target) => command.env("CARGO_TARGET_DIR", target),
+            None => command.env_remove("CARGO_TARGET_DIR"),
+        };
+        let child = command.output().expect("the copied test executable starts");
+
+        let report = String::from_utf8_lossy(&child.stdout);
         assert!(
-            failure.contains(&cause) && failure.contains(GENERIC_FIX),
-            "{test} fails with the first cause and the command that fixes it:\n{failure}"
+            !child.status.success() && report.contains("test result: FAILED. 0 passed; 2 failed"),
+            "both tests fail when the fixture has no cache, with CARGO_TARGET_DIR {target:?}:\n{report}"
         );
+        assert!(
+            !report.contains("poisoned"),
+            "no test fails with a poisoned lock:\n{report}"
+        );
+        for test in NEEDS_THE_FIXTURE {
+            let failure = failure_of(&report, test);
+            assert!(
+                failure.contains(&cause) && failure.contains(fix),
+                "{test} fails with the first cause and, with CARGO_TARGET_DIR {target:?}, the command {fix}:\n{failure}"
+            );
+        }
     }
 }

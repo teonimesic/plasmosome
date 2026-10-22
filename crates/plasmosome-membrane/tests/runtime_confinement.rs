@@ -55,7 +55,6 @@ mod darwin {
     use std::io::{BufRead, BufReader, Read};
     use std::path::{Path, PathBuf};
     use std::process::{Child, ChildStdin, Command, Stdio};
-    use std::sync::LazyLock;
 
     const FIVE: [&str; 5] = [
         "process-fork",
@@ -67,8 +66,7 @@ mod darwin {
     const SANDBOXED_OBSERVER: &str = "PLASMOSOME_TEST_SANDBOXED_OBSERVER";
     const OBSERVED_TWICE: &str = "observed twice from inside a sandbox";
 
-    static SLEEPER: LazyLock<Result<PathBuf, String>> =
-        LazyLock::new(|| fixture::set_up(build_sleeper));
+    static SLEEPER: fixture::Fixture = fixture::Fixture::new(build_sleeper);
 
     fn build_sleeper() -> PathBuf {
         let executable = std::env::current_exe().expect("the running test executable has a path");
@@ -93,7 +91,7 @@ mod darwin {
 
     impl Sleeper {
         fn start(profile: &str) -> Sleeper {
-            let mut child = Command::new(fixture::prepared(&SLEEPER))
+            let mut child = Command::new(SLEEPER.path())
                 .arg(profile)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())

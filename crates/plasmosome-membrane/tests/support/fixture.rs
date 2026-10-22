@@ -4,7 +4,6 @@ use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod target_cache {
@@ -14,12 +13,11 @@ mod target_cache {
     ));
 }
 
-pub use target_cache::{cache_root, declared_target, prepared, set_up};
+pub use target_cache::{Fixture, cache_root, declared_target};
 
 const COMPILER_ARGUMENTS: [&str; 4] = ["-std=c11", "-Wall", "-Wextra", "-Werror"];
 
-static FIXTURE: LazyLock<Result<PathBuf, String>> =
-    LazyLock::new(|| set_up(build_supervision_fixture));
+static FIXTURE: Fixture = Fixture::new(build_supervision_fixture);
 
 fn build_supervision_fixture() -> PathBuf {
     let executable = std::env::current_exe().expect("the running test executable has a path");
@@ -42,7 +40,7 @@ fn build_supervision_fixture() -> PathBuf {
 /// builds of the crate never compile the fixture; the build script compiles
 /// only the product Darwin helper.
 pub fn supervision_fixture() -> PathBuf {
-    prepared(&FIXTURE)
+    FIXTURE.path()
 }
 
 /// Takes the path of a running test executable and returns the directory the

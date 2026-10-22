@@ -4,7 +4,6 @@ use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod target_cache {
@@ -14,14 +13,13 @@ mod target_cache {
     ));
 }
 
-use target_cache::{cache_root, declared_target, prepared, set_up};
+use target_cache::{Fixture, cache_root, declared_target};
 
 const FAKE_COMPILER_ARGUMENTS: [&str; 4] = ["-std=c11", "-Wall", "-Wextra", "-Werror"];
 
 const FAKE_MODES: [&str; 1] = ["record"];
 
-static FAKE_DIRECTORY: LazyLock<Result<PathBuf, String>> =
-    LazyLock::new(|| set_up(build_runtime_fake));
+static FAKE_DIRECTORY: Fixture = Fixture::new(build_runtime_fake);
 
 fn build_runtime_fake() -> PathBuf {
     let executable = std::env::current_exe()
@@ -54,7 +52,7 @@ pub fn runtime_fake(mode: &str) -> PathBuf {
         FAKE_MODES.contains(&mode),
         "{mode} is a mode of runtime_fake.c"
     );
-    prepared(&FAKE_DIRECTORY).join(mode)
+    FAKE_DIRECTORY.path().join(mode)
 }
 
 fn compile_runtime_fake(root: &Path) -> PathBuf {

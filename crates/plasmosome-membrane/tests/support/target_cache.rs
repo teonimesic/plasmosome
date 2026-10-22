@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 const TAG_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
 
@@ -13,7 +13,10 @@ const TAG_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
 /// With no tagged ancestor it returns the message every test that needs the
 /// cache fails with. The message names the executable, says why the tag can be
 /// missing and gives the command that writes it, into `declared_target` when
-/// that directory holds the executable. There is no fallback directory.
+/// that directory is absolute and holds the executable. A relative
+/// `declared_target` gets the generic command, because Cargo resolved it from
+/// the directory it ran in, which this process cannot know. There is no
+/// fallback directory.
 pub fn cache_root(
     executable: &Path,
     cache: &str,
@@ -48,28 +51,45 @@ pub fn declared_target() -> Option<PathBuf> {
     std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from)
 }
 
-/// Takes the function that builds a fixture and returns the fixture's path,
-/// or the message the function panicked with.
+/// A compiled test fixture, built at most once per test process, on first
+/// use.
 ///
-/// A fixture kept in a `LazyLock` is built through this, so a failed build is
-/// kept as a value and the lock is never poisoned.
-pub fn set_up(build: fn() -> PathBuf) -> Result<PathBuf, String> {
-    std::panic::catch_unwind(build).map_err(panic_text)
+/// `new` is the only way to make one, and `path` always builds through
+/// `catch_unwind`. A build that panics is kept as its message, so nothing is
+/// poisoned and every caller fails with the first cause.
+pub struct Fixture {
+    build: fn() -> PathBuf,
+    built: OnceLock<Result<PathBuf, String>>,
 }
 
-/// Takes a fixture built through `set_up` and returns its path, or panics
-/// with the message its build failed with. Every call panics with that same
-/// message.
-pub fn prepared(fixture: &LazyLock<Result<PathBuf, String>>) -> PathBuf {
-    match &**fixture {
-        Ok(path) => path.clone(),
-        Err(message) => panic!("{message}"),
+impl Fixture {
+    /// Takes the function that builds the fixture and returns its path, or
+    /// panics, and returns a fixture that has not been built yet.
+    pub const fn new(build: fn() -> PathBuf) -> Fixture {
+        Fixture {
+            build,
+            built: OnceLock::new(),
+        }
     }
+
+    /// Takes nothing and returns the fixture's path, building it on the first
+    /// call. Panics with the build's panic message, on that call and on every
+    /// later one; a failed build is not run again.
+    pub fn path(&self) -> PathBuf {
+        match self.built.get_or_init(|| set_up(self.build)) {
+            Ok(path) => path.clone(),
+            Err(message) => panic!("{message}"),
+        }
+    }
+}
+
+fn set_up(build: fn() -> PathBuf) -> Result<PathBuf, String> {
+    std::panic::catch_unwind(build).map_err(panic_text)
 }
 
 fn holds(target: &Path, executable: &Path) -> bool {
     let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    !target.as_os_str().is_empty()
+    target.is_absolute()
         && (executable.starts_with(target) || canonical(executable).starts_with(canonical(target)))
 }
 
