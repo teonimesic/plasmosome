@@ -95,7 +95,7 @@ are not White_Space. A tool name blank in the same sense is refused at its own p
 no name is guessed, so following the fix deletes the tool. A names list is refused as a whole, and
 its entries have no descriptions. If its first entry is blank, the refusal is at that entry,
 `provides."a:tools".tools[0]`, with fix `remove this entry`. A blank entry after the first is not
-refused at its own index: the list's fix writes only the first entry, so it drops the blank one.
+refused at its own index: the list's fix writes at most the first entry, so it drops the blank one.
 
 For a network section that is not a table, or a `hosts` that is not a list, the fix uses the
 string the author wrote there. For the top-level `[network]`, it then uses the `[mock]` hosts.
