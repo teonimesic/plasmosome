@@ -1722,9 +1722,10 @@ is a claim that the text above may not be corrected.
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
 8. Spec017's PID-free BrokerLaunch and single-plugin format3 cutover are **delivered** in the
-   exact-ID model and the ledger, and its caller-prepared fallible grant API is **delivered** in
-   the exact-ID model. Its complete fallible snapshot, typed incomplete effects and drain-aware
-   exact cleanup are **not yet implemented**.
+   exact-ID model and the ledger. Its caller-prepared fallible grant, complete fallible snapshot,
+   typed incomplete effects and drain-aware exact removal are **delivered** at model scope: in the
+   backend seam, FakeBackend, CompositeBackend, the ledger and the conformance suite. No real
+   adapter, independent observer or workload confinement is delivered.
    Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
    format3 records. Its grant takes the operation and kind its caller prepared, keeps that
    address, mints no identity and can fail. In the model, a grant or apply can fail after its
@@ -1741,7 +1742,11 @@ is a claim that the text above may not be corrected.
    then this item listed it as not yet implemented, and said the model code still had
    infallible backend-minted grants.
    Amended on 2026-10-22, when plasmosome-wswv shipped typed incomplete effects in the exact-ID
-   model. Until then this sentence read "every failure it has today comes before any effect".
+   model. Until then the sentence on the grant ended "can fail; every failure it has today comes
+   before any effect".
+   Amended on 2026-10-22, when plasmosome-6j8 shipped the conformance clause for typed incomplete
+   effects. Until then this item listed the complete fallible snapshot, typed incomplete effects
+   and drain-aware exact cleanup as not yet implemented.
 9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
    **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
    recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest
