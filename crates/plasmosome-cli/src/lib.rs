@@ -17,13 +17,15 @@ pub mod json;
 mod refusal;
 pub mod reply;
 mod select;
-mod status;
+mod verb;
 
-pub use args::{ArgSource, CommandArgs, Flag, FlagKind, Param};
+pub use args::{
+    ArgSource, CommandArgs, Flag, FlagKind, InstanceParam, Param, VerbCall, VerbDeadline,
+};
 pub use cli::{Context, Invocation, Reading, handle, main_with, read};
 pub use clock::{Clock, Deadline, SystemClock};
 pub use codes::{ClientCode, Exit};
-pub use commands::{COMMANDS, Command};
+pub use commands::{Build, COMMANDS, Command};
 pub use env::Env;
 pub use envelope::{
     ClientError, EmitError, Envelope, ErrorBody, Form, Instance, KernelError, Stream, emit,
