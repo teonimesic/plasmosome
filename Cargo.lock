@@ -550,6 +550,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasmosome-tools"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "plotters"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
