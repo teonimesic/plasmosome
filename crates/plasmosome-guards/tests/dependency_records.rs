@@ -13,6 +13,8 @@ const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 const MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 
+const MAX_ERROR_BYTES: u64 = 1024 * 1024;
+
 const RECORDS: &str = "docs/dependencies/";
 
 const FIELDS: [&str; 10] = [
@@ -141,7 +143,7 @@ fn valid(field: &str, value: &toml::Value) -> bool {
 fn read_record(
     record: &Record,
     named: &mut BTreeSet<String>,
-    own: &mut BTreeSet<String>,
+    own: &mut BTreeMap<String, String>,
 ) -> Vec<String> {
     let file = &record.file;
     let table: toml::Table = match record.text.parse() {
@@ -198,14 +200,14 @@ fn read_record(
     let range = table.get("range").and_then(toml::Value::as_str);
     if let (Some(name), Some(range)) = (name, range.filter(|range| is_range(range))) {
         named.insert(format!("{name}@{range}"));
-        own.insert(format!("{name}@{range}"));
+        own.insert(format!("{name}@{range}"), file.clone());
     }
     problems
 }
 
 fn findings(locked: &[Package], direct: &[Package], records: &[Record]) -> Vec<String> {
     let mut named = BTreeSet::new();
-    let mut own = BTreeSet::new();
+    let mut own = BTreeMap::new();
     let fields: Vec<String> = records
         .iter()
         .flat_map(|record| read_record(record, &mut named, &mut own))
@@ -217,26 +219,38 @@ fn findings(locked: &[Package], direct: &[Package], records: &[Record]) -> Vec<S
     let candidates = candidates.chain(direct.iter().map(|package| (package, true)));
     for (package, is_direct) in candidates.filter(|(package, _)| package.source.is_some()) {
         let (name, version, lockfile) = (&package.name, &package.version, &package.lockfile);
-        let label = match ranged(version) {
-            Ok(range) => format!("{name}@{range}"),
+        let range = match ranged(version) {
+            Ok(range) => range,
             Err(error) => {
                 versions.insert(format!("{name} in {lockfile}: {error}"));
                 continue;
             }
         };
+        let label = format!("{name}@{range}");
         if !is_direct && !named.contains(&label) {
             unnamed.insert(format!(
                 "{label} (locked {version} in {lockfile}) is named by no record in docs/dependencies/"
             ));
         }
-        if is_direct && !own.contains(&label) {
-            orphans.insert(format!(
-                "direct dependency {label} has no record of its own; write docs/dependencies/{name}.toml"
-            ));
+        if is_direct && !own.contains_key(&label) {
+            orphans.insert(orphaned(name, &range, &own));
         }
     }
     let sets = [versions, unnamed, orphans].into_iter().flatten();
     sets.chain(fields).collect()
+}
+
+fn orphaned(name: &str, range: &str, own: &BTreeMap<String, String>) -> String {
+    let missing = format!("direct dependency {name}@{range} has no record of its own");
+    let crate_of = |label: &String| label.split('@').next() == Some(name);
+    match own.iter().find(|(label, _)| crate_of(label)) {
+        Some((label, file)) => {
+            format!(
+                "{missing}; {file} records {label}, so update its range to {range} and re-derive it"
+            )
+        }
+        None => format!("{missing}; write docs/dependencies/{name}.toml"),
+    }
 }
 
 fn refusal(findings: &[String]) -> Option<String> {
@@ -268,7 +282,7 @@ fn run_bounded(command: &mut Command) -> Result<Vec<u8>, String> {
     let mut stderr = child.stderr.take().expect("stderr is piped");
     let errors = std::thread::spawn(move || {
         let mut text = Vec::new();
-        let _ = (&mut stderr).take(1024 * 1024).read_to_end(&mut text);
+        let _ = (&mut stderr).take(MAX_ERROR_BYTES).read_to_end(&mut text);
         let _ = std::io::copy(&mut stderr, &mut std::io::sink());
         text
     });
@@ -404,10 +418,18 @@ fn guard(root: &Path, cargo: &OsStr) -> Vec<String> {
         Err(error) => return vec![format!("git ls-files failed, so nothing was read: {error}")],
     };
     let tracked: BTreeSet<&str> = listing.split_terminator('\0').collect();
+    let lockfiles: Vec<&str> = tracked
+        .iter()
+        .copied()
+        .filter(|path| is_lockfile(path))
+        .collect();
     let mut problems = Vec::new();
+    if lockfiles.is_empty() {
+        problems.push("git ls-files lists no Cargo.lock, so no package was checked".to_string());
+    }
     let mut locked = Vec::new();
     let mut direct = Vec::new();
-    for lockfile in tracked.iter().copied().filter(|path| is_lockfile(path)) {
+    for lockfile in lockfiles {
         let held = read_bounded(&root.join(lockfile))
             .map_err(|error| format!("{lockfile} {error}"))
             .and_then(|text| locked_in(&text, lockfile));
@@ -567,9 +589,10 @@ fn a_direct_package_with_no_record_is_refused() {
 #[test]
 fn a_new_range_without_a_record_change_is_refused() {
     let toml = [locked("toml", "0.9.0")];
+    let moved = "direct dependency toml@0.9 has no record of its own; docs/dependencies/toml.toml records toml@0.8, so update its range to 0.9 and re-derive it";
     let expected = [
         unnamed("toml@0.9", "0.9.0", "Cargo.lock"),
-        orphan("toml@0.9"),
+        moved.to_string(),
     ];
     assert_eq!(
         findings(&toml, &toml, &[record("toml", "0.8", &[])]),
@@ -799,6 +822,22 @@ fn command_output_is_read_through_a_bound_of_64_mib() {
     assert_eq!(zeros(MAX_OUTPUT_BYTES + 1), past);
 }
 
+#[test]
+fn error_output_is_read_through_a_bound_of_1_mib() {
+    let loud = "head -c 2097152 /dev/zero >&2; exit 3";
+    let error = run_bounded(Command::new("sh").args(["-c", loud]))
+        .err()
+        .unwrap_or_default();
+    let status = "exit status: 3: ";
+    let bound = usize::try_from(MAX_ERROR_BYTES).expect("1 MiB fits");
+    assert!(
+        error.starts_with(&format!("{status}\0")),
+        "{:?}",
+        error.get(..32)
+    );
+    assert_eq!(error.len(), status.len() + bound);
+}
+
 struct Fixture {
     directory: TempDir,
 }
@@ -927,6 +966,56 @@ fn an_optional_dependency_still_counts() {
     fixture.track();
     let expected = [unnamed("opt@0.3", "0.3.1", "Cargo.lock"), orphan("opt@0.3")];
     assert_eq!(fixture.guard(), expected);
+}
+
+#[test]
+fn a_dev_or_build_dependency_needs_a_record_of_its_own() {
+    let fixture = Fixture::new(&[
+        ("alpha", "1.2.3", "beta = \"0.4\"\ngamma = \"2\"\n"),
+        ("beta", "0.4.1", ""),
+        ("gamma", "2.0.0", ""),
+    ]);
+    let manifest = "\n[dependencies]\nalpha = \"1\"\n\n[dev-dependencies]\nbeta = \"0.4\"\n\n[build-dependencies]\ngamma = \"2\"\n";
+    fixture.package("crates/app", "app", manifest);
+    fixture.lock("Cargo.toml");
+    fixture.record("alpha", "1", &["beta@0.4", "gamma@2"]);
+    fixture.track();
+    assert_eq!(fixture.guard(), [orphan("beta@0.4"), orphan("gamma@2")]);
+}
+
+#[test]
+fn a_tracked_lockfile_cargo_does_not_read_is_a_finding() {
+    let fixture = Fixture::new(&[("alpha", "1.2.3", "")]);
+    fixture.package("crates/app", "app", "\n[dependencies]\nalpha = \"1\"\n");
+    fixture.lock("Cargo.toml");
+    fixture.record("alpha", "1", &[]);
+    fixture.write("crates/app/Cargo.lock", "version = 4\n");
+    fixture.track();
+    let ignored = "the resolve names alpha 1.2.3, which crates/app/Cargo.lock does not lock";
+    assert_eq!(fixture.guard(), [ignored]);
+}
+
+#[test]
+fn what_the_guard_cannot_read_is_a_finding_never_a_pass() {
+    let fixture = Fixture::new(&[("alpha", "1.2.3", "")]);
+    fixture.package("crates/app", "app", "\n[dependencies]\nalpha = \"1\"\n");
+    fixture.record("alpha", "1", &[]);
+    fixture.track();
+    let none = "git ls-files lists no Cargo.lock, so no package was checked";
+    assert_eq!(fixture.guard(), [none]);
+    fixture.lock("Cargo.toml");
+    fixture.write("fuzz/Cargo.lock", "version = \n");
+    fixture.track();
+    let one = |found: Vec<String>, start: &str| {
+        assert!(found.len() == 1 && found[0].starts_with(start), "{found:?}");
+    };
+    one(fixture.guard(), "fuzz/Cargo.lock is not TOML: ");
+    let fuzz = fixture.directory.path().join("fuzz/Cargo.lock");
+    std::fs::remove_file(fuzz).expect("the lockfile is removed");
+    one(fixture.guard(), "fuzz/Cargo.lock cannot be read: ");
+    let outside = tempfile::tempdir().expect("a scratch directory is created");
+    let failed = "git ls-files failed, so nothing was read: ";
+    one(guard(outside.path(), &cargo()), failed);
 }
 
 #[test]
