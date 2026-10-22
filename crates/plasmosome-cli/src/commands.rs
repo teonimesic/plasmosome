@@ -1,7 +1,14 @@
-use crate::args::Flag;
+use crate::args::{CommandArgs, Flag, InstanceParam, VerbCall};
+use crate::envelope::ClientError;
 
-/// One command of spec 025 §2's table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+const DEFAULT_DEADLINE_MS: u32 = 10_000;
+
+/// Builds a served command's verb call from its own arguments.
+pub type Build = fn(&CommandArgs) -> Result<VerbCall, ClientError>;
+
+/// One command of spec 025 §2's table. Two commands are equal when every field is, `build`
+/// compared by address.
+#[derive(Clone, Copy, Debug)]
 pub struct Command {
     /// The words after `plasmosome` that name it, such as `["cell", "list"]`.
     pub words: &'static [&'static str],
@@ -12,7 +19,8 @@ pub struct Command {
     pub command: &'static str,
     /// Whether `command` is a wire method. A registry command has none.
     pub is_method: bool,
-    /// Whether the request changes state, which decides exit 3.
+    /// Whether the request changes state. Help says so, and once such a request's first byte is
+    /// written, an answer lost is exit 3. The verb call has no copy of it.
     pub changes_state: bool,
     /// Whether this build serves it. An unserved command exits 2 with `not_served`.
     pub served: bool,
@@ -21,13 +29,59 @@ pub struct Command {
     pub flags: &'static [Flag],
     /// Whether it takes a workload's argv after `--`.
     pub takes_argv: bool,
+    /// The whole command's deadline when `--deadline-ms` is not given.
+    pub default_deadline_ms: u32,
+    /// Builds its verb call. `None` until the command is served.
+    pub build: Option<Build>,
 }
+
+impl PartialEq for Command {
+    fn eq(&self, other: &Command) -> bool {
+        let Command {
+            words,
+            operands,
+            command,
+            is_method,
+            changes_state,
+            served,
+            flags,
+            takes_argv,
+            default_deadline_ms,
+            build,
+        } = *self;
+        let builds = match (build, other.build) {
+            (Some(ours), Some(theirs)) => std::ptr::fn_addr_eq(ours, theirs),
+            (ours, theirs) => ours.is_none() && theirs.is_none(),
+        };
+        builds
+            && words == other.words
+            && operands == other.operands
+            && command == other.command
+            && is_method == other.is_method
+            && changes_state == other.changes_state
+            && served == other.served
+            && flags == other.flags
+            && takes_argv == other.takes_argv
+            && default_deadline_ms == other.default_deadline_ms
+    }
+}
+
+impl Eq for Command {}
 
 impl Command {
     /// Returns the wire method, which a `not_served` refusal names as `method`.
     pub fn method(&self) -> Option<&'static str> {
         self.is_method.then_some(self.command)
     }
+}
+
+fn status(_: &CommandArgs) -> Result<VerbCall, ClientError> {
+    Ok(VerbCall {
+        method: "plasmosome.status",
+        instance: InstanceParam::Name,
+        params: Vec::new(),
+        deadline: None,
+    })
 }
 
 const fn verb(
@@ -45,6 +99,8 @@ const fn verb(
         served: false,
         flags: &[],
         takes_argv: false,
+        default_deadline_ms: DEFAULT_DEADLINE_MS,
+        build: None,
     }
 }
 
@@ -63,6 +119,8 @@ const fn registry(
         served: false,
         flags: &[],
         takes_argv: false,
+        default_deadline_ms: DEFAULT_DEADLINE_MS,
+        build: None,
     }
 }
 
@@ -70,6 +128,7 @@ const fn registry(
 pub const COMMANDS: &[Command] = &[
     Command {
         served: true,
+        build: Some(status),
         ..verb(&["status"], &[], "plasmosome.status", false)
     },
     verb(&["recovery"], &[], "plasmosome.recovery", false),
