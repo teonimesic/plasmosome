@@ -1,0 +1,22 @@
+id = "model-provider"
+description = "Complete prompts through the model endpoint."
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[secrets]
+refs = [{ id = "model-provider:key", consumer = "wasm", delivery = ["handle"] }]
+
+[mock]
+hosts = ["api.github.com"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+
+[model]
+endpoint = "https://api.example/v1/chat"
+credential = "model-provider/key"
+
+[workspace]
+mount = { dst = "/workspace" }
