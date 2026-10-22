@@ -22,7 +22,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `cell_directory` checks a cell's private directory with core's `PrivateDir` and makes the writable root copy in it; see "The cell directory and the writable root" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `cell_directory` checks a cell's private directory with core's `PrivateDir` and makes the writable root copy in it; see "The cell directory and the writable root" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. `handshake` runs the host side of the shim's two hellos and its data association; see "The shim's handshake" below. Nothing here boots a cell yet |
 
 ## Use
 
@@ -486,29 +486,33 @@ core's `private_socket`, the boundary `plasmosomed` binds its control socket wit
 "Private recovery sockets", describes it. `PrivateDir::open` walks the parent from `/` without
 following a symlink, and requires every ancestor owned by root or this uid and writable by neither
 group nor other, and the parent itself owned by this uid with no group or other bits.
-`PrivateListener::bind` then binds the name inside that held directory. It refuses any entry
-already there with `AddressInUse` and leaves it as it was: a live or stale socket, a file, a
-directory, a FIFO or a symlink, dangling or not. It sets the socket to 0600 before it listens, so no
-connection lands while the umask's mode holds. A path too long for a socket address is
-`PathTooLong`. Each refusal comes back as `EndpointRefusal::Private` with core's error, which names
-the rule broken and the component that broke it. The bind holds the spawn lock's write side,
-because on Darwin core makes the socket close-on-exec in a second call. Closing the listener closes
-it, then removes the socket file only while the entry at that name in the held directory is still
-that socket, and says what it found as a `RemoveOutcome`. Dropping it does the same. A child that
-another thread is spawning holds a copy of the listener until its exec, so the socket can take
-connections until then. The cell, plasmosome-7em, which is not built yet, is to create that
-private directory.
+`PrivateListener::bind` then works in that held directory, in this order. It refuses any entry
+already at the path's name with `AddressInUse` and leaves it as it was: a live or stale socket, a
+file, a directory, a FIFO or a symlink, dangling or not. It binds the socket at a temporary name in
+that directory, sets it to 0600 and makes it listen there, and only then renames it to the path's
+name with a rename that never replaces an entry. So a client that finds the path finds a 0600 socket
+that accepts, and no connection lands while the umask's mode holds. A hard kill inside the bind can
+leave a dot-named temporary socket in the directory, which the next bind ignores. A path too long
+for a socket address is `PathTooLong`. Each refusal comes back as `EndpointRefusal::Private` with
+core's error, which names the rule broken and the component that broke it. The bind holds the spawn
+lock's write side, because on Darwin core makes the socket close-on-exec in a second call. Closing
+the listener closes it, then removes the socket file only while the entry at that name in the held
+directory is still that socket, and says what it found as a `RemoveOutcome`. Dropping it does the
+same. A child that another thread is spawning holds a copy of the listener until its exec, so the
+socket can take connections until then. The cell, plasmosome-7em, which is not built yet, is to
+create that private directory.
 
 `accept_ready` takes one pending connection without blocking, holding the same write side. Core
 reads the peer's effective uid from the kernel and closes a peer of another uid unread: that is
 `Connection::Refused` with core's refusal. A trusted stream is made nonblocking, and the peer's
 process id is read right after the accept. What that pid names differs by platform. On Linux it is
 `SO_PEERCRED`'s: the process that called `connect`, recorded then. On Darwin it is
-`LOCAL_PEERPID`'s: the last process that created, connected or sent on the peer's socket before the
-read. A process that inherited the connection and sent one byte before the accept is the one
-reported (measured on macOS 26.6.2). So on Darwin a match with the helper's pid shows that the
-helper was the last process to use that socket, not that it connected, and a genuine helper whose
-child sent first does not match.
+`LOCAL_PEERPID`'s: the last process that created, connected, sent on or received on the peer's
+socket before the read, a read still waiting included. A process that inherited the connection and
+sent one byte before the accept is the one reported, and so is one that only waits in a read on it
+(both measured on macOS 26.6.2, the second in 20 of 20 runs). So on Darwin a match with the
+helper's pid shows that the helper was the last process to use that socket, not that it connected,
+and a genuine helper whose child sent first does not match.
 
 When the peer's credentials or pid cannot be read, the connection is `Refused` with
 `PeerCredentials` and closed. On Darwin a peer that connected and exited before the accept is that
@@ -526,6 +530,71 @@ then tells the thread to stop. The thread then reads what the pipe holds without
 written before `finish` are kept even with no wait. It checks for the stop every 25 ms, so `finish`
 typically returns within `wait` plus 25 ms; on a loaded machine the scheduler adds to that. `eof` is
 true only when every holder of the write end has closed it.
+
+## The shim's handshake
+
+Spec 001 §4.2 says a cell is guest-ready only on the trusted shim's actual handshake, not on a
+fork, a socket file or a recorded pid. `runtime::handshake::handshake` is the host side of it. Pass
+it the control and data listeners the cell bound before the launch, the helper's pid, the expected
+guest policy digest, one `ProbeBudget` and a check of the helper's liveness. It returns an
+`Association` that holds the normal lane, the withdrawal lane and the data connection, and closes
+all three when dropped. Nothing calls it yet; the cell composition in native task `plasmosome-7em`
+will.
+
+It accepts the first control connection and checks its peer pid, sends the normal hello and judges
+the reply with `hello::judge_normal`. It accepts the second control connection, checks it, sends
+the withdrawal hello and judges that reply with `judge_withdrawal` and the normal lane's boot
+token. Only then does it accept one data connection and check its peer. A data connection that
+arrives early stays in the data listener's queue until both hellos have passed.
+
+One allowance covers every accept, write and read, and nothing renews it. Before every wait the
+handshake checks the budget, with shutdown winning over expiry, then the liveness check. A helper
+that ended, or whose state cannot be read, fails at once. Waits last at most 25 ms of what is left.
+The budget is checked again after each accept and after each reply is judged, so a step that
+finished after the allowance is `TimedOut` at that step's stage. The check after the data accept
+refuses a handshake that finished after its allowance.
+
+A reply is read with the readiness probe's reader, through a limit of 1,048,576 bytes before the
+newline plus one byte. One byte more is `FrameTooLarge`, before any parsing. End of file before
+the newline is `Closed`. Bytes after the newline in the same read are `UnexpectedBytes`: the shim
+sends one line and then waits, and the reader would drop those bytes. Only bytes that same read
+returns are refused. A line that arrives after that read, or one after a frame of exactly 1,048,576
+bytes, stays queued on its lane for the next reader.
+
+Every accepted stream's peer pid must equal the helper's, and the pid is read again after each
+reply. A pid of 0 or below never matches; Linux reports 0 for a peer outside the supervisor's pid
+namespace. A stream from another pid is `ForeignPeer`, and a peer that `accept_ready` refused is
+`PeerRefused`. So is a lane whose pid cannot be read after its reply: on Darwin a lane that hung up
+right after its reply fails there with `ENOTCONN`, once no other process holds its socket. Each
+fails the handshake, because nothing but the helper should reach a private endpoint. On Linux the
+pid is the connector's, so the read after a reply adds nothing. On Darwin it names the last process
+to use the peer's socket, as above. A match after a reply shows that the helper used the socket
+last once the reply had arrived, so a reply sent by another process fails, unless the helper used
+the socket after it. Measured on macOS 26.6.2, after the accept the pid followed a child that only
+sent, in 20 of 20 runs.
+
+These checks do not stop every process of the supervisor's own uid. That is the same-uid limit the
+plasmosome-qep plan records as owner gate O-4, whose handling is "proceed; document". A process
+that holds a copy of a lane's socket, inherited or passed to it, can still do this:
+
+- On Linux, with a copy of each lane's socket, it can read both requests and send both replies,
+  because `SO_PEERCRED` keeps the connector for the life of the socket.
+- On Darwin its reply passes if the helper then sends or receives on that socket before the host
+  reads the pid. In a review of this change on macOS 26.6.2, a forked child sent a forged normal
+  reply, the connector then read on its end, and the reply passed the pid read and was judged, in
+  2 of 2 runs.
+- On both, nothing checks the sender once `handshake` returns, so `Association.peer` does not show
+  who wrote later bytes on any of the three streams.
+
+Any process of that uid can also connect to either listener first and fail the handshake with
+`ForeignPeer`.
+
+The `Association` stands for both hellos and the data association. Spec 001 §4.2 also asks for
+the workload namespaces and the workload control group before readiness, and this handshake does
+not observe them. On a failure it closes every stream it accepted. A connection still waiting in a
+listener's queue closes when the caller closes that listener. When `handshake` returns an
+`Association`, it has not checked that the helper still runs or that the three streams are still
+open; the caller observes the helper.
 
 ## Control-socket ownership
 
