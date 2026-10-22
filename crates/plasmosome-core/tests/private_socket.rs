@@ -348,9 +348,17 @@ fn a_root_owned_directory_this_user_cannot_open_is_judged_by_its_owner() {
     #[cfg(target_os = "linux")]
     let locked = Path::new("/root");
     let metadata = fs::symlink_metadata(locked).expect("the locked directory exists");
+    let denied = |outcome: std::io::Result<()>| {
+        outcome.is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+    };
     assert!(
-        metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o700,
-        "{} must be a root-owned 0700 directory for this test",
+        metadata.is_dir()
+            && metadata.uid() == 0
+            && metadata.mode() & 0o022 == 0
+            && denied(fs::read_dir(locked).map(drop))
+            && denied(fs::symlink_metadata(locked.join("cell")).map(drop)),
+        "{} must be a root-owned directory that neither group nor other can write and that this \
+         user can neither list nor enter, for this test",
         locked.display()
     );
     let foreign = PrivateSocketError::ForeignOwner {
@@ -373,7 +381,7 @@ fn a_root_owned_directory_this_user_cannot_open_is_judged_by_its_owner() {
             path: unreachable,
             errno: libc::EACCES
         }),
-        "a root-owned 0700 ancestor is safe, only unreachable"
+        "a root-owned ancestor closed to this user is safe, only unreachable"
     );
     assert_eq!(
         list_trusted_dir(locked),
@@ -382,7 +390,7 @@ fn a_root_owned_directory_this_user_cannot_open_is_judged_by_its_owner() {
             path: locked.to_path_buf(),
             errno: libc::EACCES
         }),
-        "a root-owned 0700 directory passes the ancestor rule, so only its open fails"
+        "a root-owned directory closed to this user passes the ancestor rule, so only its open fails"
     );
 }
 
@@ -960,6 +968,19 @@ fn drop_removes_only_the_bound_socket() {
     let other = entry_of(&path);
     drop(listener);
     assert_eq!(entry_of(&path), other);
+    fs::remove_file(&path).expect("unlink");
+
+    let listener = bind(&root, "sock");
+    let moved = root.path().join("moved");
+    fs::rename(&path, &moved).expect("rename");
+    drop(listener);
+    assert!(
+        fs::symlink_metadata(&moved)
+            .expect("the renamed socket stays")
+            .file_type()
+            .is_socket()
+    );
+    assert!(fs::symlink_metadata(&path).is_err());
 }
 
 #[test]
@@ -1560,6 +1581,12 @@ const FOREIGN_PEER_OPT_OUT: &str = "PLASMOSOME_FOREIGN_PEER_TESTS_UNSUPPORTED";
 
 #[test]
 fn check_peer_uid_reads_a_foreign_peer_uid_from_the_kernel() {
+    if effective_uid() == 0 {
+        println!(
+            "skipped: as root, the peer that answers may be root too, so equal UIDs prove nothing"
+        );
+        return;
+    }
     let Some(stream) = FOREIGN_PEERS
         .iter()
         .find_map(|path| UnixStream::connect(path).ok())
