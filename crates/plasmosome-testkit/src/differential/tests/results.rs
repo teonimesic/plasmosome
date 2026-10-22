@@ -1,10 +1,12 @@
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Write};
+use std::os::unix::fs::symlink;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::{lane_run, load_value, manifest, manifest_json, observation, runs, set};
+use crate::differential::results::write_with;
 use crate::differential::{
     Digests, Lane, LaneConfig, Manifest, Observation, Outcome, ReadRefusal, Record, ResultsRefusal,
     Rule, RuleKind, Run, Subject, judge, write_results,
@@ -12,6 +14,11 @@ use crate::differential::{
 
 const DIGESTS: &str = "image,kernel,libkrun,fixtures,harness,session,probe suite,manifest";
 const ADMITS: &str = "and no allowance admits it";
+const EXISTS: ErrorKind = ErrorKind::AlreadyExists;
+
+fn listed(dir: &std::path::Path) -> usize {
+    fs::read_dir(dir).expect("a listing").count()
+}
 
 fn digest(number: usize) -> String {
     format!("{number:064x}")
@@ -283,7 +290,9 @@ fn a_reader_refusal_is_a_failed_run_naming_the_lane_and_the_subject() {
         let mut record = record();
         record.configs = vec![config(Lane::Open)];
         let text = written(outcome, &record).expect("written");
-        assert!(text.contains(&summary("fail", "17 in the manifest", [0, 0, 0])));
+        let unread = "- Runs: not read, since a reader refused a lane's output\n";
+        assert!(text.contains(&format!("- Probes: 17 in the manifest\n{unread}")));
+        assert!(text.contains("\n- Verdict: **fail**\n"));
         let expected = format!("a reader refused the open lane's output for {named}: {reason:?}");
         assert_eq!(why(&text), expected);
         let table = section(&text, "## Normalization table as run");
@@ -293,8 +302,18 @@ fn a_reader_refusal_is_a_failed_run_naming_the_lane_and_the_subject() {
         record.configs.clear();
         assert_eq!(refused(outcome, &record), "MissingConfig { lane: Open }");
     }
-    let refusal = &reader(Lane::Cell, Subject::Transcript, "");
+    let refusal = &reader(Lane::Cell, Subject::Probe("op-times".to_string()), "");
     let mut record = record();
+    (record.digests.harness, record.digests.session) = (None, None);
+    let outcome = Outcome::ReadRefused {
+        manifest: &manifest,
+        refusal,
+    };
+    let text = written(outcome, &record).expect("written");
+    let digests = "| harness | none given |\n| session | none given |\n";
+    assert!(section(&text, "## Digests").contains(digests));
+    let refusal = &reader(Lane::Cell, Subject::Transcript, "");
+    let mut record = self::record();
     record.digests.session = None;
     let outcome = Outcome::ReadRefused {
         manifest: &manifest,
@@ -388,6 +407,11 @@ fn a_lane_with_no_runs_reads_no_runs_and_needs_no_configuration() {
     assert!(section(&text, "## Verdict").ends_with("Failures: none.\n\n"));
     assert!(text.contains("## Lanes\n\n### cell\n\nNo configuration given.\n\n### open\n"));
     assert!(text.contains("## Runs\n\n### cell\n\nNo runs.\n\n### open, run 1\n"));
+    record
+        .configs
+        .extend([config(Lane::Cell), config(Lane::Cell)]);
+    let twice = refused(read(&manifest(), &runs), &record);
+    assert_eq!(twice, "DuplicateConfig { lane: Cell }");
 }
 
 #[test]
@@ -397,12 +421,16 @@ fn every_status_of_a_probe_and_of_the_transcript_is_written() {
     observation(&mut runs, Lane::Cell, 0, "refusal-host-2").failed_before_step = true;
     let both = observation(&mut runs, Lane::Cell, 0, "refusal-host-3");
     (both.completed, both.failed_before_step) = (false, true);
-    runs[0]
-        .observations
-        .retain(|seen| seen.probe != "facility-1");
+    for run in &mut runs {
+        run.observations.retain(|seen| seen.probe != "facility-1");
+    }
     runs[0].transcript = None;
     let text = text(&manifest(), &runs);
+    assert!(text.contains(&summary("not run", "17 in the manifest", [2, 2, 2])));
     let run = json_in(section(&text, "### cell, run 1"));
+    for (index, seen) in runs[0].observations[..3].iter().enumerate() {
+        assert_eq!(run["observations"][index]["fields"], json!(seen.fields));
+    }
     let both = "not run: no completion marker, and failed before its step";
     let expected = [
         ["refusal-host-1", "not run: no completion marker"],
@@ -451,9 +479,14 @@ fn the_rerun_list_must_name_every_lane_that_ran_and_every_digest() {
         }
     }
     let mut record = record();
+    record.configs[0].settings.clear();
+    assert_eq!(refused(outcome, &record), "EmptyConfig { lane: Cell }");
+    let mut record = self::record();
     record.digests.harness = None;
+    let mut some = runs.clone();
+    some[0].transcript = None;
     assert_eq!(
-        refused(outcome, &record),
+        refused(read(&manifest, &some), &record),
         "MissingDigest { name: \"harness\" }"
     );
     let mut untranscribed = runs.clone();
@@ -463,6 +496,10 @@ fn the_rerun_list_must_name_every_lane_that_ran_and_every_digest() {
     record.digests.session = None;
     let text = written(read(&manifest, &untranscribed), &record).expect("no transcript");
     assert!(text.contains("| harness | none: no run carries a transcript |\n"));
+    assert!(text.contains(&summary("not run", "17 in the manifest", [2, 2, 2])));
+    let lanes = ["cell", "open", "absent"];
+    let not_run = lanes.map(|lane| format!("the transcript: not run in the {lane} lane"));
+    assert_eq!(why(&text), not_run.join("\n"));
 }
 
 #[test]
@@ -470,16 +507,17 @@ fn the_file_is_named_by_date_and_name_and_never_overwritten() {
     let (manifest, runs) = (manifest(), runs());
     let outcome = read(&manifest, &runs);
     let dir = TempDir::new().expect("a temporary directory");
-    for (date, name) in [("2026-10-22", "staged-suite"), ("2024-02-29", "a-0")] {
-        let mut record = record();
-        (record.date, record.name) = (date.to_string(), name.to_string());
+    let dates = ["2026-10-22", "2024-02-29", "2000-02-29", "2026-12-31"];
+    for (index, date) in dates.into_iter().enumerate() {
+        let (mut record, name) = (record(), format!("suite-{index}"));
+        (record.date, record.name) = (date.to_string(), name.clone());
         let path = write_results(outcome, &record, dir.path()).expect("written");
         assert_eq!(path, dir.path().join(format!("{date}-{name}.md")));
         let first = fs::read(&path).expect("the file reads back");
         let again = write_results(outcome, &record, dir.path()).expect_err("never overwritten");
-        let exists = ErrorKind::AlreadyExists;
-        assert!(matches!(again, ResultsRefusal::Io(error) if error.kind() == exists));
+        assert!(matches!(again, ResultsRefusal::Io(error) if error.kind() == EXISTS));
         assert_eq!(fs::read(&path).expect("the file reads back"), first);
+        assert_eq!(listed(dir.path()), index + 1);
     }
     let empty = TempDir::new().expect("a temporary directory");
     let dates = [
@@ -489,8 +527,20 @@ fn the_file_is_named_by_date_and_name_and_never_overwritten() {
         "2026/10/22",
         "2026-10-2a",
         "+026-10-22",
+        "2026-10-22-",
+        "２０２６-10-22",
+        "2026-02-30",
+        "2026-13-45",
+        "0000-00-00",
+        "9999-99-99",
+        "2026-22-10",
+        "2026-02-29",
+        "1900-02-29",
+        "2026-04-31",
+        "2026-01-00",
+        "2026-00-10",
     ];
-    for date in dates.into_iter().chain(["2026-10-22-", "２０２６-10-22"]) {
+    for date in dates {
         let mut record = record();
         record.date = date.to_string();
         let refusal = write_results(outcome, &record, empty.path()).expect_err("a bad date");
@@ -508,10 +558,60 @@ fn the_file_is_named_by_date_and_name_and_never_overwritten() {
             format!("BadName {{ name: {name:?} }}")
         );
     }
-    assert_eq!(fs::read_dir(empty.path()).expect("a listing").count(), 0);
+    assert_eq!(listed(empty.path()), 0);
     let missing = empty.path().join("missing");
     let refusal = write_results(outcome, &record(), &missing).expect_err("no such directory");
     assert!(matches!(refusal, ResultsRefusal::Io(error) if error.kind() == ErrorKind::NotFound));
+}
+
+#[test]
+fn a_link_at_the_name_is_never_written_through() {
+    let (manifest, runs) = (manifest(), runs());
+    let dir = TempDir::new().expect("a temporary directory");
+    let target = dir.path().join("target");
+    symlink(&target, dir.path().join("2026-10-22-staged-suite.md")).expect("a dangling link");
+    for kept in [None, Some("kept")] {
+        if let Some(kept) = kept {
+            fs::write(&target, kept).expect("the target is written");
+        }
+        let refusal = write_results(read(&manifest, &runs), &record(), dir.path());
+        let refusal = refusal.expect_err("a link at the name");
+        assert!(matches!(refusal, ResultsRefusal::Io(error) if error.kind() == EXISTS));
+        assert_eq!(fs::read_to_string(&target).ok().as_deref(), kept);
+        assert_eq!(listed(dir.path()), 1 + usize::from(kept.is_some()));
+    }
+}
+
+#[test]
+fn a_write_that_fails_partway_leaves_no_file_and_a_retry_writes_it() {
+    let (manifest, runs) = (manifest(), runs());
+    let dir = TempDir::new().expect("a temporary directory");
+    let full = |file: &mut File, text: &[u8]| {
+        file.write_all(&text[..512])?;
+        Err(io::Error::other("the disk is full"))
+    };
+    let refusal = write_with(read(&manifest, &runs), &record(), dir.path(), full);
+    let refusal = format!("{:?}", refusal.expect_err("the write fails"));
+    assert!(refusal.starts_with("Io(") && refusal.contains("the disk is full"));
+    assert_eq!(listed(dir.path()), 0);
+    let path = write_results(read(&manifest, &runs), &record(), dir.path()).expect("a retry");
+    let whole = fs::read_to_string(path).expect("the file reads back");
+    assert_eq!(whole, text(&manifest, &runs));
+    assert_eq!(listed(dir.path()), 1);
+}
+
+fn one_verdict_and_closed_blocks(text: &str) {
+    let verdicts: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("- V"))
+        .collect();
+    assert_eq!(verdicts, ["- Verdict: **fail**"]);
+    let fences: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("```"))
+        .collect();
+    let closed = fences.iter().filter(|line| **line == "```").count();
+    assert_eq!(2 * closed, fences.len());
 }
 
 #[test]
@@ -520,10 +620,29 @@ fn names_and_values_cannot_break_the_file_apart() {
     let fence = "\n```\n## Runs\n# x | y `z`";
     set(&mut runs, Lane::Open, "hint-env", "HOME", json!(fence));
     runs[2].boot_id = format!("open{fence}");
+    let pass = "x\n```\n\n- Verdict: **pass**";
+    set(&mut runs, Lane::Cell, "hint-env", pass, json!(1));
     let mut record = record();
     let settings = &mut record.configs[1].settings;
     settings.insert("cmdline".to_string(), fence.to_string());
-    let text = written(read(&manifest(), &runs), &record).expect("written");
+    let manifest = manifest();
+    let text = written(read(&manifest, &runs), &record).expect("written");
+    one_verdict_and_closed_blocks(&text);
+    let differs = format!("the cell lane differs from the absent lane in field {pass:?}");
+    assert_eq!(
+        why(&text),
+        format!("probe \"hint-env\": {differs}, {ADMITS}")
+    );
+    let refusal = reader(Lane::Open, Subject::Transcript, pass);
+    let refusal = &refusal;
+    let outcome = Outcome::ReadRefused {
+        manifest: &manifest,
+        refusal,
+    };
+    let unread = written(outcome, &record).expect("written");
+    one_verdict_and_closed_blocks(&unread);
+    let output = "a reader refused the open lane's output for the transcript";
+    assert_eq!(why(&unread), format!("{output}: {pass:?}"));
     let headings: Vec<&str> = text.lines().filter(|line| line.starts_with('#')).collect();
     let mut expected = vec!["# Membrane differential: staged-suite".to_string()];
     let lanes = ["cell", "open", "absent"];
@@ -535,12 +654,6 @@ fn names_and_values_cannot_break_the_file_apart() {
         expected.extend([1, 2].map(|run| format!("### {lane}, run {run}")));
     }
     assert_eq!(headings, expected);
-    let fences: Vec<&str> = text
-        .lines()
-        .filter(|line| line.starts_with("```"))
-        .collect();
-    let closed = fences.iter().filter(|line| **line == "```").count();
-    assert_eq!(2 * closed, fences.len());
     let open = json_in(section(&text, "### open, run 1"));
     assert_eq!(open["boot_id"], json!(runs[2].boot_id));
     assert_eq!(open["observations"][11]["fields"]["HOME"], json!(fence));

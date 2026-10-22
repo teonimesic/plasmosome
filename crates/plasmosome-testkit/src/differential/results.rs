@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 
@@ -26,17 +29,17 @@ pub struct Digests {
 }
 
 /// How one lane was configured, such as its command line, vCPUs, memory and devices, as names
-/// and values.
+/// and values. `settings` holds at least one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneConfig {
     pub lane: Lane,
     pub settings: BTreeMap<String, String>,
 }
 
-/// What a results file records beyond the manifest and the runs. `date` is `YYYY-MM-DD` in
-/// ASCII digits, and `name` is lowercase ASCII letters, digits and hyphens, so the file is
-/// `<date>-<name>.md`. `configs` holds at most one configuration per lane, and must hold one
-/// for each lane with runs and for a lane whose output a reader refused.
+/// What a results file records beyond the manifest and the runs. `date` is a calendar date
+/// written `YYYY-MM-DD` in ASCII digits, and `name` is lowercase ASCII letters, digits and
+/// hyphens, so the file is `<date>-<name>.md`. `configs` holds at most one configuration per
+/// lane, and must hold one for each lane with runs and for a lane whose output a reader refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub date: String,
@@ -45,9 +48,9 @@ pub struct Record {
     pub digests: Digests,
 }
 
-/// A reader of the output a guest wrote in `lane` refused it, for `subject`: a probe's output
-/// holding a number spec 027 §6 says to refuse, or a transcript whose fixture endpoint refused a
-/// request the recorded session does not hold. `reason` says what was refused.
+/// A reader of the output a guest wrote in `lane` refused it, for `subject`: a probe's output or
+/// the transcript holding a number spec 027 §6 says to refuse, or a transcript whose fixture
+/// endpoint refused a request the recorded session does not hold. `reason` says what was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadRefusal {
     pub lane: Lane,
@@ -60,7 +63,7 @@ pub struct ReadRefusal {
 pub enum Outcome<'a> {
     /// [`super::load`] refused the manifest, so no lane ran.
     ManifestRefused(&'a ManifestRefusal),
-    /// A reader refused a lane's output, so no run was judged.
+    /// A reader refused a lane's output, so no run was judged, and the file holds none.
     ReadRefused {
         manifest: &'a Manifest,
         refusal: &'a ReadRefusal,
@@ -72,13 +75,15 @@ pub enum Outcome<'a> {
     },
 }
 
-/// Why a results file was not written. Every refusal but `Io` comes before the file is created.
+/// Why a results file was not written. Every refusal but `Io` comes before any file is created.
+/// After `Io`, no file is left at the name, so a retry with the same name can write it.
 #[derive(Debug)]
 pub enum ResultsRefusal {
     BadDate { date: String },
     BadName { name: String },
     MissingConfig { lane: Lane },
     DuplicateConfig { lane: Lane },
+    EmptyConfig { lane: Lane },
     BadDigest { name: &'static str },
     MissingDigest { name: &'static str },
     Io(io::Error),
@@ -91,22 +96,44 @@ pub enum ResultsRefusal {
 /// declares, so a manifest with none, which `judge` refuses, reads `0` and fails. It holds each
 /// lane's configuration, the eight digests, the normalization table as run, and every probe's
 /// status and observation and the transcript and its status in every run of every lane, all as
-/// run, not normalized.
+/// run, not normalized. The text goes to a temporary name in `dir` first, and is linked to its
+/// name only once it is whole and synced, so a write that fails leaves no file at the name.
 pub fn write_results(
     outcome: Outcome<'_>,
     record: &Record,
     dir: &Path,
 ) -> Result<PathBuf, ResultsRefusal> {
+    write_with(outcome, record, dir, |file, text| file.write_all(text))
+}
+
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn write_with(
+    outcome: Outcome<'_>,
+    record: &Record,
+    dir: &Path,
+    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+) -> Result<PathBuf, ResultsRefusal> {
     check(outcome, record)?;
     let text = render(outcome, record);
-    let path = dir.join(format!("{}-{}.md", record.date, record.name));
+    let name = format!("{}-{}.md", record.date, record.name);
+    let path = dir.join(&name);
+    let count = WRITES.fetch_add(1, Ordering::Relaxed);
+    let temporary = dir.join(format!(".{name}.{}-{count}.tmp", process::id()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)
+        .open(&temporary)
         .map_err(ResultsRefusal::Io)?;
-    file.write_all(text.as_bytes())
-        .map_err(ResultsRefusal::Io)?;
+    let linked = write(&mut file, text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::hard_link(&temporary, &path));
+    drop(file);
+    let removed = fs::remove_file(&temporary);
+    if linked.is_ok() && removed.is_err() {
+        fs::remove_file(&path).ok();
+    }
+    linked.and(removed).map_err(ResultsRefusal::Io)?;
     Ok(path)
 }
 
@@ -140,6 +167,13 @@ fn check(outcome: Outcome<'_>, record: &Record) -> Result<(), ResultsRefusal> {
             _ => return Err(ResultsRefusal::DuplicateConfig { lane }),
         }
     }
+    let empty = record
+        .configs
+        .iter()
+        .find(|config| config.settings.is_empty());
+    if let Some(config) = empty {
+        return Err(ResultsRefusal::EmptyConfig { lane: config.lane });
+    }
     for (name, digest) in digests(&record.digests) {
         match digest {
             Some(digest) if !is_sha256(digest) => return Err(ResultsRefusal::BadDigest { name }),
@@ -151,11 +185,24 @@ fn check(outcome: Outcome<'_>, record: &Record) -> Result<(), ResultsRefusal> {
 }
 
 fn is_date(date: &str) -> bool {
-    date.len() == 10
+    let shape = date.len() == 10
         && date.bytes().enumerate().all(|(index, byte)| match index {
             4 | 7 => byte == b'-',
             _ => byte.is_ascii_digit(),
-        })
+        });
+    let number = |range: Range<usize>| date.get(range).and_then(|part| part.parse::<u32>().ok());
+    let (Some(year), Some(month), Some(day)) = (number(0..4), number(5..7), number(8..10)) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1..=12 => 31,
+        _ => 0,
+    };
+    shape && (1..=days).contains(&day)
 }
 
 fn is_sha256(digest: &str) -> bool {
@@ -240,13 +287,17 @@ fn render(outcome: Outcome<'_>, record: &Record) -> String {
             format!("{} {count}", lane_name(lane))
         })
         .collect();
+    let unread = matches!(outcome, Outcome::ReadRefused { .. });
+    let counts = if unread {
+        "not read, since a reader refused a lane's output".to_string()
+    } else {
+        counts.join(", ")
+    };
     let mut text = format!(
         "# Membrane differential: {}\n\nSpec 027 §6's differential, run on {}. \
          `differential::write_results` wrote this file and judged the runs itself.\n\n\
-         - Verdict: **{word}**\n- Probes: {probes}\n- Runs: {}\n\n## Verdict\n\n",
-        record.name,
-        record.date,
-        counts.join(", ")
+         - Verdict: **{word}**\n- Probes: {probes}\n- Runs: {counts}\n\n## Verdict\n\n",
+        record.name, record.date,
     );
     text.push_str(&verdict_text(&judged));
     text.push_str("## Lanes\n\n");
@@ -258,10 +309,13 @@ fn render(outcome: Outcome<'_>, record: &Record) -> String {
         }
     }
     text.push_str("## Digests\n\n| Input | SHA-256 |\n| --- | --- |\n");
+    let none = if unread {
+        "none given"
+    } else {
+        "none: no run carries a transcript"
+    };
     for (name, digest) in digests(&record.digests) {
-        let shown = digest.map_or("none: no run carries a transcript".to_string(), |digest| {
-            format!("`{digest}`")
-        });
+        let shown = digest.map_or(none.to_string(), |digest| format!("`{digest}`"));
         text.push_str(&format!("| {name} | {shown} |\n"));
     }
     text.push_str("\n## Normalization table as run\n\n");
