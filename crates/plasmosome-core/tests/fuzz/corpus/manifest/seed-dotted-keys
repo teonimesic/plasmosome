@@ -1,0 +1,5 @@
+id = "dotted"
+description = "Dotted keys."
+network.hosts = ["api.example"]
+network.ports = [443]
+lifecycle.drain_ms = 5

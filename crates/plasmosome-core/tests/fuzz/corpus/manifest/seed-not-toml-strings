@@ -1,0 +1,4 @@
+x = [ a = 1 ]
+s = "escaped \" quote"
+u = "unterminated
+m = """never closed
