@@ -4,6 +4,7 @@
 
 #![doc(test(attr(forbid(unsafe_code))))]
 
+mod args;
 mod cli;
 mod clock;
 mod codes;
@@ -18,6 +19,7 @@ pub mod reply;
 mod select;
 mod status;
 
+pub use args::{ArgSource, CommandArgs, Flag, FlagKind, Param};
 pub use cli::{Context, Invocation, Reading, handle, main_with, read};
 pub use clock::{Clock, Deadline, SystemClock};
 pub use codes::{ClientCode, Exit};
