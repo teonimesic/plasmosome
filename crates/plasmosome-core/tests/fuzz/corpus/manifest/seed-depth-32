@@ -1,0 +1,4 @@
+id = "depth-32"
+description = "A fuzz seed."
+impl.wasm = "c.wasm"
+deep.a.b = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]

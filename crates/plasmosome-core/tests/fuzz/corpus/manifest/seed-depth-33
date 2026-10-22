@@ -1,0 +1,4 @@
+id = "depth-33"
+description = "A fuzz seed."
+impl.wasm = "c.wasm"
+deep = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = { a = 1 } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } }

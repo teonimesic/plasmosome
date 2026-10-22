@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 
-use super::{differs, finding, manifest, object, observation, runs, set, verdict};
+use super::{
+    differs, finding, load_value, manifest, manifest_json, object, observation, runs, set, verdict,
+};
 use crate::differential::normalize::normalize;
 use crate::differential::{
     Lane, Manifest, Observation, Reason, Rule, RuleKind, Run, RunRefusal, Verdict, judge,
@@ -9,10 +11,11 @@ use crate::differential::{
 const TOKEN_A: &str = "4f2a9c0d1e3b5a7c9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f";
 const TOKEN_B: &str = "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a1908f7e6d5c4b";
 
-const WHOLE: [RuleKind; 6] = [
+const WHOLE: [RuleKind; 7] = [
     RuleKind::Pid,
     RuleKind::MountId,
     RuleKind::ParentMountId,
+    RuleKind::PeerGroup,
     RuleKind::Device,
     RuleKind::Inode,
     RuleKind::MemoryCounter,
@@ -24,11 +27,12 @@ const NUMBERS: [RuleKind; 3] = [
     RuleKind::LoadCounter,
 ];
 
-const NAMES: [RuleKind; 8] = [
+const NAMES: [RuleKind; 9] = [
     RuleKind::Pid,
     RuleKind::BootId,
     RuleKind::MountId,
     RuleKind::ParentMountId,
+    RuleKind::PeerGroup,
     RuleKind::Device,
     RuleKind::Inode,
     RuleKind::EphemeralPort,
@@ -49,6 +53,17 @@ fn with_rules(probe: &str, rules: &[(&str, RuleKind)]) -> Manifest {
 
 fn with_rule(probe: &str, field: &str, kind: RuleKind) -> Manifest {
     with_rules(probe, &[(field, kind)])
+}
+
+fn with_named_rules(probe: &str, rules: &[(&str, &str)]) -> Manifest {
+    let mut manifest = manifest_json();
+    let table = manifest["rules"].as_array_mut().expect("rules is a list");
+    table.extend(
+        rules
+            .iter()
+            .map(|(field, kind)| json!({"probe": probe, "field": field, "kind": kind})),
+    );
+    load_value(&manifest).expect("the manifest loads")
 }
 
 fn x_and_y(kinds: [RuleKind; 2], shown: impl Fn(Lane, u64) -> [Value; 2]) -> Verdict {
@@ -339,11 +354,74 @@ fn a_parent_mount_id_is_numbered_with_the_mount_ids() {
 }
 
 #[test]
+fn peer_groups_relate_across_fields_in_byte_order() {
+    let manifest = with_named_rules(
+        "hint-env",
+        &[("masters", "peer_group"), ("a_shared", "peer_group")],
+    );
+    for (cell_shared, wanted) in [
+        (41, Verdict::Pass),
+        (40, Verdict::Fail(vec![differs("hint-env", "masters")])),
+    ] {
+        let mut runs = runs();
+        each_run(&mut runs, "hint-env", "masters", |lane, run| {
+            json!([40 + seed(lane, run), 41 + seed(lane, run)])
+        });
+        each_run(&mut runs, "hint-env", "a_shared", |lane, run| {
+            let shared = match lane {
+                Lane::Cell => cell_shared,
+                _ => 41,
+            };
+            json!([shared + seed(lane, run)])
+        });
+        assert_eq!(
+            verdict(&manifest, &runs),
+            wanted,
+            "a_shared in the cell names group {cell_shared}"
+        );
+    }
+}
+
+#[test]
+fn a_peer_group_never_shares_numbers_with_mount_ids() {
+    let manifest = with_named_rules(
+        "hint-env",
+        &[
+            ("mounts", "mount_id"),
+            ("parents", "parent_mount_id"),
+            ("groups", "peer_group"),
+        ],
+    );
+    for cell_group in [50, 51, 52] {
+        let mut runs = runs();
+        each_run(&mut runs, "hint-env", "mounts", |lane, run| {
+            json!([50 + seed(lane, run)])
+        });
+        each_run(&mut runs, "hint-env", "parents", |lane, run| {
+            json!([51 + seed(lane, run)])
+        });
+        each_run(&mut runs, "hint-env", "groups", |lane, run| {
+            let group = match lane {
+                Lane::Cell => cell_group,
+                _ => 52,
+            };
+            json!([group + seed(lane, run)])
+        });
+        assert_eq!(
+            verdict(&manifest, &runs),
+            Verdict::Pass,
+            "groups in the cell holds {cell_group}"
+        );
+    }
+}
+
+#[test]
 fn two_kinds_that_name_things_are_never_numbered_together() {
     let numbered = [
         RuleKind::Pid,
         RuleKind::MountId,
         RuleKind::ParentMountId,
+        RuleKind::PeerGroup,
         RuleKind::Device,
         RuleKind::Inode,
         RuleKind::EphemeralPort,
@@ -527,6 +605,37 @@ fn placeholders_name_their_kind_and_names_share_numbers_across_fields() {
 }
 
 #[test]
+fn peer_group_placeholders_name_their_kind_and_keep_first_appearance() {
+    let manifest = with_named_rules(
+        "hint-env",
+        &[
+            ("masters", "peer_group"),
+            ("shared", "peer_group"),
+            ("mounts", "mount_id"),
+        ],
+    );
+    let observation = Observation {
+        probe: "hint-env".to_string(),
+        completed: true,
+        failed_before_step: false,
+        fields: object(json!({"masters": [9, 7, 8, 9], "shared": [8, 7], "mounts": [7]})),
+    };
+    assert_eq!(
+        normalize(&manifest, Lane::Cell, &observation),
+        Ok(object(json!({
+            "masters": [
+                "<peer_group:1>",
+                "<peer_group:2>",
+                "<peer_group:3>",
+                "<peer_group:1>"
+            ],
+            "shared": ["<peer_group:3>", "<peer_group:2>"],
+            "mounts": ["<mount_id:1>"]
+        })))
+    );
+}
+
+#[test]
 fn time_placeholders_keep_the_order_of_the_times() {
     let late: u64 = 1_760_954_400_000_000_001;
     let fail = Verdict::Fail(vec![differs("op-times", "times")]);
@@ -587,14 +696,15 @@ fn every_kind_but_durations_keeps_equality_in_a_field_and_only_system_times_keep
             RuleKind::SystemTime => fail(),
             _ => Verdict::Pass,
         };
-        for (cell, wanted) in [
-            ([0, 1, 0], Verdict::Pass),
-            ([0, 1, 1], fail()),
-            ([0, 1, 2], fail()),
-            ([1, 0, 1], reordered),
+        for (others, cell, wanted) in [
+            ([0, 1, 0], [0, 1, 0], Verdict::Pass),
+            ([0, 1, 0], [0, 1, 1], fail()),
+            ([0, 1, 0], [0, 1, 2], fail()),
+            ([0, 1, 0], [1, 0, 1], reordered),
+            ([0, 1, 2], [0, 1, 1], fail()),
         ] {
             let mut runs = runs();
-            let base = ruled_list(kind, [0, 1, 0]);
+            let base = ruled_list(kind, others);
             let shown = ruled_list(kind, cell);
             each_run(&mut runs, "hint-env", "ruled", |lane, run| match lane {
                 Lane::Cell => shown(lane, run),
@@ -603,7 +713,7 @@ fn every_kind_but_durations_keeps_equality_in_a_field_and_only_system_times_keep
             assert_eq!(
                 verdict(&manifest, &runs),
                 wanted,
-                "{} cell {cell:?}",
+                "{} cell {cell:?}, others {others:?}",
                 kind.name()
             );
         }
@@ -729,6 +839,21 @@ fn a_whole_number_rule_holds_no_negative_fraction_text_or_token() {
             json!(300.0),
             json!("4242"),
             json!(TOKEN_A),
+        ],
+    );
+}
+
+#[test]
+fn a_peer_group_rule_holds_only_whole_numbers() {
+    refused_wherever_it_is(
+        &[RuleKind::PeerGroup],
+        &[json!(0), json!(u64::MAX)],
+        &[
+            json!("master:5"),
+            json!("shared:5"),
+            json!("propagate_from:5"),
+            json!(-5),
+            json!(5.5),
         ],
     );
 }

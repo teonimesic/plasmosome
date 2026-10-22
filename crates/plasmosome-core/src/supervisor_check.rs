@@ -2,11 +2,18 @@ use serde::Serialize;
 
 use crate::state::CellStatus;
 
-/// What the controller's `flock(LOCK_EX | LOCK_NB)` on a fresh descriptor found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What testing a cell's `supervisor.lock` found (spec 023 §8). Serializes as spec 001 §3.3a's
+/// `lock` values: `held`, `untestable` and `free`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LockFact {
     /// Another holder has the lock: a live supervisor.
     Held,
+    /// The controller cannot test the lock: a symlink, a directory or any other entry that is not
+    /// a regular file, one it cannot open, one whose `flock` fails for a reason other than another
+    /// holder, or a missing one it cannot create and lock. It is neither held nor free. It is not
+    /// a supervisor that is gone, so nothing stops or kills the cell's processes because of it.
+    Untestable,
     /// The controller got the lock, and holds it until the outcome is carried out. A missing
     /// `supervisor.lock` that the controller created exclusively and locked is free.
     Free,
@@ -49,6 +56,8 @@ pub enum SetAsideReason {
     Unresponsive,
     /// The supervisor still reported `germinating` at the cap.
     Germinating,
+    /// The cell's `supervisor.lock` cannot be tested.
+    LockUntestable,
     /// The cell would retire, but its journal holds an outstanding external obligation.
     ExternalObligations,
     /// The lock is free, but the marker is from this boot with no clean stop, or unreadable.
@@ -78,6 +87,7 @@ pub enum CheckOutcome {
 pub const fn decide(lock: LockFact, marker: MarkerFact, journal: JournalFact) -> CheckOutcome {
     match (lock, marker, journal) {
         (LockFact::Held, _, _) => CheckOutcome::Query,
+        (LockFact::Untestable, _, _) => CheckOutcome::SetAside(SetAsideReason::LockUntestable),
         (LockFact::Free, _, JournalFact::Corrupt) => CheckOutcome::Quarantine,
         (
             LockFact::Free,
@@ -167,6 +177,7 @@ mod tests {
     use super::*;
 
     const HELD: LockFact = LockFact::Held;
+    const UNTESTABLE: LockFact = LockFact::Untestable;
     const FREE: LockFact = LockFact::Free;
 
     const ABSENT: MarkerFact = MarkerFact::Absent;
@@ -192,8 +203,12 @@ mod tests {
     const LOST: CheckOutcome = CheckOutcome::SetAside(SetAsideReason::SupervisorLost);
     const NO_SUPERVISOR: CheckOutcome =
         CheckOutcome::SetAside(SetAsideReason::HoldingsWithoutSupervisor);
+    const LOCK_UNTESTABLE: CheckOutcome = CheckOutcome::SetAside(SetAsideReason::LockUntestable);
 
-    const TABLE: [(LockFact, MarkerFact, JournalFact, CheckOutcome); 40] = [
+    const MARKERS: [MarkerFact; 5] = [ABSENT, EARLIER, STOPPED, RUNNING, UNREADABLE];
+    const JOURNALS: [JournalFact; 4] = [CORRUPT, EMPTY, HOLDINGS, OBLIGATED];
+
+    const TABLE: [(LockFact, MarkerFact, JournalFact, CheckOutcome); 60] = [
         (HELD, ABSENT, CORRUPT, QUERY),
         (HELD, ABSENT, EMPTY, QUERY),
         (HELD, ABSENT, HOLDINGS, QUERY),
@@ -214,6 +229,26 @@ mod tests {
         (HELD, UNREADABLE, EMPTY, QUERY),
         (HELD, UNREADABLE, HOLDINGS, QUERY),
         (HELD, UNREADABLE, OBLIGATED, QUERY),
+        (UNTESTABLE, ABSENT, CORRUPT, LOCK_UNTESTABLE),
+        (UNTESTABLE, ABSENT, EMPTY, LOCK_UNTESTABLE),
+        (UNTESTABLE, ABSENT, HOLDINGS, LOCK_UNTESTABLE),
+        (UNTESTABLE, ABSENT, OBLIGATED, LOCK_UNTESTABLE),
+        (UNTESTABLE, EARLIER, CORRUPT, LOCK_UNTESTABLE),
+        (UNTESTABLE, EARLIER, EMPTY, LOCK_UNTESTABLE),
+        (UNTESTABLE, EARLIER, HOLDINGS, LOCK_UNTESTABLE),
+        (UNTESTABLE, EARLIER, OBLIGATED, LOCK_UNTESTABLE),
+        (UNTESTABLE, STOPPED, CORRUPT, LOCK_UNTESTABLE),
+        (UNTESTABLE, STOPPED, EMPTY, LOCK_UNTESTABLE),
+        (UNTESTABLE, STOPPED, HOLDINGS, LOCK_UNTESTABLE),
+        (UNTESTABLE, STOPPED, OBLIGATED, LOCK_UNTESTABLE),
+        (UNTESTABLE, RUNNING, CORRUPT, LOCK_UNTESTABLE),
+        (UNTESTABLE, RUNNING, EMPTY, LOCK_UNTESTABLE),
+        (UNTESTABLE, RUNNING, HOLDINGS, LOCK_UNTESTABLE),
+        (UNTESTABLE, RUNNING, OBLIGATED, LOCK_UNTESTABLE),
+        (UNTESTABLE, UNREADABLE, CORRUPT, LOCK_UNTESTABLE),
+        (UNTESTABLE, UNREADABLE, EMPTY, LOCK_UNTESTABLE),
+        (UNTESTABLE, UNREADABLE, HOLDINGS, LOCK_UNTESTABLE),
+        (UNTESTABLE, UNREADABLE, OBLIGATED, LOCK_UNTESTABLE),
         (FREE, ABSENT, CORRUPT, QUARANTINE),
         (FREE, ABSENT, EMPTY, RETIRE_EMPTY),
         (FREE, ABSENT, HOLDINGS, NO_SUPERVISOR),
@@ -239,7 +274,8 @@ mod tests {
     fn position(lock: LockFact, marker: MarkerFact, journal: JournalFact) -> usize {
         let lock = match lock {
             LockFact::Held => 0,
-            LockFact::Free => 1,
+            LockFact::Untestable => 1,
+            LockFact::Free => 2,
         };
         let marker = match marker {
             MarkerFact::Absent => 0,
@@ -276,7 +312,7 @@ mod tests {
             .collect();
         assert_eq!(
             positions,
-            (0..40).collect::<Vec<_>>(),
+            (0..60).collect::<Vec<_>>(),
             "the table names every lock, marker and journal combination once, in order"
         );
         let wrong: Vec<_> = TABLE
@@ -294,6 +330,22 @@ mod tests {
             wrong.is_empty(),
             "rows as ((lock, marker, journal), table, decide): {wrong:#?}"
         );
+    }
+
+    #[test]
+    fn an_untestable_lock_is_set_aside_whatever_the_marker_and_journal() {
+        for marker in MARKERS {
+            for journal in JOURNALS {
+                assert_eq!(
+                    decide(UNTESTABLE, marker, journal),
+                    LOCK_UNTESTABLE,
+                    "{marker:?}, {journal:?}: a query asks a supervisor nobody showed is live, a \
+                     retirement or a quarantine acts on a lock the controller does not hold, and \
+                     supervisor_lost or holdings_without_supervisor reads it as a supervisor that \
+                     is gone"
+                );
+            }
+        }
     }
 
     #[test]
@@ -377,6 +429,7 @@ mod tests {
         let names: Vec<serde_json::Value> = [
             SetAsideReason::Unresponsive,
             SetAsideReason::Germinating,
+            SetAsideReason::LockUntestable,
             SetAsideReason::ExternalObligations,
             SetAsideReason::SupervisorLost,
             SetAsideReason::HoldingsWithoutSupervisor,
@@ -389,10 +442,20 @@ mod tests {
             [
                 "unresponsive",
                 "germinating",
+                "lock_untestable",
                 "external_obligations",
                 "supervisor_lost",
                 "holdings_without_supervisor",
             ]
         );
+    }
+
+    #[test]
+    fn lock_facts_carry_their_wire_names() {
+        let names: Vec<serde_json::Value> = [HELD, UNTESTABLE, FREE]
+            .iter()
+            .map(|fact| serde_json::to_value(fact).expect("a lock fact serializes"))
+            .collect();
+        assert_eq!(names, ["held", "untestable", "free"]);
     }
 }

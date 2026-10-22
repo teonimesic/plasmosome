@@ -1,0 +1,8 @@
+id = "strings" # [[[[ {{{{
+description = '''
+[[[ a multi-line
+'' literal ]]]'''
+version = """
+{{ \""" basic \
+]]"""
+impl.wasm = 'c.wasm'

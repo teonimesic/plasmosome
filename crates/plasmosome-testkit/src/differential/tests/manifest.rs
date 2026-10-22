@@ -151,6 +151,7 @@ fn every_rule_kind_spec_027_lists_loads_by_its_name() {
             "boot_id",
             "mount_id",
             "parent_mount_id",
+            "peer_group",
             "device",
             "inode",
             "system_time",
@@ -161,6 +162,35 @@ fn every_rule_kind_spec_027_lists_loads_by_its_name() {
             "load_counter"
         ]
     );
+}
+
+#[test]
+fn the_peer_group_kind_loads_by_its_exact_name() {
+    let rule = |kind: &str| json!({"probe": "hint-env", "field": "masters", "kind": kind});
+    let mut manifest = manifest_json();
+    push(&mut manifest, "rules", rule("peer_group"));
+    let loaded = load_value(&manifest).expect("peer_group loads");
+    assert_eq!(
+        loaded.rules.last(),
+        Some(&Rule {
+            probe: "hint-env".to_string(),
+            field: "masters".to_string(),
+            kind: RuleKind::PeerGroup
+        })
+    );
+    for kind in ["Peer_Group", "peergroup", "peer_group_id"] {
+        let mut manifest = manifest_json();
+        push(&mut manifest, "rules", rule(kind));
+        assert_eq!(
+            refusal(&manifest),
+            ManifestRefusal::UnknownRuleKind {
+                probe: "hint-env".to_string(),
+                field: "masters".to_string(),
+                kind: kind.to_string()
+            },
+            "{kind}"
+        );
+    }
 }
 
 #[test]
