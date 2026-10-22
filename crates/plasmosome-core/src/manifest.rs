@@ -3204,7 +3204,11 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             ] {
                 let declaration = format!("id = \"{written}\"\n{body}");
                 let fixture: toml::Table = toml::from_str(&declaration).unwrap();
-                assert_eq!(fixture["id"].as_str(), Some(decoded.as_str()), "{declaration}");
+                assert_eq!(
+                    fixture["id"].as_str(),
+                    Some(decoded.as_str()),
+                    "{declaration}"
+                );
                 assert!(decoded.trim().is_empty(), "{declaration}");
                 assert_eq!(
                     field_refusal(&declaration),
@@ -3215,10 +3219,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                     .unwrap_err()
                     .to_string();
                 assert!(!text.starts_with("plasmid "), "{text:?}");
-                assert!(
-                    !text.chars().any(|character| [0x85, 0x2028].map(raw).contains(&character)),
-                    "{text:?}"
-                );
+                assert!(!text.contains([0x85, 0x2028].map(raw)), "{text:?}");
             }
         }
     }
@@ -3238,7 +3239,11 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "id = \"{written}\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\""
             );
             let fixture: toml::Table = toml::from_str(&declaration).unwrap();
-            assert_eq!(fixture["id"].as_str(), Some(decoded.as_str()), "{declaration}");
+            assert_eq!(
+                fixture["id"].as_str(),
+                Some(decoded.as_str()),
+                "{declaration}"
+            );
             assert_eq!(
                 PlasmidManifest::parse(&declaration).unwrap().id,
                 decoded,
