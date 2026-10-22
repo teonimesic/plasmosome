@@ -125,12 +125,15 @@ int main(int argc, char **argv) {
 
     if (!named) {
         close(ready);
-        close(control);
     }
     if (named || strcmp(argv[1], "exit") == 0) {
         return 7;
     }
-    for (;;) {
-        pause();
-    }
+    char byte;
+    ssize_t read_result;
+    do {
+        read_result = read(control, &byte, 1);
+    } while (read_result > 0 || (read_result < 0 && errno == EINTR));
+    close(control);
+    return read_result == 0 ? 0 : 69;
 }

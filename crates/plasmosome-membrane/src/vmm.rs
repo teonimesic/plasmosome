@@ -931,6 +931,38 @@ mod tests {
         (PipeEnd::from(read), PipeEnd::from(write))
     }
 
+    #[test]
+    fn fixture_pipe_creation_waits_while_a_fork_holds_the_spawn_lock() {
+        let held = crate::spawn_lock::hold_fork_side();
+        let (finished, finished_after) = std::sync::mpsc::channel();
+        let creating = std::thread::spawn(move || {
+            let _ = finished.send(close_on_exec_ends());
+        });
+        let deadline = Instant::now() + DEADLINE;
+        let waited = loop {
+            if crate::spawn_lock::waits_for_the_write_side(creating.thread().id()) {
+                break true;
+            }
+            if finished_after.try_recv().is_ok() {
+                break false;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pipe creation neither finished nor waited"
+            );
+            std::thread::yield_now();
+        };
+        drop(held);
+        assert!(
+            waited,
+            "fixture pipes must wait for the spawn lock's write side"
+        );
+        finished_after
+            .recv_timeout(DEADLINE)
+            .expect("pipe creation finishes after the fork side is released");
+        creating.join().expect("the pipe creator finishes");
+    }
+
     struct KeepAcrossExec {
         command: ExecCommand,
         kept: [OwnedFd; 2],
@@ -1052,20 +1084,23 @@ mod tests {
             control_write.0.to_string(),
         ])
         .expect("the prebuilt fixture executable resolves before fork");
-        let child = VmmChild::spawn(KeepAcrossExec {
+        let mut child = VmmChild::spawn(KeepAcrossExec {
             command,
             kept: [ready_write, control_read],
         })
         .expect("fork succeeds");
         wait_readable(&ready_read, DEADLINE);
         let mut byte = 0u8;
-        assert_eq!(
-            // SAFETY: `byte` is a local that read may write, and the length 1 matches it.
-            // `ready_read` keeps its descriptor open.
-            unsafe { libc::read(ready_read.0, &mut byte as *mut u8 as *mut libc::c_void, 1,) },
-            1,
-            "the execed worker announces readiness after opening its FIFO"
-        );
+        // SAFETY: `byte` is a local that read may write, and the length 1 matches it.
+        // `ready_read` keeps its descriptor open.
+        let read =
+            unsafe { libc::read(ready_read.0, &mut byte as *mut u8 as *mut libc::c_void, 1) };
+        if read != 1 {
+            panic!(
+                "the execed worker announces readiness after opening its FIFO; read {read}, leader {:?}",
+                child.wait_terminal(DEADLINE)
+            );
+        }
         assert_eq!(
             byte,
             b'x',
@@ -1878,7 +1913,7 @@ mod tests {
         if std::env::var_os(WORKER_CHILD).is_none() {
             return;
         }
-        let mut fixture = spawn_with_worker(true);
+        let mut fixture = std::mem::ManuallyDrop::new(spawn_with_worker(true));
         let leader = fixture.child().pid();
         println!(
             "{WORKER_LINE}{leader} {}",
