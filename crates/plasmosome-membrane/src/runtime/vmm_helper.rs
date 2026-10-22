@@ -637,11 +637,15 @@ pub fn run_plan(
 /// file, is `Other`. A file is classified by `fstat`, and only a character device has a nonzero
 /// `rdev`, its `st_rdev`. A socket is `Socket`, and any other kernel object is `Other`. Call it
 /// before anything opens a descriptor, and judge the list with [`judge_descriptors`]. It reads
-/// what is open while it runs, so a descriptor another thread opens or closes meanwhile may be
-/// missed. An error is the one `proc_pidinfo` or `fstat` gave.
+/// what is open while it runs, so a descriptor another thread opens meanwhile may be missed, and
+/// one `fstat` finds closed since the list was read is left out. Any other error is the one
+/// `proc_pidinfo` or `fstat` gave.
 #[cfg(target_os = "macos")]
 pub fn observe_descriptors() -> io::Result<Vec<DescriptorFacts>> {
-    open_descriptors()?.iter().map(descriptor_facts).collect()
+    let open = open_descriptors()?;
+    open.iter()
+        .filter_map(|entry| descriptor_facts(entry).transpose())
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -692,7 +696,7 @@ fn open_descriptors() -> io::Result<Vec<libc::proc_fdinfo>> {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn descriptor_facts(entry: &libc::proc_fdinfo) -> io::Result<DescriptorFacts> {
+fn descriptor_facts(entry: &libc::proc_fdinfo) -> io::Result<Option<DescriptorFacts>> {
     let fd = entry.proc_fd;
     let (kind, rdev) = match entry.proc_fdtype.cast_signed() {
         libc::PROX_FDTYPE_PIPE => (DescriptorKind::Fifo, 0),
@@ -701,9 +705,13 @@ fn descriptor_facts(entry: &libc::proc_fdinfo) -> io::Result<DescriptorFacts> {
             // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             // SAFETY: fstat writes only the local `stat` and keeps no pointer. A descriptor closed
-            // since the list was read fails with EBADF, which is returned.
+            // since the list was read fails with EBADF.
             if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EBADF) {
+                    return Ok(None);
+                }
+                return Err(error);
             }
             match stat.st_mode & libc::S_IFMT {
                 libc::S_IFCHR => (DescriptorKind::CharDevice, stat.st_rdev as u64),
@@ -714,7 +722,7 @@ fn descriptor_facts(entry: &libc::proc_fdinfo) -> io::Result<DescriptorFacts> {
         }
         _ => (DescriptorKind::Other, 0),
     };
-    Ok(DescriptorFacts { fd, kind, rdev })
+    Ok(Some(DescriptorFacts { fd, kind, rdev }))
 }
 
 /// Opens the writable root at `path` read-only and reads its facts with `fstat` through that
@@ -1757,6 +1765,16 @@ mod tests {
             let open = observe_descriptors().expect("the descriptor list is read");
             assert_eq!(listed(&open, &file), Some((DescriptorKind::Regular, 0)));
             assert!(open.iter().all(|facts| facts.fd >= 0), "{open:?}");
+        }
+
+        #[test]
+        fn a_descriptor_closed_since_the_list_was_read_is_left_out() {
+            let closed = libc::proc_fdinfo {
+                proc_fd: -1,
+                proc_fdtype: libc::PROX_FDTYPE_VNODE.cast_unsigned(),
+            };
+            let facts = descriptor_facts(&closed).map_err(|error| error.raw_os_error());
+            assert_eq!(facts, Ok(None));
         }
 
         #[test]
