@@ -28,6 +28,12 @@ const LEASE: Flag = Flag {
     kind: FlagKind::Integer,
 };
 
+const SIGNAL: Flag = Flag {
+    name: "--signal",
+    key: "signal",
+    kind: FlagKind::Text,
+};
+
 const GLOBAL_FLAGS: [&str; 8] = [
     "--kernel",
     "--socket",
@@ -43,15 +49,16 @@ fn table() -> Vec<Command> {
     COMMANDS
         .iter()
         .map(|command| {
-            let (flags, takes_argv): (&'static [Flag], bool) = match command.words {
-                ["status"] => (&[], false),
-                ["germinate"] => (&[CELL, NOW, MOCK, LEASE], false),
-                ["cell", "status"] => (&[CELL], false),
-                ["cell", "exec"] => (&[CELL], true),
+            let (flags, takes_argv, served): (&'static [Flag], bool, bool) = match command.words {
+                ["status"] => (&[], false, true),
+                ["germinate"] => (&[CELL, NOW, MOCK, LEASE], false, true),
+                ["cell", "status"] => (&[CELL], false, true),
+                ["cell", "exec"] => (&[CELL], true, true),
+                ["cell", "kill"] => (&[SIGNAL], false, false),
                 _ => return *command,
             };
             Command {
-                served: true,
+                served,
                 flags,
                 takes_argv,
                 ..*command
@@ -219,12 +226,20 @@ fn each_fault_in_the_own_flags_names_its_argument() {
         (&["germinate", "g", "--lease-ms", ""], ""),
         (&["germinate", "g", "--", "x"], "--"),
         (&["germinate", "g", "--"], "--"),
+        (&["germinate", "--"], "--"),
         (&["cell", "status", "--cell", "c", "--", "x"], "--"),
         (&["status", "--cell", "c"], "--cell"),
         (&["cell", "status", "--now"], "--now"),
         (&["cell", "exec", "--mock=a"], "--mock=a"),
     ] {
         assert_eq!(named(line(words)).as_deref(), Some(argument), "{words:?}");
+    }
+    let after_one = |code| format!("1{}", char::from_u32(code).expect("a code point"));
+    let (arabic, superscript) = (after_one(0x661), after_one(0xb2));
+    let wide = char::from_u32(0xff11).expect("a code point").to_string();
+    for value in ["00", "+1", "-0", " 1", "1 ", &arabic, &superscript, &wide] {
+        let words = ["germinate", "g", "--lease-ms", value];
+        assert_eq!(named(line(&words)).as_deref(), Some(value), "{value:?}");
     }
 }
 
@@ -267,6 +282,7 @@ fn an_unserved_command_reads_none_of_the_flags() {
         &["cell", "list", "--cell", "c"][..],
         &["cell", "list", "--cell"],
         &["cell", "list", "--frob", "--lease-ms", "07"],
+        &["cell", "kill", "--signal", "x"],
     ] {
         let reading = read(&line(words), &table());
         let Reading::Refuse { error, .. } = &reading else {
@@ -274,6 +290,8 @@ fn an_unserved_command_reads_none_of_the_flags() {
         };
         assert_eq!(error.code(), ClientCode::NotServed, "{words:?}");
     }
+    let words = ["--signal", "x", "cell", "kill"];
+    assert_eq!(named(line(&words)).as_deref(), Some("--signal"));
 }
 
 #[test]
@@ -363,8 +381,20 @@ fn each_flag_name_has_one_kind_and_key_across_the_table() {
                 }],
                 ..command
             },
+            ["cell", "kill"] => Command {
+                flags: &[Flag {
+                    key: "at_once",
+                    ..NOW
+                }],
+                ..command
+            },
             _ => command,
         })
         .collect();
-    assert_eq!(clashes(&clashing).len(), 2, "{:?}", clashes(&clashing));
+    let found = clashes(&clashing);
+    assert_eq!(found.len(), 3, "{found:?}");
+    for (name, rule) in [("--cell", "both"), ("--kernel", "not"), ("--now", "both")] {
+        let clash = format!("{name} is {rule} ");
+        assert!(found.iter().any(|f| f.starts_with(&clash)), "{found:?}");
+    }
 }

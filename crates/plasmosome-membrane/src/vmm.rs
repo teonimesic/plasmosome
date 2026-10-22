@@ -425,7 +425,7 @@ impl VmmChild {
             errno: libc::EPROTO,
             observed: None,
         })?;
-        record_reap(operation, reported);
+        record_reap(options, reported);
         Ok(Some(state))
     }
 
@@ -455,19 +455,22 @@ impl VmmChild {
 
     #[allow(unsafe_code)]
     fn signal_leader(&self) -> Result<(), SupervisionError> {
-        if leader_signal_withheld(self.pid) {
-            return Ok(());
-        }
-        // SAFETY: kill takes no pointer, so the call is memory-safe whatever `self.pid` names. Its
-        // callers reach it only after observe found the child running. The pid still names the
-        // child then only while this handle is the only consuming waiter, as `VmmChild`'s doc
-        // requires. The test leader_signal_esrch_is_not_wait_authority_loss breaks that rule on
-        // purpose: it reaps the child itself first, to get ESRCH.
-        if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
-            Err(self.error(SupervisionOperation::SignalLeader, None))
-        } else {
-            Ok(())
-        }
+        let signalled = leader_signal_stand_in(self.pid).unwrap_or_else(|| {
+            // SAFETY: kill takes no pointer, so the call is memory-safe whatever `self.pid` names.
+            // Its callers reach it only after observe found the child running, and no wait of this
+            // handle has consumed it since. The pid still names that child because this handle is
+            // its only consuming waiter, as `VmmChild`'s doc requires.
+            if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
+                Err(last_errno())
+            } else {
+                Ok(())
+            }
+        });
+        signalled.map_err(|errno| SupervisionError {
+            operation: SupervisionOperation::SignalLeader,
+            errno,
+            observed: None,
+        })
     }
 
     fn drop_teardown(&mut self) {
@@ -649,50 +652,84 @@ fn drop_reports() -> usize {
 
 #[cfg(test)]
 std::thread_local! {
-    static WITHHELD_LEADER_SIGNAL: std::cell::Cell<libc::pid_t> = const { std::cell::Cell::new(0) };
+    static LEADER_SIGNAL_STAND_IN: std::cell::Cell<Option<(libc::pid_t, Result<(), i32>)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
-fn withhold_leader_signal(pid: libc::pid_t) {
-    WITHHELD_LEADER_SIGNAL.set(pid);
-}
-
-#[cfg(test)]
-fn leader_signal_withheld(pid: libc::pid_t) -> bool {
-    WITHHELD_LEADER_SIGNAL.get() == pid
+fn leader_signal_stand_in(pid: libc::pid_t) -> Option<Result<(), i32>> {
+    LEADER_SIGNAL_STAND_IN
+        .get()
+        .and_then(|(named, outcome)| (named == pid).then_some(outcome))
 }
 
 #[cfg(not(test))]
-fn leader_signal_withheld(_pid: libc::pid_t) -> bool {
-    false
+fn leader_signal_stand_in(_pid: libc::pid_t) -> Option<Result<(), i32>> {
+    None
+}
+
+#[cfg(test)]
+struct LeaderSignalStandIn;
+
+#[cfg(test)]
+impl LeaderSignalStandIn {
+    fn withheld(pid: libc::pid_t) -> LeaderSignalStandIn {
+        Self::install(pid, Ok(()))
+    }
+
+    fn failing(pid: libc::pid_t, errno: i32) -> LeaderSignalStandIn {
+        Self::install(pid, Err(errno))
+    }
+
+    fn install(pid: libc::pid_t, outcome: Result<(), i32>) -> LeaderSignalStandIn {
+        LEADER_SIGNAL_STAND_IN.set(Some((pid, outcome)));
+        LeaderSignalStandIn
+    }
+}
+
+#[cfg(test)]
+impl Drop for LeaderSignalStandIn {
+    fn drop(&mut self) {
+        LEADER_SIGNAL_STAND_IN.set(None);
+    }
 }
 
 #[cfg(test)]
 std::thread_local! {
-    static LAST_REAPED_PID: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static REAPED_PIDS: std::cell::RefCell<Vec<libc::pid_t>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
-fn record_reap(operation: SupervisionOperation, pid: i32) {
-    if operation == SupervisionOperation::Reap {
-        LAST_REAPED_PID.set(pid);
+fn record_reap(options: libc::c_int, pid: libc::pid_t) {
+    if options & libc::WNOWAIT == 0 {
+        REAPED_PIDS.with_borrow_mut(|pids| pids.push(pid));
     }
 }
 
 #[cfg(not(test))]
-fn record_reap(_operation: SupervisionOperation, _pid: i32) {}
+fn record_reap(_options: libc::c_int, _pid: libc::pid_t) {}
 
 #[cfg(test)]
-fn reset_reap_record() {
-    LAST_REAPED_PID.set(0);
+pub(crate) fn reset_reap_record() {
+    REAPED_PIDS.with_borrow_mut(Vec::clear);
 }
 
 #[cfg(test)]
-fn assert_reaped_by_handle(pid: i32) {
-    assert_eq!(
-        LAST_REAPED_PID.get(),
-        pid,
-        "the consuming exact-child wait returned the owned leader"
+pub(crate) fn reaped_by_a_handle(pid: libc::pid_t) -> bool {
+    REAPED_PIDS.with_borrow(|pids| pids.contains(&pid))
+}
+
+#[cfg(test)]
+pub(crate) fn take_reap_record() -> Vec<libc::pid_t> {
+    REAPED_PIDS.take()
+}
+
+#[cfg(test)]
+fn assert_reaped_by_handle(pid: libc::pid_t) {
+    assert!(
+        reaped_by_a_handle(pid),
+        "no consuming exact-child wait of a handle on this thread returned pid {pid}"
     );
 }
 
@@ -1031,7 +1068,8 @@ mod tests {
         loop {
             // SAFETY: siginfo_t is a plain C struct, for which all zeroes is a valid value.
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            // SAFETY: `info` is a local siginfo_t that waitid may write. WNOWAIT leaves the child
+            // SAFETY: `info` is a local siginfo_t that waitid may write. Every caller passes a child
+            // it spawned before any consuming wait, so `pid` still names it, and WNOWAIT leaves it
             // unreaped.
             let waited = unsafe {
                 libc::waitid(
@@ -1059,23 +1097,12 @@ mod tests {
     }
 
     #[allow(unsafe_code)]
-    fn assert_no_waitable_child(pid: i32) {
-        let mut status = 0;
-        assert_eq!(
-            // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
-            // this process.
-            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
-            -1
-        );
-        assert_eq!(last_errno(), libc::ECHILD);
-    }
-
-    #[allow(unsafe_code)]
     fn reap_externally(pid: i32) {
         let mut status = 0;
         loop {
-            // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
-            // this process.
+            // SAFETY: `status` is a local the call may write. Every caller first saw `pid` exit
+            // through a WNOWAIT wait, which consumes nothing, and nothing has reaped it since, so
+            // it is still an unreaped child of this test and its number names it.
             let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
             if reaped == pid {
                 return;
@@ -1238,17 +1265,19 @@ mod tests {
     fn kill_then_immediate_drop_leaves_no_orphan() {
         let mut child = VmmChild::spawn(SleepForever).expect("fork succeeds");
         let pid = child.pid();
+        reset_reap_record();
         child.kill().expect("signalling a live child succeeds");
         drop(child);
-        assert_no_waitable_child(pid);
+        assert_reaped_by_handle(pid);
     }
 
     #[test]
     fn drop_reaps_a_running_child_without_orphans() {
         let child = VmmChild::spawn(SleepForever).expect("fork succeeds");
         let pid = child.pid();
+        reset_reap_record();
         drop(child);
-        assert_no_waitable_child(pid);
+        assert_reaped_by_handle(pid);
     }
 
     #[test]
@@ -1259,7 +1288,6 @@ mod tests {
         reset_reap_record();
         drop(fixture.take_child());
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
         assert_reaped_by_handle(pid);
         fixture.discard_release();
     }
@@ -1272,7 +1300,6 @@ mod tests {
         reset_reap_record();
         assert_eq!(fixture.child().state(), Ok(VmmState::Exited { code: 7 }));
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
         assert_reaped_by_handle(pid);
         assert_eq!(fixture.child().state(), Ok(VmmState::Exited { code: 7 }));
         drop(fixture.take_child());
@@ -1290,7 +1317,6 @@ mod tests {
             Ok(VmmState::Exited { code: 7 })
         );
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
         assert_reaped_by_handle(pid);
         drop(fixture.take_child());
         fixture.discard_release();
@@ -1304,7 +1330,6 @@ mod tests {
         reset_reap_record();
         fixture.child().kill().expect("cleanup succeeds");
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
         assert_reaped_by_handle(pid);
         assert_eq!(fixture.child().state(), Ok(VmmState::Exited { code: 7 }));
         fixture.discard_release();
@@ -1475,22 +1500,99 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)]
     fn leader_signal_esrch_is_not_wait_authority_loss() {
-        let mut child = VmmChild::spawn(SleepForever).expect("fork succeeds");
-        assert_eq!(child.observe(), Ok(VmmState::Running));
-        // SAFETY: kill takes no pointer. observe just found the child running, so it is unreaped
-        // and its pid still names it.
-        assert_eq!(unsafe { libc::kill(child.pid(), libc::SIGKILL) }, 0);
-        reap_externally(child.pid());
-        let expected = SupervisionError {
-            operation: SupervisionOperation::SignalLeader,
-            errno: libc::ESRCH,
-            observed: None,
-        };
-        assert_eq!(child.signal_leader(), Err(expected));
-        assert_eq!(child.lifecycle, Lifecycle::Owned);
-        assert_eq!(child.state(), Ok(VmmState::Lost));
+        let mut fixture = spawn_with_worker(false);
+        let pid = fixture.child().pid();
+        reset_reap_record();
+        {
+            let _stand_in = LeaderSignalStandIn::failing(pid, libc::ESRCH);
+            assert_eq!(
+                fixture.child().kill(),
+                Err(SupervisionError {
+                    operation: SupervisionOperation::SignalLeader,
+                    errno: libc::ESRCH,
+                    observed: None,
+                })
+            );
+            assert_eq!(fixture.child().lifecycle, Lifecycle::Owned);
+            assert_eq!(
+                take_reap_record(),
+                Vec::<libc::pid_t>::new(),
+                "a failed leader signal led to a consuming wait"
+            );
+            assert!(
+                holds_open(&fixture.liveness, SETTLE),
+                "a failed leader signal still signalled the group"
+            );
+            assert_eq!(fixture.child().state(), Ok(VmmState::Running));
+        }
+        fixture
+            .child()
+            .kill()
+            .expect("the real leader signal tears the leader down");
+        assert_eof_within(&fixture.liveness, DEADLINE);
+        assert_reaped_by_handle(pid);
+        assert_eq!(
+            fixture.child().state(),
+            Ok(VmmState::Signaled {
+                signal: libc::SIGKILL
+            })
+        );
+        fixture.discard_release();
+    }
+
+    #[test]
+    fn the_leader_signal_stand_in_answers_only_for_its_pid_on_its_thread_until_dropped() {
+        assert_eq!(leader_signal_stand_in(4000), None);
+        {
+            let _stand_in = LeaderSignalStandIn::failing(4000, libc::ESRCH);
+            assert_eq!(leader_signal_stand_in(4000), Some(Err(libc::ESRCH)));
+            assert_eq!(leader_signal_stand_in(4001), None);
+            let elsewhere = std::thread::spawn(|| leader_signal_stand_in(4000))
+                .join()
+                .expect("the other thread asks without panicking");
+            assert_eq!(elsewhere, None);
+        }
+        assert_eq!(leader_signal_stand_in(4000), None);
+        let _withheld = LeaderSignalStandIn::withheld(4000);
+        assert_eq!(leader_signal_stand_in(4000), Some(Ok(())));
+    }
+
+    #[test]
+    fn the_leader_signal_stand_in_clears_when_its_holder_panics() {
+        let unwound = std::panic::catch_unwind(|| {
+            let _stand_in = LeaderSignalStandIn::failing(4000, libc::ESRCH);
+            panic!("an assertion fails while the stand-in is installed");
+        });
+        assert!(unwound.is_err(), "the holder panicked");
+        assert_eq!(
+            leader_signal_stand_in(4000),
+            None,
+            "the unwind left the stand-in installed"
+        );
+    }
+
+    #[test]
+    fn the_reap_record_keeps_only_waits_that_consume() {
+        let mut child = VmmChild::spawn(ExitWith(5)).expect("fork succeeds");
+        let pid = child.pid();
+        reset_reap_record();
+        witness_unconsumed_exit(pid, VmmState::Exited { code: 5 });
+        assert_eq!(child.observe(), Ok(VmmState::Exited { code: 5 }));
+        assert_eq!(
+            child.wait_once(
+                SupervisionOperation::Reap,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT
+            ),
+            Ok(Some(VmmState::Exited { code: 5 })),
+            "a WNOWAIT wait still sees the exit"
+        );
+        assert!(
+            !reaped_by_a_handle(pid),
+            "a WNOWAIT observation consumed nothing, so it is not a reap"
+        );
+        assert_eq!(child.state(), Ok(VmmState::Exited { code: 5 }));
+        assert_reaped_by_handle(pid);
     }
 
     #[test]
@@ -1517,12 +1619,13 @@ mod tests {
             }
         }
         gate_read.close();
+        reset_reap_record();
         let mut child = VmmChild {
             pid,
             lifecycle: Lifecycle::Owned,
         };
         child.kill().expect("pre-setsid teardown completes");
-        assert_no_waitable_child(pid);
+        assert_reaped_by_handle(pid);
         gate_write.close();
     }
 
@@ -1530,9 +1633,10 @@ mod tests {
     fn immediate_drop_kills_execed_leader_and_worker() {
         let mut fixture = spawn_with_worker(false);
         let pid = fixture.child().pid();
+        reset_reap_record();
         drop(fixture.take_child());
         assert_eof_within(&fixture.liveness, DEADLINE);
-        assert_no_waitable_child(pid);
+        assert_reaped_by_handle(pid);
         fixture.discard_release();
     }
 
@@ -1665,21 +1769,6 @@ mod signal_pressure {
         Ok(ends)
     }
 
-    struct WithheldLeaderSignal;
-
-    impl WithheldLeaderSignal {
-        fn for_leader(pid: libc::pid_t) -> WithheldLeaderSignal {
-            withhold_leader_signal(pid);
-            WithheldLeaderSignal
-        }
-    }
-
-    impl Drop for WithheldLeaderSignal {
-        fn drop(&mut self) {
-            withhold_leader_signal(0);
-        }
-    }
-
     struct InterruptingHandler {
         previous: libc::sigaction,
     }
@@ -1779,7 +1868,7 @@ mod signal_pressure {
                     dropped: Arc::clone(&dropped),
                 })
                 .expect("the interrupter thread is running");
-            let _withheld = WithheldLeaderSignal::for_leader(child.pid());
+            let _withheld = LeaderSignalStandIn::withheld(child.pid());
             set_sigusr1_blocked(false);
             drop(child);
             set_sigusr1_blocked(true);
@@ -1847,19 +1936,9 @@ mod signal_pressure {
         unhandled
     }
 
-    #[allow(unsafe_code)]
     fn assert_reaped_by_drop(pid: libc::pid_t, interruptions: usize) {
-        let mut status: libc::c_int = 0;
-        // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
-        // this process.
-        let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        let errno = last_errno();
-        if observed == 0 {
-            // SAFETY: as above. The leader was released, so it exits and this wait returns.
-            unsafe { libc::waitpid(pid, &mut status, 0) };
-        }
         assert!(
-            observed == -1 && errno == libc::ECHILD,
+            reaped_by_a_handle(pid),
             "pid {pid} survived a drop whose blocking wait was interrupted {interruptions} times"
         );
     }
@@ -1887,7 +1966,6 @@ mod signal_pressure {
             let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
             let interruptions = interrupted_reaps() - interruptions_before;
             assert_reaped_by_drop(pid, interruptions);
-            assert_reaped_by_handle(pid);
             assert_eq!(
                 reports, 0,
                 "child {child_number}: the drop reported a cleanup error"
