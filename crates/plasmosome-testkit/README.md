@@ -115,13 +115,24 @@ return `IncompleteEffect`; the fake factories arm this with
 with real resources. For each sample capability, drain and entry point, the clause checks that
 an invalid doomed operation is refused before any effect; that the unfinished operation is
 reported exactly, with no standing object and no record; that a retry through either entry point
-returns `IncompleteEffect` again; that another owner's grant or apply, a plant, a revoke, and a
-removal naming another owner or capability are refused and change nothing; and that, of two equal
-unfinished effects, each exact removal clears its own and nothing else. It removes them in grant
-order and in reverse, and each order has its own defective backend. It compares an
-`IncompleteEffect` by class and address, never by its detail. Each step has its own defective
-backend. A withdrawal that fails after its release has no clause, because no reserved owner arms
-it: `FakeBackend`'s tests, the ledger's detach test and `tests/attach_detach_residue.rs` cover it.
+returns `IncompleteEffect` again; that a plant of its object and a revoke of its handle are
+refused; that five other operations at its address are each refused through grant, apply and
+plant, and so is the removal each one names: those of another plugin in the doomed cell, the same
+plugin in another cell, another plugin in another cell, and the doomed owner with another key or
+recipe; that none of these refusals changes the account; and that, of two equal unfinished
+effects, each exact removal clears its own and nothing else. It removes them in grant order and
+in reverse. It compares an `IncompleteEffect` by class and address, never by its detail.
+
+Each step of that clause has its own defective backend, and so does each entry point, drain and
+order, each call of the invalid and conflict steps, and each of the five other operations. The
+invalid refusal's witness is `AcceptsInvalidOperations`, which other clauses use too. Of the
+account checks that follow a refusal, only the invalid step's have a witness of their own: a
+refusal that answers correctly but changes the account fails a later check instead. Only one
+doomed owner is reserved, so no pass holds two owners' unfinished effects; the tests of
+`FakeBackend` and `CompositeBackend` check that the exact removal of one owner's unfinished effect
+keeps every other owner's. A withdrawal that fails after its release has no clause, because no
+reserved owner arms it: `FakeBackend`'s tests, the ledger's detach test and
+`tests/attach_detach_residue.rs` cover it.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012

@@ -103,18 +103,21 @@ enum Defect {
     GrantedRemovalKeepsItsObject,
     SnapshotOmitsIssuedRecords,
     SnapshotReconstructsGrantsFromObjects,
-    HidesIncompleteEffects,
+    HidesIncompleteEffectsOf(Call),
     FailedGrantReturnsAnEntry,
     OmitsIncompleteEffectsFromTheSnapshot,
     AFailedGrantIssuesARecord,
     RetryContinuesCreation(Call),
-    AnotherOperationOverwritesIncomplete,
+    AnotherOperationOverwritesIncomplete(Change, Call),
     PlantOverwritesIncomplete,
+    IncompleteYieldsToAHolderOfItsCapability,
     RevokeTakesAnUnfinishedEffect,
     IncompleteCleanupIgnoresTheOwner,
     IncompleteCleanupIgnoresTheCapability,
-    DoomedOwnerValidatesAfterTheEffect,
-    CleanupKeepsTheMarker,
+    IncompleteCleanupComparesOnlyTheCell,
+    IncompleteCleanupComparesOnlyThePlugin,
+    DoomedOwnerValidatesAfterTheEffect(Call),
+    CleanupKeepsTheMarkerUnder(RevokePolicy),
     IncompleteCleanupTakesEqualPeers,
     IncompleteCleanupTakesEqualUnfinishedPeers,
     IncompleteCleanupOnlyInGrantOrder,
@@ -229,8 +232,17 @@ impl DefectiveBackend {
         let same = unfinished == operation && call != Call::Plant;
         let overwrites = match self.defect {
             Defect::RetryContinuesCreation(continuing) => same && continuing == call,
-            Defect::AnotherOperationOverwritesIncomplete => !same && call != Call::Plant,
+            Defect::AnotherOperationOverwritesIncomplete(change, overwriting) => {
+                overwriting == call
+                    && change_between(&unfinished.object(), &operation.object()) == Some(change)
+            }
             Defect::PlantOverwritesIncomplete => call == Call::Plant,
+            Defect::IncompleteYieldsToAHolderOfItsCapability => {
+                self.ledger.values().any(|issued| {
+                    issued.owner == *operation.owner()
+                        && issued.capability == operation.capability()
+                })
+            }
             _ => false,
         };
         if overwrites {
@@ -244,11 +256,15 @@ impl DefectiveBackend {
         })
     }
 
-    fn fail_after_the_first_effect(&mut self, operation: &UniverseOp) -> Result<(), BackendError> {
+    fn fail_after_the_first_effect(
+        &mut self,
+        operation: &UniverseOp,
+        call: Call,
+    ) -> Result<(), BackendError> {
         if *operation.owner() != conformance::doomed_owner() {
             return Ok(());
         }
-        if self.defect == Defect::HidesIncompleteEffects {
+        if self.defect == Defect::HidesIncompleteEffectsOf(call) {
             return Err(BackendError::Fault(DOOMED.to_string()));
         }
         self.incomplete
@@ -264,8 +280,14 @@ impl DefectiveBackend {
         owner: &CellOwner,
         drain: DrainSpec,
     ) -> Result<(), BackendError> {
-        let owner_matches =
-            self.defect == Defect::IncompleteCleanupIgnoresTheOwner || unfinished.owner() == owner;
+        let owner_matches = match self.defect {
+            Defect::IncompleteCleanupIgnoresTheOwner => true,
+            Defect::IncompleteCleanupComparesOnlyTheCell => unfinished.owner().cell == owner.cell,
+            Defect::IncompleteCleanupComparesOnlyThePlugin => {
+                unfinished.owner().plugin == owner.plugin
+            }
+            _ => unfinished.owner() == owner,
+        };
         let capability_matches = self.defect == Defect::IncompleteCleanupIgnoresTheCapability
             || unfinished.capability() == removal.capability;
         if !(owner_matches && capability_matches) {
@@ -287,7 +309,7 @@ impl DefectiveBackend {
             return Err(unknown_object(removal, owner));
         }
         self.drained(owner, &removal.capability, address, drain, |backend| {
-            if backend.defect != Defect::CleanupKeepsTheMarker {
+            if backend.defect != Defect::CleanupKeepsTheMarkerUnder(drain.policy) {
                 backend.incomplete.remove(&address);
             }
             if backend.defect == Defect::IncompleteCleanupTakesEqualUnfinishedPeers {
@@ -367,8 +389,8 @@ impl DefectiveBackend {
                 let _ = self.state.insert(effect_read_back(operation));
                 Err(refusal)
             }
-            Defect::DoomedOwnerValidatesAfterTheEffect
-                if *operation.owner() == conformance::doomed_owner() && call != Call::Plant =>
+            Defect::DoomedOwnerValidatesAfterTheEffect(late)
+                if *operation.owner() == conformance::doomed_owner() && call == late =>
             {
                 self.incomplete
                     .insert(operation.handle(), effect_read_back(operation).operation());
@@ -956,7 +978,9 @@ impl EnforcementBackend for DefectiveBackend {
             return Ok(entry);
         }
         self.refuse_an_occupied_endpoint(&entry.capability)?;
-        if !continued && let Err(failure) = self.fail_after_the_first_effect(&operation) {
+        if !continued
+            && let Err(failure) = self.fail_after_the_first_effect(&operation, Call::Grant)
+        {
             match self.defect {
                 Defect::FailedGrantReturnsAnEntry => return Ok(requested),
                 Defect::AFailedGrantIssuesARecord => {
@@ -1131,7 +1155,7 @@ impl EnforcementBackend for DefectiveBackend {
                 .objects()
                 .any(|held| held.class() == op.class() && held.id == op.id())
         {
-            self.fail_after_the_first_effect(&op)?;
+            self.fail_after_the_first_effect(&op, Call::Apply)?;
         }
         if self.mirrors_its_ledger() {
             if self.mirrored_state().insert(op.object())? {
@@ -3319,8 +3343,20 @@ fn a_snapshot_defect_changes_only_the_issued_records_it_reports() {
 fn the_incomplete_clause_rejects_each_mishandled_step() {
     for (defect, reason) in [
         (
-            Defect::HidesIncompleteEffects,
-            "must return IncompleteEffect at its address",
+            Defect::AcceptsInvalidOperations(Call::Grant),
+            "a grant of an invalid doomed operation must be refused before any effect",
+        ),
+        (
+            Defect::AcceptsInvalidOperations(Call::Apply),
+            "an apply of an invalid doomed operation must be refused before any effect",
+        ),
+        (
+            Defect::HidesIncompleteEffectsOf(Call::Grant),
+            "a grant of the doomed operation must return IncompleteEffect at its address",
+        ),
+        (
+            Defect::HidesIncompleteEffectsOf(Call::Apply),
+            "an apply of the doomed operation must return IncompleteEffect at its address",
         ),
         (
             Defect::FailedGrantReturnsAnEntry,
@@ -3343,12 +3379,12 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
             "a retry through apply must return IncompleteEffect again",
         ),
         (
-            Defect::AnotherOperationOverwritesIncomplete,
-            "another owner's grant at an unfinished address must conflict",
-        ),
-        (
             Defect::PlantOverwritesIncomplete,
             "a plant at an unfinished address must conflict",
+        ),
+        (
+            Defect::IncompleteYieldsToAHolderOfItsCapability,
+            "a grant naming another owner at an unfinished address must conflict",
         ),
         (
             Defect::RevokeTakesAnUnfinishedEffect,
@@ -3359,15 +3395,31 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
             "a removal naming another owner must not select an unfinished effect",
         ),
         (
+            Defect::IncompleteCleanupComparesOnlyTheCell,
+            "a removal naming another owner must not select an unfinished effect",
+        ),
+        (
+            Defect::IncompleteCleanupComparesOnlyThePlugin,
+            "a removal naming another owner must not select an unfinished effect",
+        ),
+        (
             Defect::IncompleteCleanupIgnoresTheCapability,
             "a removal naming another capability must not select an unfinished effect",
         ),
         (
-            Defect::DoomedOwnerValidatesAfterTheEffect,
-            "a refused invalid doomed operation changed the account",
+            Defect::DoomedOwnerValidatesAfterTheEffect(Call::Grant),
+            "a refused invalid doomed operation changed the account through grant",
         ),
         (
-            Defect::CleanupKeepsTheMarker,
+            Defect::DoomedOwnerValidatesAfterTheEffect(Call::Apply),
+            "a refused invalid doomed operation changed the account through apply",
+        ),
+        (
+            Defect::CleanupKeepsTheMarkerUnder(RevokePolicy::Graceful),
+            "the exact removal must clear the unfinished effect and nothing else",
+        ),
+        (
+            Defect::CleanupKeepsTheMarkerUnder(RevokePolicy::Force),
             "the exact removal must clear the unfinished effect and nothing else",
         ),
         (
@@ -3390,6 +3442,27 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
         assert_rejected(reason, || {
             conformance::failed_grants_stay_incomplete_until_exact_withdrawal(carrying(defect))
         });
+    }
+    for (change, field) in [
+        (Change::Owner, "owner"),
+        (Change::Key, "capability"),
+        (Change::Recipe, "capability"),
+    ] {
+        for (call, article) in [
+            (Call::Grant, "a grant"),
+            (Call::Apply, "an apply"),
+            (Call::Plant, "a plant"),
+        ] {
+            let defect = Defect::AnotherOperationOverwritesIncomplete(change, call);
+            assert_rejected(
+                &format!("{article} naming another {field} at an unfinished address must conflict"),
+                || {
+                    conformance::failed_grants_stay_incomplete_until_exact_withdrawal(carrying(
+                        defect,
+                    ))
+                },
+            );
+        }
     }
 }
 
