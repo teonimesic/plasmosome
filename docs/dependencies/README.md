@@ -65,17 +65,20 @@ cargo metadata --locked --all-features --format-version 1 > "$dir/all.json"
 cargo metadata --locked --all-features --format-version 1 \
   --filter-platform aarch64-apple-darwin --filter-platform x86_64-unknown-linux-gnu \
   > "$dir/hosts.json"
-cargo run --locked -q -p plasmosome-tools --bin record-facts -- \
-  "$dir/all.json" "$dir/hosts.json" <crate> [<range>]
+cargo run --locked -q --manifest-path <main checkout>/Cargo.toml -p plasmosome-tools \
+  --bin record-facts -- "$dir/all.json" "$dir/hosts.json" <crate> [<range>]
 ```
 
 The last command runs the `record-facts` tool, whose code is
-`crates/plasmosome-tools/src/record_facts.rs`. On a contributor's commit, build the tool from a
-checkout of main, not from the commit you are judging: `cargo metadata` runs nothing, but `cargo
-run` builds the tool's code. So run the two `cargo metadata` commands at that commit, and the last
-command in a checkout of main. Pass the range when the lockfile holds two ranges of the crate. The
-tool prints `name`, `range`, `brings` and `build_time_code`, ready to paste. Then it prints two
-comment lines, which are not fields:
+`crates/plasmosome-tools/src/record_facts.rs`, from `<main checkout>`, a checkout of main. Run the
+two `cargo metadata` commands at the commit you are judging, and build the tool from main, not
+from that commit: `cargo metadata` builds and runs no crate's code, but `cargo run` builds the
+tool. A commit that changes the tool can make it print any record it likes, so output from a PR's
+own tool counts only when the PR leaves `crates/plasmosome-tools/` and the tool's locked
+dependencies unchanged. Pass the range when the lockfile holds two ranges of the crate. The tool
+prints `name`, `range`, `brings` and `build_time_code`, ready to paste. Paste only those four field
+lines: the two comment lines after them can hold text from a dependency's own files, and are not
+fields:
 
 - **What leaves Cargo.lock if the workspace stops using the crate.** The tool removes the
   workspace members' direct edges to the crate, and walks every edge from the members, dev edges
@@ -150,11 +153,12 @@ ties what you read to what is locked.
 
 ## When a record changes
 
-Run the tool again, at the head of the PR, whenever that PR's Cargo.lock changes the version of
-the crate or of any package in its `brings`, or the packages they depend on. Update every derived
-field to what the tool prints. A version can change a record without changing its range or its
-closure: quote 1.0.40 has no build script and quote 1.0.45 has one, so a move between them
-changes `build_time_code` in every record whose `brings` holds `quote@1`.
+Derive the fields again whenever a PR's Cargo.lock changes the version of the crate or of any
+package in its `brings`, or the packages they depend on. Update every derived field to what the
+tool prints. Run the two `cargo metadata` commands at the PR's head, and the tool from main, as the
+section above says. A version can change a record without changing its range or its closure:
+quote 1.0.40 has no build script and quote 1.0.45 has one, so a move between them changes
+`build_time_code` in every record whose `brings` holds `quote@1`.
 
 - Read the diff between the two locked versions of each package that moved, as spec 026's "What
   the review checks" says. Update `native_code` and `expands_unsafe` when the diff adds or removes

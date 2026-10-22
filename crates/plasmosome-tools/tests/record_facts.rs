@@ -1,5 +1,6 @@
 #![deny(clippy::exit)]
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,12 +14,14 @@ const BUILD: &[Option<&str>] = &[Some("build")];
 const DEV: &[Option<&str>] = &[Some("dev")];
 const APP: &str = "path+file:///app#0.1.0";
 
-/// A pair of `cargo metadata` files with one workspace member, `app`. Each package added is a
-/// registry package with a manifest directory of its own under a scratch directory.
+/// A pair of `cargo metadata` files with the workspace member `app` and any added with `member`.
+/// Each package added has a manifest directory of its own under a scratch directory. As cargo's
+/// `--filter-platform` does, `hosts.json` holds only the packages the members reach on the hosts.
 struct Fixture {
     dir: tempfile::TempDir,
     packages: Vec<Value>,
     nodes: Vec<Value>,
+    members: Vec<String>,
     off_hosts: Vec<(String, Option<String>)>,
 }
 
@@ -34,6 +37,7 @@ impl Fixture {
             dir: tempfile::tempdir().expect("a scratch directory is created"),
             packages: Vec::new(),
             nodes: Vec::new(),
+            members: vec![APP.to_owned()],
             off_hosts: Vec::new(),
         };
         fixture.add(APP, "app", "0.1.0", Value::Null);
@@ -55,6 +59,14 @@ impl Fixture {
     fn package(&mut self, name: &str, version: &str) -> String {
         let id = format!("{REGISTRY}#{name}@{version}");
         self.add(&id, name, version, json!(REGISTRY));
+        id
+    }
+
+    /// Adds a workspace member, a package without a source, and returns its id.
+    fn member(&mut self, name: &str) -> String {
+        let id = format!("path+file:///{name}#0.1.0");
+        self.add(&id, name, "0.1.0", Value::Null);
+        self.members.push(id.clone());
         id
     }
 
@@ -107,9 +119,9 @@ impl Fixture {
     }
 
     fn write(&self) -> (PathBuf, PathBuf) {
-        let metadata = |nodes: &[Value]| {
-            json!({"packages": self.packages, "resolve": {"nodes": nodes, "root": null},
-                "workspace_members": [APP], "version": 1})
+        let metadata = |packages: &[Value], nodes: &[Value]| {
+            json!({"packages": packages, "resolve": {"nodes": nodes, "root": null},
+                "workspace_members": self.members, "version": 1})
         };
         let mut host_nodes = self.nodes.clone();
         for (id, to) in &self.off_hosts {
@@ -121,12 +133,25 @@ impl Fixture {
             let deps = node.unwrap()["deps"].as_array_mut().unwrap();
             deps.retain(|dep| dep["pkg"] != to.as_str());
         }
+        let reached = reached(&host_nodes, &self.members);
+        let on_hosts = |item: &Value| reached.contains(item["id"].as_str().unwrap());
+        host_nodes.retain(on_hosts);
+        let host_packages: Vec<_> = self
+            .packages
+            .iter()
+            .filter(|p| on_hosts(p))
+            .cloned()
+            .collect();
         let (all, hosts) = (
             self.dir.path().join("all.json"),
             self.dir.path().join("hosts.json"),
         );
-        std::fs::write(&all, metadata(&self.nodes).to_string()).unwrap();
-        std::fs::write(&hosts, metadata(&host_nodes).to_string()).unwrap();
+        let (all_text, host_text) = (
+            metadata(&self.packages, &self.nodes),
+            metadata(&host_packages, &host_nodes),
+        );
+        std::fs::write(&all, all_text.to_string()).unwrap();
+        std::fs::write(&hosts, host_text.to_string()).unwrap();
         (all, hosts)
     }
 
@@ -136,6 +161,22 @@ impl Fixture {
         args.extend(words.iter().map(OsString::from));
         run_with(&args)
     }
+}
+
+/// The ids the members reach over every edge of `nodes`, the members included.
+fn reached(nodes: &[Value], members: &[String]) -> HashSet<String> {
+    let mut seen: HashSet<String> = members.iter().cloned().collect();
+    let mut stack = members.to_vec();
+    while let Some(id) = stack.pop() {
+        let node = nodes.iter().find(|node| node["id"] == id.as_str());
+        for dep in node.map_or(&[][..], |node| node["deps"].as_array().unwrap()) {
+            let pkg = dep["pkg"].as_str().unwrap().to_owned();
+            if seen.insert(pkg.clone()) {
+                stack.push(pkg);
+            }
+        }
+    }
+    seen
 }
 
 fn run_with(args: &[OsString]) -> Outcome {
@@ -461,6 +502,83 @@ fn the_crate_is_not_in_its_own_brings() {
 }
 
 #[test]
+fn a_package_two_paths_reach_is_brought_once() {
+    let (mut fixture, root) = rooted("1.0.0", NORMAL);
+    let left = fixture.package("left", "1.0.0");
+    let right = fixture.package("right", "1.0.0");
+    let below = fixture.package("below", "1.0.0");
+    fixture.kinds(&below, &["custom-build"]);
+    for (from, to) in [
+        (&root, &left),
+        (&root, &right),
+        (&left, &below),
+        (&right, &below),
+    ] {
+        fixture.edge(from, to, NORMAL);
+    }
+
+    let outcome = fixture.run(&["root"]);
+
+    assert_eq!(
+        outcome.line("brings"),
+        "brings = [\"below@1\", \"left@1\", \"right@1\"]"
+    );
+    assert_eq!(
+        outcome.line("build_time_code"),
+        "build_time_code = [\"below@1 build script\"]"
+    );
+}
+
+/// Each member has a direct edge to the crate and a package only it reaches, so a walk that
+/// starts from one member alone lists the other member's package.
+#[test]
+fn the_leaves_walk_starts_from_every_member() {
+    let (mut fixture, root) = rooted("1.0.0", NORMAL);
+    let other = fixture.member("other");
+    let deep = fixture.package("deep", "1.0.0");
+    let only_app = fixture.package("only-app", "1.0.0");
+    let only_other = fixture.package("only-other", "1.0.0");
+    fixture.edge(&other, &root, DEV);
+    fixture.edge(&root, &deep, NORMAL);
+    fixture.edge(APP, &only_app, NORMAL);
+    fixture.edge(&other, &only_other, BUILD);
+
+    assert_eq!(
+        fixture.run(&["root"]).line("# leaves"),
+        "# leaves Cargo.lock with it: 2: deep@1, root@1"
+    );
+}
+
+/// The leaves come from the all-platform resolve, so a package no host builds leaves too.
+#[test]
+fn a_package_no_host_builds_leaves_with_the_crate() {
+    let (mut fixture, root) = rooted("1.0.0", NORMAL);
+    let windows = fixture.package("windows-only", "1.0.0");
+    fixture.edge_off_hosts(&root, &windows);
+
+    let outcome = fixture.run(&["root"]);
+
+    assert_eq!(outcome.line("brings"), "brings = [\"windows-only@1\"]");
+    assert_eq!(
+        outcome.line("# leaves"),
+        "# leaves Cargo.lock with it: 2: root@1, windows-only@1"
+    );
+}
+
+#[test]
+fn a_package_whose_source_python_reads_as_false_never_leaves() {
+    let (mut fixture, root) = rooted("1.0.0", NORMAL);
+    let empty = "registry+empty#empty@0.1.0";
+    fixture.add(empty, "empty", "0.1.0", json!(""));
+    fixture.edge(&root, empty, NORMAL);
+
+    assert_eq!(
+        fixture.run(&["root"]).line("# leaves"),
+        "# leaves Cargo.lock with it: 1: root@1"
+    );
+}
+
+#[test]
 fn a_package_without_a_source_is_brought_but_never_leaves() {
     let (mut fixture, root) = rooted("1.0.0", NORMAL);
     let local = "path+file:///local#0.1.0";
@@ -520,7 +638,8 @@ fn the_link_scan_finds_what_the_python_pattern_finds() {
     let text = "link(name = \"a\") link(\n\tname\u{b}=\u{1c}\"b\") \
         link(\u{3000}name\u{a0}=\u{2028}\"c\") link (name = \"no\") link(name: \"no\") \
         link(name = \"\"), link(name = \"d\") dylink(name = \"e\") link(name = \"a\") \
-        link(name = \"x link(name = \")\nlink(name = \"f\") link(name = \"g\r\nh\ri\") ";
+        link(name = \"x link(name = \")\nlink(name = \"f\") link(name = \"g\r\nh\ri\") \
+        link(name = r\"raw\") link(= \"eq\") ";
     let bytes = [
         text.as_bytes(),
         b"link(name = \"\xff\") link(name = \"unterminated",
