@@ -158,7 +158,7 @@ fn is_terminal_control(character: char) -> bool {
 mod tests {
     use std::fs;
 
-    use super::{show, write_string};
+    use super::{is_terminal_control, show, write_string};
 
     const SPEC_025: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -166,6 +166,20 @@ mod tests {
     );
 
     const TERMINAL_CONTROLS_PARAGRAPH: &str = "**Terminal controls are escaped in both forms.**";
+
+    const LIST_START: &str = "The terminal controls are ";
+
+    fn named_code_points(text: &str) -> impl Iterator<Item = (Option<u32>, &str)> {
+        text.split("U+").skip(1).map(|piece| {
+            let rest =
+                piece.trim_start_matches(|c: char| c.is_ascii_digit() || ('A'..='F').contains(&c));
+            let digits = &piece[..piece.len() - rest.len()];
+            let point = (4..=6)
+                .contains(&digits.len())
+                .then(|| u32::from_str_radix(digits, 16).expect("upper-case hex digits"));
+            (point, rest)
+        })
+    }
 
     fn spec_025_terminal_controls() -> Vec<u32> {
         let spec = fs::read_to_string(SPEC_025).expect("spec 025 is readable beside the crate");
@@ -176,31 +190,55 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         let list = paragraph
-            .split_once("The terminal controls are ")
+            .split_once(LIST_START)
             .and_then(|(_, rest)| rest.split_once('.'))
             .map(|(list, _)| list)
-            .unwrap_or_else(|| panic!("spec 025's list of terminal controls was not found"));
+            .unwrap_or_else(|| {
+                panic!(
+                    "spec 025's list of terminal controls was not found: no paragraph starts with {TERMINAL_CONTROLS_PARAGRAPH:?} and holds {LIST_START:?} and a period"
+                )
+            });
         let mut points = Vec::new();
         let mut range_open = false;
-        for piece in list.split("U+").skip(1) {
-            let rest =
-                piece.trim_start_matches(|c: char| c.is_ascii_digit() || ('A'..='F').contains(&c));
-            let digits = &piece[..piece.len() - rest.len()];
-            if !(4..=6).contains(&digits.len()) {
-                range_open = false;
-                continue;
+        for (point, rest) in named_code_points(list) {
+            match point {
+                Some(point) if range_open => {
+                    let first = points.pop().expect("a range starts at a code point");
+                    points.extend(first..=point);
+                }
+                Some(point) => points.push(point),
+                None => {}
             }
-            let point = u32::from_str_radix(digits, 16).expect("upper-case hex digits");
-            if range_open {
-                let first = points.pop().expect("a range starts at a code point");
-                points.extend(first..=point);
-            } else {
-                points.push(point);
-            }
-            range_open = rest.trim() == "to";
+            range_open = point.is_some() && rest.trim() == "to";
         }
         points.sort_unstable();
+        points.dedup();
+        if let Some(point) = named_code_points(&paragraph)
+            .filter_map(|(point, _)| point)
+            .find(|point| points.binary_search(point).is_err())
+        {
+            panic!(
+                "U+{point:04X} is named in spec 025's paragraph {TERMINAL_CONTROLS_PARAGRAPH:?} but not in its list of terminal controls"
+            );
+        }
         points
+    }
+
+    fn assert_same_code_points(spec: &[u32], other: &[u32], other_name: &str) {
+        let first = spec
+            .iter()
+            .chain(other)
+            .copied()
+            .filter(|point| spec.contains(point) != other.contains(point))
+            .min();
+        if let Some(point) = first {
+            let (holder, lacking) = if spec.contains(&point) {
+                ("spec 025's list", other_name)
+            } else {
+                (other_name, "spec 025's list")
+            };
+            panic!("U+{point:04X} is in {holder} but not in {lacking}");
+        }
     }
 
     fn json_escape(rest: &str, point: u32) -> Option<&str> {
@@ -251,6 +289,10 @@ mod tests {
     #[test]
     fn both_writers_follow_spec_025s_list_for_every_character() {
         let listed = spec_025_terminal_controls();
+        let escaped: Vec<u32> = (0..=0x10ffff)
+            .filter(|&point| char::from_u32(point).is_some_and(is_terminal_control))
+            .collect();
+        assert_same_code_points(&listed, &escaped, "is_terminal_control's list");
         assert_eq!(listed.len(), 77, "spec 025 section 3 names 77 code points");
         let every: String = (0..=0x10ffff).filter_map(char::from_u32).collect();
         let mut shown = String::new();

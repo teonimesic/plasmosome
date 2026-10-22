@@ -13,6 +13,8 @@ const SPEC_025: &str = concat!(
 
 const TERMINAL_CONTROLS_PARAGRAPH: &str = "**Terminal controls are escaped in both forms.**";
 
+const LIST_START: &str = "The terminal controls are ";
+
 fn escaped(hex: &str) -> String {
     format!("{BACKSLASH}u{hex}")
 }
@@ -37,6 +39,18 @@ fn terminal_controls() -> Vec<char> {
     .collect()
 }
 
+fn named_code_points(text: &str) -> impl Iterator<Item = (Option<u32>, &str)> {
+    text.split("U+").skip(1).map(|piece| {
+        let rest =
+            piece.trim_start_matches(|c: char| c.is_ascii_digit() || ('A'..='F').contains(&c));
+        let digits = &piece[..piece.len() - rest.len()];
+        let point = (4..=6)
+            .contains(&digits.len())
+            .then(|| u32::from_str_radix(digits, 16).expect("upper-case hex digits"));
+        (point, rest)
+    })
+}
+
 fn spec_025_terminal_controls() -> Vec<u32> {
     let spec = fs::read_to_string(SPEC_025).expect("spec 025 is readable beside the crate");
     let paragraph = spec
@@ -46,31 +60,55 @@ fn spec_025_terminal_controls() -> Vec<u32> {
         .collect::<Vec<_>>()
         .join(" ");
     let list = paragraph
-        .split_once("The terminal controls are ")
+        .split_once(LIST_START)
         .and_then(|(_, rest)| rest.split_once('.'))
         .map(|(list, _)| list)
-        .unwrap_or_else(|| panic!("spec 025's list of terminal controls was not found"));
+        .unwrap_or_else(|| {
+            panic!(
+                "spec 025's list of terminal controls was not found: no paragraph starts with {TERMINAL_CONTROLS_PARAGRAPH:?} and holds {LIST_START:?} and a period"
+            )
+        });
     let mut points = Vec::new();
     let mut range_open = false;
-    for piece in list.split("U+").skip(1) {
-        let rest =
-            piece.trim_start_matches(|c: char| c.is_ascii_digit() || ('A'..='F').contains(&c));
-        let digits = &piece[..piece.len() - rest.len()];
-        if !(4..=6).contains(&digits.len()) {
-            range_open = false;
-            continue;
+    for (point, rest) in named_code_points(list) {
+        match point {
+            Some(point) if range_open => {
+                let first = points.pop().expect("a range starts at a code point");
+                points.extend(first..=point);
+            }
+            Some(point) => points.push(point),
+            None => {}
         }
-        let point = u32::from_str_radix(digits, 16).expect("upper-case hex digits");
-        if range_open {
-            let first = points.pop().expect("a range starts at a code point");
-            points.extend(first..=point);
-        } else {
-            points.push(point);
-        }
-        range_open = rest.trim() == "to";
+        range_open = point.is_some() && rest.trim() == "to";
     }
     points.sort_unstable();
+    points.dedup();
+    if let Some(point) = named_code_points(&paragraph)
+        .filter_map(|(point, _)| point)
+        .find(|point| points.binary_search(point).is_err())
+    {
+        panic!(
+            "U+{point:04X} is named in spec 025's paragraph {TERMINAL_CONTROLS_PARAGRAPH:?} but not in its list of terminal controls"
+        );
+    }
     points
+}
+
+fn assert_same_code_points(spec: &[u32], other: &[u32], other_name: &str) {
+    let first = spec
+        .iter()
+        .chain(other)
+        .copied()
+        .filter(|point| spec.contains(point) != other.contains(point))
+        .min();
+    if let Some(point) = first {
+        let (holder, lacking) = if spec.contains(&point) {
+            ("spec 025's list", other_name)
+        } else {
+            (other_name, "spec 025's list")
+        };
+        panic!("U+{point:04X} is in {holder} but not in {lacking}");
+    }
 }
 
 fn json_escape(rest: &str, point: u32) -> Option<&str> {
@@ -215,10 +253,7 @@ fn other_characters_pass_through_raw() {
 fn every_character_is_escaped_exactly_when_spec_025_lists_it() {
     let listed = spec_025_terminal_controls();
     let tested: Vec<u32> = terminal_controls().into_iter().map(u32::from).collect();
-    assert_eq!(
-        listed, tested,
-        "the test's list of terminal controls is spec 025's list"
-    );
+    assert_same_code_points(&listed, &tested, "the test's list");
     let text: String = (0..=0x10ffff)
         .filter_map(char::from_u32)
         .filter(|&character| character != '"' && character != BACKSLASH)
