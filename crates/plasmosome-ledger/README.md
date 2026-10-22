@@ -48,7 +48,9 @@ A log names its plugin but not the cell that plugin is attached to. `detach` and
 take that cell from the caller, so every universe and compensation removal names the owner
 `{cell, plugin}`; the cell is never read from old bytes or defaulted. Every removal and revoke uses
 the detach's drain. A graceful timeout stops the replay with the pending cursor on that effect, and
-a later detach resumes there without replaying what already succeeded.
+a later detach resumes there without replaying what already succeeded. So does a withdrawal that
+fails after its release: the detach returns the backend's `IncompleteEffect`, and a later detach
+runs that effect's exact cleanup first.
 The first detach of a closed ledger binds its cell, whatever that call's outcome. A later call
 naming another cell returns `DetachError::CellChanged` before any backend call, so a resume on
 that ledger cannot move to another cell. The binding lives in memory beside the cursor, not in the
