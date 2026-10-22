@@ -1,11 +1,14 @@
+use std::ffi::OsString;
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use plasmosome_cli::json::{Json, Number};
-use plasmosome_cli::{ClientCode, ClientError, Exit, PathOrigin, map_refusal};
-use plasmosome_core::private_socket::{PrivateSocketError, effective_uid};
+use plasmosome_cli::{
+    COMMANDS, ClientCode, ClientError, Exit, PathOrigin, Reading, map_refusal, read,
+};
+use plasmosome_core::private_socket::{PrivateSocketError, check_private_path, effective_uid};
 
 const SPEC_025: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -123,7 +126,7 @@ every_variant! {
         },
         ClientCode::InvalidArgument,
         64,
-        vec![("argument", text("--socket"))],
+        vec![("argument", text(CHECKED))],
     ),
     SymlinkInPath => unsafe_socket(
         PrivateSocketError::SymlinkInPath { path: at("/tmp") },
@@ -452,11 +455,47 @@ fn bad_path_depends_on_its_origin() {
     let flag = from_socket(&error);
     assert_eq!(flag.code(), ClientCode::InvalidArgument);
     assert_eq!(flag.code().exit(), Exit::Usage);
-    assert_eq!(flag.fields(), fields(vec![("argument", text("--socket"))]));
+    assert_eq!(flag.fields(), fields(vec![("argument", text(CHECKED))]));
     let home = from_home(&error);
     assert_eq!(home.code(), ClientCode::InvalidHome);
     assert_eq!(home.code().exit(), Exit::Refused);
     assert_eq!(home.fields(), &[]);
+}
+
+#[test]
+fn the_parse_and_the_map_name_a_refused_socket_value_alike() {
+    for given in [
+        "relative/control.uds",
+        "/a//b/control.uds",
+        "/a/./control.uds",
+        "/a/../control.uds",
+        "/a/b/",
+        "/",
+    ] {
+        let error = match check_private_path(Path::new(given), TRUSTED) {
+            Err(error @ PrivateSocketError::BadPath { .. }) => error,
+            other => panic!("the check gives {other:?} for {given}, not BadPath"),
+        };
+        let mapped = map_refusal(&error, Path::new(given), PathOrigin::SocketFlag, TRUSTED);
+        assert_eq!(mapped.code(), ClientCode::InvalidArgument, "{given}'s code");
+        assert_eq!(mapped.code().exit(), Exit::Usage, "{given}'s exit");
+        assert_eq!(
+            mapped.fields(),
+            fields(vec![("argument", text(given))]),
+            "{given}'s fields from the map"
+        );
+        let line = ["status", "--socket", given].map(OsString::from);
+        let parsed = match read(&line, COMMANDS) {
+            Reading::Refuse { error, .. } => error,
+            other => panic!("the parse gives {other:?} for --socket {given}"),
+        };
+        assert_eq!(parsed.code(), ClientCode::InvalidArgument, "{given} parsed");
+        assert_eq!(
+            parsed.fields(),
+            mapped.fields(),
+            "{given}'s fields from the parse"
+        );
+    }
 }
 
 #[test]

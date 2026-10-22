@@ -1719,7 +1719,14 @@ is a claim that the text above may not be corrected.
    tree today, held by review rather than by a test: the guards that asserted it were removed
    with spec 013, which says why.
 4. The D2 mock-mode field appears in every plasmid-carrying response — **delivered** (§3).
-5. Ambiguity-as-error with candidate lists is the only selection semantics — **delivered** (§2).
+5. Ambiguity-as-error with candidate lists is the only selection semantics. Instance selection
+   (spec 025 §5) is **delivered** by `plasmosome status`, the one command the `plasmosome`
+   binary serves: exactly one instance is the default, and more than one, reachable or not, is
+   refused with `ambiguous_instance` and the candidate list. Cell selection (§2) is **not yet**:
+   code `100` and its `candidates` field exist, but no served verb takes a cell, so nothing
+   resolves one. Amended on 2026-10-21, when spec 025's amendment A gave instance selection to
+   the command line (plasmosome-6yev). Until then this item read
+   "Ambiguity-as-error with candidate lists is the only selection semantics — **delivered** (§2)."
 6. Ledger replayable-from-log and residue-empty as standing rows — ledger property green
    today (rule 3); the D4 residue row re-points at the membrane in P1 step 2.
 7. Spec008's recovery journal, typed cell ownership, instance-root startup, recovery diagnostics
