@@ -226,8 +226,10 @@ impl PrivateListener {
     /// name in the held directory is removed, but only if the effective UID owns it.
     /// `BindEscaped` means that after bind the temporary name in the held directory holds no
     /// socket owned by the effective UID, or holds an entry other than the one found there just
-    /// after bind. If the socket goes before `fchmodat` reaches it, or after its mode is checked,
-    /// the result is `Io` from `fchmodat` or from the rename. `BadName` holds `name` itself, not a
+    /// after bind. Until the socket's mode is set, a failed look at that name, for example with
+    /// `EACCES`, is also `BindEscaped`, though the socket may still be there. If the socket goes
+    /// after it is found there and before `fchmodat` reaches it, or after its mode is checked, the
+    /// result is `Io` from `fchmodat` or from the rename. `BadName` holds `name` itself, not a
     /// path. `PathTooLong`, `AddressInUse` and the other failures before `bind` name `name`'s
     /// path. The directory checks' errors name the directory component that broke the rule. Every
     /// other error from `bind` on names the temporary's path. A hard exit before the rename leaves
@@ -1937,6 +1939,7 @@ mod tests {
                 Some((_other, ino)) => {
                     let left = fs::symlink_metadata(&temporary).expect("the other socket stays");
                     assert_eq!((left.file_type().is_socket(), left.ino()), (true, ino));
+                    assert_eq!(left.mode() & 0o7777, 0o600);
                     assert_eq!(entries(&cell), vec![temporary]);
                 }
                 None => assert_eq!(entries(&cell), Vec::<PathBuf>::new()),
