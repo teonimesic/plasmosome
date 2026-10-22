@@ -7,10 +7,11 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
 
 use plasmosome_tools::quickstart::{
-    BASE_RULE, Entry, Host, MOUNTINFO_LIMIT, System, check_base, noexec_in,
+    BASE_RULE, Entry, Host, ID_OUTPUT_LIMIT, MOUNTINFO_LIMIT, System, check_base, noexec_in,
 };
 
 const LONGEST_BASE: usize = 100 - 1 - "/plasmosome-status-XXXXXXXX/membrane.uds".len();
@@ -217,7 +218,7 @@ fn a_base_one_byte_too_long_through_a_two_byte_character_is_refused() {
 fn a_base_that_is_not_valid_utf8_is_refused() {
     let tail = letters(8);
     let mut name = b"q\xff".to_vec();
-    name.extend_from_slice(tail.as_bytes());
+    name.extend(tail.bytes());
     let path = root().join(OsStr::from_bytes(&name));
     let _made = match std::fs::create_dir(&path) {
         Ok(()) => Some(Base(path.clone())),
@@ -418,12 +419,42 @@ fn a_base_that_is_not_utf8_shows_each_bad_byte_and_keeps_the_good_ones() {
 }
 
 #[test]
-fn system_reads_the_uid_that_owns_a_new_directory() {
-    let made = tempfile::tempdir().expect("a scratch directory is made");
-    let owner = std::fs::symlink_metadata(made.path())
-        .expect("lstat works")
-        .uid();
-    assert_eq!(System::new().expect("id -u works").effective_uid(), owner);
+fn the_uid_is_read_from_one_line_of_digits_and_nothing_else() {
+    let read = |script: &str| {
+        System::reading(Command::new("/bin/sh").args(["-c", script]))
+            .map(|host| host.effective_uid())
+    };
+    assert_eq!(read("echo 4242"), Ok(4242));
+    let longest = format!("printf '%0{}d\\n' 7", ID_OUTPUT_LIMIT - 1);
+    assert_eq!(read(&longest), Ok(7));
+    let over = format!("printf '%0{}d' 0", ID_OUTPUT_LIMIT + 1);
+    for (script, why) in [
+        (
+            "echo 7; exit 3",
+            "id -u exited with exit status: 3".to_owned(),
+        ),
+        (
+            over.as_str(),
+            format!("id -u printed over {ID_OUTPUT_LIMIT} bytes"),
+        ),
+        ("echo", r#"id -u printed "\n", not a uid"#.to_owned()),
+        ("printf 42", r#"id -u printed "42", not a uid"#.to_owned()),
+        ("echo +42", r#"id -u printed "+42\n", not a uid"#.to_owned()),
+        (
+            "echo 4294967296",
+            r#"id -u printed "4294967296\n", not a uid"#.to_owned(),
+        ),
+        (
+            "echo 1; echo 2",
+            r#"id -u printed "1\n2\n", not a uid"#.to_owned(),
+        ),
+    ] {
+        assert_eq!(
+            read(script),
+            Err(format!("cannot read the effective uid: {why}")),
+            "{script}"
+        );
+    }
 }
 
 #[test]

@@ -87,21 +87,25 @@ pub struct System {
 impl System {
     /// Reads the effective uid once, from `id -u`, which prints it. `Err` says why it could not.
     pub fn new() -> Result<System, String> {
+        System::reading(Command::new("id").arg("-u"))
+    }
+
+    /// Reads the effective uid from what `command` prints, which must be what `id -u` prints: one
+    /// line of ASCII digits, and an exit status of 0. Output over [`ID_OUTPUT_LIMIT`] is refused.
+    pub fn reading(command: &mut Command) -> Result<System, String> {
         let failed = |why: String| format!("cannot read the effective uid: {why}");
-        let mut child = Command::new("id")
-            .arg("-u")
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
             .map_err(|error| failed(format!("cannot run id -u: {error}")))?;
         let mut output = Vec::new();
-        let read = match child.stdout.take() {
-            Some(stdout) => stdout
-                .take(ID_OUTPUT_LIMIT + 1)
-                .read_to_end(&mut output)
-                .map(drop),
-            None => Ok(()),
-        };
+        let read = child
+            .stdout
+            .take()
+            .expect("stdout is piped")
+            .take(ID_OUTPUT_LIMIT + 1)
+            .read_to_end(&mut output);
         let status = child
             .wait()
             .map_err(|error| failed(format!("cannot wait for id -u: {error}")))?;
@@ -116,7 +120,7 @@ impl System {
         }
         output
             .strip_suffix(b"\n")
-            .filter(|digits| !digits.is_empty() && digits.iter().all(u8::is_ascii_digit))
+            .filter(|digits| digits.iter().all(u8::is_ascii_digit))
             .and_then(|digits| std::str::from_utf8(digits).ok()?.parse().ok())
             .map(|uid| System { uid })
             .ok_or_else(|| {
