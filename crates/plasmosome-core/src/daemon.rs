@@ -19,7 +19,7 @@ use crate::control::{Controller, Handler, serve_connection};
 use crate::private_socket::{
     Accepted, PrivateDir, PrivateListener, PrivateSocketError, effective_uid,
 };
-use crate::runtime::recipe::{PlatformLimits, RecipeRefusal};
+use crate::runtime::recipe::{HostLimitsError, PlatformLimits};
 use crate::runtime::strict_json;
 use crate::state::{ControllerState, InstanceName, InstanceNameError};
 
@@ -122,7 +122,7 @@ pub fn parse_config(text: &str) -> Result<DaemonConfig, ConfigError> {
 
 fn read_config(
     text: &str,
-    limits: impl FnOnce() -> Result<PlatformLimits, RecipeRefusal>,
+    limits: impl FnOnce() -> Result<PlatformLimits, HostLimitsError>,
 ) -> Result<DaemonConfig, ConfigError> {
     let written = one_object(text).map_err(ConfigError::NotConfig)?;
     let name = InstanceName::parse(&written.name).map_err(ConfigError::NotAnInstanceName)?;
