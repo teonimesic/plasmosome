@@ -1,0 +1,13 @@
+id = "headers"
+description = "Table headers."
+
+[impl]
+wasm = "c.wasm"
+
+[provides."a:tools".tools]
+list = "List things."
+
+[[secrets.refs]]
+id = "a:key"
+consumer = "wasm"
+delivery = ["handle"]

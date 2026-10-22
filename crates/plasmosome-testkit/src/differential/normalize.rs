@@ -19,6 +19,7 @@ fn numbering(kind: RuleKind) -> Numbering {
         RuleKind::Pid
         | RuleKind::BootId
         | RuleKind::MountId
+        | RuleKind::PeerGroup
         | RuleKind::Device
         | RuleKind::Inode
         | RuleKind::EphemeralPort
@@ -97,6 +98,7 @@ fn holds(kind: RuleKind, value: &Value) -> bool {
         RuleKind::Pid
         | RuleKind::MountId
         | RuleKind::ParentMountId
+        | RuleKind::PeerGroup
         | RuleKind::Device
         | RuleKind::Inode
         | RuleKind::MemoryCounter => value.is_u64(),

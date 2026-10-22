@@ -196,13 +196,16 @@ a field and a kind. In each run, `judge` replaces every value of that field with
 such as `<pid:2>`, numbered within that probe and run, so an extra value in one probe shifts no
 other probe. How a kind is numbered decides which relations its placeholders keep:
 
-- A value that names something, a process ID, boot ID, mount ID, device, inode, ephemeral port or
-  resolved address, is numbered by first appearance across every field of the probe that has a
-  rule of its kind. The fields are taken in the byte order of their names, and a list's values in
-  their order. So equal values stay equal and distinct ones distinct, even in two fields: a leader
-  that names another process of its list fails, and so do two files that report one inode in two
-  fields. A parent mount ID is numbered with the mount IDs, and its placeholder is
-  `<mount_id:N>`. Apart from that pair, two kinds never share numbers.
+- A value that names something, a process ID, boot ID, mount ID, peer group, device, inode,
+  ephemeral port or resolved address, is numbered by first appearance across every field of the
+  probe that has a rule of its kind. The fields are taken in the byte order of their names, and a
+  list's values in their order. So equal values stay equal and distinct ones distinct, even in two
+  fields: a leader that names another process of its list fails, and so do two files that report
+  one inode in two fields. A parent mount ID is numbered with the mount IDs, and its placeholder
+  is `<mount_id:N>`. Apart from that pair, two kinds never share numbers. So a peer group, the `N`
+  of a mount's `shared:N`, `master:N` or `propagate_from:N`, is numbered apart from the mount IDs:
+  it names a peer group, not a mount, and a mount and a peer group that share a number by chance
+  are not related.
 - A system time is numbered by rank within its field, earliest first, and equal times share a
   number, so time placeholders keep their order.
 - A memory or load counter is numbered by first appearance within its field, so counters in two
@@ -223,7 +226,9 @@ Every field no rule names is compared exactly, so nothing is normalized for how 
 field the workload set can have no rule. A ruled field must hold one value of the rule's kind or
 a list of them, or the runs are refused, naming the lane, probe, field and kind:
 
-- a process ID, mount ID, parent mount ID, device, inode or memory counter is a whole number;
+- a process ID, mount ID, parent mount ID, peer group, device, inode or memory counter is a whole
+  number. So a probe reports the `5` of `master:5` as a bare number, and a peer group rule
+  refuses the tag text itself;
 - an ephemeral port is a whole number up to 65535;
 - a system time, duration or load counter is any number, but a list of system times must not mix
   integers with numbers serde_json holds as floats, since the two do not compare exactly. Floats
