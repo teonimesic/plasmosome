@@ -1256,7 +1256,182 @@ pub fn doomed_owner() -> CellOwner {
 pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBackend>(
     make: impl Fn() -> B,
 ) {
-    let _ = make;
+    for capability in sample_capabilities() {
+        for drain in drains() {
+            for entry in [Entry::Grant, Entry::Apply] {
+                let mut backend = make();
+                let peer_request = hot_grant(conformance_owner(), &capability);
+                let peer = grant_prepared(&mut backend, &peer_request);
+                let peer_object = requested_object(&peer, &peer_request);
+                let first = observe(&mut backend);
+                for call in [Entry::Grant, Entry::Apply] {
+                    let invalid = op_for(
+                        GrantId::new(),
+                        doomed_owner(),
+                        invalid_capability(&capability),
+                    );
+                    contract_assert_eq!(
+                        call.run(&mut backend, &invalid),
+                        Err(invalid_refusal(&invalid)),
+                        "{} of an invalid doomed operation must be refused before any effect",
+                        call.with_article()
+                    );
+                    contract_assert_eq!(
+                        observe(&mut backend),
+                        first,
+                        "a refused invalid doomed operation changed the account through {}",
+                        call.name()
+                    );
+                }
+                let op = op_for(GrantId::new(), doomed_owner(), capability.clone());
+                let removal = op.removal();
+                let failure = entry.run(&mut backend, &op);
+                contract_assert!(
+                    incomplete_at(&failure, &op),
+                    "{} of the doomed operation must return IncompleteEffect at its address, not {failure:?}",
+                    entry.with_article()
+                );
+                let failed = observe(&mut backend);
+                assert_account(
+                    &failed,
+                    std::slice::from_ref(&peer_object),
+                    std::slice::from_ref(&peer),
+                    std::slice::from_ref(&op),
+                    "an unfinished operation must be reported exactly, with no standing object and no record",
+                );
+                for retry in [Entry::Grant, Entry::Apply] {
+                    let again = retry.run(&mut backend, &op);
+                    contract_assert!(
+                        incomplete_at(&again, &op),
+                        "a retry through {} must return IncompleteEffect again, not {again:?}",
+                        retry.name()
+                    );
+                    contract_assert_eq!(
+                        observe(&mut backend),
+                        failed,
+                        "a retry through {} changed the account",
+                        retry.name()
+                    );
+                }
+                let conflict = BackendError::IdentityConflict {
+                    class: op.class().as_str(),
+                    id: op.id(),
+                };
+                let another = op_for(op.id(), conformance_owner(), capability.clone());
+                for call in [Entry::Grant, Entry::Apply] {
+                    contract_assert_eq!(
+                        call.run(&mut backend, &another),
+                        Err(conflict.clone()),
+                        "another owner's {} at an unfinished address must conflict",
+                        call.name()
+                    );
+                    contract_assert_eq!(
+                        observe(&mut backend),
+                        failed,
+                        "another owner's {} changed the account",
+                        call.name()
+                    );
+                }
+                contract_assert_eq!(
+                    backend.plant(op.object()),
+                    Err(conflict),
+                    "a plant at an unfinished address must conflict"
+                );
+                contract_assert_eq!(
+                    backend.revoke(op.handle(), drain),
+                    Err(BackendError::UnknownHandle {
+                        handle: op.handle()
+                    }),
+                    "a revoke of an unfinished operation's handle must return UnknownHandle"
+                );
+                contract_assert_eq!(
+                    observe(&mut backend),
+                    failed,
+                    "a refused plant or revoke changed the account"
+                );
+                let mut refused = vec![
+                    (removal.clone(), conformance_owner(), "owner"),
+                    (removal.clone(), other_cell(&doomed_owner()), "owner"),
+                ];
+                for changed in changed_capabilities(&capability) {
+                    refused.push((
+                        UniverseRemoval {
+                            id: op.id(),
+                            capability: changed,
+                        },
+                        doomed_owner(),
+                        "capability",
+                    ));
+                }
+                for (wrong, owner, field) in refused {
+                    contract_assert_eq!(
+                        backend.apply_removal(wrong.clone(), &owner, drain),
+                        Err(BackendError::UnknownObject {
+                            class: wrong.class().as_str(),
+                            key: wrong.key(),
+                            owner: owner.clone(),
+                            id: wrong.id,
+                        }),
+                        "a removal naming another {field} must not select an unfinished effect"
+                    );
+                    contract_assert_eq!(
+                        observe(&mut backend),
+                        failed,
+                        "a refused removal naming another {field} changed the account"
+                    );
+                }
+                contract_unwrap!(backend.apply_removal(removal, &doomed_owner(), drain));
+                assert_account(
+                    &observe(&mut backend),
+                    std::slice::from_ref(&peer_object),
+                    std::slice::from_ref(&peer),
+                    &[],
+                    "the exact removal must clear the unfinished effect and nothing else",
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Entry {
+    Grant,
+    Apply,
+}
+
+impl Entry {
+    fn name(self) -> &'static str {
+        match self {
+            Entry::Grant => "grant",
+            Entry::Apply => "apply",
+        }
+    }
+
+    fn with_article(self) -> &'static str {
+        match self {
+            Entry::Grant => "a grant",
+            Entry::Apply => "an apply",
+        }
+    }
+
+    fn run<B: EnforcementBackend>(
+        self,
+        backend: &mut B,
+        operation: &UniverseOp,
+    ) -> Result<(), BackendError> {
+        match self {
+            Entry::Grant => backend.grant(operation.clone(), GrantKind::Hot).map(|_| ()),
+            Entry::Apply => backend.apply(operation.clone()),
+        }
+    }
+}
+
+fn incomplete_at(result: &Result<(), BackendError>, operation: &UniverseOp) -> bool {
+    matches!(
+        result,
+        Err(BackendError::IncompleteEffect { class, id, .. })
+            if *class == operation.class().as_str() && *id == operation.id()
+    )
 }
 
 fn hot_grant(owner: CellOwner, capability: &Capability) -> PreparedGrant {
