@@ -448,6 +448,14 @@ fn a_build_dependency_on_the_tools_is_refused() {
     ));
 }
 
+/// CI runs this guard on Linux and on macOS, so a dependency only for Windows is never the host's.
+#[test]
+fn a_target_specific_dependency_on_the_tools_is_refused() {
+    assert_membrane_ships_the_tools(&tools_refusals_for(
+        "[target.'cfg(windows)'.dependencies]\nplasmosome-tools = { path = \"../tools\" }\n",
+    ));
+}
+
 #[test]
 fn an_optional_tools_dependency_behind_a_feature_is_refused() {
     assert_membrane_ships_the_tools(&tools_refusals_for(
