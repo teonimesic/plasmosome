@@ -22,6 +22,23 @@ static int descriptor(const char *text) {
     return (int)value;
 }
 
+static bool is_open(int fd) {
+    return fcntl(fd, F_GETFD) != -1;
+}
+
+static void check_pipe_ends(int ready, int control, int parent_ready, int parent_control) {
+    if (!is_open(ready)) {
+        _exit(75);
+    }
+    if (!is_open(control) || is_open(parent_ready) || is_open(parent_control)) {
+        char leaked = 'L';
+        if (write(ready, &leaked, 1) != 1) {
+            _exit(76);
+        }
+        _exit(75);
+    }
+}
+
 static void descriptor_worker(int ready, int control, const char *liveness_path) {
     int liveness = open(liveness_path, O_WRONLY);
     if (liveness < 0) {
@@ -72,15 +89,23 @@ static void named_worker(pid_t leader, const char *liveness_path, const char *co
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5) {
+    if (argc < 2) {
         return 64;
     }
     bool late = strcmp(argv[1], "named-exit-late") == 0;
     bool named = late || strcmp(argv[1], "named-exit") == 0;
+    if (argc != (named ? 5 : 7)) {
+        return 64;
+    }
     int ready = named ? -1 : descriptor(argv[2]);
     int control = named ? -1 : descriptor(argv[3]);
-    if (!named && (ready < 0 || control < 0)) {
-        return 65;
+    if (!named) {
+        int parent_ready = descriptor(argv[5]);
+        int parent_control = descriptor(argv[6]);
+        if (ready < 0 || control < 0 || parent_ready < 0 || parent_control < 0) {
+            return 65;
+        }
+        check_pipe_ends(ready, control, parent_ready, parent_control);
     }
 
     pid_t leader = getpid();

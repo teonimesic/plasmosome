@@ -835,6 +835,7 @@ mod tests {
     use super::*;
     use crate::exec::ExecCommand;
     use std::ffi::CString;
+    use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
 
     include!("../tests/support/fixture.rs");
@@ -914,19 +915,50 @@ mod tests {
         }
     }
 
-    #[allow(unsafe_code)]
-    fn pipe() -> (PipeEnd, PipeEnd) {
-        let mut fds = [0; 2];
-        // SAFETY: `fds` is a local array of two c_int, the size pipe writes.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "a pipe opens");
-        (PipeEnd(fds[0]), PipeEnd(fds[1]))
+    impl From<OwnedFd> for PipeEnd {
+        fn from(fd: OwnedFd) -> PipeEnd {
+            PipeEnd(fd.into_raw_fd())
+        }
     }
+
+    fn close_on_exec_ends() -> [OwnedFd; 2] {
+        crate::spawn_lock::with_each_descriptor_held(super::signal_pressure::close_on_exec_pipe)
+            .expect("a close-on-exec pipe opens")
+    }
+
+    fn pipe() -> (PipeEnd, PipeEnd) {
+        let [read, write] = close_on_exec_ends();
+        (PipeEnd::from(read), PipeEnd::from(write))
+    }
+
+    struct KeepAcrossExec {
+        command: ExecCommand,
+        kept: [OwnedFd; 2],
+    }
+
+    impl Launch for KeepAcrossExec {
+        #[allow(unsafe_code)]
+        fn launch(self) -> ! {
+            for kept in &self.kept {
+                // SAFETY: fcntl with F_SETFD takes integers only and is async-signal-safe, which is
+                // all this forked child may call. `self` owns the descriptor and keeps it open.
+                if unsafe { libc::fcntl(kept.as_raw_fd(), libc::F_SETFD, 0) } == -1 {
+                    // SAFETY: _exit is async-signal-safe and ends the child without running a Rust
+                    // destructor.
+                    unsafe { libc::_exit(77) }
+                }
+            }
+            self.command.launch()
+        }
+    }
+
+    const LIVENESS: &str = "worker-liveness";
 
     struct WorkerFixture {
         child: Option<VmmChild>,
         liveness: PipeEnd,
         release: Option<PipeEnd>,
-        _dir: tempfile::TempDir,
+        dir: tempfile::TempDir,
     }
 
     impl WorkerFixture {
@@ -964,6 +996,9 @@ mod tests {
 
     impl Drop for WorkerFixture {
         fn drop(&mut self) {
+            if std::thread::panicking() {
+                return;
+            }
             if holds_open(&self.liveness, Duration::ZERO) {
                 self.release_live_worker();
             } else {
@@ -974,11 +1009,28 @@ mod tests {
     }
 
     #[allow(unsafe_code)]
+    fn open_liveness(path: &Path) -> PipeEnd {
+        let c_path =
+            CString::new(path.as_os_str().as_bytes()).expect("the temporary path has no NUL");
+        // SAFETY: `c_path` is a CString that lives until this function returns, and open keeps no
+        // pointer to it.
+        let liveness = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        assert!(liveness >= 0, "the test opens its private FIFO reader");
+        PipeEnd(liveness)
+    }
+
+    #[allow(unsafe_code)]
     fn spawn_with_worker(leader_exits: bool) -> WorkerFixture {
-        let (ready_read, ready_write) = pipe();
-        let (control_read, control_write) = pipe();
+        let [ready_read, ready_write] = close_on_exec_ends();
+        let [control_read, control_write] = close_on_exec_ends();
+        let (ready_read, control_write) = (PipeEnd::from(ready_read), PipeEnd::from(control_write));
         let dir = tempfile::tempdir().expect("the fixture owns its directory");
-        let liveness_path = dir.path().join("worker-liveness");
+        let liveness_path = dir.path().join(LIVENESS);
         let c_path = CString::new(liveness_path.as_os_str().as_bytes())
             .expect("the temporary path has no NUL");
         assert_eq!(
@@ -988,27 +1040,23 @@ mod tests {
             0,
             "the worker liveness FIFO is created"
         );
-        // SAFETY: `c_path` is a CString that lives until this function returns, and open keeps no
-        // pointer to it.
-        let liveness = unsafe {
-            libc::open(
-                c_path.as_ptr(),
-                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
-            )
-        };
-        assert!(liveness >= 0, "the parent opens its private FIFO reader");
+        let liveness = open_liveness(&liveness_path);
         let mode = if leader_exits { "exit" } else { "wait" };
         let command = ExecCommand::new(vec![
             supervision_fixture().display().to_string(),
             mode.to_string(),
-            ready_write.0.to_string(),
-            control_read.0.to_string(),
+            ready_write.as_raw_fd().to_string(),
+            control_read.as_raw_fd().to_string(),
             liveness_path.display().to_string(),
+            ready_read.0.to_string(),
+            control_write.0.to_string(),
         ])
         .expect("the prebuilt fixture executable resolves before fork");
-        let child = VmmChild::spawn(command).expect("fork succeeds");
-        ready_write.close();
-        control_read.close();
+        let child = VmmChild::spawn(KeepAcrossExec {
+            command,
+            kept: [ready_write, control_read],
+        })
+        .expect("fork succeeds");
         wait_readable(&ready_read, DEADLINE);
         let mut byte = 0u8;
         assert_eq!(
@@ -1018,12 +1066,21 @@ mod tests {
             1,
             "the execed worker announces readiness after opening its FIFO"
         );
-        assert_eq!(byte, b'x');
+        assert_eq!(
+            byte,
+            b'x',
+            "the execed leader answers {:?}: it must hold its ready_write and control_read, and \
+             never its parent's ready_read ({}) or control_write ({}), which would keep its \
+             worker from ever seeing the control pipe close",
+            char::from(byte),
+            ready_read.0,
+            control_write.0
+        );
         WorkerFixture {
             child: Some(child),
-            liveness: PipeEnd(liveness),
+            liveness,
             release: Some(control_write),
-            _dir: dir,
+            dir,
         }
     }
 
@@ -1811,6 +1868,145 @@ mod tests {
         );
     }
 
+    const WORKER_CHILD: &str = "PLASMOSOME_WORKER_FIXTURE_CHILD";
+    const WORKER_LINE: &str = "worker fixture leader ";
+
+    #[test]
+    #[ignore = "helper process for a_killed_test_process_leaves_no_worker_behind"]
+    fn worker_fixture_in_a_child_process() {
+        use std::io::Read;
+        if std::env::var_os(WORKER_CHILD).is_none() {
+            return;
+        }
+        let mut fixture = spawn_with_worker(true);
+        let leader = fixture.child().pid();
+        println!(
+            "{WORKER_LINE}{leader} {}",
+            fixture.dir.path().join(LIVENESS).display()
+        );
+        std::io::stdout()
+            .flush()
+            .expect("the helper's line reaches its parent");
+        std::io::stdin()
+            .read_to_end(&mut Vec::new())
+            .expect("the helper reads its stdin until its parent closes it");
+    }
+
+    struct KilledOnDrop(std::process::Child);
+
+    impl Drop for KilledOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    struct GroupKilledWhileLive<'a> {
+        group: libc::pid_t,
+        liveness: &'a PipeEnd,
+    }
+
+    impl Drop for GroupKilledWhileLive<'_> {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            let mut byte = 0u8;
+            // SAFETY: `byte` is a local that read may write, and the length 1 matches it.
+            // `liveness` keeps its descriptor open.
+            let read = unsafe {
+                libc::read(
+                    self.liveness.0,
+                    &mut byte as *mut u8 as *mut libc::c_void,
+                    1,
+                )
+            };
+            if read != 0 {
+                // SAFETY: kill takes no pointer. The FIFO is not at end of file, so the worker
+                // that holds its write end still runs, and the process group named by its
+                // leader's pid still has that member, so the number names that group.
+                unsafe { libc::kill(-self.group, libc::SIGKILL) };
+            }
+        }
+    }
+
+    fn helper_line(stdout: OwnedFd) -> std::sync::mpsc::Receiver<String> {
+        use std::io::BufRead;
+        let (sender, named) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(fs::File::from(stdout))
+                .lines()
+                .map_while(Result::ok)
+            {
+                if let Some((_, named)) = line.split_once(WORKER_LINE) {
+                    let _ = sender.send(named.to_string());
+                }
+            }
+        });
+        named
+    }
+
+    #[test]
+    fn a_killed_test_process_leaves_no_worker_behind() {
+        use std::os::unix::process::ExitStatusExt;
+        let root = tempfile::tempdir().expect("the test owns a temporary root for its helper");
+        let stderr = tempfile::tempfile().expect("the helper has a file for its stderr");
+        let [stdin, _stdin_held] = close_on_exec_ends();
+        let [said, stdout] = close_on_exec_ends();
+        let mut command =
+            Command::new(std::env::current_exe().expect("the test executable has a path"));
+        command
+            .args([
+                "--exact",
+                "vmm::tests::worker_fixture_in_a_child_process",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(WORKER_CHILD, "1")
+            .env("TMPDIR", root.path())
+            .stdin(stdin)
+            .stdout(stdout)
+            .stderr(stderr.try_clone().expect("the stderr file is shared"));
+        let spawned = {
+            let _no_pipe_mid_creation = crate::spawn_lock::hold_fork_side();
+            command.spawn()
+        };
+        drop(command);
+        let mut helper = KilledOnDrop(spawned.expect("the helper test process starts"));
+        let named = helper_line(said)
+            .recv_timeout(PROBE_DEADLINE)
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the helper names its worker within {PROBE_DEADLINE:?}\n{}",
+                    read_from_start(stderr)
+                )
+            });
+        let (leader, path) = named
+            .split_once(' ')
+            .unwrap_or_else(|| panic!("the helper names a pid and a path: {named:?}"));
+        let leader: libc::pid_t = leader
+            .parse()
+            .unwrap_or_else(|_| panic!("the helper names its leader's pid: {named:?}"));
+        let liveness = open_liveness(Path::new(path));
+        assert!(
+            holds_open(&liveness, Duration::ZERO),
+            "the helper's worker holds its liveness FIFO before the helper is killed"
+        );
+        let _orphan = GroupKilledWhileLive {
+            group: leader,
+            liveness: &liveness,
+        };
+        helper.0.kill().expect("the helper is killed by its pid");
+        let status = helper.0.wait().expect("the killed helper is reaped");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "the helper ended by the test's SIGKILL, not on its own: {status}"
+        );
+        assert_eof_within(&liveness, DEADLINE);
+        root.close()
+            .expect("the helper's root, and the fixture directory inside it, are removed");
+    }
+
     #[test]
     fn the_leader_signal_stand_in_answers_only_for_its_pid_on_its_thread_until_dropped() {
         assert_eq!(leader_signal_stand_in(4000), None);
@@ -2021,7 +2217,7 @@ mod signal_pressure {
     }
 
     #[allow(unsafe_code)]
-    fn close_on_exec_pipe(
+    pub(super) fn close_on_exec_pipe(
         _held: &crate::spawn_lock::DescriptorsHeld,
     ) -> std::io::Result<[OwnedFd; 2]> {
         let mut fds = [0; 2];
