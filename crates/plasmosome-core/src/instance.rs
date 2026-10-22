@@ -2199,12 +2199,7 @@ mod tests {
     const DEADLINE: Duration = Duration::from_secs(5);
 
     fn temp_root() -> (TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let root = dir
-            .path()
-            .canonicalize()
-            .expect("a canonical temporary path");
-        (dir, root)
+        crate::nofollow::fixtures::walkable_temp_dir("in")
     }
 
     fn open_root(root: &Path) -> InstanceRoot {
@@ -3698,9 +3693,7 @@ mod tests {
                 "{created} was created under a foreign lock"
             );
         }
-        let link = base.join("link");
-        symlink(&moved, &link).expect("the link is made");
-        open_root(&link)
+        open_root(&moved)
             .discover(&lock)
             .expect("the lock's own root is accepted at another path");
     }

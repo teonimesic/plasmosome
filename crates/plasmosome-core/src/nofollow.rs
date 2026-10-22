@@ -890,35 +890,38 @@ pub(crate) mod fixtures {
         }
 
         pub(crate) fn walkable_from_root() -> TestRoot {
-            let euid = effective_uid();
-            let mut refusals = Vec::new();
-            for base in root_bases() {
-                let dir = match tempfile::Builder::new().prefix("nf").tempdir_in(&base) {
-                    Ok(dir) => dir,
-                    Err(error) => {
-                        refusals.push(format!("{}: {error}", base.display()));
-                        continue;
-                    }
-                };
-                let path = fs::canonicalize(dir.path()).expect("the test root resolves");
-                set_mode(&path, 0o700);
-                let walked = Walk::from_root(&path).and_then(|walk| {
-                    walk.open_directory(|reached| {
-                        judge_ancestor(&reached.facts, euid, reached.path)
-                    })
-                });
-                match walked {
-                    Ok(_) => return TestRoot { path, _dir: dir },
-                    Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
-                }
-            }
-            panic!(
-                "no base holds a test root the walk from / accepts; on macOS the base is the \
-                 per-user temp directory that confstr(_CS_DARWIN_USER_TEMP_DIR) names, on Linux \
-                 XDG_RUNTIME_DIR when it is set, then the test binary's directory:\n{}",
-                refusals.join("\n")
-            );
+            let (dir, path) = walkable_temp_dir("nf");
+            TestRoot { path, _dir: dir }
         }
+    }
+
+    pub(crate) fn walkable_temp_dir(prefix: &str) -> (TempDir, PathBuf) {
+        let euid = effective_uid();
+        let mut refusals = Vec::new();
+        for base in root_bases() {
+            let dir = match tempfile::Builder::new().prefix(prefix).tempdir_in(&base) {
+                Ok(dir) => dir,
+                Err(error) => {
+                    refusals.push(format!("{}: {error}", base.display()));
+                    continue;
+                }
+            };
+            let path = fs::canonicalize(dir.path()).expect("the test root resolves");
+            set_mode(&path, 0o700);
+            let walked = Walk::from_root(&path).and_then(|walk| {
+                walk.open_directory(|reached| judge_ancestor(&reached.facts, euid, reached.path))
+            });
+            match walked {
+                Ok(_) => return (dir, path),
+                Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
+            }
+        }
+        panic!(
+            "no base holds a test root the walk from / accepts; on macOS the base is the per-user \
+             temp directory that confstr(_CS_DARWIN_USER_TEMP_DIR) names, on Linux \
+             XDG_RUNTIME_DIR when it is set, then the test binary's directory:\n{}",
+            refusals.join("\n")
+        );
     }
 
     #[cfg(target_os = "macos")]

@@ -827,11 +827,7 @@ mod tests {
     }
 
     fn held_lock() -> (tempfile::TempDir, SupervisorLock) {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = dir
-            .path()
-            .canonicalize()
-            .expect("the temporary directory has a canonical path");
+        let (dir, path) = crate::nofollow::fixtures::walkable_temp_dir("ss");
         let root = InstanceRoot::open(&path).expect("the instance root opens");
         let writer = root.lock().expect("the writer lock is free");
         let lock = root
