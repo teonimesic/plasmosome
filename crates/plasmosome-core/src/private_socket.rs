@@ -790,15 +790,23 @@ fn publish(
     };
     recheck?;
     restrict_to_owner(&bound)?;
-    let facts = stat_at(&bound.dir.dir, &bound.name)
-        .map_err(|errno| no_socket_or_io(errno, &bound.entry.path))?;
-    if facts.dev != created.dev || facts.ino != created.ino {
-        return Err(PrivateSocketError::BindEscaped {
-            path: bound.entry.path.clone(),
-        });
-    }
-    judge_socket(&facts, owner, &bound.entry.path)?;
     (seam.observe)(Step::Restricted);
+    let facts = match stat_at(&bound.dir.dir, &bound.name) {
+        Ok(facts) if facts.dev == created.dev && facts.ino == created.ino => facts,
+        Err(errno) if errno != libc::ENOENT => {
+            return Err(PrivateSocketError::Io {
+                op: "fstatat",
+                path: bound.entry.path.clone(),
+                errno,
+            });
+        }
+        _ => {
+            return Err(PrivateSocketError::BindEscaped {
+                path: bound.entry.path.clone(),
+            });
+        }
+    };
+    judge_socket(&facts, owner, &bound.entry.path)?;
     // SAFETY: listen takes no pointer, and `socket` keeps its descriptor open for the call.
     if unsafe { libc::listen(socket.as_raw_fd(), LISTEN_BACKLOG) } != 0 {
         return Err(io_failure(
@@ -1888,6 +1896,44 @@ mod tests {
             b"planted"
         );
         assert_eq!(entries(&cell), vec![temporary]);
+    }
+
+    #[test]
+    fn publish_reports_bind_escaped_when_the_temporary_goes_after_its_mode_is_set() {
+        for planted in [false, true] {
+            let (_root, cell, dir) = private_cell();
+            let temporary = cell.join(DRAWN);
+            let mut mode = None;
+            let refusal = refusal_of(publish_drawing(
+                dir,
+                "sock",
+                effective_uid(),
+                &[DRAWN],
+                |step| {
+                    if step == Step::Restricted {
+                        mode = Some(fs::symlink_metadata(&temporary).expect("stat").mode());
+                        fs::remove_file(&temporary).expect("unlink");
+                        if planted {
+                            fs::write(&temporary, b"planted").expect("write");
+                        }
+                    }
+                },
+            ));
+            assert_eq!(mode.map(|mode| mode & 0o7777), Some(0o600));
+            assert_eq!(
+                refusal,
+                PrivateSocketError::BindEscaped {
+                    path: temporary.clone()
+                },
+                "planted: {planted}"
+            );
+            if planted {
+                assert_eq!(fs::read(&temporary).expect("the file stays"), b"planted");
+                assert_eq!(entries(&cell), vec![temporary]);
+            } else {
+                assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+            }
+        }
     }
 
     #[test]

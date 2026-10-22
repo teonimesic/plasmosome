@@ -529,8 +529,9 @@ socket through it too, as [Socket ownership](#socket-ownership) says, and so do
   - On macOS, an ancestor is also refused when its ACL has an allow entry that grants
     `add_file`, `add_subdirectory`, `delete_child`, `delete`, `writesecurity` or `chown`, or
     the generic write or generic all right that implies them. This holds whoever the entry
-    names, this user included, and for entries that apply only to new children. Extended ACLs do not show in the mode bits. Deny entries and allow entries for
-    reading still pass, such as the home directory's `everyone deny delete`.
+    names, this user included, and for entries that apply only to new children. Extended ACLs do not
+    show in the mode bits. Deny entries and allow entries for reading still pass, such as the home
+    directory's `everyone deny delete`.
   - On Linux, an ACL that grants write raises the mask, which shows in the group bits, so the
     mode rule covers it. Linux reads only POSIX ACLs, so neither rule sees an NFSv4 or CIFS
     ACL.
@@ -633,9 +634,11 @@ The Linux ACL tests fail when the filesystem refuses POSIX ACLs. Set
 The test that lists a name that is not UTF-8 runs on Linux only, because APFS refuses to
 create such a name, with `EILSEQ`.
 
-One test connects to a socket served by another UID and expects the kernel to report that UID,
-not this process's own: `/private/var/run/mDNSResponder` on macOS, the system D-Bus socket or
-the journal's stdout socket on Linux. It fails when none of them accepts a connection. Set
+One test connects to a system daemon's socket and checks only that the kernel reports a peer UID
+other than this process's own: `/private/var/run/mDNSResponder` on macOS, the system D-Bus socket or
+the journal's stdout socket on Linux. On Linux it is the UID of the process that called `listen()`,
+so under systemd socket activation it is systemd's UID 0, not the daemon's. The test skips as root,
+where the peer may be root too. It fails when none of the sockets accepts a connection. Set
 `PLASMOSOME_FOREIGN_PEER_TESTS_UNSUPPORTED=1` to skip it there instead.
 
 On macOS, the generic-rights test writes an ACL entry that holds only a generic right, through

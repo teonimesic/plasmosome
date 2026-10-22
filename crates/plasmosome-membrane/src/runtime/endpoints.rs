@@ -79,10 +79,11 @@ impl RuntimeListener {
     /// `/` without following a symlink, every ancestor owned by root or this
     /// uid and writable by neither group nor other, the directory itself owned
     /// by this uid with no group or other bits. Core's `PrivateListener` then
-    /// binds the name inside that held directory, refusing any entry already
-    /// there and leaving it as it was. The socket reaches `path` only once it
-    /// is 0600 and listening. The bind holds the write side of the spawn lock,
-    /// so no `VmmChild::spawn` forks while the socket is still inheritable.
+    /// works inside that held directory: it refuses any entry already at the
+    /// name and leaves it as it was, binds the socket at a temporary name, and
+    /// renames it to `path` only once it is 0600 and listening. The bind holds
+    /// the write side of the spawn lock, so no `VmmChild::spawn` forks while
+    /// the socket is still inheritable.
     pub fn bind(path: &RecipePath) -> Result<RuntimeListener, EndpointRefusal> {
         Self::bind_trusting(path, effective_uid())
     }
