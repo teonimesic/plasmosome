@@ -4,7 +4,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, mpsc};
+use std::sync::{Arc, Barrier, LazyLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -418,11 +418,8 @@ fn a_cache_root_that_is_not_a_directory_fails_setup_naming_it() {
 #[test]
 fn the_fixture_cache_sits_in_the_nearest_directory_cargo_tagged_whatever_the_layout_below() {
     let target = tempfile::tempdir().unwrap();
-    std::fs::write(
-        target.path().join("CACHEDIR.TAG"),
-        "Signature: 8a477f597d28d172789f06886806bc55\n",
-    )
-    .expect("the cache directory tag is written");
+    std::fs::write(target.path().join("CACHEDIR.TAG"), TAG)
+        .expect("the cache directory tag is written");
     let executable = target
         .path()
         .join("debug/build/plasmosome-membrane/0123abcd/out/membraned-0123abcd");
@@ -459,4 +456,275 @@ fn the_supervision_fixture_is_cached_inside_the_target_directory() {
         fixture.display(),
         executable.display()
     );
+}
+
+const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
+
+fn untagged_temporary_directory() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    if let Some(tagged) = directory
+        .path()
+        .ancestors()
+        .find(|ancestor| ancestor.join("CACHEDIR.TAG").is_file())
+    {
+        panic!(
+            "this test needs a temporary directory outside any Cargo target directory; {} has a tagged ancestor {}",
+            directory.path().display(),
+            tagged.display()
+        );
+    }
+    directory
+}
+
+const GENERIC_FIX: &str = "Let Cargo create the directory, or write the tag into the Cargo target directory that holds the test executable: echo 'Signature: 8a477f597d28d172789f06886806bc55' > <that directory>/CACHEDIR.TAG";
+
+fn declared_fix(tag: &str) -> String {
+    format!(
+        "Let Cargo create the directory, or write the tag into CARGO_TARGET_DIR: echo 'Signature: 8a477f597d28d172789f06886806bc55' > {tag}"
+    )
+}
+
+#[test]
+fn a_missing_tag_names_the_executable_and_the_fix() {
+    let target = untagged_temporary_directory();
+    let executable = target.path().join("debug/deps/plasmosome_membrane-0123");
+    let refusal = |declared: Option<&Path>| {
+        fixture::cache_root(&executable, "a-cache", "the test fixture", declared)
+            .expect_err("an untagged tree holds no cache")
+    };
+
+    let generic = refusal(None);
+    assert!(
+        generic.starts_with(&format!(
+            "the test executable {} has no ancestor holding CACHEDIR.TAG, so the test fixture has no cache inside a Cargo target directory. ",
+            executable.display()
+        )) && generic.contains(
+            "Cargo writes that tag only when it creates the target directory itself; a directory made by hand or by cargo llvm-cov has none. "
+        ) && generic.ends_with(GENERIC_FIX),
+        "the refusal names the executable, why the tag is missing and the command that writes it: {generic}"
+    );
+    let declared = refusal(Some(target.path()));
+    assert!(
+        declared.ends_with(&declared_fix(&format!(
+            "'{}/CACHEDIR.TAG'",
+            target.path().display()
+        ))),
+        "a CARGO_TARGET_DIR holding the executable is named in the command: {declared}"
+    );
+    assert_eq!(
+        declared.replace(
+            &declared_fix(&format!("'{}/CACHEDIR.TAG'", target.path().display())),
+            GENERIC_FIX
+        ),
+        generic,
+        "only the command differs"
+    );
+    let elsewhere = untagged_temporary_directory();
+    assert_eq!(
+        refusal(Some(elsewhere.path())),
+        generic,
+        "a CARGO_TARGET_DIR that does not hold the executable gets the generic command"
+    );
+    assert_eq!(
+        refusal(Some(Path::new(""))),
+        generic,
+        "an empty CARGO_TARGET_DIR gets the generic command"
+    );
+}
+
+#[test]
+fn the_fix_command_quotes_the_target_for_the_shell() {
+    let parent = untagged_temporary_directory();
+    let target = parent.path().join("it's a target");
+    let executable = target.join("debug/deps/membraned-0123");
+
+    let refusal = fixture::cache_root(&executable, "a-cache", "the test fixture", Some(&target))
+        .expect_err("an untagged tree holds no cache");
+
+    assert!(
+        refusal.ends_with(&declared_fix(&format!(
+            "'{}/it'\\''s a target/CACHEDIR.TAG'",
+            parent.path().display()
+        ))),
+        "the path is one shell word, with its quote escaped: {refusal}"
+    );
+}
+
+#[test]
+fn a_target_named_through_a_symbolic_link_still_holds_the_executable() {
+    let parent = untagged_temporary_directory();
+    let real = parent.path().join("real");
+    let executable = real.join("debug/deps/plasmosome_membrane-0123");
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::write(&executable, "").expect("a stand-in executable is written");
+    let link = parent.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("a link to the target is made");
+    let canonical = std::fs::canonicalize(&executable).expect("the stand-in has a canonical path");
+
+    let refusal = fixture::cache_root(&canonical, "a-cache", "the test fixture", Some(&link))
+        .expect_err("an untagged tree holds no cache");
+
+    assert!(
+        refusal.ends_with(&declared_fix(&format!("'{}/CACHEDIR.TAG'", link.display()))),
+        "CARGO_TARGET_DIR is named as the user spelled it: {refusal}"
+    );
+}
+
+#[test]
+fn a_tagged_target_still_holds_the_cache() {
+    let target = tempfile::tempdir().unwrap();
+    std::fs::write(target.path().join("CACHEDIR.TAG"), TAG).expect("the tag is written");
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    for below in [
+        "membraned-0123",
+        "debug/deps/membraned-0123",
+        "debug/build/plasmosome-membrane/0123abcd/out/membraned-0123abcd",
+    ] {
+        for declared in [None, Some(elsewhere.path())] {
+            assert_eq!(
+                fixture::cache_root(
+                    &target.path().join(below),
+                    "a-cache",
+                    "the test fixture",
+                    declared
+                ),
+                Ok(target.path().join("a-cache")),
+                "an executable at {below} has its cache in the tagged target, whatever CARGO_TARGET_DIR says"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_nearest_tagged_ancestor_holds_the_cache() {
+    let outer = tempfile::tempdir().unwrap();
+    std::fs::write(outer.path().join("CACHEDIR.TAG"), TAG).expect("the outer tag is written");
+    let inner = outer.path().join("inner");
+    std::fs::create_dir(&inner).expect("the inner target is created");
+    std::fs::write(inner.join("CACHEDIR.TAG"), TAG).expect("the inner tag is written");
+
+    assert_eq!(
+        fixture::cache_root(
+            &inner.join("debug/deps/membraned-0123"),
+            "a-cache",
+            "the test fixture",
+            None
+        ),
+        Ok(inner.join("a-cache"))
+    );
+}
+
+#[test]
+fn a_directory_named_cachedir_tag_is_not_a_tag() {
+    let target = untagged_temporary_directory();
+    std::fs::create_dir(target.path().join("CACHEDIR.TAG"))
+        .expect("a directory takes the tag's name");
+
+    assert!(
+        fixture::cache_root(
+            &target.path().join("debug/deps/membraned-0123"),
+            "a-cache",
+            "the test fixture",
+            None
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_failed_fixture_setup_fails_every_caller_with_its_own_message() {
+    static FAILING: LazyLock<Result<PathBuf, String>> =
+        LazyLock::new(|| fixture::set_up(|| panic!("the first cause")));
+
+    for caller in ["first", "second"] {
+        let refused = std::panic::catch_unwind(|| fixture::prepared(&FAILING))
+            .expect_err("a fixture whose setup failed fails its caller");
+        assert_eq!(
+            panic_message(refused),
+            "the first cause",
+            "the {caller} caller fails with the setup's own message, not a poisoned lock"
+        );
+    }
+}
+
+#[test]
+fn a_fixture_that_set_up_returns_its_path_to_every_caller() {
+    static READY: LazyLock<Result<PathBuf, String>> =
+        LazyLock::new(|| fixture::set_up(|| PathBuf::from("/a/fixture")));
+
+    for _ in 0..2 {
+        assert_eq!(fixture::prepared(&READY), PathBuf::from("/a/fixture"));
+    }
+}
+
+#[test]
+fn a_setup_keeps_a_formatted_message_and_names_a_payload_that_is_not_text() {
+    const KIND: &str = "formatted";
+    assert_eq!(
+        fixture::set_up(|| panic!("a {KIND} cause")),
+        Err("a formatted cause".to_owned())
+    );
+    assert_eq!(
+        fixture::set_up(|| std::panic::panic_any(7_u8)),
+        Err("the fixture's setup panicked with a payload that is not text".to_owned())
+    );
+}
+
+const NEEDS_THE_FIXTURE: [&str; 2] = [
+    "fixture_cache::the_same_fixture_source_at_another_path_reuses_the_published_fixture",
+    "fixture_cache::the_supervision_fixture_is_cached_inside_the_target_directory",
+];
+
+fn failure_of<'a>(report: &'a str, test: &str) -> &'a str {
+    let heading = format!("---- {test} stdout ----\n");
+    let start = report
+        .find(&heading)
+        .unwrap_or_else(|| panic!("the report shows {test} failing:\n{report}"))
+        + heading.len();
+    let rest = &report[start..];
+    &rest[..rest
+        .find("\n---- ")
+        .or_else(|| rest.find("\nfailures:"))
+        .unwrap_or(rest.len())]
+}
+
+#[test]
+fn every_test_needing_the_fixture_fails_with_the_first_cause_outside_a_tagged_target() {
+    let outside = untagged_temporary_directory();
+    let copy = outside.path().join("debug/deps/membraned-copy");
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::copy(
+        std::env::current_exe().expect("the running test executable has a path"),
+        &copy,
+    )
+    .expect("the test executable is copied outside the target directory");
+
+    let child = Command::new(&copy)
+        .args(["--exact", "--test-threads=1"])
+        .args(NEEDS_THE_FIXTURE)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("the copied test executable starts");
+
+    let report = String::from_utf8_lossy(&child.stdout);
+    assert!(
+        !child.status.success() && report.contains("test result: FAILED. 0 passed; 2 failed"),
+        "both tests fail when the fixture has no cache:\n{report}"
+    );
+    assert!(
+        !report.contains("poisoned"),
+        "no test fails with a poisoned lock:\n{report}"
+    );
+    let cause = format!(
+        "the test executable {} has no ancestor holding CACHEDIR.TAG, so the supervision fixture has no cache inside a Cargo target directory. ",
+        copy.display()
+    );
+    for test in NEEDS_THE_FIXTURE {
+        let failure = failure_of(&report, test);
+        assert!(
+            failure.contains(&cause) && failure.contains(GENERIC_FIX),
+            "{test} fails with the first cause and the command that fixes it:\n{failure}"
+        );
+    }
 }
