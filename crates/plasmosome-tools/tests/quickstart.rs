@@ -426,6 +426,19 @@ fn system_reads_the_uid_that_owns_a_new_directory() {
     assert_eq!(System::new().expect("id -u works").effective_uid(), owner);
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+fn on_linux_the_system_host_reads_noexec_from_its_mounts() {
+    assert_eq!(system().noexec(Path::new("/proc")), Ok(true));
+    assert_eq!(system().noexec(root()), Ok(false));
+}
+
+#[test]
+#[cfg(not(target_os = "linux"))]
+fn off_linux_the_system_host_finds_no_noexec_mount() {
+    assert_eq!(system().noexec(Path::new("/dev")), Ok(false));
+}
+
 fn mountinfo(lines: &[&str]) -> tempfile::NamedTempFile {
     let mut file = tempfile::NamedTempFile::new().expect("a scratch file is made");
     for line in lines {
