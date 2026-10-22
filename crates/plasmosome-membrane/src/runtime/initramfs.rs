@@ -412,7 +412,7 @@ impl Read for Positioned<'_> {
 mod tests {
     use super::*;
     use crate::runtime::test_fixtures::newc::{
-        Entry, INIT, POLICY, REGULAR, SYMLINK, encode, offsets, standard,
+        DIRECTORY, Entry, INIT, POLICY, REGULAR, SYMLINK, encode, offsets, standard,
     };
     use InitramfsRefusal::*;
     use proptest::prelude::*;
@@ -483,10 +483,14 @@ mod tests {
             Entry::trailer(),
         ]);
         let end = first.len() as u64;
+        let boundary = (end + 1).next_multiple_of(512);
+        let after = |zeros: u64| [vec![0; zeros as usize], second.clone()].concat();
         for (tail, offset) in [
-            ([&[0u8; 4][..], &second].concat(), end + 4),
+            (after(4), end + 4),
             (second.clone(), end),
             (vec![0, 0, 7], end + 2),
+            (after(88), end + 88),
+            (after(boundary - end), boundary),
         ] {
             let bytes = [first.as_slice(), &tail].concat();
             assert_eq!(audit_bytes(&bytes), Err(DataAfterTrailer { offset }));
@@ -551,18 +555,44 @@ mod tests {
             (b"\xff\0", "is not UTF-8"),
             (&long, "is longer than PATH_MAX"),
         ];
-        for (area, reason) in rows {
-            let entries = plus(named(area));
-            let offset = offsets(&entries)[3];
-            assert_eq!(
-                audit(&entries),
-                Err(BadName { offset, reason }),
-                "{:?}",
-                String::from_utf8_lossy(area)
-            );
-        }
+        let file_or_directory: [fn(&[u8]) -> Entry; 2] = [named, |area| Entry {
+            name: area.to_vec(),
+            ..Entry::dir("x")
+        }];
         let longest = [vec![b'a'; 4095], vec![0]].concat();
-        assert_eq!(audit(&plus(named(&longest))), Ok(binding(4)));
+        for entry in file_or_directory {
+            for (area, reason) in rows {
+                let entries = plus(entry(area));
+                let offset = offsets(&entries)[3];
+                assert_eq!(
+                    audit(&entries),
+                    Err(BadName { offset, reason }),
+                    "{:?} {:o}",
+                    String::from_utf8_lossy(area),
+                    entries[3].mode
+                );
+            }
+            assert_eq!(audit(&plus(entry(&longest))), Ok(binding(4)));
+        }
+    }
+
+    #[test]
+    fn directories_that_reach_the_policy_through_a_dot_dot_part_refuse_bad_name() {
+        let mut entries = standard();
+        for alias in [
+            "plasmosome/..",
+            "plasmosome/../plasmosome",
+            "plasmosome/../plasmosome/guest-policy",
+        ] {
+            entries.insert(entries.len() - 1, Entry::dir(alias));
+        }
+        assert_eq!(
+            audit(&entries),
+            Err(BadName {
+                offset: offsets(&entries)[3],
+                reason: "has a . or .. part"
+            })
+        );
     }
 
     #[test]
@@ -609,6 +639,19 @@ mod tests {
                 plus(Entry::file("plasmosome/a/b", 0o644, b"x")),
                 MissingParent {
                     name: name("plasmosome/a/b"),
+                },
+            ),
+            (plus(Entry::dir("x/y")), MissingParent { name: name("x/y") }),
+            (
+                plus(Entry::dir("plasmosome/a/b")),
+                MissingParent {
+                    name: name("plasmosome/a/b"),
+                },
+            ),
+            (
+                plus(Entry::dir("init/x")),
+                MissingParent {
+                    name: name("init/x"),
                 },
             ),
         ];
@@ -760,6 +803,13 @@ mod tests {
         for (entries, refusal) in rows {
             assert_eq!(audit(&entries), Err(refusal));
         }
+        let three = plus(Entry::file("ab", 0o644, b"abcde"));
+        assert_eq!(audit(&three), Ok(binding(4)));
+        for last in [offsets(&three)[3] + 115, data_start(&three, 3) + 7] {
+            let mut bytes = encode(&three);
+            bytes[last as usize] = 1;
+            assert_eq!(audit_bytes(&bytes), Err(NonzeroPadding { offset: last }));
+        }
         let archive = encode(&standard());
         let policy_at = offsets(&standard())[2] as usize;
         let fields = "ino mode uid gid nlink mtime filesize devmajor devminor rdevmajor rdevminor";
@@ -795,6 +845,23 @@ mod tests {
                     field: "filesize"
                 })
             );
+        }
+    }
+
+    #[test]
+    fn a_trailer_with_a_symlink_mode_refuses_and_a_trailer_of_another_mode_passes() {
+        let trailer = |mode| with(3, |entry| entry.mode = mode);
+        for mode in [SYMLINK, SYMLINK | 0o777] {
+            assert_eq!(
+                audit(&trailer(mode)),
+                Err(SymlinkEntry {
+                    name: name("TRAILER!!!")
+                }),
+                "{mode:o}"
+            );
+        }
+        for mode in [0, REGULAR | 0o644, DIRECTORY | 0o755, 0o020644, 0o777] {
+            assert_eq!(audit(&trailer(mode)), Ok(binding(3)), "{mode:o}");
         }
     }
 
@@ -917,6 +984,57 @@ mod tests {
         for (refusal, part) in rows {
             let shown = refusal.to_string();
             assert!(shown.contains(part), "{shown:?} names {part}");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    mod off_macos {
+        use super::*;
+        use crate::runtime::artifacts::verified_for_test;
+        use crate::runtime::test_fixtures::newc::bound;
+        use std::path::Path;
+
+        fn bound_to_the_empty_policy() -> InitramfsBinding {
+            InitramfsBinding {
+                policy_digest: Digest::of(b""),
+                ..binding(3)
+            }
+        }
+
+        #[test]
+        fn a_swapped_path_still_reads_the_verified_archive() {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let path = dir.path().join("initramfs");
+            std::fs::write(&path, encode(&bound(INIT, b""))).expect("write the archive");
+            let initramfs = verified_for_test(ArtifactRole::Initramfs, &path);
+            let policy = verified_for_test(ArtifactRole::GuestPolicy, Path::new("/dev/null"));
+            let expected = Ok(bound_to_the_empty_policy());
+            assert_eq!(verify_initramfs(&initramfs, &policy), expected);
+            std::fs::rename(&path, dir.path().join("initramfs.old")).expect("rename");
+            std::fs::write(&path, encode(&bound(INIT, b"another policy"))).expect("write");
+            assert_eq!(verify_initramfs(&initramfs, &policy), expected);
+        }
+
+        #[test]
+        fn a_role_mix_up_refuses_wrong_role() {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let path = dir.path().join("initramfs");
+            std::fs::write(&path, encode(&bound(INIT, b""))).expect("write the archive");
+            let kernel = verified_for_test(ArtifactRole::Kernel, &path);
+            let initramfs = verified_for_test(ArtifactRole::Initramfs, &path);
+            let policy = verified_for_test(ArtifactRole::GuestPolicy, Path::new("/dev/null"));
+            assert_eq!(
+                verify_initramfs(&initramfs, &policy),
+                Ok(bound_to_the_empty_policy())
+            );
+            for (first, second, role) in [
+                (&kernel, &policy, ArtifactRole::Kernel),
+                (&policy, &policy, ArtifactRole::GuestPolicy),
+                (&initramfs, &initramfs, ArtifactRole::Initramfs),
+                (&initramfs, &kernel, ArtifactRole::Kernel),
+            ] {
+                assert_eq!(verify_initramfs(first, second), Err(WrongRole { role }));
+            }
         }
     }
 
