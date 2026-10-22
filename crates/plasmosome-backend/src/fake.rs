@@ -50,7 +50,9 @@ impl FakeBackend {
 
     /// Makes every later `grant` and `apply` of a valid operation owned by exactly `owner` fail
     /// with `BackendError::Fault(cause)` before any change. The same plugin in another cell, and
-    /// every withdrawal, are not affected. An invalid operation still returns `InvalidOperation`.
+    /// every withdrawal, are not affected. An invalid operation still returns `InvalidOperation`,
+    /// and an address that holds an unfinished effect still returns its incomplete error or
+    /// `IdentityConflict`.
     pub fn fail_before_effect_for_owner(&mut self, owner: CellOwner, cause: &str) {
         self.refused_owners.insert(owner, cause.to_string());
     }
@@ -68,8 +70,8 @@ impl FakeBackend {
     /// Makes the next withdrawal at this exact address, through `revoke` or `apply_removal` and
     /// under either policy, fail after it released something. The call returns
     /// `BackendError::IncompleteEffect` carrying `detail`. A standing holding moves to
-    /// `incomplete` and keeps its issued record. A graceful timeout comes first and leaves the
-    /// failure armed.
+    /// `incomplete` and keeps its issued record, if it was granted. A graceful timeout comes
+    /// first and leaves the failure armed.
     pub fn fail_next_withdrawal(&mut self, handle: Handle, detail: &str) {
         self.failing_withdrawals.insert(handle, detail.to_string());
     }

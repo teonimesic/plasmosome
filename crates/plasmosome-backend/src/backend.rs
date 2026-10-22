@@ -369,7 +369,9 @@ pub enum BackendError {
     },
     /// The operation at this address had its first effect and did not finish, or a withdrawal
     /// failed after it released something. Its unfinished effect is in the snapshot's
-    /// `incomplete` until an exact removal clears it. `detail` is diagnostic, never a selector.
+    /// `incomplete` until an exact removal clears it. A retry returns this error again with the
+    /// same `class` and `id` and the latest failure's `detail`, so a caller compares class and id.
+    /// `detail` is diagnostic, never a selector.
     IncompleteEffect {
         class: &'static str,
         id: GrantId,
@@ -431,8 +433,11 @@ pub trait EnforcementBackend {
     /// changes nothing: a grant never promotes an object into an issued record. A grant that
     /// fails after its first effect returns `IncompleteEffect`, issues no record and leaves the
     /// operation in the snapshot's `incomplete`. While it is there, a grant or apply of that
-    /// operation returns the same error and creates nothing, and another operation at that
-    /// address returns `IdentityConflict`.
+    /// operation returns `IncompleteEffect` with the same class and id and the latest failure's
+    /// detail, and creates nothing, and another operation at that address returns
+    /// `IdentityConflict`. So a changed kind returns `IdentityConflict` while the issued holding
+    /// stands, and after a withdrawal of that holding fails, the same call returns
+    /// `IncompleteEffect`.
     fn grant(
         &mut self,
         operation: UniverseOp,
@@ -462,8 +467,8 @@ pub trait EnforcementBackend {
     /// record, so a later `revoke` of its handle returns `UnknownHandle`. It also takes an
     /// unfinished effect at that address whose operation has this owner and removal. A withdrawal
     /// that fails after it released something returns `IncompleteEffect`: the holding moves to
-    /// `incomplete` with its issued record, or the unfinished effect stays, until a later exact
-    /// removal succeeds.
+    /// `incomplete`, with its issued record if it was granted, or the unfinished effect stays,
+    /// until a later exact removal succeeds.
     fn apply_removal(
         &mut self,
         removal: UniverseRemoval,
