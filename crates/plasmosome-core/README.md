@@ -30,7 +30,7 @@ one.
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
-| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, the crate-private `sources::Probes` refuses one inside a Mount source under rule 5, and `sources::Guard` refuses a Mount source over a guarded directory under §6 |
+| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, the crate-private `file::OperatorFile` reads the operator file's content under rule 6 and §4, the crate-private `sources::Probes` refuses one inside a Mount source under rule 5, and `sources::Guard` refuses a Mount source over a guarded directory under §6 |
 | `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell. Its file judge is public, so `plasmosome-membrane` judges with the same code: `check_file` applies the rule to the file a walk reaches, and `verify_file` also hashes it |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
@@ -759,8 +759,9 @@ component or the value found.
 The parent, type and owner checks also judge a file the controller cannot open. On macOS the
 path is `/private/etc/...` or `/private/var/...`: `/etc` and `/var` are symlinks, so a path
 through them is `path`. Rule 5, no trusted file inside a Mount source, is a separate check on an
-open `TrustedFile`, described under [Mount sources](#mount-sources). Rule 6, the content, is not
-checked here.
+open `TrustedFile`, described under [Mount sources](#mount-sources). Rule 6, the operator file's
+content, is checked by `operator::file`, as
+[The operator file's content](#the-operator-files-content) says.
 
 Most unit tests build their files under a canonical temp directory and walk from it, so they run
 on Linux below a sticky `/tmp`. One test opens a file through the walk from `/`, so its test root
@@ -769,6 +770,42 @@ that is the per-user temp directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, w
 says. On Linux it tries `XDG_RUNTIME_DIR` when it is set, then the test binary's directory. If no
 base passes, the test fails and names each base with the ancestor that refused it. The test that
 `/etc/hosts` is `parent` skips as root, because root owns `/etc`.
+
+## The operator file's content
+
+`operator::file::OperatorFile::parse` reads the bytes `TrustedFile` read from the operator file,
+under spec 022 §3 rule 6 and §4. It is crate-private, and nothing calls it yet. It refuses the
+whole file at its first fault with a `ContentRefusal`, which a caller turns into a 108 with
+`detail` `content`. The size is not checked here: `TrustedFile` refuses a file over 1,048,576
+bytes as `size`.
+
+- The file is UTF-8 and one JSON value, read by `runtime::strict_json`, so a key repeated at any
+  depth is refused, not kept once.
+- Each object has exactly its keys: `version` and `plasmids` at the top; `proxy_maps`, `mounts`
+  and an optional `declaration` in a plasmid entry; seven keys in a ProxyMap entry; `target`,
+  `source` and `access` in a Mount entry. An unknown key, the smallest named, refuses before a
+  missing one. `version` is the JSON integer 1, so `1.0` and `"1"` are refused.
+- A plasmid ID is nonempty and NUL-free. Whether it equals its declaration's `id` is checked when
+  the declaration is opened (§5), not here.
+- `declaration`, `target` and `source` are canonical paths as `plasmosome_backend::canonical_path`
+  defines them: no empty, `.` or `..` component, no trailing `/`, and not `/` alone. A path that
+  is not canonical is refused, never rewritten.
+- A ProxyMap entry's host passes `is_proxy_host`, its modes are `MockMode::parse` names with no
+  repeat, and its route is a nonempty NUL-free label. Its transport, destination, port and
+  `allow_private` must then pass `ProxyRecipe::validate`, so `::ffff:192.0.2.10` and
+  `192.000.002.010` are refused.
+- Within one plasmid's entry, no mode appears twice for one host, port and transport, and no two
+  Mount entries share a `target`. TCP and UDP on one port are separate. Entries of different
+  plasmids are never compared.
+
+A refusal's `at` is the dotted location of the fault, such as
+`plasmids.github-pr.proxy_maps[1].modes`, or empty when the whole file is at fault. Its `Display`
+joins `at` and the reason. `OperatorFile::empty` stands for an unset `operator_declarations` key.
+`entry` gives one plasmid's entry, `listed` each declaration path for §5's local selection, and
+`mount_sources` each declared Mount source for rule 5.
+
+Spec 028's optional `lifetime` key is not read yet. plasmosome-ltb4 adds it; until then a plasmid
+entry that names it is refused as an unknown key.
 
 ## Mount sources
 
