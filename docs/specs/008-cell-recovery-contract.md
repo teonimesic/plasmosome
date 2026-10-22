@@ -60,6 +60,11 @@ The daemon receives an explicit absolute `instance_root`, independently of its c
 layout in spec001 does not imply that today's arbitrary configured socket identifies a root.
 The trusted operator supplies the root. The root and its ancestors are outside the cell's write
 authority; cell workloads must not be able to replace journal directories or files.
+The controller opens the root by walking its path from `/` without following a symlink, and
+judges every directory on the way, the root included, by the rule a membrane's socket check
+applies to them under spec 001 §4.1; a root that fails is refused before anything is created
+under it. Amended on 2026-10-22: this did not say how the root is opened, so a root whose every
+membrane would refuse its socket could still be opened.
 Private supervisor sockets additionally require spec001 §4.1's owner/mode, kernel peer-UID and
 workload-confinement boundary. A trusted path or writer lock alone does not authorize an RPC.
 
