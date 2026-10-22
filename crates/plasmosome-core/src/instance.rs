@@ -984,7 +984,9 @@ impl CellDir {
     /// lock, until its [`SupervisorLock`] is dropped. Every error of the probe or the create is
     /// `Untestable`, which keeps the error for logs and holds nothing. Use
     /// [`CellDir::probe_supervisor_lock`] where a missing lock must not be created, as in spec 023
-    /// §4 step 6.
+    /// §4 step 6. Test one cell's lock one call at a time, as spec 023 §6 has one cell's mutations,
+    /// the check of §8 among them, "run one at a time": two tests at once can both come back
+    /// `Untestable` and set a healthy cell aside.
     pub fn test_supervisor_lock(&self) -> LockTest {
         self.probe_supervisor_lock()
             .and_then(|probe| match probe {
@@ -6515,6 +6517,58 @@ mod tests {
             assert_eq!(source.raw_os_error(), Some(libc::ENOLCK), "{source}");
         });
         expect_match!(free_test_once_released(&dir), LockTest::Free(_) => ());
+    }
+
+    #[test]
+    fn a_temporary_swapped_before_the_rename_makes_a_missing_lock_untestable() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        let temporary = lock_temporary_path(&root);
+        on_naming_the_lock(move || {
+            fs::remove_file(&temporary).expect("this call's temporary is removed");
+            fs::File::create(&temporary).expect("a second creator's file is made");
+        });
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(test, LockTest::Untestable(CellDirError::LockNotNamed { path: refused }) => {
+            assert_eq!(refused, path)
+        });
+        assert!(
+            a_separate_open_can_lock(&path),
+            "the failed test kept a lock on the second creator's file"
+        );
+        assert!(!exists(&lock_temporary_path(&root)));
+    }
+
+    #[test]
+    fn a_held_file_planted_before_the_rename_makes_a_missing_lock_untestable() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        let racer = Rc::new(RefCell::new(None));
+        let (kept, planted) = (Rc::clone(&racer), path.clone());
+        on_naming_the_lock(move || {
+            let file = fs::File::create(&planted).expect("a file is planted at the name");
+            lock_exclusive_nonblocking(file.as_fd()).expect("the planter locks its file");
+            *kept.borrow_mut() = Some(file);
+        });
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(test, LockTest::Untestable(CellDirError::AlreadyExists { path: refused }) => {
+            assert_eq!(refused, path)
+        });
+        let planter = racer
+            .borrow_mut()
+            .take()
+            .expect("the planted file was made");
+        assert_eq!(
+            identity_at(&path),
+            identity(&planter.metadata().expect("the planted file's metadata")),
+            "the failed test replaced the planted file"
+        );
+        assert!(!exists(&lock_temporary_path(&root)));
+        drop(planter);
     }
 
     #[test]
