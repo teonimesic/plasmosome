@@ -1021,6 +1021,7 @@ mod tests {
                 "with no write it verifies"
             );
             let rewriting = |checked: &CheckedFile, path: &Path| {
+                assert_eq!(path, root.join("lib/membraned"), "the walk's path");
                 let found = digest_checked(checked, path);
                 after_the_clock_passes(&root, checked.stamp());
                 writer
