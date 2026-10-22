@@ -20,9 +20,10 @@ One command is served: `plasmosome status`. Every other command refuses with `no
 `read` reads the arguments after the program name against a command table, `COMMANDS` in the
 binary, and the first rule that applies decides, as spec 025 §2 orders them. All three rules that
 need the command words read them the same way: left to right, skipping each flag's value, up to
-`--` or the first unknown flag not written `--name=value`. A command's own flags are fixed by the
-task that serves it, so until then the argument after an unknown `--cell` may be its value or a
-word, and nothing after it counts as a command word. An unknown `--mock=simulate` cannot take the
+`--` or the first unknown flag not written `--name=value`. The flags this build knows are the
+global flags and the own flags of every served command, below. An unserved command's flags are
+not known yet, so the argument after an unknown `--cell` may be its value or a word, and nothing
+after it counts as a command word. An unknown `--mock=simulate` cannot take the
 next argument, so the reading goes on past it. An unknown flag of any other shape, `-x=y`
 included, ends the reading as a bare one does, so `-x=y cell list` has no command words and names
 `-x=y`.
@@ -56,13 +57,16 @@ judge only their own flags: `frobnicate --version` names `--version`, and
    - an argument that is not UTF-8;
    - a flag that is unknown, an unknown `--name=value` such as `--deadline=5` included, given
      twice, `--json` with `--human`, `--kernel`, `--socket` or `--deadline-ms` on a registry
-     command, which reaches no control socket, or a value flag with no value;
+     command, which reaches no control socket, a served command's own flag on a command that
+     does not take it, or a value flag with no value. `--mock` and `--mock=MODE` are one flag,
+     so the two together are a flag given twice;
    - a bad value, judged where it stands. `--kernel` takes a name that `plasmosome-core`'s
      `InstanceName` accepts and that holds no terminal control. `--socket` takes an absolute
      path with no empty, `.` or `..` component. `--deadline-ms` takes an integer from 1 to
-     3,600,000, and a longer digit string is refused, never parsed;
+     3,600,000, and a longer digit string is refused, never parsed. An integer flag of a command
+     takes `0` or digits with no leading zero, so `007`, `-1` and `1.5` are refused;
    - a command word that names no command, the last word of a group with no command, or a word
-     past the command's operands.
+     past the command's operands. `--mock capture` leaves `capture` a word.
 
    The command is the one the command words name, read as above before the scan starts. A flag
    the command does not take is at fault where the flag stands, so
@@ -70,15 +74,17 @@ judge only their own flags: `frobnicate --version` names `--version`, and
    last word, so `cell --kernel ../x` names `cell`. With no fault before `--`, a line with no
    command words names `--` when it has one, so bare `--`, `-- --version`, `-- --help` and `--`
    followed by an argument that is not UTF-8 all name `--`. With no `--` either, it asks for a
-   command and names no argument. A line with a command refuses `--` itself, since no served
-   command takes anything after it: `status --` and `status -- a<0xff>` both name `--`. A clean
-   line gives an `Invocation`.
+   command and names no argument. A command that takes no argv refuses `--` itself: `status --`
+   and `status -- a<0xff>` both name `--`. One that takes argv names the first argument after
+   `--` that is not UTF-8. A line still short of one of its command's operands names no argument,
+   as spec 025 says of a line wrong only for what it lacks. A clean line gives an `Invocation`.
 
 A flag is any argument before `--` that begins with `-`, `-` alone and `-5` included, unless it
 stands where a flag's value does. A known flag matches its name exactly, so `--kernel=work` is an
 unknown flag. A word is an argument before `--` that is neither a flag nor a value. `--kernel`,
-`--socket` and `--deadline-ms` take the next argument before `--` as their value, even one that
-begins with `-`, and a value is never read as a flag. So `cell list --kernel --human` keeps the
+`--socket`, `--deadline-ms` and each served command's text and integer flags take the next
+argument before `--` as their value, even one that begins with `-`, and a value is never read as
+a flag or a word. So `cell list --kernel --human` keeps the
 JSON form, and `status --kernel --socket /x/control.uds` names the instance `--socket` and refuses
 `/x/control.uds` as a word past the operands. `-h`, `--help` and `--version` are the exception:
 spec 025 looks for them anywhere before `--`, a value's place included. `--` is never a value, so
@@ -100,6 +106,27 @@ it ends in one `internal` envelope on stderr, in the form the line chose, and ex
 call to `handle` installs a panic hook for the whole process. The hook is silent on a thread while
 it runs `handle`, and passes every other panic to the hook set before it, a panic on a helper thread
 included. A hook set after that first call replaces it.
+
+## A command's own flags
+
+Each entry of the table lists its own flags in `Command.flags`, and says in `takes_argv` whether
+it takes a workload's argv after `--`. They are set in the task that serves the command, so today
+every entry has none. A `Flag` is a name, the wire key it sets and a `FlagKind`:
+
+- `Text`, `--cell VALUE`: the next argument, passed unchanged as a string.
+- `Integer`, `--lease-ms N`: `0` or digits with no leading zero, sent as a number with the
+  digits as written, so `18446744073709551616` is never rounded. The daemon judges the range.
+- `Bare`, `--now`: `true` when given, and no key at all when not, never `false`.
+- `Mock`, `--mock`: `"simulate"` alone, and MODE unchanged from `--mock=MODE`, the one `=` form
+  a flag takes. Any other `--name=VALUE`, such as `--cell=x`, is an unknown flag named as given.
+
+The parse reads a command's own flags in its one scan, beside the global flags, so a line names
+its leftmost fault whichever kind it is. A clean line's `Invocation.args` is a `CommandArgs`.
+`CommandArgs::flag`, `positional` and `argv` each give a `Param`, the wire key, the value and the
+`ArgSource` it came from, or `None` when the line does not give it. A command's help lists its
+own flags, such as `Its own flags: --cell VALUE, --now, --mock[=MODE], --lease-ms N.`, and says
+when it takes an argv. Each flag name has one kind and one key across the table, since the
+command words pass over every served command's flags; `tests/flags.rs` checks the table.
 
 ## Reading a reply
 
@@ -357,7 +384,9 @@ On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it 
 | `emit` | Writes an envelope to stdout or stderr, never both |
 | `map_refusal`, `PathOrigin` | A private-socket refusal to spec 025 §5's client error, by where the checked path came from |
 | `ClientCode`, `Exit` | The 18 client codes of spec 025 §4 and the six exit statuses they map to |
-| `Command`, `COMMANDS` | Spec 025 §2's command table: words, operands, wire method or registry name, whether it changes state, whether this build serves it |
+| `Command`, `COMMANDS` | Spec 025 §2's command table: words, operands, wire method or registry name, whether it changes state, whether this build serves it, its own flags and whether it takes argv |
+| `Flag`, `FlagKind` | A command's own flag: its name, its wire key, and what it takes and sends |
+| `CommandArgs`, `Param`, `ArgSource` | A served command's own flags, operands and argv as the parse read them, each as a wire parameter with where it came from |
 | `read`, `Reading`, `Invocation` | One command line read in spec 025's order, and a served command's checked flags |
 | `handle`, `main_with` | Read a line, write its outcome and return the exit, with a panic ending as `internal`; `main_with` does it on the process's own streams |
 | `Context` | What `handle` reads a line against and runs a command with: the version, the table, the trusted UID, the clock and the environment |

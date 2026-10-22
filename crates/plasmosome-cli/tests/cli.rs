@@ -5,8 +5,8 @@ use std::os::unix::ffi::OsStringExt;
 
 use plasmosome_cli::json::Json;
 use plasmosome_cli::{
-    COMMANDS, ClientCode, Command, Context, Env, Exit, Form, Invocation, Reading, SystemClock,
-    handle, read,
+    COMMANDS, ClientCode, Command, CommandArgs, Context, Env, Exit, Form, Invocation, Reading,
+    SystemClock, handle, read,
 };
 
 const SPEC_025: &str = concat!(
@@ -512,6 +512,7 @@ fn a_value_is_never_read_as_a_flag() {
                 socket: None,
                 deadline_ms: None,
                 form: Form::Json,
+                args: CommandArgs::default(),
             }),
             "{line:?}"
         );
@@ -899,6 +900,7 @@ fn the_full_parse_reads_each_value() {
             socket: Some("/x/control.uds".to_string()),
             deadline_ms: Some(3_600_000),
             form: Form::Human,
+            args: CommandArgs::default(),
         })
     );
     assert_eq!(
@@ -912,6 +914,7 @@ fn the_full_parse_reads_each_value() {
             socket: None,
             deadline_ms: Some(1),
             form: Form::Json,
+            args: CommandArgs::default(),
         })
     );
     assert_eq!(
@@ -922,6 +925,7 @@ fn the_full_parse_reads_each_value() {
             socket: None,
             deadline_ms: None,
             form: Form::Json,
+            args: CommandArgs::default(),
         })
     );
 }

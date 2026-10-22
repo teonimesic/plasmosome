@@ -8,6 +8,7 @@ use std::time::Instant;
 use plasmosome_core::private_socket::effective_uid;
 use plasmosome_core::state::InstanceName;
 
+use crate::args::{ArgSource, CommandArgs, Flag, FlagKind, Sent, is_integer};
 use crate::clock::{Clock, SystemClock};
 use crate::codes::{ClientCode, Exit};
 use crate::commands::{COMMANDS, Command};
@@ -80,6 +81,8 @@ pub struct Invocation {
     /// `--deadline-ms`, from 1 to 3,600,000. `None` leaves the command its default.
     pub deadline_ms: Option<u32>,
     pub form: Form,
+    /// The command's own flags, positional arguments and argv. Empty for a command with none.
+    pub args: CommandArgs,
 }
 
 /// What [`handle`] reads a line against, and what it runs a command with.
@@ -155,7 +158,7 @@ pub fn handle(
 /// Reads a command line in spec 025 §2's order. `args` are the arguments after the program name;
 /// `commands` is the table to read them against, [`COMMANDS`] in the binary.
 pub fn read(args: &[OsString], commands: &[Command]) -> Reading {
-    let line = Line::new(args);
+    let line = Line::new(args, commands);
     if line
         .head
         .iter()
@@ -214,6 +217,7 @@ struct Arg<'a> {
 struct Line<'a> {
     head: Vec<Arg<'a>>,
     tail: &'a [OsString],
+    commands: &'a [Command],
 }
 
 struct Words<'a> {
@@ -229,7 +233,7 @@ enum Named {
 }
 
 impl<'a> Line<'a> {
-    fn new(args: &'a [OsString]) -> Line<'a> {
+    fn new(args: &'a [OsString], commands: &'a [Command]) -> Line<'a> {
         let split = args
             .iter()
             .position(|arg| arg == "--")
@@ -245,7 +249,7 @@ impl<'a> Line<'a> {
             } else {
                 Kind::Word
             };
-            wants_value = kind == Kind::Flag && VALUE_FLAGS.iter().any(|flag| text == *flag);
+            wants_value = kind == Kind::Flag && takes_value(commands, text);
             classified.push(Arg {
                 text: text.as_os_str(),
                 kind,
@@ -254,7 +258,12 @@ impl<'a> Line<'a> {
         Line {
             head: classified,
             tail,
+            commands,
         }
+    }
+
+    fn is_known(&self, flag: &OsStr) -> bool {
+        KNOWN_FLAGS.iter().any(|known| flag == *known) || served_flag(self.commands, flag).is_some()
     }
 
     fn command_words(&self) -> Words<'a> {
@@ -263,7 +272,7 @@ impl<'a> Line<'a> {
             .iter()
             .enumerate()
             .take_while(|(_, arg)| {
-                arg.kind != Kind::Flag || is_known(arg.text) || holds_its_value(arg.text)
+                arg.kind != Kind::Flag || self.is_known(arg.text) || holds_its_value(arg.text)
             })
             .filter(|(_, arg)| arg.kind == Kind::Word)
             .map(|(index, arg)| (index, arg.text))
@@ -416,22 +425,42 @@ impl<'a> Line<'a> {
                 return fault;
             }
             if arg.kind == Kind::Flag {
-                seen.push(arg.text);
+                seen.push(self.flag_name(arg.text));
             }
         }
         let Named::Command(command) = named else {
             return self.no_command();
         };
-        if let Some(dashes) = self.tail.first() {
+        if let Some(fault) = self.tail_fault(&command) {
+            return fault;
+        }
+        let given = words.texts.len() - command.words.len();
+        if let Some(missing) = command.operands.get(given) {
             return self.usage(
+                format!("plasmosome {} needs {missing}", command.words.join(" ")),
+                None,
+            );
+        }
+        self.invocation(command, &words)
+    }
+
+    fn flag_name(&self, flag: &'a OsStr) -> &'a OsStr {
+        served_flag(self.commands, flag).map_or(flag, |own| OsStr::new(own.name))
+    }
+
+    fn tail_fault(&self, command: &Command) -> Option<Reading> {
+        let dashes = self.tail.first()?;
+        if !command.takes_argv {
+            return Some(self.usage(
                 format!(
                     "plasmosome {} takes nothing after `--`",
                     command.words.join(" ")
                 ),
                 Some(dashes),
-            );
+            ));
         }
-        self.invocation(command)
+        let bad = self.tail[1..].iter().find(|arg| arg.to_str().is_none())?;
+        Some(self.not_utf8(bad))
     }
 
     fn not_utf8(&self, bad: &OsStr) -> Reading {
@@ -459,7 +488,7 @@ impl<'a> Line<'a> {
 
     fn flag_fault(&self, index: usize, seen: &[&OsStr], named: &Named) -> Option<Reading> {
         let flag = self.head[index].text;
-        if !is_known(flag) {
+        if !self.is_known(flag) {
             return Some(self.usage(
                 format!(
                     "unknown flag `{}`; see plasmosome --help",
@@ -468,13 +497,32 @@ impl<'a> Line<'a> {
                 Some(flag),
             ));
         }
+        let own = served_flag(self.commands, flag);
+        if let Some(own) = own
+            && seen.contains(&OsStr::new(own.name))
+        {
+            return Some(self.usage(format!("{} is given twice", own.name), Some(flag)));
+        }
         if let Some(fault) = self.repeated(seen, flag) {
             return Some(fault);
         }
-        if !VALUE_FLAGS.iter().any(|known| flag == *known) {
+        if let (Some(own), Named::Command(command)) = (own, named)
+            && !command.flags.contains(&own)
+        {
+            return Some(self.usage(
+                format!(
+                    "plasmosome {} takes no {}",
+                    command.words.join(" "),
+                    own.name
+                ),
+                Some(flag),
+            ));
+        }
+        if !takes_value(self.commands, flag) {
             return None;
         }
         if let Named::Command(command) = named
+            && own.is_none()
             && command.method().is_none()
         {
             return Some(self.usage(
@@ -518,7 +566,14 @@ impl<'a> Line<'a> {
                 &format!("a deadline is an integer from 1 to {MAX_DEADLINE_MS}"),
             ));
         }
-        None
+        let own = served_flag(self.commands, flag)?;
+        (own.kind == FlagKind::Integer && !is_integer(&text)).then(|| {
+            self.refused(
+                own.name,
+                &text,
+                "an integer is 0, or digits with no leading zero",
+            )
+        })
     }
 
     fn word_fault(&self, index: usize, words: &Words<'a>, named: &Named) -> Option<Reading> {
@@ -543,14 +598,53 @@ impl<'a> Line<'a> {
         }
     }
 
-    fn invocation(&self, command: Command) -> Reading {
+    fn invocation(&self, command: Command, words: &Words<'a>) -> Reading {
         Reading::Run(Invocation {
             command,
             kernel: self.value(KERNEL),
             socket: self.value(SOCKET),
             deadline_ms: self.value(DEADLINE).as_deref().and_then(deadline_ms),
             form: self.form(),
+            args: self.args(&command, words),
         })
+    }
+
+    fn args(&self, command: &Command, words: &Words<'a>) -> CommandArgs {
+        let mut args = CommandArgs::default();
+        for (index, text) in self.flags() {
+            let Some(own) = served_flag(self.commands, text) else {
+                continue;
+            };
+            let value = || self.head[index + 1].text.to_string_lossy().into_owned();
+            let sent = match own.kind {
+                FlagKind::Text => Sent::Text(value()),
+                FlagKind::Integer => Sent::Number(value()),
+                FlagKind::Bare => Sent::True,
+                FlagKind::Mock => {
+                    let text = text.to_string_lossy();
+                    let mode = text
+                        .strip_prefix(own.name)
+                        .and_then(|rest| rest.strip_prefix('='));
+                    Sent::Text(mode.unwrap_or("simulate").to_string())
+                }
+            };
+            args.give(ArgSource::Flag(own.name), sent);
+        }
+        for (text, operand) in words.texts[command.words.len()..]
+            .iter()
+            .zip(command.operands)
+        {
+            let text = text.to_string_lossy().into_owned();
+            args.give(ArgSource::Positional(operand), Sent::Text(text));
+        }
+        if command.takes_argv && !self.tail.is_empty() {
+            let argv = self.tail[1..]
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            args.give(ArgSource::Argv, Sent::Argv(argv));
+        }
+        args
     }
 
     fn value(&self, flag: &str) -> Option<String> {
@@ -591,8 +685,18 @@ fn name(words: &[&OsStr], commands: &[Command]) -> Named {
     group.map_or(Named::Nothing, Named::Group)
 }
 
-fn is_known(flag: &OsStr) -> bool {
-    KNOWN_FLAGS.iter().any(|known| flag == *known)
+fn served_flag(commands: &[Command], text: &OsStr) -> Option<Flag> {
+    commands
+        .iter()
+        .filter(|command| command.served)
+        .flat_map(|command| command.flags)
+        .find(|flag| flag.matches(text))
+        .copied()
+}
+
+fn takes_value(commands: &[Command], flag: &OsStr) -> bool {
+    VALUE_FLAGS.iter().any(|known| flag == *known)
+        || served_flag(commands, flag).is_some_and(|own| own.kind.takes_value())
 }
 
 fn holds_its_value(flag: &OsStr) -> bool {

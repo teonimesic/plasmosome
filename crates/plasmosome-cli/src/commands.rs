@@ -1,9 +1,12 @@
+use crate::args::Flag;
+
 /// One command of spec 025 §2's table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Command {
     /// The words after `plasmosome` that name it, such as `["cell", "list"]`.
     pub words: &'static [&'static str],
-    /// The positional arguments that may follow the words, by the names help gives them.
+    /// The positional arguments that follow the words, by the names help gives them. A served
+    /// command needs every one.
     pub operands: &'static [&'static str],
     /// The envelope's `command`: the wire method, or spec 020's name for a registry command.
     pub command: &'static str,
@@ -13,6 +16,11 @@ pub struct Command {
     pub changes_state: bool,
     /// Whether this build serves it. An unserved command exits 2 with `not_served`.
     pub served: bool,
+    /// The command's own flags. Once it is served, the command line knows them, so their values
+    /// are never read as words. Each name has one kind and one key across the table.
+    pub flags: &'static [Flag],
+    /// Whether it takes a workload's argv after `--`.
+    pub takes_argv: bool,
 }
 
 impl Command {
@@ -35,6 +43,8 @@ const fn verb(
         is_method: true,
         changes_state,
         served: false,
+        flags: &[],
+        takes_argv: false,
     }
 }
 
@@ -51,6 +61,8 @@ const fn registry(
         is_method: false,
         changes_state,
         served: false,
+        flags: &[],
+        takes_argv: false,
     }
 }
 
