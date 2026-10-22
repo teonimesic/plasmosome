@@ -5,6 +5,7 @@ fn composite_over_fake_leaves() -> CompositeBackend {
     fn leaf() -> Box<dyn EnforcementBackend> {
         let mut leaf = FakeBackend::new();
         leaf.stall_graceful_drains_for_owner(conformance::stalled_owner());
+        leaf.fail_after_effect_for_owner(conformance::doomed_owner(), "the readiness probe failed");
         Box::new(leaf)
     }
     CompositeBackend::new(leaf(), leaf(), leaf()).expect("empty fake leaves are valid")
@@ -73,4 +74,9 @@ fn composite_backend_returns_the_original_entry_to_a_retry_and_promotes_nothing(
 #[test]
 fn composite_backends_fresh_from_the_factory_share_no_authority() {
     conformance::fresh_backends_share_no_authority(composite_over_fake_leaves);
+}
+
+#[test]
+fn composite_backend_keeps_a_failed_grant_incomplete_until_its_exact_withdrawal() {
+    conformance::failed_grants_stay_incomplete_until_exact_withdrawal(composite_over_fake_leaves);
 }
