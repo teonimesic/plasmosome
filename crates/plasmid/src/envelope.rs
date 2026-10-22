@@ -203,54 +203,70 @@ mod tests {
         points
     }
 
+    fn json_escape(rest: &str, point: u32) -> Option<&str> {
+        let hex = rest.strip_prefix(char::from(0x5c_u8))?.strip_prefix('u')?;
+        let digits = hex.get(..4)?;
+        if !digits.chars().all(|c| c.is_ascii_hexdigit())
+            || u32::from_str_radix(digits, 16) != Ok(point)
+        {
+            return None;
+        }
+        hex.get(4..)
+    }
+
+    fn code_point_shown(rest: &str, point: u32) -> Option<&str> {
+        rest.strip_prefix(format!("<U+{point:04X}>").as_str())
+    }
+
+    fn assert_written_as_spec_025_says(
+        writer: &str,
+        written: &str,
+        text: &str,
+        listed: &[u32],
+        escape: fn(&str, u32) -> Option<&str>,
+    ) {
+        let mut rest = written;
+        for character in text.chars() {
+            let point = u32::from(character);
+            let is_listed = listed.binary_search(&point).is_ok();
+            let after = if is_listed {
+                escape(rest, point)
+            } else {
+                rest.strip_prefix(character)
+            };
+            rest = after.unwrap_or_else(|| {
+                let found: String = rest.chars().take(8).collect();
+                if is_listed {
+                    panic!("U+{point:04X} is listed, so {writer} escapes it, not as {found:?}")
+                }
+                panic!("U+{point:04X} is not listed, so {writer} writes it raw, not as {found:?}")
+            });
+        }
+        assert!(
+            rest.is_empty(),
+            "{writer} writes {rest:?} after the last character"
+        );
+    }
+
     #[test]
     fn both_writers_follow_spec_025s_list_for_every_character() {
         let listed = spec_025_terminal_controls();
         assert_eq!(listed.len(), 77, "spec 025 section 3 names 77 code points");
+        let every: String = (0..=0x10ffff).filter_map(char::from_u32).collect();
+        let mut shown = String::new();
+        show(&mut shown, &every);
+        assert_written_as_spec_025_says("show", &shown, &every, &listed, code_point_shown);
         let backslash = char::from(0x5c_u8);
-        for character in (0..=0x10ffff).filter_map(char::from_u32) {
-            let point = u32::from(character);
-            let text = character.to_string();
-            let is_listed = listed.binary_search(&point).is_ok();
-            let mut shown = String::new();
-            show(&mut shown, &text);
-            if is_listed {
-                assert_eq!(
-                    shown,
-                    format!("<U+{point:04X}>"),
-                    "U+{point:04X} is listed, so show writes its code point"
-                );
-            } else {
-                assert_eq!(
-                    shown, text,
-                    "U+{point:04X} is not listed, so show writes it as UTF-8"
-                );
-            }
-            if character == '"' || character == backslash {
-                continue;
-            }
-            let mut written = String::new();
-            write_string(&mut written, &text);
-            if is_listed {
-                let escape = written
-                    .strip_prefix('"')
-                    .and_then(|rest| rest.strip_suffix('"'))
-                    .and_then(|rest| rest.strip_prefix(backslash))
-                    .and_then(|rest| rest.strip_prefix('u'))
-                    .filter(|hex| hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()))
-                    .and_then(|hex| u32::from_str_radix(hex, 16).ok());
-                assert_eq!(
-                    escape,
-                    Some(point),
-                    "U+{point:04X} is listed, so write_string escapes it, not as {written:?}"
-                );
-            } else {
-                assert_eq!(
-                    written,
-                    format!(r#""{character}""#),
-                    "U+{point:04X} is not listed, so write_string writes it as UTF-8"
-                );
-            }
-        }
+        let text: String = every
+            .chars()
+            .filter(|&character| character != '"' && character != backslash)
+            .collect();
+        let mut written = String::new();
+        write_string(&mut written, &text);
+        let body = written
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("write_string writes a string between quotes");
+        assert_written_as_spec_025_says("write_string", body, &text, &listed, json_escape);
     }
 }

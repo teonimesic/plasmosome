@@ -73,6 +73,56 @@ fn spec_025_terminal_controls() -> Vec<u32> {
     points
 }
 
+fn json_escape(rest: &str, point: u32) -> Option<&str> {
+    let hex = rest.strip_prefix(BACKSLASH)?.strip_prefix('u')?;
+    let digits = hex.get(..4)?;
+    if !digits.chars().all(|c| c.is_ascii_hexdigit())
+        || u32::from_str_radix(digits, 16) != Ok(point)
+    {
+        return None;
+    }
+    hex.get(4..)
+}
+
+fn code_point_shown(rest: &str, point: u32) -> Option<&str> {
+    rest.strip_prefix(format!("<U+{point:04X}>").as_str())
+}
+
+fn assert_written_as_spec_025_says(
+    form: &str,
+    written: &str,
+    text: &str,
+    listed: &[u32],
+    escape: fn(&str, u32) -> Option<&str>,
+) {
+    let mut rest = written
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("the {form} form writes a string between quotes"));
+    for character in text.chars() {
+        let point = u32::from(character);
+        let is_listed = listed.binary_search(&point).is_ok();
+        let after = if is_listed {
+            escape(rest, point)
+        } else {
+            rest.strip_prefix(character)
+        };
+        rest = after.unwrap_or_else(|| {
+            let found: String = rest.chars().take(8).collect();
+            if is_listed {
+                panic!("U+{point:04X} is listed, so the {form} form escapes it, not as {found:?}")
+            }
+            panic!(
+                "U+{point:04X} is not listed, so the {form} form writes it raw, not as {found:?}"
+            )
+        });
+    }
+    assert!(
+        rest.is_empty(),
+        "the {form} form writes {rest:?} after the last character"
+    );
+}
+
 fn number(text: &str) -> Json {
     Json::Number(Number::new(text.to_string()).expect("the test names valid number text"))
 }
@@ -169,44 +219,15 @@ fn every_character_is_escaped_exactly_when_spec_025_lists_it() {
         listed, tested,
         "the test's list of terminal controls is spec 025's list"
     );
-    for character in (0..=0x10ffff).filter_map(char::from_u32) {
-        if character == '"' || character == BACKSLASH {
-            continue;
-        }
-        let point = u32::from(character);
-        let value = Json::String(character.to_string());
-        let compact = write_compact(&value);
-        let human = write_human(&value);
-        if listed.binary_search(&point).is_ok() {
-            let escape = compact
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix('"'))
-                .and_then(|rest| rest.strip_prefix(BACKSLASH))
-                .and_then(|rest| rest.strip_prefix('u'))
-                .filter(|hex| hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()))
-                .and_then(|hex| u32::from_str_radix(hex, 16).ok());
-            assert_eq!(
-                escape,
-                Some(point),
-                "U+{point:04X} is listed, so the compact form escapes it, not as {compact:?}"
-            );
-            assert_eq!(
-                human,
-                format!(r#""<U+{point:04X}>""#),
-                "U+{point:04X} is listed, so the human form shows it by its code point"
-            );
-        } else {
-            let raw = format!(r#""{character}""#);
-            assert_eq!(
-                compact, raw,
-                "U+{point:04X} is not listed, so the compact form writes it as UTF-8"
-            );
-            assert_eq!(
-                human, raw,
-                "U+{point:04X} is not listed, so the human form writes it as UTF-8"
-            );
-        }
-    }
+    let text: String = (0..=0x10ffff)
+        .filter_map(char::from_u32)
+        .filter(|&character| character != '"' && character != BACKSLASH)
+        .collect();
+    let value = Json::String(text.clone());
+    let compact = write_compact(&value);
+    assert_written_as_spec_025_says("compact", &compact, &text, &listed, json_escape);
+    let human = write_human(&value);
+    assert_written_as_spec_025_says("human", &human, &text, &listed, code_point_shown);
 }
 
 #[test]
