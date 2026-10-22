@@ -1638,7 +1638,10 @@ mod tests {
                 if previous.get() != Some(fd) {
                     previous.set(Some(fd));
                     reached.set(reached.get() + 1);
-                    if reached.get() == 1 || reached.get() == ordinal {
+                    if reached.get() == 1 {
+                        advance.advance(Duration::from_millis(600));
+                    }
+                    if reached.get() == ordinal {
                         advance.advance(Duration::from_millis(600));
                     }
                     let _ = turn.send(());
@@ -1662,6 +1665,11 @@ mod tests {
             "600 ms at the normal accept and 600 ms at {stage} spend a 1,000 ms allowance"
         );
         assert!(closed(shim), "every stream the shim opened is closed");
+    }
+
+    #[test]
+    fn one_allowance_covers_the_normal_accept_alone() {
+        the_allowance_runs_out_at(Stage::NormalAccept);
     }
 
     #[test]
