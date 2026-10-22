@@ -2597,13 +2597,26 @@ mod tests {
             ("add_subdirectory on the root", root_with_acl),
             ("a foreign owner above", under_a_foreign_owner),
         ]);
-        for (row, setup) in rows {
+        let mut failed: Vec<&str> = rows
+            .into_iter()
+            .filter(|(row, setup)| {
+                std::panic::catch_unwind(|| {
+                    let base = TestRoot::walkable_from_root();
+                    assert_refused_where_its_socket_would_be(row, setup(base.path()));
+                })
+                .is_err()
+            })
+            .map(|(row, _)| row)
+            .collect();
+        let clean = std::panic::catch_unwind(|| {
             let base = TestRoot::walkable_from_root();
-            assert_refused_where_its_socket_would_be(row, setup(base.path()));
+            make_dir(&base.join("inst"), 0o700);
+            assert_opens_where_its_socket_would("clean", &base.join("inst"));
+        });
+        if clean.is_err() {
+            failed.push("clean");
         }
-        let base = TestRoot::walkable_from_root();
-        make_dir(&base.join("inst"), 0o700);
-        assert_opens_where_its_socket_would("clean", &base.join("inst"));
+        assert!(failed.is_empty(), "rows that failed: {failed:?}");
     }
 
     #[test]
