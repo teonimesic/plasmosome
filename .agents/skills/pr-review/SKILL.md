@@ -70,6 +70,25 @@ claim model diversity. The author spawns it when possible and asks the orchestra
 The reviewer reads the surrounding code as well as the diff, verifies empirical claims, and
 checks every applicable acceptance item in every governing spec.
 
+A PR that adds a Python file, a workflow step that runs Python, or a Python block to a doc is
+refused. Tooling here is Rust (the owner's rule of 2026-10-21): a binary and its tests in
+`crates/plasmosome-tools`, or a crate's own tests. The one exception is a hit that belongs to
+`tools/work-state*` or `.githooks/build-input-guard`, which stay Python until the owner rules on
+them: the files themselves, or the workflow lines that run them. Check the added files for a
+`.py` name or a first line that names Python, and the lines a PR adds to workflows and docs for
+a Python command or a code fence opened as Python:
+
+```shell
+git diff --name-only --no-renames --diff-filter=A <base>...<head> | while IFS= read -r f; do
+  case $f in *.py) echo "$f" ;; *) git show "<head>:$f" | head -n 1 | /usr/bin/grep -q -i '[p]ython' && echo "$f" ;; esac
+done
+git diff -U0 <base>...<head> -- .github '*.md' | /usr/bin/grep -n -e '^+.*[p]ython3' -e '^+ *[`~]\{3\} *[p]y'
+```
+
+Only added lines count, and the brackets stop the commands from naming their own lines. The
+failure this prevents: Python tooling added after that rule. Whether it stopped is counted with
+`git log --diff-filter=A -- '*.py'` on `main`.
+
 A PR that changes any path or kind of code listed in
 [spec 026 section 8](../../../docs/specs/026-security-standard.md#8-which-prs-this-spec-governs)
 is also governed by spec 026, whatever its task maps to. Run nothing from a contributor's PR on

@@ -8,6 +8,8 @@ const TESTKIT: &str = "plasmosome-testkit";
 
 const LANES: &str = "plasmosome-lanes";
 
+const TOOLS: &str = "plasmosome-tools";
+
 const BACKEND: &str = "plasmosome-backend";
 
 const TEST_FIXTURE: &str = "test-fixture";
@@ -382,6 +384,95 @@ fn lanes_are_dev_only() {
         let refusals = lanes_refusals(root, &members);
         assert!(refusals.is_empty(), "{}", refusals.join("\n"));
     });
+}
+
+fn tools_refusals(root: &Path, members: &[String]) -> Vec<String> {
+    if !members.iter().any(|member| member == TOOLS) {
+        return vec![format!(
+            "`{TOOLS}` is no longer a workspace member, so this guard checks nothing: {members:?}"
+        )];
+    }
+    members_shipping(root, members, TOOLS)
+        .into_iter()
+        .map(|member| {
+            format!(
+                "`{member}` has a non-dev dependency path to `{TOOLS}`. The tools are the repository's CI and maintainer tooling, not product code, so their code would ship inside a product binary (spec 013). Reach them only through `[dev-dependencies]`, never through a normal, build or optional dependency."
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn tools_are_dev_only() {
+    check_workspace(|root| {
+        let refusals = tools_refusals(root, &workspace_members(root));
+        assert!(refusals.is_empty(), "{}", refusals.join("\n"));
+    });
+}
+
+fn tools_refusals_for(sections: &str) -> Vec<String> {
+    let workspace = fixture_feature_workspace_of(
+        &[
+            (
+                "crates/membrane",
+                &consumer("plasmosome-membrane", sections),
+            ),
+            ("crates/tools", &member_manifest(TOOLS)),
+        ],
+        "",
+    );
+    tools_refusals(workspace.path(), &workspace_members_in(workspace.path()))
+}
+
+fn assert_membrane_ships_the_tools(refusals: &[String]) {
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    assert!(
+        refusals[0]
+            .starts_with("`plasmosome-membrane` has a non-dev dependency path to `plasmosome-tools`"),
+        "{refusals:?}"
+    );
+}
+
+#[test]
+fn a_normal_dependency_on_the_tools_is_refused() {
+    assert_membrane_ships_the_tools(&tools_refusals_for(
+        "[dependencies]\nplasmosome-tools = { path = \"../tools\" }\n",
+    ));
+}
+
+#[test]
+fn a_build_dependency_on_the_tools_is_refused() {
+    assert_membrane_ships_the_tools(&tools_refusals_for(
+        "[build-dependencies]\nplasmosome-tools = { path = \"../tools\" }\n",
+    ));
+}
+
+#[test]
+fn an_optional_tools_dependency_behind_a_feature_is_refused() {
+    assert_membrane_ships_the_tools(&tools_refusals_for(
+        "[features]\ntools = [\"dep:plasmosome-tools\"]\n\n[dependencies]\nplasmosome-tools = { path = \"../tools\", optional = true }\n",
+    ));
+}
+
+#[test]
+fn a_dev_dependency_on_the_tools_is_not_refused() {
+    let refusals =
+        tools_refusals_for("[dev-dependencies]\nplasmosome-tools = { path = \"../tools\" }\n");
+
+    assert!(refusals.is_empty(), "{refusals:?}");
+}
+
+#[test]
+fn a_workspace_without_the_tools_is_refused_not_passed() {
+    let workspace = fixture_feature_workspace(&consumer("plasmosome-membrane", ""), "");
+
+    let refusals = tools_refusals(workspace.path(), &workspace_members_in(workspace.path()));
+
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    assert!(
+        refusals[0].starts_with("`plasmosome-tools` is no longer a workspace member"),
+        "{refusals:?}"
+    );
 }
 
 fn membrane_workspace(sections: &str) -> tempfile::TempDir {
