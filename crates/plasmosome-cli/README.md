@@ -206,10 +206,13 @@ The caller passes the refusal, the path it passed to the check, where that path 
 trusted UID it passed to the check. The path is the socket path for `check_private_path` and
 `check_peer_uid`, and `instances/` for `list_trusted_dir`. `PathOrigin::SocketFlag` says the path
 is `--socket`'s value, and `PathOrigin::Home` says it was built from `$HOME`. Only `BadPath` reads
-the origin: from `--socket` it is `invalid_argument`, exit 64, with `argument` `--socket`; from
-`$HOME` it is `invalid_home`, exit 2. `status` never reaches the `--socket` arm: `BadPath` means a
-path that is not absolute and normal, and the parse refuses every such `--socket` value first,
-naming the value.
+the origin: from `--socket` it is `invalid_argument`, exit 64, and its `argument` is the path
+passed in, the value given to `--socket`, as the parse names a value it refuses; from `$HOME` it
+is `invalid_home`, exit 2. The binary's `status` never reaches the `--socket` arm: `BadPath`
+means a path that is not absolute and normal, or one with a NUL byte. The parse refuses every
+`--socket` value of the first kind, naming the value, and a process argument holds no NUL. A
+library caller that passes `handle` a `--socket` value with a NUL reaches the arm, and gets that
+value as its `argument`.
 
 Each code carries only the fields spec 025's client-code table lists for it. `path` is the
 component the check reports. `BadName`, `PeerCredentials` and `PeerMismatch` report none, so their
