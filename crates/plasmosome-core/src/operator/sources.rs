@@ -1208,12 +1208,19 @@ mod tests {
         symlink("src", root.join("link")).expect("symlink");
         symlink("real", root.join("alias")).expect("symlink");
         write_file(&root.join("file"), b"", 0o600);
+        write_file(&root.join("unreadable"), b"", 0o000);
         let guard = guard(&root, &[(InstanceRoot, "inst")]).expect("opens");
         let at = |relative: &str| root.join(relative);
         for (relative, refusal) in [
             ("link", WalkRefusal::Symlink { path: at("link") }),
             ("alias/x", WalkRefusal::Symlink { path: at("alias") }),
             ("file", WalkRefusal::NotDirectory { path: at("file") }),
+            (
+                "unreadable",
+                WalkRefusal::NotDirectory {
+                    path: at("unreadable"),
+                },
+            ),
             ("absent", WalkRefusal::Missing { path: at("absent") }),
         ] {
             assert_eq!(
