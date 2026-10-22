@@ -278,7 +278,9 @@ impl DefectiveBackend {
             .filter(|held| self.incomplete.contains_key(held));
         let out_of_order = match self.defect {
             Defect::IncompleteCleanupOnlyInGrantOrder => pending.next() != Some(&address),
-            Defect::IncompleteCleanupOnlyInReversePushOrder => pending.last() != Some(&address),
+            Defect::IncompleteCleanupOnlyInReversePushOrder => {
+                pending.next_back() != Some(&address)
+            }
             _ => false,
         };
         if out_of_order {
