@@ -2393,6 +2393,7 @@ mod tests {
         real: Option<PathBuf>,
         refusal: WalkRefusal,
         socket_check: bool,
+        closed_parent: Option<(PathBuf, u32)>,
     }
 
     fn refused_at(open: PathBuf, real: Option<PathBuf>, refusal: WalkRefusal) -> Refused {
@@ -2401,6 +2402,7 @@ mod tests {
             real,
             refusal,
             socket_check: true,
+            closed_parent: None,
         }
     }
 
@@ -2425,6 +2427,7 @@ mod tests {
             real,
             refusal,
             socket_check,
+            closed_parent,
         } = refused;
         match InstanceRoot::open(&open) {
             Err(InstanceRootError::Untrusted {
@@ -2437,8 +2440,14 @@ mod tests {
             other => panic!("{row}: expected Untrusted, got {other:?}"),
         }
         if let Some(real) = &real {
+            if let Some((parent, _)) = &closed_parent {
+                set_mode(parent, 0o700);
+            }
             assert_eq!(entries_of(real), Vec::<PathBuf>::new(), "{row}");
             make_cell_dir_by_hand(real);
+            if let Some((parent, mode)) = &closed_parent {
+                set_mode(parent, *mode);
+            }
         }
         if socket_check {
             assert_eq!(
@@ -2462,11 +2471,14 @@ mod tests {
         make_dir(&parent.join("inst"), 0o700);
         set_mode(&parent, mode);
         let root = parent.join("inst");
-        refused_at(
-            root.clone(),
-            Some(root),
-            WalkRefusal::Replaceable { path: parent, mode },
-        )
+        Refused {
+            closed_parent: Some((parent.clone(), mode)),
+            ..refused_at(
+                root.clone(),
+                Some(root),
+                WalkRefusal::Replaceable { path: parent, mode },
+            )
+        }
     }
 
     fn root_at(base: &Path, mode: u32) -> Refused {
@@ -2503,6 +2515,7 @@ mod tests {
             real: Some(root),
             refusal: WalkRefusal::NotNormal { path: spelled },
             socket_check: false,
+            closed_parent: None,
         }
     }
 
