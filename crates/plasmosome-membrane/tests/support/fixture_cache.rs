@@ -418,8 +418,7 @@ fn a_cache_root_that_is_not_a_directory_fails_setup_naming_it() {
 #[test]
 fn the_fixture_cache_sits_in_the_nearest_directory_cargo_tagged_whatever_the_layout_below() {
     let target = tempfile::tempdir().unwrap();
-    std::fs::write(target.path().join("CACHEDIR.TAG"), TAG)
-        .expect("the cache directory tag is written");
+    tag(target.path());
     let executable = target
         .path()
         .join("debug/build/plasmosome-membrane/0123abcd/out/membraned-0123abcd");
@@ -476,7 +475,7 @@ fn the_refusal_test_needs_an_untagged_temporary_directory_and_leaves_it_empty() 
     );
 
     let planted = tempfile::tempdir().unwrap();
-    std::fs::write(planted.path().join("CACHEDIR.TAG"), TAG).expect("a tag is planted");
+    tag(planted.path());
     let inside = planted.path().join("tmp");
     std::fs::create_dir(&inside).expect("a temporary directory is made inside the tagged one");
     let (passed, report) = refusal_run_with(&inside);
@@ -519,7 +518,13 @@ fn the_supervision_fixture_is_cached_inside_the_target_directory() {
     );
 }
 
-const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
+fn tag(directory: &Path) {
+    std::fs::write(
+        directory.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .expect("the cache directory tag is written");
+}
 
 fn untagged_temporary_directory() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
@@ -634,7 +639,7 @@ fn a_target_named_through_a_symbolic_link_still_holds_the_executable() {
 #[test]
 fn a_tagged_target_still_holds_the_cache() {
     let target = tempfile::tempdir().unwrap();
-    std::fs::write(target.path().join("CACHEDIR.TAG"), TAG).expect("the tag is written");
+    tag(target.path());
     let elsewhere = tempfile::tempdir().unwrap();
 
     for below in [
@@ -660,10 +665,10 @@ fn a_tagged_target_still_holds_the_cache() {
 #[test]
 fn the_nearest_tagged_ancestor_holds_the_cache() {
     let outer = tempfile::tempdir().unwrap();
-    std::fs::write(outer.path().join("CACHEDIR.TAG"), TAG).expect("the outer tag is written");
+    tag(outer.path());
     let inner = outer.path().join("inner");
     std::fs::create_dir(&inner).expect("the inner target is created");
-    std::fs::write(inner.join("CACHEDIR.TAG"), TAG).expect("the inner tag is written");
+    tag(&inner);
 
     assert_eq!(
         fixture::cache_root(
