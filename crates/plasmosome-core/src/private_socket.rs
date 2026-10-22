@@ -210,18 +210,21 @@ impl PrivateListener {
     /// `AddressInUse` and is left as it was. The temporary is `.` and then up to 15 characters
     /// from `0-9a-z`, as many as the socket address has room for, or one such character when one
     /// byte is left. A temporary that is taken, or that equals `name` ignoring ASCII case, is
-    /// drawn again, eight draws in all; then the result is `Io` from `bind` with `EADDRINUSE`.
+    /// drawn again, eight draws in all; then the result is `Io` from `bind` with `EADDRINUSE`,
+    /// naming the last temporary `bind` found taken, or `dir` if every draw equalled `name`
+    /// ignoring case.
     ///
     /// `dir` is walked and judged again before the socket is created, and again after it is
     /// bound; if that second check fails, its error is returned and the socket at the temporary
     /// name in the held directory is removed, but only if the effective UID owns it.
     /// `BindEscaped` means no socket owned by the effective UID is at the temporary name in the
-    /// held directory after bind. `PathTooLong` and `AddressInUse` name `name`'s path; errors
-    /// after the bind name the temporary's path. A hard exit before the rename leaves the
-    /// temporary, which nothing removes. The socket's own address, as `getsockname` reports it,
-    /// is the temporary name. A caller that forks from another thread must hold its descriptor
-    /// lock around this call, because on macOS the socket is created before it is marked
-    /// close-on-exec.
+    /// held directory after bind. `PathTooLong`, `AddressInUse` and failures before `bind` name
+    /// `name`'s path. The directory checks' errors name the directory component that broke the
+    /// rule. Every other error from `bind` on names the temporary's path. A hard exit before the
+    /// rename leaves the temporary, which nothing removes. The socket's own address, as
+    /// `getsockname` reports it, is the temporary name. A caller that forks from another thread
+    /// must hold its descriptor lock around this call, because on macOS the socket is created
+    /// before it is marked close-on-exec.
     pub fn bind(
         dir: PrivateDir,
         name: &str,
@@ -821,30 +824,28 @@ fn choose_temporary(
     draw: &mut dyn FnMut(usize) -> String,
     mut bind_at: impl FnMut(&Path) -> Result<(), PrivateSocketError>,
 ) -> Result<String, PrivateSocketError> {
-    let mut drawn = 0;
-    loop {
-        drawn += 1;
+    let mut taken = None;
+    for _ in 0..TEMPORARY_DRAWS {
         let candidate = draw(room);
-        let at = dir.join(&candidate);
-        if !candidate.eq_ignore_ascii_case(name) {
-            match bind_at(&at) {
-                Ok(()) => return Ok(candidate),
-                Err(PrivateSocketError::Io {
-                    op: "bind",
-                    errno: libc::EADDRINUSE,
-                    ..
-                }) => {}
-                Err(refusal) => return Err(refusal),
-            }
+        if candidate.eq_ignore_ascii_case(name) {
+            continue;
         }
-        if drawn == TEMPORARY_DRAWS {
-            return Err(PrivateSocketError::Io {
+        let at = dir.join(&candidate);
+        match bind_at(&at) {
+            Ok(()) => return Ok(candidate),
+            Err(PrivateSocketError::Io {
                 op: "bind",
-                path: at,
                 errno: libc::EADDRINUSE,
-            });
+                ..
+            }) => taken = Some(at),
+            Err(refusal) => return Err(refusal),
         }
     }
+    Err(PrivateSocketError::Io {
+        op: "bind",
+        path: taken.unwrap_or_else(|| dir.to_path_buf()),
+        errno: libc::EADDRINUSE,
+    })
 }
 
 #[allow(unsafe_code)]
@@ -1667,6 +1668,27 @@ mod tests {
     }
 
     #[test]
+    fn the_rename_publishes_in_the_held_directory_after_its_path_moves() {
+        let (root, cell, dir) = private_cell();
+        let moved = root.path().join("moved");
+        let mut seen = None;
+        let (_listener, bound) = publish_drawing(dir, "sock", effective_uid(), &[DRAWN], |step| {
+            if step == Step::Listening {
+                seen = Some(fs::symlink_metadata(cell.join(DRAWN)).expect("the temporary"));
+                fs::rename(&cell, &moved).expect("rename");
+                make_dir(&cell, 0o700);
+            }
+        })
+        .expect("publish binds");
+        let seen = seen.expect("the last observation point ran");
+        let published = fs::symlink_metadata(moved.join("sock")).expect("the moved directory");
+        assert_eq!((published.dev(), published.ino()), (seen.dev(), seen.ino()));
+        assert_eq!((bound.entry.dev, bound.entry.ino), (seen.dev(), seen.ino()));
+        assert_eq!(entries(&moved), vec![moved.join("sock")]);
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
     fn a_failure_before_the_rename_removes_only_the_temporary_it_created() {
         let (_root, cell, dir) = private_cell();
         let sock = cell.join("sock");
@@ -1690,6 +1712,23 @@ mod tests {
             }
         );
         assert_eq!(fs::read(&sock).expect("the planted file stays"), b"planted");
+        assert_eq!(entries(&cell), vec![sock]);
+    }
+
+    #[test]
+    fn publish_refuses_an_occupied_name_before_it_draws_a_temporary() {
+        let (_root, cell, dir) = private_cell();
+        let sock = cell.join("sock");
+        fs::write(&sock, b"planted").expect("write");
+        let mut steps = Vec::new();
+        let refusal = refusal_of(publish_drawing(dir, "sock", effective_uid(), &[], |step| {
+            steps.push(step)
+        }));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::AddressInUse { path: sock.clone() }
+        );
+        assert_eq!(steps, Vec::<Step>::new());
         assert_eq!(entries(&cell), vec![sock]);
     }
 
@@ -1904,6 +1943,37 @@ mod tests {
     }
 
     #[test]
+    fn a_draw_that_names_the_entry_is_not_reported_as_a_taken_bind() {
+        let (root, cell, dir) = private_cell();
+        let names = [".t1", ".t2", ".t3", ".t4", ".t5", ".t6", ".t7", ".SOCK"];
+        for name in &names[..7] {
+            fs::write(cell.join(name), b"taken").expect("write");
+        }
+        let in_use = |path: PathBuf| PrivateSocketError::Io {
+            op: "bind",
+            path,
+            errno: libc::EADDRINUSE,
+        };
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            ".sock",
+            effective_uid(),
+            &names,
+            |_| {},
+        ));
+        assert_eq!(refusal, in_use(cell.join(".t7")));
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            ".a",
+            effective_uid(),
+            &[".A"; 8],
+            |_| {},
+        ));
+        assert_eq!(refusal, in_use(cell.clone()));
+    }
+
+    #[test]
     fn a_bind_the_directory_refuses_is_io_naming_the_temporary_and_is_not_drawn_again() {
         let (_root, cell, dir) = private_cell();
         let mut draws = 0;
@@ -1943,6 +2013,7 @@ mod tests {
             ("sock", 16),
             ("sock", 90),
         ] {
+            let mut distinct = std::collections::HashSet::new();
             for _ in 0..1000 {
                 let temporary = choose_temporary(
                     Path::new("/r/cell"),
@@ -1972,7 +2043,15 @@ mod tests {
                     !temporary.eq_ignore_ascii_case(name),
                     "{temporary:?} names the entry {name:?}"
                 );
+                distinct.insert(temporary);
             }
+            if room >= 16 {
+                assert_eq!(distinct.len(), 1000, "draws repeat at room {room}");
+            }
+            assert!(
+                distinct.len() > 1,
+                "every draw at room {room} is {distinct:?}"
+            );
         }
     }
 
