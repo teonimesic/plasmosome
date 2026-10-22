@@ -344,9 +344,10 @@ hashes the bytes as it writes them. Then the root image must still pass `reconfi
 refusal is `Source` with whatever fault `reconfirm()` found: a path that names another file, a
 size or times that moved, or a fault of any check it repeats, such as a cleared `uchg`. A refusal
 after the new file's `fstat` removes the copy as `remove()` does, so a removal that fails, or that
-finds another object at the name, leaves what is there. If that `fstat` fails, the empty file
-stays, since there is no identity to remove it by. The copy is a plain copy, not an APFS clone: a
-clone of a `uchg` file can carry the flag, and the copy must be writable.
+finds another object at the name, leaves what is there, and a copy renamed away stays under its
+new name. If that `fstat` fails, the empty file stays, since there is no identity to remove it
+by. The copy is a plain copy, not an APFS clone: a clone of a `uchg` file can carry the flag, and
+the copy must be writable.
 
 `remove()` and dropping a `WritableRoot` unlink the name in the held directory only while it is
 still the file that was made, by device and inode. A cell directory renamed after the copy still

@@ -74,7 +74,8 @@ impl PrivateDirectory {
 /// directory and unlinks it only if it still holds the file it created. The inspection and the
 /// unlink are two steps, so another writer can put an object at the name between them. Dropping
 /// it does the same, so a refusal or a panic after the copy removes the copy, unless that removal
-/// fails or finds another object at the name.
+/// fails, finds another object at the name, or finds the name gone because the copy was renamed
+/// away.
 #[derive(Debug)]
 pub struct WritableRoot {
     path: RecipePath,
@@ -955,10 +956,10 @@ mod tests {
             ),
             (
                 Source(ArtifactFault::Io {
-                    op: "openat",
-                    errno: 24,
+                    op: "fstat",
+                    errno: 5,
                 }),
-                "the root image did not pass its reconfirm after the copy: openat failed with errno 24",
+                "the root image did not pass its reconfirm after the copy: fstat failed with errno 5",
             ),
             (
                 Io {
