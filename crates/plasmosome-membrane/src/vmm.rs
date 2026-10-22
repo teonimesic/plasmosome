@@ -1986,6 +1986,11 @@ mod tests {
         let leader: libc::pid_t = leader
             .parse()
             .unwrap_or_else(|_| panic!("the helper names its leader's pid: {named:?}"));
+        assert!(
+            Path::new(path).starts_with(root.path()),
+            "the helper's fixture directory {path} is inside the test's root {}, so it is removed with it",
+            root.path().display()
+        );
         let liveness = open_liveness(Path::new(path));
         assert!(
             holds_open(&liveness, Duration::ZERO),
