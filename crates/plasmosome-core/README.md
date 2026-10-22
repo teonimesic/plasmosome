@@ -537,7 +537,8 @@ socket through it too, as [Socket ownership](#socket-ownership) says, and so do
     characters from `0-9a-z`, or a single such character when only one byte is left. A
     temporary that `bind` finds taken, or that equals the configured name ignoring ASCII case, is
     drawn again; on a case-insensitive volume such a name would be the configured entry. After
-    eight draws it returns `Io` naming the last temporary, with `EADDRINUSE`.
+    eight draws it returns `Io` with `EADDRINUSE`, naming the last temporary `bind` found taken,
+    or the directory if every draw equalled the name ignoring case.
   - It walks and judges the directory again before it creates the socket, and again after
     `bind`. If the second check fails, it returns that check's error and removes the socket it
     finds at the temporary name in the held directory, but only if the effective UID owns it.

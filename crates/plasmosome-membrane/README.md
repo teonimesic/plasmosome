@@ -405,20 +405,21 @@ core's `private_socket`, the boundary `plasmosomed` binds its control socket wit
 "Private recovery sockets", describes it. `PrivateDir::open` walks the parent from `/` without
 following a symlink, and requires every ancestor owned by root or this uid and writable by neither
 group nor other, and the parent itself owned by this uid with no group or other bits.
-`PrivateListener::bind` then binds the name inside that held directory. It refuses any entry
-already there with `AddressInUse` and leaves it as it was: a live or stale socket, a file, a
-directory, a FIFO or a symlink, dangling or not. It binds the socket at a temporary name in that
-directory, sets it to 0600 and makes it listen there, and only then renames it to the path's name
-with a rename that never replaces an entry. So a client that finds the path finds a 0600 socket
-that accepts, and no connection lands while the umask's mode holds. A path too long for a socket
-address is `PathTooLong`. Each refusal comes back as `EndpointRefusal::Private` with core's error,
-which names the rule broken and the component that broke it. The bind holds the spawn lock's write
-side, because on Darwin core makes the socket close-on-exec in a second call. Closing the listener
-closes it, then removes the socket file only while the entry at that name in the held directory is
-still that socket, and says what it found as a `RemoveOutcome`. Dropping it does the same. A child
-that another thread is spawning holds a copy of the listener until its exec, so the socket can take
-connections until then. The cell, plasmosome-7em, which is not built yet, is to create that
-private directory.
+`PrivateListener::bind` then works in that held directory, in this order. It refuses any entry
+already at the path's name with `AddressInUse` and leaves it as it was: a live or stale socket, a
+file, a directory, a FIFO or a symlink, dangling or not. It binds the socket at a temporary name in
+that directory, sets it to 0600 and makes it listen there, and only then renames it to the path's
+name with a rename that never replaces an entry. So a client that finds the path finds a 0600 socket
+that accepts, and no connection lands while the umask's mode holds. A hard kill inside the bind can
+leave a dot-named temporary socket in the directory, which the next bind ignores. A path too long
+for a socket address is `PathTooLong`. Each refusal comes back as `EndpointRefusal::Private` with
+core's error, which names the rule broken and the component that broke it. The bind holds the spawn
+lock's write side, because on Darwin core makes the socket close-on-exec in a second call. Closing
+the listener closes it, then removes the socket file only while the entry at that name in the held
+directory is still that socket, and says what it found as a `RemoveOutcome`. Dropping it does the
+same. A child that another thread is spawning holds a copy of the listener until its exec, so the
+socket can take connections until then. The cell, plasmosome-7em, which is not built yet, is to
+create that private directory.
 
 `accept_ready` takes one pending connection without blocking, holding the same write side. Core
 reads the peer's effective uid from the kernel and closes a peer of another uid unread: that is
