@@ -1131,7 +1131,7 @@ mod tests {
         ]
     }
 
-    fn json_leaves(capability: &Capability) -> BTreeMap<String, serde_json::Value> {
+    fn json_leaves(value: &impl Serialize) -> BTreeMap<String, serde_json::Value> {
         fn walk(
             value: serde_json::Value,
             path: String,
@@ -1155,7 +1155,7 @@ mod tests {
         }
         let mut found = BTreeMap::new();
         walk(
-            serde_json::to_value(capability).unwrap(),
+            serde_json::to_value(value).unwrap(),
             String::new(),
             &mut found,
         );
@@ -1359,6 +1359,275 @@ mod tests {
                     },
                     "a new grant id alone is one lost and one leaked object ({field})"
                 );
+            }
+        }
+    }
+
+    const GENERATED_CLASSES: [UniverseClass; 5] = [
+        UniverseClass::SessionFile,
+        UniverseClass::UdsPath,
+        UniverseClass::ProxyMap,
+        UniverseClass::BrokerPid,
+        UniverseClass::Mount,
+    ];
+
+    const OWNER_FIELDS: [&str; 2] = ["owner.cell", "owner.plugin"];
+
+    fn capability_fields(class: UniverseClass) -> &'static [&'static str] {
+        match class {
+            UniverseClass::SessionFile => &[
+                "SessionFile.path",
+                "SessionFile.recipe.contents",
+                "SessionFile.recipe.mode",
+                "SessionFile.recipe.guest_path",
+            ],
+            UniverseClass::UdsPath => &[
+                "UdsSocket.path",
+                "UdsSocket.recipe.upstream",
+                "UdsSocket.recipe.guest_path",
+            ],
+            UniverseClass::ProxyMap => &[
+                "ProxyMap.host",
+                "ProxyMap.route",
+                "ProxyMap.recipe.transport",
+                "ProxyMap.recipe.destination",
+                "ProxyMap.recipe.port",
+                "ProxyMap.recipe.allow_private",
+            ],
+            UniverseClass::BrokerPid => &[
+                "Broker.name",
+                "Broker.launch.command",
+                "Broker.launch.control_socket",
+                "Broker.launch.data_socket",
+            ],
+            UniverseClass::Mount => &["Mount.source", "Mount.target", "Mount.recipe.access"],
+        }
+    }
+
+    fn holding_fields(class: UniverseClass) -> Vec<&'static str> {
+        capability_fields(class)
+            .iter()
+            .chain(&OWNER_FIELDS)
+            .copied()
+            .collect()
+    }
+
+    fn pick<T>(mask: u32, bit: u32, [first, second]: [T; 2]) -> T {
+        if mask & (1 << bit) == 0 {
+            first
+        } else {
+            second
+        }
+    }
+
+    fn generated(class: UniverseClass, mask: u32) -> Capability {
+        let text = |bit, values: [&str; 2]| pick(mask, bit, values).to_string();
+        let access = |bit| pick(mask, bit, [FileAccess::ReadOnly, FileAccess::ReadWrite]);
+        match class {
+            UniverseClass::SessionFile => Capability::SessionFile {
+                path: text(0, ["/skills/pr.md", "/skills/qa.md"]),
+                recipe: SessionFileRecipe {
+                    contents: pick(mask, 1, [b"# Review\n", b"# Revise\n"]).to_vec(),
+                    mode: access(2),
+                    guest_path: text(3, ["/run/plasmosome/session", "/run/plasmosome/reviews"]),
+                },
+            },
+            UniverseClass::UdsPath => Capability::UdsSocket {
+                path: text(0, ["/run/egressd.uds", "/run/ingress.uds"]),
+                recipe: UdsRecipe {
+                    upstream: text(
+                        1,
+                        [
+                            "/run/plasmosome/upstream.sock",
+                            "/run/plasmosome/auditors.sock",
+                        ],
+                    ),
+                    guest_path: text(
+                        2,
+                        ["/run/plasmosome/guest.sock", "/run/plasmosome/audit.sock"],
+                    ),
+                },
+            },
+            UniverseClass::ProxyMap => Capability::ProxyMap {
+                host: text(0, ["api.github.com", "api.gitlab.com"]),
+                route: text(1, ["splice", "tunnel"]),
+                recipe: ProxyRecipe {
+                    transport: pick(mask, 2, [ProxyTransport::Tcp, ProxyTransport::Udp]),
+                    destination: text(3, ["upstream.plasmosome.test", "auditors.plasmosome.test"]),
+                    port: pick(mask, 4, [443, 8443]),
+                    allow_private: pick(mask, 5, [false, true]),
+                },
+            },
+            UniverseClass::BrokerPid => Capability::Broker {
+                name: text(0, ["egressd", "ingress"]),
+                launch: BrokerLaunch {
+                    command: vec![
+                        text(
+                            1,
+                            [
+                                "/usr/libexec/plasmosome-broker",
+                                "/usr/libexec/plasmosome-tracer",
+                            ],
+                        ),
+                        "--audit".to_string(),
+                    ],
+                    control_socket: text(
+                        2,
+                        [
+                            "/run/plasmosome/broker.control",
+                            "/run/plasmosome/audits.control",
+                        ],
+                    ),
+                    data_socket: text(
+                        3,
+                        ["/run/plasmosome/broker.data", "/run/plasmosome/audits.data"],
+                    ),
+                },
+            },
+            UniverseClass::Mount => Capability::Mount {
+                source: text(0, ["/code", "/data"]),
+                target: text(1, ["/workspace", "/workbench"]),
+                recipe: MountRecipe { access: access(2) },
+            },
+        }
+    }
+
+    fn generated_owner(mask: u32) -> CellOwner {
+        CellOwner {
+            cell: CellId::from(pick(mask, 0, ["cell-1", "cell-2"])),
+            plugin: PluginId::from(pick(mask, 1, ["deploy", "review"])),
+        }
+    }
+
+    fn holding(class: UniverseClass, mask: u32) -> OsObject {
+        OsObject {
+            id: GrantId::new(),
+            owner: generated_owner(mask >> capability_fields(class).len()),
+            capability: generated(class, mask),
+        }
+    }
+
+    fn holding_leaves(object: &OsObject) -> BTreeMap<String, serde_json::Value> {
+        let mut leaves = json_leaves(&object.capability);
+        for (name, value) in json_leaves(&object.owner) {
+            leaves.insert(format!("owner.{name}"), value);
+        }
+        leaves
+    }
+
+    #[test]
+    fn the_generated_holdings_vary_every_capability_and_owner_field_one_at_a_time() {
+        let (mut session, mut socket, mut proxy, mut broker, mut mount) =
+            (false, false, false, false, false);
+        for class in GENERATED_CLASSES {
+            let first = generated(class, 0);
+            match &first {
+                Capability::SessionFile { .. } => session = true,
+                Capability::UdsSocket { .. } => socket = true,
+                Capability::ProxyMap { .. } => proxy = true,
+                Capability::Broker { .. } => broker = true,
+                Capability::Mount { .. } => mount = true,
+            }
+            let (selection, recipe) = field_names(&first);
+            let mut named: Vec<&str> = selection.iter().chain(recipe).copied().collect();
+            named.sort_unstable();
+            let mut listed = capability_fields(class).to_vec();
+            listed.sort_unstable();
+            assert_eq!(listed, named, "{class:?}");
+
+            let names = holding_fields(class);
+            let mut sorted_names = names.clone();
+            sorted_names.sort_unstable();
+            for mask in 0..(1u32 << names.len()) {
+                let x = holding(class, mask);
+                assert_eq!(x.class(), class, "{x:?}");
+                assert_eq!(x.capability.validate(), Ok(()), "{x:?}");
+                let leaves = holding_leaves(&x);
+                assert_eq!(
+                    leaves.keys().map(String::as_str).collect::<Vec<_>>(),
+                    sorted_names,
+                    "{x:?}"
+                );
+                for (bit, field) in names.iter().enumerate() {
+                    let neighbour = holding_leaves(&holding(class, mask ^ (1 << bit)));
+                    let differing: Vec<&str> = leaves
+                        .iter()
+                        .filter(|(path, value)| neighbour.get(*path) != Some(*value))
+                        .map(|(path, _)| path.as_str())
+                        .collect();
+                    assert_eq!(differing, vec![*field], "bit {bit} of {x:?}");
+                }
+            }
+        }
+        assert!(
+            session && socket && proxy && broker && mount,
+            "the generated holdings leave out a capability variant or universe class: \
+             {GENERATED_CLASSES:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_equivalence_tells_two_holdings_apart_when_any_one_field_differs() {
+        for class in GENERATED_CLASSES {
+            let names = holding_fields(class);
+            for mask in 0..(1u32 << names.len()) {
+                let x = holding(class, mask);
+                let x2 = OsObject {
+                    id: GrantId::new(),
+                    ..x.clone()
+                };
+                let pair = state_of(&[x.clone(), x2.clone()]);
+                let reissued = state_of(&[
+                    OsObject {
+                        id: GrantId::new(),
+                        ..x.clone()
+                    },
+                    OsObject {
+                        id: GrantId::new(),
+                        ..x.clone()
+                    },
+                ]);
+                assert!(
+                    pair.canonically_equivalent(&reissued),
+                    "new grant ids alone changed the canonical account of {x:?}"
+                );
+                let leaves = holding_leaves(&x);
+                let one = state_of(std::slice::from_ref(&x));
+                for (bit, field) in names.iter().enumerate() {
+                    let y = holding(class, mask ^ (1 << bit));
+                    assert_ne!(
+                        leaves,
+                        holding_leaves(&y),
+                        "the generator's bit {bit} ({field}) changes nothing at {x:?}"
+                    );
+                    let other = state_of(std::slice::from_ref(&y));
+                    assert!(
+                        !one.canonically_equivalent(&other) && !other.canonically_equivalent(&one),
+                        "one holding on each side hid a changed {field} of {class:?} at {x:?}"
+                    );
+                    for mixed in [
+                        state_of(&[
+                            OsObject {
+                                id: x.id,
+                                ..y.clone()
+                            },
+                            x2.clone(),
+                        ]),
+                        state_of(&[
+                            x.clone(),
+                            OsObject {
+                                id: x2.id,
+                                ..y.clone()
+                            },
+                        ]),
+                    ] {
+                        assert!(
+                            !pair.canonically_equivalent(&mixed)
+                                && !mixed.canonically_equivalent(&pair),
+                            "two holdings at one key hid a changed {field} of {class:?} at {x:?}"
+                        );
+                    }
+                }
             }
         }
     }
