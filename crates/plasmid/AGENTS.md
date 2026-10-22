@@ -37,8 +37,10 @@ names.
 `--kernel`, the normal absolute path for `--socket` and the deadline for `--deadline-ms`. It is a
 copy for the reason the envelope writer is one. The name rule reads the terminal controls from
 `src/envelope.rs`, so the escaping and the name rule follow one list. `tests/value_parity.rs`
-runs the same lines through this binary and through `plasmosome_cli::handle`, so a rule changed
-in one crate and not the other fails it. Change both rules together.
+runs the same lines through this binary and through `plasmosome_cli::handle`, and compares the
+argument each names and the message of each refused value. It fails a rule changed in one crate
+and not the other only when the change moves the answer on one of its lines. So change both rules
+together, and add a line that shows the change.
 
 ## Testing
 

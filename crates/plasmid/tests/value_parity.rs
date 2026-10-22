@@ -21,6 +21,7 @@ enum Answer {
     Usage {
         argument: Option<String>,
         form: Form,
+        refused_value: bool,
     },
     Help,
 }
@@ -29,7 +30,7 @@ impl Answer {
     fn describe(&self) -> String {
         match self {
             Answer::Help => "exit 0 with help on stdout".to_string(),
-            Answer::Usage { argument, form } => {
+            Answer::Usage { argument, form, .. } => {
                 let named = match argument {
                     Some(argument) => format!("naming {argument:?}"),
                     None => "naming no argument".to_string(),
@@ -176,6 +177,10 @@ fn json_usage(stderr: &str, argument: Option<&str>) -> Result<(), String> {
         "code invalid_argument",
     )?;
     check(
+        error.get("message").is_some_and(Value::is_string),
+        "a message string",
+    )?;
+    check(
         error.keys().all(|key| ERROR_KEYS.contains(&key.as_str())),
         "no error key but domain, code, message and argument",
     )?;
@@ -208,7 +213,7 @@ fn judge(answer: &Answer, run: &Run) -> Result<(), String> {
             check(run.stderr.is_empty(), "an empty stderr")?;
             check(!run.stdout.is_empty(), "help on stdout")
         }
-        Answer::Usage { argument, form } => {
+        Answer::Usage { argument, form, .. } => {
             check(run.exit == Some(64), "exit 64")?;
             check(run.stdout.is_empty(), "an empty stdout")?;
             let stderr = std::str::from_utf8(&run.stderr)
@@ -232,6 +237,32 @@ fn verdict(answer: &Answer, run: &Run) -> Option<String> {
     })
 }
 
+fn message(run: &Run, form: Form) -> Option<String> {
+    let stderr = std::str::from_utf8(&run.stderr).ok()?;
+    let first = stderr.lines().next()?;
+    match form {
+        Form::Json => {
+            let value: Value = serde_json::from_str(first).ok()?;
+            Some(value.get("error")?.get("message")?.as_str()?.to_string())
+        }
+        Form::Human => Some(first.to_string()),
+    }
+}
+
+fn messages_differ(answer: &Answer, plasmid: &Run, plasmosome: &Run) -> Option<String> {
+    let Answer::Usage {
+        form,
+        refused_value: true,
+        ..
+    } = answer
+    else {
+        return None;
+    };
+    let ours = message(plasmid, *form);
+    let theirs = message(plasmosome, *form);
+    (ours != theirs).then(|| format!("plasmid {ours:?}, plasmosome {theirs:?}"))
+}
+
 fn character(code: u32) -> char {
     char::from_u32(code).expect("a character")
 }
@@ -251,7 +282,17 @@ fn usage(name: &str, line: Vec<OsString>, argument: Option<&str>, form: Form) ->
         answer: Answer::Usage {
             argument: argument.map(str::to_string),
             form,
+            refused_value: false,
         },
+    }
+}
+
+impl Row {
+    fn refused(mut self) -> Row {
+        if let Answer::Usage { refused_value, .. } = &mut self.answer {
+            *refused_value = true;
+        }
+        self
     }
 }
 
@@ -259,12 +300,16 @@ fn names(name: &str, arguments: &[&str], argument: &str) -> Row {
     usage(name, words(arguments), Some(argument), Form::Json)
 }
 
+fn refuses(name: &str, arguments: &[&str], value: &str) -> Row {
+    names(name, arguments, value).refused()
+}
+
 fn names_nothing(name: &str, arguments: &[&str]) -> Row {
     usage(name, words(arguments), None, Form::Json)
 }
 
 fn shows(name: &str, arguments: &[&str], argument: &str) -> Row {
-    usage(name, words(arguments), Some(argument), Form::Human)
+    usage(name, words(arguments), Some(argument), Form::Human).refused()
 }
 
 fn bytes(name: &str, arguments: &[&[u8]], argument: &str) -> Row {
@@ -285,15 +330,15 @@ fn helps(name: &str, arguments: &[&str]) -> Row {
 
 fn reported() -> Vec<Row> {
     vec![
-        names("A1", &["--kernel", "../x", "frobnicate"], "../x"),
-        names("A2", &["--socket", "rel", "frobnicate"], "rel"),
-        names("A3", &["--kernel", "", "frobnicate"], ""),
-        names("A4", &["--kernel", "../x"], "../x"),
-        names("A5", &["--socket", "rel"], "rel"),
-        names("A6", &["--deadline-ms", "0"], "0"),
-        names("A7", &["--kernel", "../x", "--kernel", "a"], "../x"),
-        names("A8", &["--kernel", "../x", "--frob"], "../x"),
-        names("A9", &["--deadline-ms", "0", "--json", "--json"], "0"),
+        refuses("A1", &["--kernel", "../x", "frobnicate"], "../x"),
+        refuses("A2", &["--socket", "rel", "frobnicate"], "rel"),
+        refuses("A3", &["--kernel", "", "frobnicate"], ""),
+        refuses("A4", &["--kernel", "../x"], "../x"),
+        refuses("A5", &["--socket", "rel"], "rel"),
+        refuses("A6", &["--deadline-ms", "0"], "0"),
+        refuses("A7", &["--kernel", "../x", "--kernel", "a"], "../x"),
+        refuses("A8", &["--kernel", "../x", "--frob"], "../x"),
+        refuses("A9", &["--deadline-ms", "0", "--json", "--json"], "0"),
     ]
 }
 
@@ -304,7 +349,10 @@ fn edges() -> Vec<Row> {
     kernel_refused.extend([0x1b, 0x7f, 0x9b, 0x202e, 0x2066].map(around));
     let mut kernel_accepted: Vec<String> = owned(&["work", "Work_1", "...", "-x"]);
     kernel_accepted.push(around(0x2028));
-    let socket_refused = owned(&["rel", "", "./x", "/", "/a/", "/a//b", "/a/./b", "/a/../b"]);
+    kernel_accepted.push("a".repeat(200));
+    let socket_refused = owned(&[
+        "rel", "", "./x", "/", "//a", "/a/", "/a//b", "/a/./b", "/a/../b",
+    ]);
     let mut socket_accepted: Vec<String> = owned(&["/a/b", "/a/.b", "/a/b c"]);
     socket_accepted.push(format!("/a{}b", character(0x1b)));
     socket_accepted.push(format!("/{}", "a".repeat(199)));
@@ -319,7 +367,7 @@ fn edges() -> Vec<Row> {
         ("--deadline-ms", deadline_refused, deadline_accepted),
     ] {
         for value in &refused {
-            rows.push(edge(flag, value, value));
+            rows.push(edge(flag, value, value).refused());
         }
         for value in &accepted {
             rows.push(edge(flag, value, "frobnicate"));
@@ -348,14 +396,14 @@ fn order() -> Vec<Row> {
         ),
         names("D4", &["frobnicate", "--kernel", "../x"], "frobnicate"),
         names("D5", &["--kernel", "a", "--kernel", "../x"], "--kernel"),
-        names("D6", &["--kernel", "../x", "--json", "--json"], "../x"),
-        bytes("D7", &[b"--kernel", b"../x", b"a\xff"], "../x"),
-        names("D8", &["--kernel", "../x", "--", "x"], "../x"),
-        names("D9", &["--kernel", "../x", "--"], "../x"),
-        names("D10", &["--socket", "rel", "--kernel", "../x"], "rel"),
-        names("D11", &["--deadline-ms", "0", "--socket", "rel"], "0"),
-        names("D12", &["--socket", "--human"], "--human"),
-        names("D13", &["--deadline-ms", "--json"], "--json"),
+        refuses("D6", &["--kernel", "../x", "--json", "--json"], "../x"),
+        bytes("D7", &[b"--kernel", b"../x", b"a\xff"], "../x").refused(),
+        refuses("D8", &["--kernel", "../x", "--", "x"], "../x"),
+        refuses("D9", &["--kernel", "../x", "--"], "../x"),
+        refuses("D10", &["--socket", "rel", "--kernel", "../x"], "rel"),
+        refuses("D11", &["--deadline-ms", "0", "--socket", "rel"], "0"),
+        refuses("D12", &["--socket", "--human"], "--human"),
+        refuses("D13", &["--deadline-ms", "--json"], "--json"),
         names_nothing("D14", &["--kernel", "--json"]),
         bytes(
             "D15",
@@ -396,24 +444,31 @@ fn plasmid_and_plasmosome_name_the_same_argument_on_every_line() {
         .collect();
     assert_eq!(
         rows.len(),
-        70,
-        "the design's 69 lines and --kernel -- --help"
+        72,
+        "the design's 69 lines, --kernel -- --help, a 200-byte name and the socket path //a"
     );
     let mut differ = Vec::new();
     for row in &rows {
-        let plasmid = verdict(&row.answer, &plasmid(&row.line));
-        let plasmosome = verdict(&row.answer, &plasmosome(&row.line));
-        if plasmid.is_none() && plasmosome.is_none() {
+        let ours = plasmid(&row.line);
+        let theirs = plasmosome(&row.line);
+        let messages = messages_differ(&row.answer, &ours, &theirs);
+        let plasmid = verdict(&row.answer, &ours);
+        let plasmosome = verdict(&row.answer, &theirs);
+        if plasmid.is_none() && plasmosome.is_none() && messages.is_none() {
             continue;
         }
         let side = |verdict: Option<String>| verdict.unwrap_or_else(|| "as expected".to_string());
         differ.push(format!(
-            "{} {:?}: expected {}\n  plasmid: {}\n  plasmosome: {}",
+            "{} {:?}: expected {}
+  plasmid: {}
+  plasmosome: {}
+  messages: {}",
             row.name,
             row.line,
             row.answer.describe(),
             side(plasmid),
-            side(plasmosome)
+            side(plasmosome),
+            messages.unwrap_or_else(|| "the same".to_string())
         ));
     }
     assert!(
