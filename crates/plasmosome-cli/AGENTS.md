@@ -5,8 +5,9 @@
 The client logic of the `plasmosome` command line, as a library the binary calls, so tests drive
 it without spawning a process. Decision 009 named the trigger for this crate and spec 025 §1
 pulled it. Today it holds spec 025's JSON scanner and writers, its reply reader and reply rules,
-its envelopes, its client codes, its command table, the order the command line is read in, spec
-025 §5's instance selection, and the one served command, `status`. It is `publish = false` and
+its envelopes, its client codes, its command table, the order the command line is read in, the
+grammar of a served command's own flags, spec 025 §5's instance selection, and the one served
+command, `status`. It is `publish = false` and
 never ships on its own.
 
 ## Hard rules
@@ -45,6 +46,10 @@ never ships on its own.
 - **The command table is spec 025's.** `COMMANDS` holds every command of spec 025 §2, and the
   table test reads spec 025's table. A command is marked served in the task that serves its verb,
   and never earlier, so `--help` stays true.
+- **A flag name has one kind and one key across the table.** The command words pass over every
+  served command's own flags with their values, so a name that takes a value in one entry and
+  none in another would turn one command's value into another's word. A command's flags land
+  with the task that serves it, and `tests/flags.rs` checks the whole table.
 - **Help, the version and `not_served` read nothing more.** They read no environment variable,
   select no socket and connect nowhere. Help comes before every other rule.
 - **The full parse names the leftmost fault.** It judges each argument where it stands, in one
@@ -111,4 +116,5 @@ with `instances/` entries and `FakeDaemon`s at their sockets, and pass it in `Va
 under `/tmp` fails the ancestor check, and a long one overflows `sun_path`. They never read the
 real `~/.plasmosome`. The tests in `tests/cli.rs`, for help, the version, `not_served` and usage
 errors, pass an `Env` that panics when it is read, so a rule that reads the environment there
-fails them.
+fails them. The tests in `tests/flags.rs` read lines against a test-only table that serves a few
+commands with own flags, since no command of `COMMANDS` has any yet.
