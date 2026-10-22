@@ -1,7 +1,14 @@
-use crate::args::Flag;
+use crate::args::{CommandArgs, Flag, InstanceParam, VerbCall};
+use crate::envelope::ClientError;
 
-/// One command of spec 025 §2's table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+const DEFAULT_DEADLINE_MS: u32 = 10_000;
+
+/// Builds a served command's verb call from its own arguments.
+pub type Build = fn(&CommandArgs) -> Result<VerbCall, ClientError>;
+
+/// One command of spec 025 §2's table. Two commands are equal when every field is, `build`
+/// compared by address.
+#[derive(Clone, Copy, Debug)]
 pub struct Command {
     /// The words after `plasmosome` that name it, such as `["cell", "list"]`.
     pub words: &'static [&'static str],
@@ -21,13 +28,49 @@ pub struct Command {
     pub flags: &'static [Flag],
     /// Whether it takes a workload's argv after `--`.
     pub takes_argv: bool,
+    /// The whole command's deadline when `--deadline-ms` is not given.
+    pub default_deadline_ms: u32,
+    /// Builds its verb call. `None` until the command is served.
+    pub build: Option<Build>,
 }
+
+impl PartialEq for Command {
+    fn eq(&self, other: &Command) -> bool {
+        let builds = match (self.build, other.build) {
+            (Some(ours), Some(theirs)) => std::ptr::fn_addr_eq(ours, theirs),
+            (ours, theirs) => ours.is_none() && theirs.is_none(),
+        };
+        builds
+            && (self.words, self.operands, self.command, self.is_method)
+                == (other.words, other.operands, other.command, other.is_method)
+            && (self.changes_state, self.served, self.flags, self.takes_argv)
+                == (
+                    other.changes_state,
+                    other.served,
+                    other.flags,
+                    other.takes_argv,
+                )
+            && self.default_deadline_ms == other.default_deadline_ms
+    }
+}
+
+impl Eq for Command {}
 
 impl Command {
     /// Returns the wire method, which a `not_served` refusal names as `method`.
     pub fn method(&self) -> Option<&'static str> {
         self.is_method.then_some(self.command)
     }
+}
+
+fn status(_: &CommandArgs) -> Result<VerbCall, ClientError> {
+    Ok(VerbCall {
+        method: "plasmosome.status",
+        instance: InstanceParam::Name,
+        params: Vec::new(),
+        changes_state: false,
+        deadline: None,
+    })
 }
 
 const fn verb(
@@ -45,6 +88,8 @@ const fn verb(
         served: false,
         flags: &[],
         takes_argv: false,
+        default_deadline_ms: DEFAULT_DEADLINE_MS,
+        build: None,
     }
 }
 
@@ -63,6 +108,8 @@ const fn registry(
         served: false,
         flags: &[],
         takes_argv: false,
+        default_deadline_ms: DEFAULT_DEADLINE_MS,
+        build: None,
     }
 }
 
@@ -70,6 +117,7 @@ const fn registry(
 pub const COMMANDS: &[Command] = &[
     Command {
         served: true,
+        build: Some(status),
         ..verb(&["status"], &[], "plasmosome.status", false)
     },
     verb(&["recovery"], &[], "plasmosome.recovery", false),

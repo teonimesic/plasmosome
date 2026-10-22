@@ -43,7 +43,25 @@ impl Flag {
     }
 }
 
-/// Where a parameter came from on the command line.
+/// Where a verb takes the instance's name: `name` on `plasmosome.*` verbs, `kernel` on the
+/// others (spec 025 section 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstanceParam {
+    Name,
+    Kernel,
+}
+
+impl InstanceParam {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            InstanceParam::Name => "name",
+            InstanceParam::Kernel => "kernel",
+        }
+    }
+}
+
+/// Where a parameter came from on the command line. A request line too large names the argument
+/// its source gave.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArgSource {
     /// One of the command's flags, by its name.
@@ -62,16 +80,42 @@ pub struct Param {
     pub source: ArgSource,
 }
 
+/// A verb that takes `deadline_ms`. `max_ms` is the verb's own maximum, if it has one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerbDeadline {
+    pub max_ms: Option<u64>,
+}
+
+/// The one request a served command sends. The client adds the instance's name, from socket
+/// selection, and `deadline_ms`, from the time left.
+#[derive(Debug, PartialEq, Eq)]
+pub struct VerbCall {
+    pub method: &'static str,
+    pub instance: InstanceParam,
+    /// The parameters, which must not repeat a key, use the instance's key or `deadline_ms`, or
+    /// hold an object that repeats a key.
+    pub params: Vec<Param>,
+    /// Whether the request changes state, which turns an answer lost after the first byte into
+    /// exit 3.
+    pub changes_state: bool,
+    /// `None` for a verb that takes no `deadline_ms`.
+    pub deadline: Option<VerbDeadline>,
+}
+
 /// A served command's own arguments, as the full parse read them: its flags, its positional
-/// arguments and its argv. Only the parse makes one with anything in it.
+/// arguments and its argv. Only the parse makes one with anything in it. A command's build turns
+/// them into its [`VerbCall`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommandArgs {
     given: Vec<Given>,
+    kernel_at: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Given {
     source: ArgSource,
+    position: usize,
+    argument: String,
     sent: Sent,
 }
 
@@ -114,8 +158,26 @@ impl CommandArgs {
         Some(Param { key, value, source })
     }
 
-    pub(crate) fn give(&mut self, source: ArgSource, sent: Sent) {
-        self.given.push(Given { source, sent });
+    pub(crate) fn give(&mut self, source: ArgSource, position: usize, argument: &str, sent: Sent) {
+        self.given.push(Given {
+            source,
+            position,
+            argument: argument.to_string(),
+            sent,
+        });
+    }
+
+    pub(crate) fn kernel_at(&mut self, position: usize) {
+        self.kernel_at = Some(position);
+    }
+
+    pub(crate) fn kernel_position(&self) -> Option<usize> {
+        self.kernel_at
+    }
+
+    pub(crate) fn locate(&self, source: ArgSource) -> Option<(usize, &str)> {
+        let given = self.given.iter().find(|given| given.source == source)?;
+        Some((given.position, &given.argument))
     }
 }
 
