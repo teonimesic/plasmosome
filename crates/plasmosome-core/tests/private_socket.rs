@@ -1194,13 +1194,30 @@ enum Seen {
     Ready,
 }
 
-fn watch_binds(path: PathBuf, cycles: mpsc::Receiver<()>, seen: mpsc::Sender<Seen>) -> Views {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cycle {
+    Start,
+    Bound,
+}
+
+fn watch_binds(path: PathBuf, cycles: mpsc::Receiver<Cycle>, seen: mpsc::Sender<Seen>) -> Views {
     let mut views = Views::default();
-    while cycles.recv().is_ok() {
+    while let Ok(message) = cycles.recv() {
+        if message == Cycle::Bound {
+            continue;
+        }
         let mut absent_reported = false;
         let refusable_before = views.refusable();
-        let deadline = Instant::now() + PATIENCE;
-        while Instant::now() < deadline {
+        let mut deadline = None;
+        loop {
+            match cycles.try_recv() {
+                Ok(_) => deadline = Some(Instant::now() + PATIENCE),
+                Err(mpsc::TryRecvError::Disconnected) => return views,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if deadline.is_some_and(|at| Instant::now() >= at) {
+                break;
+            }
             let view = view_of(&path);
             views.count(&view);
             if view == View::Absent && !absent_reported {
@@ -1231,7 +1248,9 @@ fn a_client_never_sees_the_socket_before_it_is_private_and_listening() {
     });
     let mut durations = Vec::with_capacity(WATCHED_BINDS);
     for round in 0..WATCHED_BINDS {
-        cycle.send(()).expect("the watcher waits for a cycle");
+        cycle
+            .send(Cycle::Start)
+            .expect("the watcher waits for a cycle");
         assert_eq!(
             seen.recv_timeout(PATIENCE),
             Ok(Seen::Absent),
@@ -1240,6 +1259,9 @@ fn a_client_never_sees_the_socket_before_it_is_private_and_listening() {
         let started = Instant::now();
         let listener = bind(&root, "sock");
         durations.push(started.elapsed());
+        cycle
+            .send(Cycle::Bound)
+            .expect("the watcher waits for the bind");
         assert_eq!(
             seen.recv_timeout(PATIENCE),
             Ok(Seen::Ready),
