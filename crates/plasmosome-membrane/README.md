@@ -522,8 +522,8 @@ A reply is read with the readiness probe's reader, through a limit of 1,048,576 
 newline plus one byte. One byte more is `FrameTooLarge`, before any parsing. End of file before
 the newline is `Closed`. Bytes after the newline in the same read are `UnexpectedBytes`: the shim
 sends one line and then waits, and the reader would drop those bytes. Only bytes that same read
-returns are refused. A line sent in a later write, or after a frame of exactly 1,048,576 bytes,
-stays queued on its lane for the next reader.
+returns are refused. A line that arrives after that read, or one after a frame of exactly 1,048,576
+bytes, stays queued on its lane for the next reader.
 
 Every accepted stream's peer pid must equal the helper's, and the pid is read again after each
 reply. A pid of 0 or below never matches; Linux reports 0 for a peer outside the supervisor's pid
@@ -537,12 +537,12 @@ last once the reply had arrived, so a reply sent by another process fails, unles
 the socket after it. Measured on macOS 26.6.2, after the accept the pid followed a child that only
 sent, in 20 of 20 runs.
 
-These checks do not stop a process of the supervisor's own uid. That is the same-uid limit the
+These checks do not stop every process of the supervisor's own uid. That is the same-uid limit the
 plasmosome-qep plan records as owner gate O-4, whose handling is "proceed; document". A process
-that holds a copy of the shim's socket, inherited or passed to it, can still do this:
+that holds a copy of a lane's socket, inherited or passed to it, can still do this:
 
-- On Linux it can read both requests and send both replies, because `SO_PEERCRED` keeps the
-  connector for the life of the socket.
+- On Linux, with a copy of each lane's socket, it can read both requests and send both replies,
+  because `SO_PEERCRED` keeps the connector for the life of the socket.
 - On Darwin its reply passes if the helper then sends or receives on that socket before the host
   reads the pid. In a review of this change on macOS 26.6.2, a forked child sent a forged normal
   reply, the connector then read on its end, and the reply passed the pid read and was judged, in

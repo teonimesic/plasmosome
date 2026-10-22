@@ -95,12 +95,12 @@ inject a fake at each. The fourth is the capture deadline of a paged observation
 `CaptureSlot` in `plasmosome-backend::paging` decides it in `capture`, `page` and `expire`:
 `capture` takes an injected clock and reads it before and after collection, and `page` and `expire`
 take the current instant. Each server that pages a result passes its clock in and counts no decision
-of its own. The fifth is the budget of the runtime handshake (spec001 §4.2), which shares the
-readiness `ProbeBudget`. `runtime::handshake` in `plasmosome-membrane` checks it before every wait
-and after every step, and `handshake_with` takes an injected clock and waiter in the shape of
-`readiness::probe_with`: production supplies `Instant::now` and the real wait, and its tests inject
-a fake clock that moves only when the test moves it. Amended on 2026-10-21: this read "Four
-earlier decisions read elapsed time", before the handshake landed.
+of its own. The fifth is the budget of the runtime handshake (spec001 §4.2), which uses the
+readiness probe's `ProbeBudget` type. `runtime::handshake` in `plasmosome-membrane` checks it
+before every wait and after every step, and `handshake_with` takes an injected clock and waiter
+in the shape of `readiness::probe_with`: production supplies `Instant::now` and the real wait, and
+its tests inject a fake clock that moves only when the test moves it. Amended on 2026-10-21: this
+read "Four earlier decisions read elapsed time", before the handshake landed.
 One test fixture outside the kernel also reads elapsed time: `run_lane` in
 `plasmosome-lanes` kills a lane at a timeout passed in. It reads `Instant` itself, not `Clock`,
 because it makes no lifetime decision and its test needs no fake clock: a launcher that never exits
