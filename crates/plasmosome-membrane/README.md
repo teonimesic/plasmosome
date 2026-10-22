@@ -22,7 +22,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. `vmm_helper` holds the decisions the VMM helper of spec 001 §4.2 makes: its exit codes, the judges of its argv and environment, descriptors, recipe, host limits (`judge_host_limits`), own path (`judge_self`), writable root, host policy, denial probes and loaded images, and its 14 libkrun calls with a runner that stops at the first failure. The helper binary that uses them is not built yet. Nothing here boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `cell_directory` checks a cell's private directory with core's `PrivateDir` and makes the writable root copy in it; see "The cell directory and the writable root" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. `vmm_helper` holds the decisions the VMM helper of spec 001 §4.2 makes: its exit codes, the judges of its argv and environment, descriptors, recipe, host limits (`judge_host_limits`), own path (`judge_self`), writable root, host policy, denial probes and loaded images, and its 14 libkrun calls with a runner that stops at the first failure. The helper binary that uses them is not built yet. Nothing here boots a cell yet |
 
 ## Use
 
@@ -326,6 +326,39 @@ plasmosome-7em, which is not built yet, must call `reconfirm()` after this check
 launch that opens the initramfs by path. Off macOS no artifact verifies, so `verify_initramfs`
 runs only in tests, on artifacts that `artifacts::verified_for_test` builds.
 
+## The cell directory and the writable root
+
+Spec 001 §4.2 puts `writable_root`, `control_path` and `data_path` under an owned, nonreplaceable
+private per-cell directory, and has the supervisor create the writable root exclusively from the
+verified root image. `runtime::cell_directory` does both. In cell mode the directory is spec 023's
+`cells/<cell>/runtime/`, which `membraned` creates through core's `CellDir::create_runtime_dir`.
+
+`PrivateDirectory::open` is core's `PrivateDir::open`, the check `RuntimeListener::bind` makes of
+its parent. A refusal is `CellDirectoryFault::Private` with core's error, which names the rule and
+the component that broke it.
+
+`WritableRoot::create` makes the name in the held directory with `O_CREAT | O_EXCL | O_NOFOLLOW`,
+so any entry already there, a symlink included, is `Exists` and is left as it was. It copies
+through the verified descriptor, not the path, reads at most one byte past the verified size, and
+hashes the bytes as it writes them. Then the root image must still pass `reconfirm()`. Its
+refusal is `Source` with whatever fault `reconfirm()` found: a path that names another file, a
+size or times that moved, or a fault of any check it repeats, such as a cleared `uchg`. A refusal
+after the new file's `fstat` removes the copy as `remove()` does, so a removal that fails, or that
+finds another object at the name, leaves what is there, and a copy renamed away stays under its
+new name. If that `fstat` fails, the empty file stays, since there is no identity to remove it
+by. The copy is a plain copy, not an APFS clone: a clone of a `uchg` file can carry the flag, and
+the copy must be writable.
+
+`remove()` and dropping a `WritableRoot` unlink the name in the held directory only while it is
+still the file that was made, by device and inode. A cell directory renamed after the copy still
+has its copy removed, and whatever is then at the old path is left. The inspection and the unlink
+are two steps. As spec 001 §1 says of sockets, this is ownership-correct cleanup, not protection
+from another writer with authority over the directory, the same uid included.
+
+Spec 023 §5 step 9 keeps `root.img` when `membraned` stops on SIGTERM, but a dropped
+`WritableRoot` always removes its copy. The cell, plasmosome-7em, will need a way to give the copy
+up without removing it. Nothing calls this module yet.
+
 ## Launching the VMM helper
 
 `runtime::launch::HelperExec` runs the pinned VMM helper the way spec 001 §4.2 says: argv is
@@ -453,18 +486,21 @@ core's `private_socket`, the boundary `plasmosomed` binds its control socket wit
 "Private recovery sockets", describes it. `PrivateDir::open` walks the parent from `/` without
 following a symlink, and requires every ancestor owned by root or this uid and writable by neither
 group nor other, and the parent itself owned by this uid with no group or other bits.
-`PrivateListener::bind` then binds the name inside that held directory. It refuses any entry
-already there with `AddressInUse` and leaves it as it was: a live or stale socket, a file, a
-directory, a FIFO or a symlink, dangling or not. It sets the socket to 0600 before it listens, so no
-connection lands while the umask's mode holds. A path too long for a socket address is
-`PathTooLong`. Each refusal comes back as `EndpointRefusal::Private` with core's error, which names
-the rule broken and the component that broke it. The bind holds the spawn lock's write side,
-because on Darwin core makes the socket close-on-exec in a second call. Closing the listener closes
-it, then removes the socket file only while the entry at that name in the held directory is still
-that socket, and says what it found as a `RemoveOutcome`. Dropping it does the same. A child that
-another thread is spawning holds a copy of the listener until its exec, so the socket can take
-connections until then. The cell, plasmosome-7em, which is not built yet, is to create that
-private directory.
+`PrivateListener::bind` then works in that held directory, in this order. It refuses any entry
+already at the path's name with `AddressInUse` and leaves it as it was: a live or stale socket, a
+file, a directory, a FIFO or a symlink, dangling or not. It binds the socket at a temporary name in
+that directory, sets it to 0600 and makes it listen there, and only then renames it to the path's
+name with a rename that never replaces an entry. So a client that finds the path finds a 0600 socket
+that accepts, and no connection lands while the umask's mode holds. A hard kill inside the bind can
+leave a dot-named temporary socket in the directory, which the next bind ignores. A path too long
+for a socket address is `PathTooLong`. Each refusal comes back as `EndpointRefusal::Private` with
+core's error, which names the rule broken and the component that broke it. The bind holds the spawn
+lock's write side, because on Darwin core makes the socket close-on-exec in a second call. Closing
+the listener closes it, then removes the socket file only while the entry at that name in the held
+directory is still that socket, and says what it found as a `RemoveOutcome`. Dropping it does the
+same. A child that another thread is spawning holds a copy of the listener until its exec, so the
+socket can take connections until then. The cell, plasmosome-7em, which is not built yet, is to
+create that private directory.
 
 `accept_ready` takes one pending connection without blocking, holding the same write side. Core
 reads the peer's effective uid from the kernel and closes a peer of another uid unread: that is
