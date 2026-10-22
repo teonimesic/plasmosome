@@ -65,14 +65,19 @@ cargo metadata --locked --all-features --format-version 1 > "$dir/all.json"
 cargo metadata --locked --all-features --format-version 1 \
   --filter-platform aarch64-apple-darwin --filter-platform x86_64-unknown-linux-gnu \
   > "$dir/hosts.json"
-python3 "$dir/record-facts.py" "$dir/all.json" "$dir/hosts.json" <crate> [<range>]
+cargo run --locked -q -p plasmosome-tools --bin record-facts -- \
+  "$dir/all.json" "$dir/hosts.json" <crate> [<range>]
 ```
 
-Save the block at the end of this section as `$dir/record-facts.py`. Pass the range when the
-lockfile holds two ranges of the crate. The block prints `name`, `range`, `brings` and
-`build_time_code`, ready to paste. Then it prints two comment lines, which are not fields:
+The last command runs the `record-facts` tool, whose code is
+`crates/plasmosome-tools/src/record_facts.rs`. On a contributor's commit, build the tool from a
+checkout of main, not from the commit you are judging: `cargo metadata` runs nothing, but `cargo
+run` builds the tool's code. So run the two `cargo metadata` commands at that commit, and the last
+command in a checkout of main. Pass the range when the lockfile holds two ranges of the crate. The
+tool prints `name`, `range`, `brings` and `build_time_code`, ready to paste. Then it prints two
+comment lines, which are not fields:
 
-- **What leaves Cargo.lock if the workspace stops using the crate.** The block removes the
+- **What leaves Cargo.lock if the workspace stops using the crate.** The tool removes the
   workspace members' direct edges to the crate, and walks every edge from the members, dev edges
   included. It lists the third-party packages it no longer reaches. Each package it lists does
   leave. More can leave, when dropping the crate also turns a feature off.
@@ -103,107 +108,6 @@ commands. Its `brings` and `build_time_code` are then the union of the two deriv
 lockfiles lock different ranges of one crate, the PR that adds the fuzz workspace decides how the
 record shows that.
 
-```python
-import json
-import pathlib
-import re
-import sys
-
-LINK = re.compile(r'link\(\s*name\s*=\s*"([^"]+)"')
-
-
-def ranged(version):
-    major, minor, patch = (int(part) for part in version.split("-")[0].split("+")[0].split("."))
-    return str(major) if major else f"0.{minor}" if minor else f"0.0.{patch}"
-
-
-def load(path):
-    metadata = json.load(open(path))
-    packages = {package["id"]: package for package in metadata["packages"]}
-    nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
-    return packages, nodes, metadata["workspace_members"]
-
-
-def label(packages, package_id):
-    package = packages[package_id]
-    return f"{package['name']}@{ranged(package['version'])}"
-
-
-def closure(nodes, root):
-    seen, stack = set(), [root]
-    while stack:
-        for dep in nodes[stack.pop()]["deps"]:
-            kinds = {kind["kind"] or "normal" for kind in dep["dep_kinds"]}
-            if kinds & {"normal", "build"} and dep["pkg"] not in seen:
-                seen.add(dep["pkg"])
-                stack.append(dep["pkg"])
-    seen.discard(root)
-    return seen
-
-
-def kept_without(nodes, members, root):
-    seen, stack = set(members), list(members)
-    while stack:
-        here = stack.pop()
-        for dep in nodes[here]["deps"]:
-            if (here in members and dep["pkg"] == root) or dep["pkg"] in seen:
-                continue
-            seen.add(dep["pkg"])
-            stack.append(dep["pkg"])
-    return seen
-
-
-def linked(package):
-    names = set()
-    for path in pathlib.Path(package["manifest_path"]).parent.rglob("*.rs"):
-        names |= set(LINK.findall(path.read_text(errors="replace")))
-    return sorted(names)
-
-
-def find(packages, name, wanted):
-    found = [i for i, p in packages.items() if p["source"] and p["name"] == name
-             and (wanted is None or ranged(p["version"]) == wanted)]
-    if len(found) != 1:
-        sys.exit(f"{name}: {len(found)} locked third-party packages match; pass the range too")
-    return found[0]
-
-
-def quoted(items):
-    return "[" + ", ".join(f'"{item}"' for item in items) + "]"
-
-
-all_packages, all_nodes, members = load(sys.argv[1])
-host_packages, host_nodes, _ = load(sys.argv[2])
-name, wanted = sys.argv[3], (sys.argv[4] if len(sys.argv) > 4 else None)
-root = find(all_packages, name, wanted)
-print(f'name = "{name}"')
-print(f'range = "{ranged(all_packages[root]["version"])}"')
-print("brings = " + quoted(sorted(label(all_packages, i) for i in closure(all_nodes, root))))
-built, hints = [], []
-on_hosts = closure(host_nodes, root) | {root} if root in host_nodes else set()
-for i in sorted(on_hosts, key=lambda i: label(host_packages, i)):
-    package = host_packages[i]
-    kinds = {kind for target in package["targets"] for kind in target["kind"]}
-    if "custom-build" in kinds:
-        built.append(f"{label(host_packages, i)} build script")
-    if "proc-macro" in kinds:
-        built.append(f"{label(host_packages, i)} proc macro")
-    if package.get("links"):
-        hints.append(f"{label(host_packages, i)} links {package['links']}")
-    builders = sorted(d["name"] for d in package["dependencies"] if d["kind"] == "build")
-    if {"cc", "cmake", "pkg-config"} & set(builders):
-        hints.append(f"{label(host_packages, i)} builds with {', '.join(builders)}")
-    libraries = linked(package)
-    if libraries:
-        hints.append(f"{label(host_packages, i)} names in link(name): {', '.join(libraries)}")
-print("build_time_code = " + quoted(built))
-kept = kept_without(all_nodes, set(members), root)
-gone = sorted(label(all_packages, i) for i, p in all_packages.items()
-              if p["source"] and i not in kept)
-print(f"# leaves Cargo.lock with it: {len(gone)}: " + (", ".join(gone) or "none, it stays"))
-print("# native-code hints to read, not a field: " + ("; ".join(hints) or "none"))
-```
-
 ## The fields written by hand
 
 Read the crate at its locked version, in `~/.cargo/registry/src/*/<name>-<version>/`. Its
@@ -230,7 +134,7 @@ ties what you read to what is locked.
     a wrong record.
   - The parts a replacement needs, each with its lines in parentheses, such as `(150 lines)` or
     `(150)`, and then their sum, as `: 700 lines`. `lines` holds that sum.
-  - Whether replacing the crate would remove anything from Cargo.lock, from the block's
+  - Whether replacing the crate would remove anything from Cargo.lock, from the tool's
     "leaves Cargo.lock" line.
 - **`exception`.** Empty, unless the owner approved one. An agent may record an approval it is
   carrying, and never originates one.
@@ -246,9 +150,9 @@ ties what you read to what is locked.
 
 ## When a record changes
 
-Run the block again, at the head of the PR, whenever that PR's Cargo.lock changes the version of
+Run the tool again, at the head of the PR, whenever that PR's Cargo.lock changes the version of
 the crate or of any package in its `brings`, or the packages they depend on. Update every derived
-field to what the block prints. A version can change a record without changing its range or its
+field to what the tool prints. A version can change a record without changing its range or its
 closure: quote 1.0.40 has no build script and quote 1.0.45 has one, so a move between them
 changes `build_time_code` in every record whose `brings` holds `quote@1`.
 
