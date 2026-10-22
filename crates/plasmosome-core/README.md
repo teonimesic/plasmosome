@@ -30,8 +30,8 @@ one.
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
-| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, and the crate-private `sources::Probes` refuses one inside a Mount source under rule 5 |
-| `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell |
+| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, the crate-private `sources::Probes` refuses one inside a Mount source under rule 5, and `sources::Guard` refuses a Mount source over a guarded directory under §6 |
+| `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell. Its file judge is public, so `plasmosome-membrane` judges with the same code: `check_file` applies the rule to the file a walk reaches, and `verify_file` also hashes it |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
@@ -359,10 +359,18 @@ calls them yet.
   cannot create and lock are all untestable, as is a create whose directory sync fails after it
   named the lock. `LockTest::fact` gives the `LockFact` that `decide` takes. Spec 023 §4 step 6's
   wait keeps the probe, since it must not create a missing lock.
-- Nothing here calls `LOCK_UN`. An `flock` lock belongs to the open file, so it is released only
-  when every descriptor of that open file is closed: the copy handed to `membraned` keeps it
-  held after the controller drops its own. A forked child that has not called `exec` keeps it
-  alive too, as it does the writer lock.
+- Nothing here calls `LOCK_UN` on a supervisor lock it returns. A `SupervisorLock`, whether from
+  `create_supervisor_lock`, a `Free` probe or a `Free` test, keeps the lock until every
+  descriptor of its open file is closed. An `flock` lock belongs to the open file, so the copy
+  handed to `membraned` keeps it held after the controller drops its own, and a forked child
+  that has not called `exec` keeps it alive too. A `create_supervisor_lock` that fails after its
+  `flock` calls `LOCK_UN` before it returns, when no copy has been handed on. Without it, a
+  process that another thread is starting, which holds a copy of every descriptor until its
+  `exec`, would keep a lock the call never returned.
+- The writer lock is released with `LOCK_UN`: a dropped `WriterLock`, and an `InstanceRoot::lock`
+  that fails after its `flock`, unlock before the descriptor closes, so the copy in a process
+  that another thread is starting does not keep it. The death of the process still leaves it
+  held while a forked child that has not called `exec` has the file open.
 - `CellDir::supervisor_lock_identity` gives the device and inode of the file at the name, so
   `membraned` can check that its descriptor 4 is this cell's lock (spec 023 §5, step 2).
   `SupervisorLock::identity` gives the same for the file it holds.
@@ -781,8 +789,9 @@ a case-insensitive volume, or spelled through `/System/Volumes/Data`, holds what
   source with its cell and pass the request's cell. A request for an existing cell checked as if
   it made a new cell, or a held source labelled as declared, checks less, and nothing signals it.
 - A declared source that does not open is skipped. Spec 022 says it cannot be mounted either.
-  That holds only once §6's source guard (native task plasmosome-98hv) refuses it at resolution
-  and spec 017's Mount adapter walks it again at apply. Neither exists yet.
+  That holds only once §6's source guard, below, refuses it at resolution and spec 017's Mount
+  adapter walks it again at apply. Nothing calls the guard yet, and the adapter does not exist
+  yet.
 - On macOS a firmlink such as `/Users`, `/private` or `/usr/local` opens a directory of the data
   volume, so that directory has a second parent that no walk from `/` sees. Rule 5 counts both
   chains. It opens `/System/Volumes/Data` followed by the directory's path, one component more at
@@ -812,8 +821,57 @@ observation gives no sources. Two more cases escape it:
   joining the directory's path to `/System/Volumes/Data`, so such a firmlink would hide it.
   `/usr/share/firmlinks` lists none on macOS 26.6.2.
 
-The guard that keeps a new Mount source away from spec 022 §6's guarded directories comes with
-native task plasmosome-98hv.
+Spec 022 §6's source guard keeps a new Mount source away from the directories that decide what
+cells get. It is `operator::sources::Guard`, and nothing calls it yet either. `Guard::new` takes
+each guarded directory with its `GuardedKind`, the one list of guarded kinds: the instance root,
+the registry root, and the directories of the control socket, the configuration file, the
+controller executable, the operator file, each listed declaration and each `cell_runtime`
+Artifact. It opens each one with `Walk::identities`, which judges no directory, so a directory
+below a group-writable one, such as Homebrew's `Cellar`, stays guarded. A trusted file guards the
+directory it was read from, by the chain of that same read. A guarded directory that does not
+open refuses every Mount of the request, naming its kind and path.
+
+`Guard::check` opens a new source from `/` with the full walk: no symlink is followed, every
+directory above the source meets rule 2, and the source must be a directory. The source itself is
+not judged, so a 0777 source below good ancestors passes. The guard then refuses the source when,
+by device and inode alone, it is the same directory as, inside or above a guarded directory. A
+sibling named `<dir>-x` passes, and a source spelled in another case on a case-insensitive volume
+is the same directory. Each `GuardRefusal` displays as one sentence, for a 108's `detail`. An
+overlap names the source, the relation, the kind and the guarded directory's path.
+
+On macOS the guard also refuses every source that is the data volume, lies inside it, or lies
+above it: `/`, `/System`, `/System/Volumes`, `/System/Volumes/Data`, and every spelling through
+it, such as `/System/Volumes/Data/usr`. Each of these holds a firmlinked directory under a second
+spelling that no walk from `/` through the firmlink passes. A spelling through
+`/System/Volumes/Data` is refused even where it would be safe: name the directory through its
+firmlink instead. A guarded directory reached through the data volume refuses the request too.
+Each firmlink target is its own path and lies inside no other target (`/usr/share/firmlinks` on
+macOS 26.6.2). So a directory inside the data volume above a target can be named only through
+`/System/Volumes/Data`, and that spelling is refused. A data volume that does not open for any
+reason but a missing name refuses every Mount.
+
+The guard's limits:
+
+- It judges a source when a request resolves it. A holding is not judged again when the guarded
+  set changes later, such as a reconfigured root, an upgraded controller or a new `cell_runtime`
+  Artifact. Rule 5 still refuses a newly listed declaration inside a held source when it is read.
+- Spec 022 does not guard a mount point inside the source that reaches a guarded directory, or
+  another view of a guarded directory with a different identity, such as a FUSE or bindfs mount.
+- A Linux bind mount of a directory inside a guarded directory, placed elsewhere and declared as
+  a source, passes, though spec 022 §6 refuses it. It has the directory's device and inode, but
+  its chain from `/` holds no guarded directory. Only root can make one. This is reasoned from the
+  code, not measured; rule 5 has the same limit above.
+- A guarded directory moved to a new parent after `Guard::new`, or a trusted file's directory
+  moved after the file was read, is judged by its old chain, so a source at the new parent
+  passes. Only the operator or the controller's UID can make that move.
+- A source renamed and replaced after the check needs write access to its parent, which meets
+  rule 2, so only root or the controller's UID can do it. What is at the path at apply is what is
+  mounted.
+- On macOS the guard relies on each firmlink target being its own path and lying inside no other
+  target. If a target lay inside another under another name, a source at the outer target would
+  pass, with nothing refusing. A macOS test reads `/usr/share/firmlinks` and fails on such a
+  table, but only where the suite runs. CI's `macos` job runs on `macos-26`, and nothing reads the
+  file at run time.
 
 ## Artifacts
 
@@ -826,11 +884,11 @@ it carries no ACL allow entry that grants a right to replace its entries, whoeve
 names, and is on no volume mounted with ownership ignored. The file must be a regular file owned
 by root or the effective UID, with no write bit at all, no set-user-ID or set-group-ID bit, no
 ACL allow entry that grants write, and `uchg` or `schg` set. Off macOS, a file that passes every
-earlier rule is then refused as `ImmutabilityUnverifiable`, so no Artifact passes there. Spec 023
-§1 has the membrane repeat these file rules at launch. A FIFO is refused at once. Only then is the
-file hashed, through the descriptor that was checked, so a file that breaks a rule is refused even
-when its digest matches. An `ArtifactRefusal` names the path and the broken rule, and its `wire`
-is the 108 `cell.new` answers, with that path and a message that names an untrusted artifact.
+earlier rule is then refused as `ImmutabilityUnverifiable`, so no Artifact passes there. A FIFO
+is refused at once. Only then is the file hashed, through the descriptor that was checked, so a
+file that breaks a rule is refused even when its digest matches. An `ArtifactRefusal` names the
+path and the broken rule, and its `wire` is the 108 `cell.new` answers, with that path and a
+message that names an untrusted artifact.
 
 The read stops one byte past the size `fstat` reported at the check, so it ends even if the file
 grows. That bound is the apparent size: a huge sparse file is read, zeros included, for as long
@@ -847,10 +905,22 @@ through a descriptor opened before the file was locked: the mode and `uchg` refu
 It cannot catch every change. A `MAP_SHARED` mapping made before the file was locked, from a
 descriptor opened for writing, can change the bytes whatever protection it had when the file was
 locked, because `mprotect` can add write later. Such a write moves the times only at `msync` or
-`munmap`, if at all, so neither this check nor the membrane's sees it.
+`munmap`, if at all, so neither this check nor the membrane's `reconfirm` sees it.
 
 `CellRuntime::artifacts` lists what to verify: `membraned`, then the template's Artifacts in
 recipe order, read from the recipe the startup check completed. Unlike `TrustedFile`, the file and
 its own directory may be root's as well as the effective UID's, there is no link-count rule, and
-there is no size cap: a root image can be large. Spec 001 §4.2 also has `membraned` check the
-files it launches. That check belongs to `plasmosome-membrane` and is separate from this one.
+there is no size cap: a root image can be large.
+
+Spec 001 §4.2 also has `membraned` check the files it launches, and spec 023 §1 needs that check
+to admit every file this one admits. So the membrane does not repeat the rule: it calls the same
+judge. `check_file` opens the file a `Walk` reaches and applies the file rule without the hash. It
+returns a `CheckedFile`, which holds the open descriptor, the `Facts` of what it opened and its
+`Stamp`, the size, modification time and change time at the check. Only this module makes a
+`CheckedFile`, so holding one means the file passed. `verify_file` runs `check_file` and then the
+hash, reading through `Positioned`, a reader that uses `pread` and so never moves the
+descriptor's offset. `verify_artifact` is `Walk::from_root` and then `verify_file`. The membrane
+calls `verify_file` at launch and keeps the walk, the descriptor and the stamp; its `reconfirm`
+calls `check_file` again and compares the device, inode and stamp. Two equal stamps are the one
+meaning of "unchanged". A `Stamp` proves nothing by itself: `Stamp::of` makes one from any
+`fstat`.
