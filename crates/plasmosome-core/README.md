@@ -31,7 +31,7 @@ one.
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
 | `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, and the crate-private `sources::Probes` refuses one inside a Mount source under rule 5 |
-| `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell |
+| `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell. Its file judge is public, so `plasmosome-membrane` judges with the same code: `check_file` applies the rule to the file a walk reaches, and `verify_file` also hashes it |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
@@ -826,11 +826,11 @@ it carries no ACL allow entry that grants a right to replace its entries, whoeve
 names, and is on no volume mounted with ownership ignored. The file must be a regular file owned
 by root or the effective UID, with no write bit at all, no set-user-ID or set-group-ID bit, no
 ACL allow entry that grants write, and `uchg` or `schg` set. Off macOS, a file that passes every
-earlier rule is then refused as `ImmutabilityUnverifiable`, so no Artifact passes there. Spec 023
-§1 has the membrane repeat these file rules at launch. A FIFO is refused at once. Only then is the
-file hashed, through the descriptor that was checked, so a file that breaks a rule is refused even
-when its digest matches. An `ArtifactRefusal` names the path and the broken rule, and its `wire`
-is the 108 `cell.new` answers, with that path and a message that names an untrusted artifact.
+earlier rule is then refused as `ImmutabilityUnverifiable`, so no Artifact passes there. A FIFO
+is refused at once. Only then is the file hashed, through the descriptor that was checked, so a
+file that breaks a rule is refused even when its digest matches. An `ArtifactRefusal` names the
+path and the broken rule, and its `wire` is the 108 `cell.new` answers, with that path and a
+message that names an untrusted artifact.
 
 The read stops one byte past the size `fstat` reported at the check, so it ends even if the file
 grows. That bound is the apparent size: a huge sparse file is read, zeros included, for as long
@@ -847,10 +847,22 @@ through a descriptor opened before the file was locked: the mode and `uchg` refu
 It cannot catch every change. A `MAP_SHARED` mapping made before the file was locked, from a
 descriptor opened for writing, can change the bytes whatever protection it had when the file was
 locked, because `mprotect` can add write later. Such a write moves the times only at `msync` or
-`munmap`, if at all, so neither this check nor the membrane's sees it.
+`munmap`, if at all, so neither this check nor the membrane's `reconfirm` sees it.
 
 `CellRuntime::artifacts` lists what to verify: `membraned`, then the template's Artifacts in
 recipe order, read from the recipe the startup check completed. Unlike `TrustedFile`, the file and
 its own directory may be root's as well as the effective UID's, there is no link-count rule, and
-there is no size cap: a root image can be large. Spec 001 §4.2 also has `membraned` check the
-files it launches. That check belongs to `plasmosome-membrane` and is separate from this one.
+there is no size cap: a root image can be large.
+
+Spec 001 §4.2 also has `membraned` check the files it launches, and spec 023 §1 needs that check
+to admit every file this one admits. So the membrane does not repeat the rule: it calls the same
+judge. `check_file` opens the file a `Walk` reaches and applies the file rule without the hash. It
+returns a `CheckedFile`, which holds the open descriptor, the `Facts` of what it opened and its
+`Stamp`, the size, modification time and change time at the check. Only this module makes a
+`CheckedFile`, so holding one means the file passed. `verify_file` runs `check_file` and then the
+hash, reading through `Positioned`, a reader that uses `pread` and so never moves the
+descriptor's offset. `verify_artifact` is `Walk::from_root` and then `verify_file`. The membrane
+calls `verify_file` at launch and keeps the walk, the descriptor and the stamp; its `reconfirm`
+calls `check_file` again and compares the device, inode and stamp. Two equal stamps are the one
+meaning of "unchanged". A `Stamp` proves nothing by itself: `Stamp::of` makes one from any
+`fstat`.
