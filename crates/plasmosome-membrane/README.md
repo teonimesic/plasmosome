@@ -297,15 +297,24 @@ in its only NUL, be UTF-8, be at most 4,096 bytes with that NUL, and be one plai
 spelling: not absolute, with no empty, `.` or `..` part and no trailing `/`. Each name appears
 once, after an earlier directory entry for its parent. Only regular files with one link and
 directories pass; a symlink, a device, a FIFO, a socket or an unknown type is refused. `init` must
-have an execute bit and some bytes. `TRAILER!!!` ends the archive, and only zero bytes may follow
-it, so the kernel finds no second archive to unpack over the first.
+have an execute bit and some bytes. The last entry is a `TRAILER!!!` with no body and no symlink
+mode, and only zero bytes may follow it.
 
-Some rules follow how Linux unpacks the archive (`init/initramfs.c`). The kernel reads an entry's
-name only when the entry is a regular file or has no body, so a directory or a trailer with a body
-is refused: the kernel would skip it unread, and a `TRAILER!!!` it skips does not end the archive.
-The kernel also skips an entry whose name is over 4,096 bytes, and it keeps the last of two
-entries with one name. It skips zero bytes between entries; the audit refuses them, and the
-qualified archive has none.
+Some rules follow how Linux unpacks the archive, in `init/initramfs.c` at 6.12.91, the guest
+kernel's version, and at master as read on 2026-10-21. Line numbers below are 6.12.91's, then
+master's. The kernel never stops at `TRAILER!!!`: there it only frees its hard-link table (372-375,
+384-387), and its unpack loop reads any later `0` at a 4-byte boundary as the start of another
+entry (519-525, 544-550). So the rule that only zero bytes follow the trailer is the one that keeps
+a second archive from being unpacked over the first. The kernel reads an entry's name only when
+the entry is a regular file or has no body (305, 317). A directory with a body is skipped unread,
+so nothing under it is made, and the audit refuses it. The audit also refuses a trailer with a
+body, which only fails closed: the kernel skips that body to the same next header the audit would
+read. A `TRAILER!!!` with a symlink mode takes the symlink branch before its name is compared
+(296, 308), so the kernel tries to make a link and never sees a trailer; the audit refuses it as a
+symlink. The kernel also skips an entry whose name is over 4,096 bytes (294, 306), and it keeps the
+last of two entries with one name. It skips zero bytes between entries; the audit refuses them, and
+the qualified archive has none. 6.12.91 parses a header field with `simple_strtoul` and master with
+`hex2bin`; the audit takes exactly 8 hexadecimal digits, which both read the same way.
 
 It reads the bytes the descriptor holds now and does not hash them again, so the limit stated for
 `reconfirm()` above holds here too: a write through a shared writable mapping made before the file
