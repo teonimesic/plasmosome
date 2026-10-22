@@ -13,8 +13,8 @@ use crate::instance::{DirectoryStream, rename_no_replace};
 use crate::nofollow::darwin_acl;
 pub use crate::nofollow::{DirIdentity, effective_uid};
 use crate::nofollow::{
-    Facts, Kind, Opened, Walk, WalkRefusal, absolute_components, errno_of, judge_ancestor,
-    last_errno, refuse_if, refuse_replacing_acl, stat_at,
+    Facts, Kind, Opened, Walk, WalkRefusal, absolute_components, errno_of, last_errno, refuse_if,
+    stat_at,
 };
 
 /// A socket's parent directory, opened without following symlinks and judged private: every
@@ -441,13 +441,8 @@ pub struct ListedEntry {
 /// A failure to read the directory or to stat an entry is `Io`.
 pub fn list_trusted_dir(path: &Path) -> Result<Vec<ListedEntry>, PrivateSocketError> {
     let walk = Walk::from_root(path)?;
-    let path = walk.path();
-    let euid = effective_uid();
-    let opened = walk.open_directory(|reached| {
-        judge_ancestor(&reached.facts, euid, reached.path).map_err(PrivateSocketError::from)
-    })?;
-    refuse_replacing_acl(&opened.fd, &path)?;
-    list_entries(&opened.fd, &path)
+    let opened = walk.open_trusted_directory()?;
+    list_entries(&opened.fd, &walk.path())
 }
 
 fn open_private(walk: &Walk, path: &Path) -> Result<Opened, PrivateSocketError> {

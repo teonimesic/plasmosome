@@ -169,6 +169,17 @@ impl Walk {
         self.reach(Last::Directory, judge)
     }
 
+    /// Opens the last component as a directory and holds it to the rule every directory above it
+    /// meets: the ancestor rule, then on macOS no ACL allow entry that lets anyone replace its
+    /// entries. `InstanceRoot::open` and `list_trusted_dir` both reach the rule through this.
+    pub(crate) fn open_trusted_directory(&self) -> Result<Opened, WalkRefusal> {
+        let euid = effective_uid();
+        let opened =
+            self.open_directory(|reached| judge_ancestor(&reached.facts, euid, reached.path))?;
+        refuse_replacing_acl(&opened.fd, &self.path())?;
+        Ok(opened)
+    }
+
     /// Opens the last component read-only with `O_NOFOLLOW`, `O_NONBLOCK` and `O_NOCTTY` and
     /// without `O_DIRECTORY`, so a FIFO or a device cannot block the open. `judge` decides the
     /// object from `fstat` on that descriptor, and must refuse every type the caller does not
@@ -857,7 +868,7 @@ pub(crate) mod fixtures {
 
     use tempfile::TempDir;
 
-    use super::{DirIdentity, Facts, Kind, Walk, effective_uid, judge_ancestor};
+    use super::{DirIdentity, Facts, Kind, Walk};
 
     pub(crate) struct TestRoot {
         path: PathBuf,
@@ -896,7 +907,6 @@ pub(crate) mod fixtures {
     }
 
     pub(crate) fn walkable_temp_dir(prefix: &str) -> (TempDir, PathBuf) {
-        let euid = effective_uid();
         let mut refusals = Vec::new();
         for base in root_bases() {
             let dir = match tempfile::Builder::new().prefix(prefix).tempdir_in(&base) {
@@ -908,10 +918,7 @@ pub(crate) mod fixtures {
             };
             let path = fs::canonicalize(dir.path()).expect("the test root resolves");
             set_mode(&path, 0o700);
-            let walked = Walk::from_root(&path).and_then(|walk| {
-                walk.open_directory(|reached| judge_ancestor(&reached.facts, euid, reached.path))
-            });
-            match walked {
+            match Walk::from_root(&path).and_then(|walk| walk.open_trusted_directory()) {
                 Ok(_) => return (dir, path),
                 Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
             }
