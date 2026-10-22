@@ -9,13 +9,6 @@ use super::digest::Digest;
 use super::path::RecipePath;
 use super::recipe::{Artifact, ArtifactRole, RuntimeRecipe};
 
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(
-        unused_imports,
-        reason = "off macOS nothing in this crate reads through it yet"
-    )
-)]
 pub(crate) use plasmosome_core::artifact::Positioned;
 
 /// The device and inode of a verified file.

@@ -177,11 +177,17 @@ pub fn check_file(walk: &Walk) -> Result<CheckedFile, ArtifactFault> {
 /// On a pass it returns the checked file, its stamp the one taken at the check. A failed `pread`
 /// or `fstat` is `Walk(Io)` naming the walk's path.
 pub fn verify_file(walk: &Walk, pinned: &Digest) -> Result<CheckedFile, ArtifactFault> {
+    verify_with(walk, pinned, digest_checked)
+}
+
+fn verify_with(
+    walk: &Walk,
+    pinned: &Digest,
+    read: impl FnOnce(&CheckedFile, &Path) -> Result<Digest, ArtifactFault>,
+) -> Result<CheckedFile, ArtifactFault> {
     let checked = check_file(walk)?;
     let path = walk.path();
-    hash_checked(checked, &path, pinned, |checked| {
-        digest_checked(checked, &path)
-    })
+    hash_checked(checked, &path, pinned, |checked| read(checked, &path))
 }
 
 fn hash_checked(
@@ -460,7 +466,7 @@ mod tests {
             assert_eq!(
                 reached(&path, kind, uid, mode),
                 Err(NotRegular { kind }),
-                "{kind:?}, uid {uid}, mode {mode:04o}"
+                "{kind:?}, mode {mode:04o}"
             );
         }
         for (row, (uid, mode, fault)) in [
@@ -1007,25 +1013,23 @@ mod tests {
         #[test]
         fn a_held_writer_rewriting_the_same_bytes_inside_the_read_step_is_refused_as_changed() {
             let root = with_file(0o644);
-            let path = root.join("lib/membraned");
+            let walk = root.walk("lib/membraned");
             let writer = locked_with_a_writer(&root);
             assert_eq!(
-                hashed(checked(&root), &path),
+                verify_file(&walk, &Digest::of(BYTES)).map(drop),
                 Ok(()),
                 "with no write it verifies"
             );
-            let checked = checked(&root);
-            let stamp = checked.stamp();
-            let rewriting = |checked: &CheckedFile| {
-                let found = digest_checked(checked, &path);
-                after_the_clock_passes(&root, stamp);
+            let rewriting = |checked: &CheckedFile, path: &Path| {
+                let found = digest_checked(checked, path);
+                after_the_clock_passes(&root, checked.stamp());
                 writer
                     .write_all_at(BYTES, 0)
                     .expect("the held writer still writes under uchg");
                 found
             };
             assert_eq!(
-                hash_checked(checked, &path, &Digest::of(BYTES), rewriting).map(drop),
+                verify_with(&walk, &Digest::of(BYTES), rewriting).map(drop),
                 Err(ArtifactFault::ChangedWhileHashing)
             );
         }
