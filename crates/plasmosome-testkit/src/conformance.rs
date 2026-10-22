@@ -1250,9 +1250,9 @@ pub fn doomed_owner() -> CellOwner {
 /// `UnknownObject`, each changing nothing; that an invalid operation of that owner is refused with
 /// `InvalidOperation` and changes nothing; and that, of two such effects, each exact removal clears
 /// its own effect and nothing else. An error is compared by class and address, never by its
-/// detail. The factory's backend must fail every grant or apply owned by `doomed_owner()` after its
-/// first effect. Each pass removes its two effects in grant order or in reverse, and every message
-/// of that walk names its order.
+/// detail. The factory's backend must fail, after its first effect, every valid grant or apply of
+/// the doomed owner at a free address. Each pass removes its two effects in grant order or in
+/// reverse, and every message of that walk names its order.
 pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBackend>(
     make: impl Fn() -> B,
 ) {

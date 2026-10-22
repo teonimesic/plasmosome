@@ -18,10 +18,12 @@ Every clause reads the backend's complete account, and a snapshot that fails is 
 failure. Each account check compares the whole snapshot with what the clause expects: the standing
 objects, an issued record for each standing grant and none for an applied or planted object, and
 the unfinished effects it expects. Only `failed_grants_stay_incomplete_until_exact_withdrawal`
-expects one; every other clause expects none. A check that a backend holds nothing reads all three
-collections, and each such
-check has a defective backend that leaves only an unfinished effect there. Two defects hold the
-clauses to the records. `SnapshotOmitsIssuedRecords` reports
+expects any; every other clause expects none. A check that a backend holds nothing reads all three
+collections. Each such check has its own defective backend, which leaves only an unfinished effect
+there, with no standing object and no record: `RevokeLeavesAnUnfinishedEffect`,
+`RecoversUnfinishedEffectsFromItsOwnLog` at two checks, and `ApplyRemovalLeavesAnUnfinishedEffectOf`
+after a planted and after a granted removal. So a check that read only the objects and the records
+would pass them. Two defects hold the clauses to the records. `SnapshotOmitsIssuedRecords` reports
 its objects with no records, and `snapshot_never_invents_objects` must reject it.
 `SnapshotReconstructsGrantsFromObjects` rebuilds a record for every standing object, and
 `apply_and_removal_reach_the_universe` must reject it. One per-step check is narrower: after each

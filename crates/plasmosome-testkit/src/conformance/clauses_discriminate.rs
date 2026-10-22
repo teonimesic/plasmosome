@@ -1216,9 +1216,6 @@ impl EnforcementBackend for DefectiveBackend {
             && let Some(object) = held
         {
             self.incomplete.insert(address, object.operation());
-            if let Some(record) = record.clone() {
-                self.ledger.insert(address, record);
-            }
         }
         let keeps_the_record = match self.defect {
             Defect::ForcedApplyRemovalLeavesAStaleHandle => drain.policy == RevokePolicy::Force,
@@ -3490,14 +3487,14 @@ fn the_snapshot_keeps_the_record_of_an_unfinished_holding_and_each_emptiness_def
     let granted = conformance::op_for(GrantId::new(), owner(), uds_socket("/run/egressd.uds"));
     let mut leaving =
         DefectiveBackend::carrying(Defect::ApplyRemovalLeavesAnUnfinishedEffectOf(Call::Grant));
-    let entry = leaving.grant(granted.clone(), GrantKind::Hot).unwrap();
+    leaving.grant(granted.clone(), GrantKind::Hot).unwrap();
     leaving
         .apply_removal(granted.removal(), &owner(), DrainSpec::forcing())
         .unwrap();
     assert_eq!(
         leaving.snapshot_os_state(),
         Ok(
-            EnforcementSnapshot::new(OsState::new(), vec![entry], unfinished(vec![granted]))
+            EnforcementSnapshot::new(OsState::new(), Vec::new(), unfinished(vec![granted]))
                 .unwrap()
         )
     );

@@ -1724,8 +1724,9 @@ is a claim that the text above may not be corrected.
 8. Spec017's PID-free BrokerLaunch and single-plugin format3 cutover are **delivered** in the
    exact-ID model and the ledger. Its caller-prepared fallible grant, complete fallible snapshot,
    typed incomplete effects and drain-aware exact removal are **delivered** at model scope: in the
-   backend seam, FakeBackend, CompositeBackend, the ledger and the conformance suite. No real
-   adapter, independent observer or workload confinement is delivered.
+   backend seam, FakeBackend, CompositeBackend and the conformance suite. The ledger's detach uses
+   that removal and stops, and later resumes, on a typed incomplete effect. No real adapter,
+   independent observer or workload confinement is delivered.
    Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
    format3 records. Its grant takes the operation and kind its caller prepared, keeps that
    address, mints no identity and can fail. In the model, a grant or apply can fail after its
@@ -1733,8 +1734,7 @@ is a claim that the text above may not be corrected.
    incomplete effect in the account, which only its exact removal clears.
    No product code calls grant yet. In tests, the testkit's attach-detach fixture writes the
    inverse of every prepared grant to a format3 log before the first grant. The new contract permits
-   complete prepare/inverse before fork and defines cleanup after partial launch; it does not
-   deliver an independent observer, workload confinement or all five real adapters.
+   complete prepare/inverse before fork and defines cleanup after partial launch.
    Amended on 2026-10-20, when plasmosome-8pr4 shipped the launch and the format3 cutover. Until
    then this item listed both as not yet implemented, and said the model code carried
    PID-bearing capabilities and format2 records.
@@ -1745,8 +1745,10 @@ is a claim that the text above may not be corrected.
    model. Until then the sentence on the grant ended "can fail; every failure it has today comes
    before any effect".
    Amended on 2026-10-22, when plasmosome-6j8 shipped the conformance clause for typed incomplete
-   effects. Until then this item listed the complete fallible snapshot, typed incomplete effects
-   and drain-aware exact cleanup as not yet implemented.
+   effects. Until then the first sentences still listed the complete fallible snapshot, typed
+   incomplete effects and drain-aware exact cleanup as not yet implemented, although #294, #305
+   and #122 had delivered them. The same change reworded the plasmosome-wswv note above, which
+   until then said "this sentence read" and did not name the sentence.
 9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
    **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
    recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest
