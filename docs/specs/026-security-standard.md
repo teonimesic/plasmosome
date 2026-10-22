@@ -475,6 +475,7 @@ maximum size and, where it applies, a maximum nesting depth and a time budget.
 | --- | --- | --- | --- | --- |
 | Controller control line | `plasmosome-core` `control.rs`, `protocol.rs` | A control-socket client, including a poisoned agent | 1 MiB (`MAX_LINE_BYTES`), read through a limit; JSON depth 128 | Fuzz target |
 | Broker readiness reply | `plasmosome-membrane` `readiness.rs` | A plasmid's broker | 1 MiB (`MAX_RESPONSE_BYTES`) within spec 001's readiness budget; JSON depth 128 | Fuzz target |
+| Hello reply | `plasmosome-membrane` `runtime/handshake.rs`, which reads it with `readiness.rs`'s `read_frame_within`; `runtime/hello.rs`, `judge_normal` and `judge_withdrawal` | The guest shim, through the helper's 4090 mapping, so also a cell's workload that took the shim over | 1,048,576 bytes before the newline (`MAX_RESPONSE_BYTES`), read through a limit of the bound plus one byte, so a reply one byte longer is refused before it is parsed; bytes after the newline in the same read are refused too. JSON depth 128 from core's `strict_json`. Inside the handshake's one `ProbeBudget`. Amended on 2026-10-21: this row is new; the judge landed with #151 without it | Fuzz target, plasmosome-o7bf's; its corpus replays under `cargo test` |
 | Plasmid manifest | `plasmosome-core` `manifest.rs`, `load` and `parse` | A plasmid author | 1 MiB (`MAX_MANIFEST_BYTES`) on both, spec 020's limit for a declaration; `load` reads through a limit. Nesting 32 levels (`MAX_MANIFEST_DEPTH`), counted from the text before TOML parses it, as spec 011 says. TOML's own depth limit of 80 bounds each key or value alone, not the parsed tree, and is not the bound. The count is exact for arrays, inline tables and dotted keys, and never below the depth of the tree toml builds, so a declaration that passes has a tree at most 32 levels deep. Each part of a table header counts two, so under a plain table header the count is above the tree's depth, up to about twice it: a 16-part table header with a key under it counts 33 and is refused, although its tree is 17 deep. Amended on 2026-10-20: this named no depth bound, and Needs asked for one | Fuzz target |
 | Membrane control request | `plasmosome-membrane` `control.rs` | The controller, under spec 001's peer-UID check | 1 MiB (`MAX_REQUEST_BYTES`), read through a limit | Bound only |
 | Supervisor config record | `plasmosome-core` `supervisor_config.rs`, `decode`; `plasmosome-membrane` `cell_start.rs`, `read_config` | The controller, on `membraned`'s descriptor 3 (spec 023 §4) | 1,048,576 bytes before the newline (`MAX_RECORD_BYTES`), read through a limit of `MAX_RECORD_BYTES + 2`; JSON depth 128 from serde_json. No time budget: it reads to EOF, and the controller closes its end once the record is written (spec 023 §4 step 5). Amended on 2026-10-21: this row is new; `decode` landed without it. | Bound only |
@@ -550,15 +551,17 @@ when Q1 is answered. It never names a route nobody receives.
 This spec governs a PR, whatever task it maps to, when the PR changes any of these: a lockfile; a
 manifest's dependency, `[lints]`, `[patch]` or `[replace]` tables; `.cargo/config*`, `build.rs`,
 `clippy.toml`, `rust-toolchain*` or `deny.toml`; a library root's `#![doc(test(...))]`; anything
-under `.github/`, `.githooks/`, `tools/` or `docs/dependencies/`; `unsafe` or native code; a pin of
-a native artifact that section 1 records, such as `PINNED_BUNDLE_ID` in
-`crates/plasmosome-lanes/src/bundle.rs`; a parser
-of less-trusted bytes or a fuzz corpus; or `SECURITY.md`. Its reviewer checks the reviewer rows of
-section 7, and reads any change under `tools/` as a workflow change, whether or not a workflow
-names the file. Workflows run scripts there, and a module added beside a Python script can shadow
-the standard-library module of that name. So a PR that only adds a file under `tools/` can switch a
-check off and still pass its own CI. Amended on 2026-10-20: the doctest attribute and `tools/` were
-not in this list. Amended on 2026-10-21: native artifact pins were not in this list.
+under `.github/`, `.githooks/`, `tools/`, `crates/plasmosome-tools/` or `docs/dependencies/`;
+`unsafe` or native code; a pin of a native artifact that section 1 records, such as
+`PINNED_BUNDLE_ID` in `crates/plasmosome-lanes/src/bundle.rs`; a parser of less-trusted bytes or a
+fuzz corpus; or `SECURITY.md`. Its reviewer checks the reviewer rows of section 7, and reads any
+change under `tools/` or `crates/plasmosome-tools/` as a workflow change, whether or not a workflow
+names the file. Workflows run programs from both. A module added beside a Python script in `tools/`
+can shadow the standard-library module of that name, and a change to a tool's Rust code can make it
+pass what it should refuse. So a PR that only changes a file in either place can switch a check off
+and still pass its own CI. Amended on 2026-10-20: the doctest attribute and `tools/` were not in
+this list. Amended on 2026-10-21: native artifact pins were not in this list. Amended on 2026-10-22:
+this did not name `crates/plasmosome-tools/`.
 
 ## Changes proposed to accepted specs and documents
 

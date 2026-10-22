@@ -165,10 +165,16 @@ socket's name in the directory it opened and checked at start, which it holds op
 the identity only of a socket its effective UID owns, and if that directory is renamed while it
 runs, teardown removes the socket under the directory's new name and leaves whatever is then at
 the configured path. A `plasmosomed` start that fails at any step after the capture removes the
-just-bound socket as any later error does. Those steps are, in order, the repeated path check, the
-change to mode 0600, the re-inspection of the socket after that change, `listen`, and the switch
-to nonblocking. Amended on 2026-10-20: this paragraph said each daemon removes the configured
-path, and described only `membraned`'s capture and teardown.
+just-bound socket as any later error does. Until those steps finish, the socket is bound at a
+temporary name in that directory, not at the configured name. Those steps are, in order, the
+repeated path check, the change to mode 0600, the re-inspection of the socket after that change,
+`listen`, the switch to nonblocking, and the move from the temporary name to the configured name.
+The move never replaces an entry: one already there is refused and left as it was. Amended on
+2026-10-20: this paragraph said each daemon removes the configured path, and described only
+`membraned`'s capture and teardown. Amended on 2026-10-21: this read "Those steps are, in order,
+the repeated path check, the change to mode 0600, the re-inspection of the socket after that
+change, `listen`, and the switch to nonblocking."; the steps ended at the switch to nonblocking,
+and the socket was bound at the configured name.
 
 These are host-conditioned guarantees, not race-free protection. The caller supplies a trusted,
 stable directory and coordinated namespace writers: parent, ancestors and their symlink targets
@@ -178,7 +184,10 @@ included. The final inspect-then-unlink pair is two steps, not one atomic one. D
 distinguishes a later socket at the same name only while the original inode stays allocated;
 the file-type check still rejects regular files and symlinks even if inode numbers are recycled.
 `SIGKILL` and equivalent hard exits run no destructor; the resulting residue is observed by the
-next start's refusal, not prevented, and no verb observes or repairs it.
+next start's refusal, not prevented, and no verb observes or repairs it. A hard exit while
+`plasmosomed`'s socket still has its temporary name leaves it under that name, which no start
+refuses and nothing removes. Amended on 2026-10-21: this paragraph ended at "no verb observes or
+repairs it.", and did not cover a hard exit before the socket reaches its configured name.
 
 `plasmosomed`'s control socket is held to a stricter rule: it is bound under §4.1's path
 boundary for private sockets. The daemon refuses to start when the configured path fails that
@@ -1070,14 +1079,18 @@ Recovery sockets are restricted to the instance's trusted host UID: the controll
 membranes run under that same effective UID. Before binding, the membrane opens and validates
 the socket's private parent directory without following symlinks: it is owned by that UID,
 mode0700, with no ACL granting access to another principal. Ancestors cannot be replaced by
-an untrusted principal. The bound socket is owned by that UID and mode0600 before listening;
+an untrusted principal. The bound socket is owned by that UID, mode 0600 and listening before it
+appears at its configured name, so a client that finds the name finds a socket it may connect to;
 umask alone is not the boundary. An existing unsafe directory/socket is refused, not silently
 adopted, chmodded or unlinked. The controller validates this same path boundary before connecting.
 Both endpoints obtain the connected peer's effective UID from the kernel (`getpeereid` on
 macOS, `SO_PEERCRED` on Linux) and require it to equal their own. Missing credentials, a mismatch,
 or failure to establish the path boundary closes/refuses the connection before request parsing,
 method dispatch or trusting a response. No recovery result is returned on an unauthorized
-connection. Client-supplied cell, PID, operator or UID fields are not authentication.
+connection. Client-supplied cell, PID, operator or UID fields are not authentication. Amended on
+2026-10-21: this read "The bound socket is owned by that UID and mode0600 before listening; umask
+alone is not the boundary.", which said only that the socket is mode 0600 before listening, so a
+client could find it at its name before it was either.
 
 Processes under that host UID, and host root, are inside the trusted boundary; this is not
 protection against their compromise or a multi-user authorization service. A cell workload must
@@ -1722,9 +1735,11 @@ is a claim that the text above may not be corrected.
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
 8. Spec017's PID-free BrokerLaunch and single-plugin format3 cutover are **delivered** in the
-   exact-ID model and the ledger, and its caller-prepared fallible grant API is **delivered** in
-   the exact-ID model. Its complete fallible snapshot, typed incomplete effects and drain-aware
-   exact cleanup are **not yet implemented**.
+   exact-ID model and the ledger. Its caller-prepared fallible grant, complete fallible snapshot,
+   typed incomplete effects and drain-aware exact removal are **delivered** at model scope: in the
+   backend seam, FakeBackend, CompositeBackend and the conformance suite. The ledger's detach uses
+   that removal and stops, and later resumes, on a typed incomplete effect. No real adapter,
+   independent observer or workload confinement is delivered.
    Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
    format3 records. Its grant takes the operation and kind its caller prepared, keeps that
    address, mints no identity and can fail. In the model, a grant or apply can fail after its
@@ -1732,8 +1747,7 @@ is a claim that the text above may not be corrected.
    incomplete effect in the account, which only its exact removal clears.
    No product code calls grant yet. In tests, the testkit's attach-detach fixture writes the
    inverse of every prepared grant to a format3 log before the first grant. The new contract permits
-   complete prepare/inverse before fork and defines cleanup after partial launch; it does not
-   deliver an independent observer, workload confinement or all five real adapters.
+   complete prepare/inverse before fork and defines cleanup after partial launch.
    Amended on 2026-10-20, when plasmosome-8pr4 shipped the launch and the format3 cutover. Until
    then this item listed both as not yet implemented, and said the model code carried
    PID-bearing capabilities and format2 records.
@@ -1741,7 +1755,13 @@ is a claim that the text above may not be corrected.
    then this item listed it as not yet implemented, and said the model code still had
    infallible backend-minted grants.
    Amended on 2026-10-22, when plasmosome-wswv shipped typed incomplete effects in the exact-ID
-   model. Until then this sentence read "every failure it has today comes before any effect".
+   model. Until then the sentence on the grant ended "can fail; every failure it has today comes
+   before any effect".
+   Amended on 2026-10-22, when plasmosome-6j8 shipped the conformance clause for typed incomplete
+   effects. Until then the first sentences still listed the complete fallible snapshot, typed
+   incomplete effects and drain-aware exact cleanup as not yet implemented, although #294, #305
+   and #122 had delivered them. The same change reworded the plasmosome-wswv note above, which
+   until then said "this sentence read" and did not name the sentence.
 9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
    **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
    recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest

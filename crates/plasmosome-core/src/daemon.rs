@@ -310,10 +310,11 @@ fn split_socket_path(path: &Path) -> Result<(&Path, &str), PrivateSocketError> {
 /// refused as `DaemonError::Boundary`, naming the failing component, and
 /// nothing is bound. A path already there is refused too, whether it holds a live
 /// daemon's socket or a stale file; the daemon never unlinks a path it did not
-/// create, so clearing a stale path is the caller's job. The socket is set to
-/// mode 0600 before it listens, whatever the umask. A connection whose kernel
-/// peer UID is not the effective UID is closed before a byte is read or
-/// written, and the daemon goes on to the next one.
+/// create, so clearing a stale path is the caller's job. The socket reaches the
+/// configured path only once it is mode 0600 and listening, whatever the umask;
+/// until then it has a temporary name in the same directory. A connection
+/// whose kernel peer UID is not the effective UID is closed before a byte is
+/// read or written, and the daemon goes on to the next one.
 /// Returning — cleanly, on an error raised after the bind, or through an
 /// unwinding panic — removes the socket only while the entry at that name in
 /// the directory opened at start is still the socket this daemon bound, by

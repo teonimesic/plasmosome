@@ -76,34 +76,71 @@ or a string such as `"443, 8080"` is removed, not unwrapped. The parser itself n
 wraps an entry.
 
 Every other refusal of what a declaration says takes the same form, naming the plasmid: a network
-section that is not a table; a top-level `[network]` that names no host (a command's own network
-section with no host still parses); `hosts`, `pin_cidrs` or `[mock]` `hosts` that are not lists
-of strings; a declaration with no capability and no implementation, or whose only capability is
-an empty commands table; `[commands]`, its commands table or a command that is not a table, or
-`[commands]` with no commands table; a command whose `exec` is missing, is not a list or names no
-program; and a `[mock]` with no `[network]`, or naming a host `[network]` does not declare. In
-`hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is named by its index.
-Its fix is `remove this entry`, except in a pin list with no string entry, where it is the
-example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned. A `[provides]`
-binding whose key is empty or only whitespace is refused at its own path, such as `provides.""`,
-before anything inside it is checked. Its fix is `remove this entry`: no key is guessed, so
-following the fix deletes the binding and its tools. A key is blank when every character in it is
-Unicode White_Space, the characters `str::trim` removes. A key made only of U+3000 or U+00A0 is
-blank. A key such as `" a"` is not, and neither is one made only of U+FEFF, U+200B or U+180E, which
-are not White_Space. A tool name blank in the same sense is refused at its own path, such as
-`provides."a:tools".tools.""`, before its description is checked. Its fix is `remove this entry`:
-no name is guessed, so following the fix deletes the tool. A names list is refused as a whole, and
-its entries have no descriptions. If its first entry is blank, the refusal is at that entry,
-`provides."a:tools".tools[0]`, with fix `remove this entry`. A blank entry after the first is not
-refused at its own index: the list's fix writes at most the first entry, so it drops the blank one.
+section that is not a table; a top-level `[network]` that declares a port and names no host (a
+command's own network section with no host still parses); `hosts`, `pin_cidrs` or `[mock]`
+`hosts` that are not lists of strings; a declaration with no capability and no implementation, or
+whose only capability is an empty commands table; `[commands]`, its commands table or a command
+that is not a table, or `[commands]` with no commands table; a command whose `exec` is missing, is
+not a list or names no program; and a `[mock]` with no `[network]`, or naming a host `[network]`
+does not declare. In `hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is
+named by its index. Its fix is `remove this entry`, except in a pin list with no string entry,
+where it is the example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned.
+A `[provides]` binding whose key is empty or only whitespace is refused at its own path, such as
+`provides.""`, before anything inside it is checked. Its fix is `remove this entry`: no key is
+guessed, so following the fix deletes the binding and its tools. A key is blank when every
+character in it is Unicode White_Space, the characters `str::trim` removes. A key made only of
+U+3000 or U+00A0 is blank. A key such as `" a"` is not, and neither is one made only of U+FEFF,
+U+200B or U+180E, which are not White_Space. A tool name blank in the same sense is refused at its
+own path, such as `provides."a:tools".tools.""`, before its description is checked. Its fix is
+`remove this entry`: no name is guessed, so following the fix deletes the tool. A names list is
+refused as a whole, and its entries have no descriptions. If its first entry is blank, the refusal
+is at that entry, `provides."a:tools".tools[0]`, with fix `remove this entry`. A blank entry after
+the first is not refused at its own index: the list's fix writes at most the first entry, so it
+drops the blank one.
 
 For a network section that is not a table, or a `hosts` that is not a list, the fix uses the
 string the author wrote there. For the top-level `[network]`, it then uses the `[mock]` hosts.
-The `[mock]` check also runs before the no-host check, so an empty top-level `hosts` is offered
-the `[mock]` hosts. Only after those does a fix name the example `api.example.com`. A `[mock]`
-`hosts` with no string in it, and a `[mock]` with no host and no `[network]`, get
-`remove this entry`. A command fix runs the program the author wrote, else the command's key,
-else `command-name`.
+The `[mock]` check also runs before the no-host check, so an empty top-level `hosts` beside a
+declared port is offered the `[mock]` hosts. Only after those does a fix name the example
+`api.example.com`. A `[mock]` `hosts` with no string in it gets `remove this entry`. So does a
+`[mock]` with no `[network]`, refused at `mock`, and a `[mock]` naming a host that a `[network]`
+with no port does not declare: declaring that host would give hosts with no port, which the rules
+below remove. With a port declared, a mock host that `[network]` does not declare and that
+`is_proxy_host` refuses is refused at its entry, such as `mock.hosts[1]`. Its fix is the host in
+lower case when that is a DNS name `[mock]` does not already hold, else `remove this entry`. A
+command fix runs the program the author wrote, else the command's key, else `command-name`.
+
+The top-level `[network]` and `[workspace]` must also hold exact values (spec 022 §6). The network
+checks run after the ones above, in this order:
+
+1. No host and no port: refused at `network` with `remove this entry`. With a port and no host,
+   the no-host refusal above stands.
+2. Hosts with no port, or with `ports = []`: refused at `network.hosts[0]` with
+   `remove this entry`. No port is guessed, so following the fixes removes the hosts one at a time
+   and then the section.
+3. A port written twice: refused at the later entry, such as `network.ports[1]`, with
+   `remove this entry`.
+4. A host that `is_proxy_host` refuses, such as one with an upper-case letter, an IP literal, a
+   trailing dot or a last label that is a number: refused at its entry. Its fix is the host in
+   lower case when that is a DNS name not already declared, else `remove this entry`.
+5. A host written twice: refused at the later entry with `remove this entry`.
+6. A pin with host bits set, such as `192.0.2.1/24`: refused at its entry with the network it
+   masks to, `"192.0.2.0/24"`.
+7. A pin that is not a `Cidr`: refused at its entry with `remove this entry` when another pin in
+   the list is one, else with the example pin `"192.0.2.0/24"`.
+
+So following a pin fix never unpins the section, and a masked pin keeps the addresses the author
+wrote. A command's own network section keeps its values as written, as a `CommandNetwork`.
+
+A `[workspace]` table with no `mount` is refused at `workspace.mount` with
+`mount = { dst = "/workspace" }`, before the check for a declaration with no capability. A `dst`
+that is not a string is refused at `workspace.mount.dst` with `dst = "/workspace"`. So is a `dst`
+that `plasmosome_backend::canonical_path` refuses: relative, `/`, with a trailing `/`, with an
+empty, `.` or `..` component, or with a NUL. Its fix adds a leading `/` to a relative value and
+removes trailing `/`s when that gives a canonical path, such as `dst = "/srv/work"` for
+`srv/work//`, and is `dst = "/workspace"` otherwise. Any other `dst`, such as `/srv/work.d`, is
+kept exactly as written. A `workspace` or `mount` that is not a table is read as before: no
+workspace, or the default `/workspace`.
 
 A fix built from a list the author wrote names each entry once, keeping the first:
 `commands = ["gh", "gh"]` gets one `[commands.commands.gh]` section, since TOML refuses a
@@ -142,7 +179,11 @@ tree is 17 deep.
 without parsing `detail`. A refusal of an `id` that is missing, not a string or empty names no
 plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three members.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
-description.
+description. `PlasmidManifest::provides` lists the `[provides]` binding keys, such as
+`github:tools`, as written. A binding with its own `[provides."<key>"]` header is listed where
+that header is, and any other binding where its key first appears, so
+`[provides."z:k".tools]`, then `[provides."a:k".tools]`, then `[provides."z:k"]` lists `a:k`
+first. `provides_tools` keeps the keys' byte order.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
 mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` that declare
@@ -463,11 +504,13 @@ the failing component when the configured path:
   permission, or that carries an ACL.
 
 [Private recovery sockets](#private-recovery-sockets) gives the full rules. Nothing is bound when
-one of these rules refuses it, and the daemon creates no directory. Otherwise the socket is set to
-mode 0600 before it listens, whatever the umask. A connection whose kernel-reported peer UID is
-not the daemon's effective UID is closed before a byte is read or written, and the daemon goes on
-to the next connection. Tests and scripts that bind under macOS's `TMPDIR` must pass its real
-path, `/private/var/folders/...`.
+one of these rules refuses it, and the daemon creates no directory. Otherwise the socket is bound
+at a temporary name in that directory, set to mode 0600 and made to listen there, whatever the
+umask, and only then renamed to the configured name by a rename that never replaces an entry. A
+client that finds the configured path finds a 0600 socket that accepts. A connection whose
+kernel-reported peer UID is not the daemon's effective UID is closed before a byte is read or
+written, and the daemon goes on to the next connection. Tests and scripts that bind under macOS's
+`TMPDIR` must pass its real path, `/private/var/folders/...`.
 
 `plasmosomed` refuses a control-socket path that already exists — a live socket, a stale socket,
 a regular file or a symlink — and never unlinks it: the start exits naming the path, and
@@ -498,11 +541,13 @@ socket from a later one only while the original inode stays allocated (its new n
 alive), and the file-type check still rejects regular files and symlinks even if inode numbers
 are recycled. A leaf symlink at the configured path is an entry already there, so it is refused
 before `bind`, which would otherwise follow it. When the check `PrivateListener` repeats after
-`bind` fails, the start is refused and the socket just bound is removed only while it is still
-that socket by device and inode. If no socket owned by the effective UID is at the name in that
-directory after `bind` (`BindEscaped`), the start unlinks nothing and can leave the just-bound
-socket for the operator. `SIGKILL` is the case no destructor covers, because a killed process
-runs none, so the path survives the daemon and the next start refuses it and says why.
+`bind` fails, the start is refused and the socket just bound is removed from its temporary name
+only while it is still that socket by device and inode. If no socket owned by the effective UID is
+at the temporary name in that directory after `bind` (`BindEscaped`), the start unlinks nothing and
+can leave the just-bound socket for the operator. `SIGKILL` is the case no destructor covers,
+because a killed process runs none, so the path survives the daemon and the next start refuses it
+and says why. A `SIGKILL` during the start, before the rename, leaves the socket under its
+temporary name instead, which no start refuses and nothing removes.
 
 Connections are taken one at a time. The shutdown flag is read between accepts and between reads,
 and both halves of a connection carry a timeout, so neither an idle client nor one that never
@@ -545,11 +590,31 @@ socket through it too, as [Socket ownership](#socket-ownership) says, and so do
     calls made relative to it, as the membrane's writable root copy does; they reach the
     directory that was opened even after its path is renamed or names another one.
 - `PrivateListener::bind` refuses any entry already at the name and never unlinks it.
+  - It binds the socket at a temporary name in the held directory, never at the configured name.
+    The temporary is as long as the socket address leaves room for, up to 16 bytes: `.` and then
+    characters from `0-9a-z`, or a single such character when only one byte is left. A
+    temporary that `bind` finds taken, or that equals the configured name ignoring ASCII case, is
+    drawn again; on a case-insensitive volume such a name would be the configured entry. After
+    eight draws it returns `Io` with `EADDRINUSE`, naming the last temporary `bind` found taken,
+    or the directory if every draw equalled the name ignoring case.
   - It walks and judges the directory again before it creates the socket, and again after
     `bind`. If the second check fails, it returns that check's error and removes the socket it
-    finds at the name in the held directory, but only if the effective UID owns it.
-  - It sets the socket to mode 0600 through the held directory before `listen`. On Linux,
-    glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
+    finds at the temporary name in the held directory, but only if the effective UID owns it.
+  - It sets the socket to mode 0600 through the held directory, makes it listen and makes it
+    nonblocking, all at the temporary name. Only then does it rename it to the configured name,
+    with `renameatx_np` and `RENAME_EXCL` on macOS and `renameat2` and `RENAME_NOREPLACE` on
+    Linux, so a client that finds the name finds a 0600 socket that accepts. An entry that
+    appears at the name meanwhile is `AddressInUse` and is left as it was, and the temporary is
+    removed. A Linux filesystem without `RENAME_NOREPLACE` fails the rename with `EINVAL`, which
+    is `Io`; it never falls back to a rename that replaces. Errors from `bind`, `fchmodat`,
+    `listen`, `fcntl` and the rename name the temporary path, except the rename's
+    `AddressInUse`, which names the configured path, and the error after eight draws, which
+    names the directory when no draw reached `bind`. The socket's own address, as
+    `getsockname` reports it, stays the temporary name; no code here reads it. A hard kill before
+    the rename leaves the temporary entry, which nothing removes. Measured on macOS 26.6.2 before
+    this order: a client looping over `check_private_path` and `connect` saw the socket at mode
+    0755, or at 0600 refusing the connection, in 363 to 404 of 500 binds.
+  - On Linux, glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
     `EOPNOTSUPP` without it. The socket is then matched by device and inode and set with
     `fchmodat` without that flag.
   - `close` closes the socket, then removes only the socket it created, matched by device and
