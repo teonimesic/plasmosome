@@ -153,9 +153,9 @@ gets `scope = { path_scope = [...] }`, written in place of `scope`, not of the f
 
 Paths, the plasmid ID, refused values and fixes are written as TOML: a key that is not bare, and
 every string, is a basic string on one line. Every control character is escaped, and so are the
-line and paragraph separators U+2028 and U+2029 and the bidi controls U+200E, U+200F, U+202A to
-U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A command's
-refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
+line and paragraph separators U+2028 and U+2029 and the bidi controls U+061C, U+200E, U+200F,
+U+202A to U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A
+command's refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
 could not be read), `ManifestError::Parse` (the text is not TOML), `ManifestError::TooLarge`
 (the declaration is over 1 MiB) and `ManifestError::TooDeep` (the declaration nests more than 32
 levels deep) carry no field. For `Parse`, the TOML parser reports a position,
