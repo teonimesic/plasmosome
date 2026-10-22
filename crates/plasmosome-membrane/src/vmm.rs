@@ -1974,9 +1974,9 @@ mod tests {
         let mut helper = KilledOnDrop(spawned.expect("the helper test process starts"));
         let named = helper_line(said)
             .recv_timeout(PROBE_DEADLINE)
-            .unwrap_or_else(|_| {
+            .unwrap_or_else(|error| {
                 panic!(
-                    "the helper names its worker within {PROBE_DEADLINE:?}\n{}",
+                    "the helper did not name its worker within {PROBE_DEADLINE:?} ({error})\n{}",
                     read_from_start(stderr)
                 )
             });
