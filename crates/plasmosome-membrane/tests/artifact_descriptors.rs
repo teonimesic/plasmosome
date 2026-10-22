@@ -6,6 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use plasmosome_core::artifact::ArtifactFault as CoreFault;
 use plasmosome_membrane::runtime::artifacts::{ArtifactFault, verify_recipe_artifacts};
 use plasmosome_membrane::runtime::digest::Digest;
 use plasmosome_membrane::runtime::recipe::{ArtifactRole, PlatformLimits, RuntimeRecipe};
@@ -167,10 +168,9 @@ fn each_verified_artifact_holds_two_close_on_exec_descriptors_and_a_refused_or_d
     assert_eq!(refusal.role, ArtifactRole::RootImage);
     assert_eq!(
         refusal.fault,
-        ArtifactFault::DigestMismatch {
-            expected: Digest::of(b"tampered"),
-            actual: Digest::of(b"rootfs.raw"),
-        }
+        ArtifactFault::Rule(CoreFault::Digest {
+            found: Digest::of(b"rootfs.raw"),
+        })
     );
     assert_eq!(open_descriptors(), before, "after the refusal");
     let verified = verify_recipe_artifacts(&intact).expect("every artifact verifies");
