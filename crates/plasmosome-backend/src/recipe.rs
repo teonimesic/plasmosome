@@ -378,6 +378,16 @@ fn destination(value: &str) -> Result<(), RecipeError> {
     }
 }
 
+/// Returns the address `text` spells when it is an IP literal that `ProxyRecipe::validate`
+/// accepts as a destination: spelled exactly as `IpAddr` displays it, and with no IPv4 address
+/// in IPv4-mapped or IPv4-compatible form, though `::` and `::1` are accepted. Anything else,
+/// a DNS name included, is `None`. `plasmosome_core::manifest::Cidr::parse` uses it for the
+/// address of a pin, so a pin and a destination follow one rule.
+pub fn canonical_ip_literal(text: &str) -> Option<IpAddr> {
+    let address = text.parse().ok()?;
+    ip_literal(text, address).ok().map(|()| address)
+}
+
 fn ip_literal(value: &str, address: IpAddr) -> Result<(), RecipeError> {
     if let IpAddr::V6(v6) = address
         && let Some(ipv4) = embedded_ipv4(v6)

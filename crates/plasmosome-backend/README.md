@@ -80,10 +80,12 @@ for the two paths, never `fstat` on the socket descriptors, and treats a match a
 under spec 017's incomplete-effect rules. Decoding refuses a missing or unknown field and a
 positional array, and decoding JSON text also refuses a repeated field; a `serde_json::Value` or
 `Map` keeps only the last copy of a repeated key. Decoding and encoding both refuse any value
-`validate` refuses; neither reads the filesystem or resolves a name. Two of these rules are public
-so a declaration is checked by the same code: `canonical_path` checks a path, and `is_proxy_host`
-accepts a host only when it is a DNS name that `ProxyRecipe::validate` accepts, written in lower
-case. `plasmosome_core::manifest` uses them for a workspace `dst` and for `[network]` hosts.
+`validate` refuses; neither reads the filesystem or resolves a name. Three of these rules are
+public so a declaration is checked by the same code: `canonical_path` checks a path,
+`is_proxy_host` accepts a host only when it is a DNS name that `ProxyRecipe::validate` accepts,
+written in lower case, and `canonical_ip_literal` accepts an IP literal only in the spelling that
+`ProxyRecipe::validate` accepts. `plasmosome_core::manifest` uses them for a workspace `dst`, for
+`[network]` hosts and for the address of each pin.
 
 Every `Capability` carries its complete recipe, and so does the `UniverseOp` that creates it:
 `SessionFile`, `UdsSocket`, `ProxyMap` and `Mount` carry a `recipe`, and `Broker` carries a

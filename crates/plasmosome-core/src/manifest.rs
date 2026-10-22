@@ -5,8 +5,8 @@ use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
-use plasmosome_backend::canonical_path;
 pub use plasmosome_backend::is_proxy_host;
+use plasmosome_backend::{canonical_ip_literal, canonical_path};
 
 use crate::toml_depth;
 
@@ -32,7 +32,9 @@ pub struct PlasmidManifest {
     pub network: Option<NetworkSpec>,
     pub requires: Vec<String>,
     pub provides_tools: Vec<ToolDeclaration>,
-    /// The `[provides]` binding keys, such as `github:tools`, in file order and as written.
+    /// The `[provides]` binding keys, such as `github:tools`, as written, in the order the file
+    /// gives them: a binding with its own `[provides."<key>"]` header where that header is, and
+    /// any other binding where its key first appears.
     pub provides: Vec<String>,
     pub secrets: Vec<SecretRef>,
     pub commands: Option<CommandsSpec>,
@@ -88,20 +90,17 @@ pub enum CidrError {
 }
 
 impl Cidr {
-    /// Parses `<address>/<prefix>`. The address must be spelled as Rust's `IpAddr` displays it,
-    /// and an IPv6 address must not carry an IPv4 address in IPv4-mapped or IPv4-compatible
-    /// form, the rule `ProxyRecipe::validate` applies to a destination. So `192.000.002.000/24`,
-    /// `2001:DB8::/32` and `::ffff:192.0.2.0/120` are `Malformed`. The prefix is 0 to 32 for
-    /// IPv4 and 0 to 128 for IPv6, in decimal digits with no sign and no leading zero. An address
-    /// with a bit set past the prefix is `HostBitsSet`, never rewritten.
+    /// Parses `<address>/<prefix>`. The address must pass `plasmosome_backend`'s
+    /// `canonical_ip_literal`, the rule `ProxyRecipe::validate` applies to a destination: spelled
+    /// as Rust's `IpAddr` displays it, with no IPv4 address in IPv4-mapped or IPv4-compatible
+    /// form. So `192.000.002.000/24`, `2001:DB8::/32`, `::ffff:192.0.2.0/120` and `::2/128` are
+    /// `Malformed`, while `::/0` and `::1/128` parse, since `::` and `::1` are not
+    /// IPv4-compatible. The prefix is 0 to 32 for IPv4 and 0 to 128 for IPv6, in decimal digits
+    /// with no sign and no leading zero. An address with a bit set past the prefix is
+    /// `HostBitsSet`, never rewritten.
     pub fn parse(text: &str) -> Result<Cidr, CidrError> {
         let (written, prefix) = text.split_once('/').ok_or(CidrError::Malformed)?;
-        let address: IpAddr = written.parse().map_err(|_| CidrError::Malformed)?;
-        let embeds_ipv4 = matches!(address, IpAddr::V6(v6)
-            if !v6.is_unspecified() && !v6.is_loopback() && v6.to_ipv4().is_some());
-        if embeds_ipv4 || address.to_string() != written {
-            return Err(CidrError::Malformed);
-        }
+        let address = canonical_ip_literal(written).ok_or(CidrError::Malformed)?;
         let width = if address.is_ipv4() { 32 } else { 128 };
         let prefix = prefix_length(prefix, width).ok_or(CidrError::Malformed)?;
         let network = Cidr {
@@ -1225,11 +1224,14 @@ fn validate_mock(
 ) -> Result<(), ManifestError> {
     let Some(network) = network else {
         let detail = if mock.hosts.is_empty() {
-            "[mock] names no host, and there is no [network]"
+            "[mock] names no host, and there is no [network]".to_string()
         } else {
-            "a mock stands in for hosts that [network] declares, and there is no [network]"
+            format!(
+                "[mock] stands in for {}, and there is no [network]",
+                hosts_named(&distinct(&mock.hosts))
+            )
         };
-        return Err(field_error(id, "mock".into(), REMOVE_ENTRY.into(), detail));
+        return Err(field_error(id, "mock".into(), REMOVE_ENTRY.into(), &detail));
     };
     let Some((index, host)) = mock
         .hosts
@@ -1240,6 +1242,10 @@ fn validate_mock(
         return Ok(());
     };
     if network.ports.is_empty() {
+        let undeclared: Vec<String> = distinct(&mock.hosts)
+            .into_iter()
+            .filter(|host| !network.hosts.contains(host))
+            .collect();
         return Err(field_error(
             id,
             "mock".into(),
@@ -1247,7 +1253,7 @@ fn validate_mock(
             &format!(
                 "[mock] stands in for {}, which [network] does not declare, \
                  and [network] declares no port",
-                toml_string(host)
+                hosts_named(&undeclared)
             ),
         ));
     }
@@ -1268,10 +1274,11 @@ fn validate_mock(
             ),
         ));
     }
-    let fix = if network.hosts.is_empty() {
-        strings_line("hosts", &distinct(&mock.hosts))
+    let (fix, written) = if network.hosts.is_empty() {
+        let hosts = distinct(&mock.hosts);
+        (strings_line("hosts", &hosts), hosts)
     } else {
-        toml_string(host)
+        (toml_string(host), vec![host.clone()])
     };
     Err(field_error(
         id,
@@ -1279,9 +1286,17 @@ fn validate_mock(
         fix,
         &format!(
             "[mock] stands in for {}, which [network] does not declare",
-            toml_string(host)
+            hosts_named(&written)
         ),
     ))
+}
+
+fn hosts_named(hosts: &[String]) -> String {
+    let quoted: Vec<String> = hosts.iter().map(|host| toml_string(host)).collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => quoted.concat(),
+    }
 }
 
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
@@ -4135,6 +4150,8 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             "2001:db8::1/128",
             "2001:db8::8000/113",
             "10.0.0.0/8",
+            "::ffff:0:c000:200/120",
+            "64:ff9b::c000:200/120",
         ] {
             let cidr = Cidr::parse(text).unwrap_or_else(|error| panic!("{text}: {error:?}"));
             assert_eq!(cidr.to_string(), text);
@@ -4177,6 +4194,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             "192.000.002.000/24",
             "::ffff:192.0.2.0/120",
             "::c000:200/120",
+            "::2/128",
             "2001:DB8::/32",
             "2001:0db8::/32",
             "[2001:db8::]/32",
@@ -4230,6 +4248,41 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "2001:db8::/48",
                 vec!["2001:db8::", "2001:db8:0:ffff::1"],
                 vec!["2001:db8:1::", "192.0.2.1", "0.0.0.0"],
+            ),
+            (
+                "128.0.0.0/1",
+                vec!["128.0.0.0", "255.255.255.255"],
+                vec!["127.255.255.255"],
+            ),
+            (
+                "192.0.2.6/31",
+                vec!["192.0.2.6", "192.0.2.7"],
+                vec!["192.0.2.5", "192.0.2.8"],
+            ),
+            (
+                "8000::/1",
+                vec!["8000::", "ffff::1"],
+                vec!["7fff:ffff::", "::", "128.0.0.1"],
+            ),
+            (
+                "2001:db8::/31",
+                vec!["2001:db9:ffff::"],
+                vec!["2001:dba::", "2001:db7::"],
+            ),
+            (
+                "2001:db8:0:1::/64",
+                vec!["2001:db8:0:1:ffff:ffff:ffff:ffff"],
+                vec!["2001:db8:0:2::", "2001:db8::ffff:ffff:ffff:ffff"],
+            ),
+            (
+                "2001:db8::/127",
+                vec!["2001:db8::", "2001:db8::1"],
+                vec!["2001:db8::2"],
+            ),
+            (
+                "2001:db8::1/128",
+                vec!["2001:db8::1"],
+                vec!["2001:db8::", "0.0.0.1"],
             ),
         ] {
             let cidr = Cidr::parse(network).unwrap();
@@ -4291,7 +4344,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     }
 
     #[test]
-    fn provides_lists_each_binding_key_in_file_order_as_written() {
+    fn provides_lists_each_binding_key_as_written_where_the_file_places_it() {
         let tools = |key: &str| format!("[provides.{key}.tools]\n\"t\" = \"Do t.\"\n");
         for (bindings, keys) in [
             (String::new(), vec![]),
@@ -4315,6 +4368,14 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "provides.\"b:k\".tools.t = \"Do t.\"\nprovides.\"a\\tk\".tools.t = \"Do t.\"\n"
                     .to_string(),
                 vec!["b:k", "a\tk"],
+            ),
+            (
+                format!(
+                    "{}{}[provides.\"z:k\"]\n",
+                    tools("\"z:k\""),
+                    tools("\"a:k\"")
+                ),
+                vec!["a:k", "z:k"],
             ),
         ] {
             let manifest = PlasmidManifest::parse(&format!("{PROVIDER}{bindings}"))
@@ -4398,6 +4459,67 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             panic!("{declaration} was not refused with its field: {error:?}");
         };
         detail
+    }
+
+    #[test]
+    fn every_mock_refusal_names_each_host_it_concerns() {
+        let portless = "[network]\nhosts = [\"a.example\"]\n";
+        let ported = "[network]\nhosts = [\"a.example\"]\nports = [443]\n";
+        let mocked = |hosts: &str| format!("[mock]\nhosts = [{hosts}]");
+        for (tail, field, hosts) in [
+            (mocked("\"b.example\""), "mock", vec!["b.example"]),
+            (
+                mocked("\"b.example\", \"c.example\", \"b.example\""),
+                "mock",
+                vec!["b.example", "c.example"],
+            ),
+            (
+                format!(
+                    "{portless}{}",
+                    mocked("\"a.example\", \"b.example\", \"c.example\"")
+                ),
+                "mock",
+                vec!["b.example", "c.example"],
+            ),
+            (
+                format!("[network]\nhosts = []\n{}", mocked("\"b.example\"")),
+                "mock",
+                vec!["b.example"],
+            ),
+            (
+                format!("{ported}{}", mocked("\"a.example\", \"B.example\"")),
+                "mock.hosts[1]",
+                vec!["B.example"],
+            ),
+            (
+                format!("{ported}{}", mocked("\"192.0.2.1\"")),
+                "mock.hosts[0]",
+                vec!["192.0.2.1"],
+            ),
+            (
+                format!("{ported}{}", mocked("\"b.example\", \"c.example\"")),
+                "network.hosts",
+                vec!["b.example"],
+            ),
+            (
+                format!(
+                    "[network]\nhosts = []\nports = [443]\n{}",
+                    mocked("\"b.example\", \"c.example\"")
+                ),
+                "network.hosts",
+                vec!["b.example", "c.example"],
+            ),
+        ] {
+            let declaration = declared(&tail);
+            assert_eq!(field_refusal(&declaration).1, field, "{tail}");
+            let detail = refusal_detail(&declaration);
+            for host in hosts {
+                assert!(
+                    detail.contains(&toml_string(host)),
+                    "{tail}\n{detail} does not name {host}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4501,7 +4623,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             ),
             (
                 "[mock]\nhosts = [\"api.github.com\"]".to_string(),
-                "a mock stands in for hosts that [network] declares, and there is no [network]",
+                "[mock] stands in for \"api.github.com\", and there is no [network]",
             ),
             (
                 format!("[network]\nhosts = [\"x{ESCAPE}y\"]\nports = [443]"),

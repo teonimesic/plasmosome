@@ -174,7 +174,10 @@ without parsing `detail`. A refusal of an `id` that is missing, not a string or 
 plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three members.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description. `PlasmidManifest::provides` lists the `[provides]` binding keys, such as
-`github:tools`, in file order and as written; `provides_tools` keeps the keys' byte order.
+`github:tools`, as written. A binding with its own `[provides."<key>"]` header is listed where
+that header is, and any other binding where its key first appears, so
+`[provides."z:k".tools]`, then `[provides."a:k".tools]`, then `[provides."z:k"]` lists `a:k`
+first. `provides_tools` keeps the keys' byte order.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
 mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` that declare
