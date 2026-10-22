@@ -1,0 +1,4 @@
+id = "fuzz-minimal"
+description = "A minimal declaration."
+version = "0.1.0"
+impl.wasm = "component.wasm"

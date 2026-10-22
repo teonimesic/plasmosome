@@ -5,6 +5,8 @@ pub(crate) mod fake {
     include!("../../tests/support/runtime_fake.rs");
 }
 
+pub(crate) mod newc;
+
 pub(crate) fn artifact(path: &str, digit: char) -> Value {
     json!({"path": path, "sha256": digit.to_string().repeat(64)})
 }
