@@ -103,6 +103,24 @@ enum Defect {
     GrantedRemovalKeepsItsObject,
     SnapshotOmitsIssuedRecords,
     SnapshotReconstructsGrantsFromObjects,
+    HidesIncompleteEffects,
+    FailedGrantReturnsAnEntry,
+    OmitsIncompleteEffectsFromTheSnapshot,
+    AFailedGrantIssuesARecord,
+    RetryContinuesCreation(Call),
+    AnotherOperationOverwritesIncomplete,
+    PlantOverwritesIncomplete,
+    RevokeTakesAnUnfinishedEffect,
+    IncompleteCleanupIgnoresTheOwner,
+    IncompleteCleanupIgnoresTheCapability,
+    DoomedOwnerValidatesAfterTheEffect,
+    CleanupKeepsTheMarker,
+    IncompleteCleanupTakesEqualPeers,
+    IncompleteCleanupTakesEqualUnfinishedPeers,
+    IncompleteCleanupOnlyInGrantOrder,
+    IncompleteCleanupOnlyInReversePushOrder,
+    RecoversUnfinishedEffectsFromItsOwnLog,
+    ApplyRemovalLeavesAnUnfinishedEffectOf(Call),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +168,8 @@ struct DefectiveBackend {
     landed_effects: RefCell<Vec<OsObject>>,
     pending_record_drops: Vec<Handle>,
     landing_record_drops: Vec<Handle>,
+    incomplete: BTreeMap<Handle, UniverseOp>,
+    failure_order: Vec<Handle>,
 }
 
 impl DefectiveBackend {
@@ -173,16 +193,124 @@ impl DefectiveBackend {
             landed_effects: RefCell::default(),
             pending_record_drops: Vec::new(),
             landing_record_drops: Vec::new(),
+            incomplete: BTreeMap::new(),
+            failure_order: Vec::new(),
         };
-        if defect == Defect::RecordsItsOwnRecoveryLog {
-            let recovered = backend.recovery_log.borrow().clone();
-            for entry in recovered {
+        let recovered = backend.recovery_log.borrow().clone();
+        for entry in recovered {
+            if defect == Defect::RecoversUnfinishedEffectsFromItsOwnLog {
+                backend
+                    .incomplete
+                    .insert(entry.handle, entry.object().operation());
+            } else if defect == Defect::RecordsItsOwnRecoveryLog {
                 backend.state.insert(entry.object()).unwrap();
                 backend.grant_order.push(entry.handle);
                 backend.ledger.insert(entry.handle, entry);
             }
         }
         backend
+    }
+
+    fn keeps_a_recovery_log(&self) -> bool {
+        matches!(
+            self.defect,
+            Defect::RecordsItsOwnRecoveryLog | Defect::RecoversUnfinishedEffectsFromItsOwnLog
+        )
+    }
+
+    fn answer_an_unfinished_address(
+        &mut self,
+        operation: &UniverseOp,
+        call: Call,
+    ) -> Result<bool, BackendError> {
+        let Some(unfinished) = self.incomplete.get(&operation.handle()) else {
+            return Ok(false);
+        };
+        let same = unfinished == operation && call != Call::Plant;
+        let overwrites = match self.defect {
+            Defect::RetryContinuesCreation(continuing) => same && continuing == call,
+            Defect::AnotherOperationOverwritesIncomplete => !same && call != Call::Plant,
+            Defect::PlantOverwritesIncomplete => call == Call::Plant,
+            _ => false,
+        };
+        if overwrites {
+            self.incomplete.remove(&operation.handle());
+            return Ok(true);
+        }
+        Err(if same {
+            incomplete_effect(operation)
+        } else {
+            identity_conflict(operation.handle())
+        })
+    }
+
+    fn fail_after_the_first_effect(&mut self, operation: &UniverseOp) -> Result<(), BackendError> {
+        if *operation.owner() != conformance::doomed_owner() {
+            return Ok(());
+        }
+        if self.defect == Defect::HidesIncompleteEffects {
+            return Err(BackendError::Fault(DOOMED.to_string()));
+        }
+        self.incomplete
+            .insert(operation.handle(), operation.clone());
+        self.failure_order.push(operation.handle());
+        Err(incomplete_effect(operation))
+    }
+
+    fn clean_up(
+        &mut self,
+        unfinished: UniverseOp,
+        removal: &UniverseRemoval,
+        owner: &CellOwner,
+        drain: DrainSpec,
+    ) -> Result<(), BackendError> {
+        let owner_matches =
+            self.defect == Defect::IncompleteCleanupIgnoresTheOwner || unfinished.owner() == owner;
+        let capability_matches = self.defect == Defect::IncompleteCleanupIgnoresTheCapability
+            || unfinished.capability() == removal.capability;
+        if !(owner_matches && capability_matches) {
+            return Err(unknown_object(removal, owner));
+        }
+        let address = unfinished.handle();
+        let mut pending = self
+            .failure_order
+            .iter()
+            .filter(|held| self.incomplete.contains_key(held));
+        let out_of_order = match self.defect {
+            Defect::IncompleteCleanupOnlyInGrantOrder => pending.next() != Some(&address),
+            Defect::IncompleteCleanupOnlyInReversePushOrder => {
+                pending.next_back() != Some(&address)
+            }
+            _ => false,
+        };
+        if out_of_order {
+            return Err(unknown_object(removal, owner));
+        }
+        self.drained(owner, &removal.capability, address, drain, |backend| {
+            if backend.defect != Defect::CleanupKeepsTheMarker {
+                backend.incomplete.remove(&address);
+            }
+            if backend.defect == Defect::IncompleteCleanupTakesEqualUnfinishedPeers {
+                backend.incomplete.retain(|_, held| {
+                    held.owner() != unfinished.owner()
+                        || held.capability() != unfinished.capability()
+                });
+            }
+            backend.drop_record(address);
+            if backend.defect == Defect::IncompleteCleanupTakesEqualPeers {
+                let peers: Vec<OsObject> = backend
+                    .state
+                    .objects()
+                    .filter(|held| held.capability == removal.capability)
+                    .cloned()
+                    .collect();
+                for peer in peers {
+                    backend.state.remove(&removal_of(&peer), &peer.owner);
+                    backend.drop_record(peer.operation().handle());
+                }
+            }
+            Ok(())
+        })
     }
 
     fn mirrors_its_ledger(&self) -> bool {
@@ -237,6 +365,13 @@ impl DefectiveBackend {
             Defect::SwallowsInvalidOperations(swallowed) if swallowed == call => Ok(false),
             Defect::ValidatesAfterTheEffect(late) if late == call => {
                 let _ = self.state.insert(effect_read_back(operation));
+                Err(refusal)
+            }
+            Defect::DoomedOwnerValidatesAfterTheEffect
+                if *operation.owner() == conformance::doomed_owner() && call != Call::Plant =>
+            {
+                self.incomplete
+                    .insert(operation.handle(), effect_read_back(operation).operation());
                 Err(refusal)
             }
             Defect::RefusalRollsBackItsAddress(rollback) if rollback == call => {
@@ -703,6 +838,7 @@ impl EnforcementBackend for DefectiveBackend {
         if !valid {
             return Ok(requested);
         }
+        let continued = self.answer_an_unfinished_address(&operation, Call::Grant)?;
         let mut owner = operation.owner().clone();
         let mut capability = operation.capability();
         if self.defect == Defect::GrantSubstitutesRequestedOwner {
@@ -820,6 +956,16 @@ impl EnforcementBackend for DefectiveBackend {
             return Ok(entry);
         }
         self.refuse_an_occupied_endpoint(&entry.capability)?;
+        if !continued && let Err(failure) = self.fail_after_the_first_effect(&operation) {
+            match self.defect {
+                Defect::FailedGrantReturnsAnEntry => return Ok(requested),
+                Defect::AFailedGrantIssuesARecord => {
+                    self.ledger.insert(requested.handle, requested);
+                }
+                _ => {}
+            }
+            return Err(failure);
+        }
         if !self.mirrors_its_ledger() {
             let duplicate = self.defect == Defect::IdenticalGrantsCollapse
                 && self
@@ -852,7 +998,7 @@ impl EnforcementBackend for DefectiveBackend {
         }
         self.ledger.insert(handle, entry.clone());
         self.grant_order.push(handle);
-        if self.defect == Defect::RecordsItsOwnRecoveryLog {
+        if self.keeps_a_recovery_log() {
             self.recovery_log.borrow_mut().push(entry.clone());
         }
         if self.defect == Defect::OneHandleForEveryLiveGrant {
@@ -869,6 +1015,16 @@ impl EnforcementBackend for DefectiveBackend {
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
         if self.refuses_grant_order(handle) || self.refuses_reverse_order(handle) {
             return Err(BackendError::UnknownHandle { handle });
+        }
+        if self.defect == Defect::RevokeTakesAnUnfinishedEffect
+            && let Some(unfinished) = self.incomplete.remove(&handle)
+        {
+            return Ok(LedgerEntry {
+                handle,
+                owner: unfinished.owner().clone(),
+                capability: unfinished.capability(),
+                kind: GrantKind::Hot,
+            });
         }
         let Some(entry) = self.ledger.get(&handle).cloned() else {
             if self.defect == Defect::UnknownRevokeTidiesResidue
@@ -936,11 +1092,17 @@ impl EnforcementBackend for DefectiveBackend {
             _ => self
                 .ledger
                 .values()
-                .filter(|entry| state.objects().any(|held| *held == entry.object()))
+                .filter(|entry| {
+                    state.objects().any(|held| *held == entry.object())
+                        || self
+                            .incomplete
+                            .get(&entry.handle)
+                            .is_some_and(|unfinished| *unfinished == entry.object().operation())
+                })
                 .cloned()
                 .collect(),
         };
-        let incomplete = match self.defect {
+        let mut incomplete: Vec<IncompleteEffect> = match self.defect {
             Defect::RevokeLeavesAnUnfinishedEffect => self
                 .spent
                 .values()
@@ -950,12 +1112,26 @@ impl EnforcementBackend for DefectiveBackend {
                 .collect(),
             _ => Vec::new(),
         };
+        if self.defect != Defect::OmitsIncompleteEffectsFromTheSnapshot {
+            incomplete.extend(self.incomplete.values().map(|operation| IncompleteEffect {
+                operation: operation.clone(),
+            }));
+        }
         EnforcementSnapshot::new(state, grants, incomplete)
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
         if !self.validated(&op, Call::Apply)? {
             return Ok(());
+        }
+        let continued = self.answer_an_unfinished_address(&op, Call::Apply)?;
+        if !continued
+            && !self
+                .observed()
+                .objects()
+                .any(|held| held.class() == op.class() && held.id == op.id())
+        {
+            self.fail_after_the_first_effect(&op)?;
         }
         if self.mirrors_its_ledger() {
             if self.mirrored_state().insert(op.object())? {
@@ -994,6 +1170,9 @@ impl EnforcementBackend for DefectiveBackend {
             class: removal.class(),
             id: removal.id,
         };
+        if let Some(unfinished) = self.incomplete.get(&address).cloned() {
+            return self.clean_up(unfinished, &removal, owner, drain);
+        }
         if let Some(refusal) = self.drain_before_resolving(&removal, owner, address, drain) {
             return Err(refusal);
         }
@@ -1017,9 +1196,27 @@ impl EnforcementBackend for DefectiveBackend {
             drain
         };
         let record = self.ledger.get(&address).cloned();
+        let origin = if record.is_some() {
+            Call::Grant
+        } else if self.applied.iter().any(|op| op.handle() == address) {
+            Call::Apply
+        } else {
+            Call::Plant
+        };
+        let held = self
+            .state
+            .objects()
+            .find(|held| held.class() == address.class && held.id == address.id)
+            .cloned();
         let removed = self.drained(owner, &removal.capability, address, drain, |backend| {
             backend.remove_exact(&removal, owner)
         });
+        if self.defect == Defect::ApplyRemovalLeavesAnUnfinishedEffectOf(origin)
+            && removed.is_ok()
+            && let Some(object) = held
+        {
+            self.incomplete.insert(address, object.operation());
+        }
         let keeps_the_record = match self.defect {
             Defect::ForcedApplyRemovalLeavesAStaleHandle => drain.policy == RevokePolicy::Force,
             Defect::GracefulApplyRemovalLeavesAStaleHandle => {
@@ -1040,6 +1237,7 @@ impl EnforcementBackend for DefectiveBackend {
         if !self.validated(&object.operation(), Call::Plant)? {
             return Ok(());
         }
+        self.answer_an_unfinished_address(&object.operation(), Call::Plant)?;
         if self.mirrors_its_ledger() {
             if self.mirrored_state().insert(object.clone())? {
                 self.planted.push(object);
@@ -1087,6 +1285,16 @@ fn change_between(standing: &OsObject, requested: &OsObject) -> Option<Change> {
         Some(Change::Key)
     } else {
         Some(Change::Recipe)
+    }
+}
+
+const DOOMED: &str = "the readiness probe failed";
+
+fn incomplete_effect(operation: &UniverseOp) -> BackendError {
+    BackendError::IncompleteEffect {
+        class: operation.class().as_str(),
+        id: operation.id(),
+        detail: DOOMED.to_string(),
     }
 }
 
@@ -1211,8 +1419,12 @@ fn carrying(defect: Defect) -> impl Fn() -> DefectiveBackend {
 }
 
 fn carrying_a_shared_log() -> impl Fn() -> DefectiveBackend {
+    sharing_a_log(Defect::RecordsItsOwnRecoveryLog)
+}
+
+fn sharing_a_log(defect: Defect) -> impl Fn() -> DefectiveBackend {
     let log = Rc::new(RefCell::new(Vec::new()));
-    move || DefectiveBackend::recovering(Defect::RecordsItsOwnRecoveryLog, Rc::clone(&log))
+    move || DefectiveBackend::recovering(defect, Rc::clone(&log))
 }
 
 fn factory_panics() -> DefectiveBackend {
@@ -1272,6 +1484,7 @@ fn run_all(defect: Defect) {
     conformance::graceful_timeouts_preserve_the_selected_holding(carrying(defect));
     conformance::grant_retry_returns_the_original_entry(carrying(defect));
     conformance::fresh_backends_share_no_authority(carrying(defect));
+    conformance::failed_grants_stay_incomplete_until_exact_withdrawal(carrying(defect));
 }
 
 #[test]
@@ -3100,4 +3313,189 @@ fn a_snapshot_defect_changes_only_the_issued_records_it_reports() {
         );
         assert_eq!(snapshot.state().len(), 3, "{defect:?}");
     }
+}
+
+#[test]
+fn the_incomplete_clause_rejects_each_mishandled_step() {
+    for (defect, reason) in [
+        (
+            Defect::HidesIncompleteEffects,
+            "must return IncompleteEffect at its address",
+        ),
+        (
+            Defect::FailedGrantReturnsAnEntry,
+            "grant of the doomed operation must return IncompleteEffect",
+        ),
+        (
+            Defect::OmitsIncompleteEffectsFromTheSnapshot,
+            "must be reported exactly, with no standing object and no record",
+        ),
+        (
+            Defect::AFailedGrantIssuesARecord,
+            "must be reported exactly, with no standing object and no record",
+        ),
+        (
+            Defect::RetryContinuesCreation(Call::Grant),
+            "a retry through grant must return IncompleteEffect again",
+        ),
+        (
+            Defect::RetryContinuesCreation(Call::Apply),
+            "a retry through apply must return IncompleteEffect again",
+        ),
+        (
+            Defect::AnotherOperationOverwritesIncomplete,
+            "another owner's grant at an unfinished address must conflict",
+        ),
+        (
+            Defect::PlantOverwritesIncomplete,
+            "a plant at an unfinished address must conflict",
+        ),
+        (
+            Defect::RevokeTakesAnUnfinishedEffect,
+            "a revoke of an unfinished operation's handle must return UnknownHandle",
+        ),
+        (
+            Defect::IncompleteCleanupIgnoresTheOwner,
+            "a removal naming another owner must not select an unfinished effect",
+        ),
+        (
+            Defect::IncompleteCleanupIgnoresTheCapability,
+            "a removal naming another capability must not select an unfinished effect",
+        ),
+        (
+            Defect::DoomedOwnerValidatesAfterTheEffect,
+            "a refused invalid doomed operation changed the account",
+        ),
+        (
+            Defect::CleanupKeepsTheMarker,
+            "the exact removal must clear the unfinished effect and nothing else",
+        ),
+        (
+            Defect::IncompleteCleanupTakesEqualPeers,
+            "the exact removal must clear the unfinished effect and nothing else",
+        ),
+        (
+            Defect::IncompleteCleanupTakesEqualUnfinishedPeers,
+            "the exact removal must clear the unfinished effect and nothing else",
+        ),
+        (
+            Defect::IncompleteCleanupOnlyInGrantOrder,
+            "removal of an unfinished effect in reverse-push-order must succeed",
+        ),
+        (
+            Defect::IncompleteCleanupOnlyInReversePushOrder,
+            "removal of an unfinished effect in grant-order must succeed",
+        ),
+    ] {
+        assert_rejected(reason, || {
+            conformance::failed_grants_stay_incomplete_until_exact_withdrawal(carrying(defect))
+        });
+    }
+}
+
+#[test]
+fn every_emptiness_check_reads_the_unfinished_effects() {
+    assert_rejected("the earlier instance kept a holding", || {
+        conformance::fresh_backends_share_no_authority(carrying(
+            Defect::RevokeLeavesAnUnfinishedEffect,
+        ))
+    });
+    assert_rejected("fresh from the factory must observe nothing", || {
+        conformance::fresh_backends_share_no_authority(sharing_a_log(
+            Defect::RecoversUnfinishedEffectsFromItsOwnLog,
+        ))
+    });
+    assert_rejected("fresh from the factory must observe nothing", || {
+        conformance::snapshot_never_invents_objects(sharing_a_log(
+            Defect::RecoversUnfinishedEffectsFromItsOwnLog,
+        ))
+    });
+    assert_rejected("apply_removal of planted residue must take it", || {
+        conformance::repeated_grants_are_independently_removable(carrying(
+            Defect::ApplyRemovalLeavesAnUnfinishedEffectOf(Call::Plant),
+        ))
+    });
+    assert_rejected(
+        "apply_removal of a granted holding must take its holding",
+        || {
+            conformance::repeated_grants_are_independently_removable(carrying(
+                Defect::ApplyRemovalLeavesAnUnfinishedEffectOf(Call::Grant),
+            ))
+        },
+    );
+}
+
+#[test]
+fn the_snapshot_keeps_the_record_of_an_unfinished_holding_and_each_emptiness_defect_shows_only_its_effect()
+ {
+    let unfinished = |operations: Vec<UniverseOp>| {
+        operations
+            .into_iter()
+            .map(|operation| IncompleteEffect { operation })
+            .collect::<Vec<_>>()
+    };
+    let doomed = conformance::op_for(
+        GrantId::new(),
+        conformance::doomed_owner(),
+        mount("/src", "/work"),
+    );
+    let mut recording = DefectiveBackend::carrying(Defect::AFailedGrantIssuesARecord);
+    assert_eq!(
+        recording.grant(doomed.clone(), GrantKind::Hot),
+        Err(incomplete_effect(&doomed))
+    );
+    let record = LedgerEntry {
+        handle: doomed.handle(),
+        owner: doomed.owner().clone(),
+        capability: doomed.capability(),
+        kind: GrantKind::Hot,
+    };
+    assert_eq!(
+        recording.snapshot_os_state(),
+        Ok(EnforcementSnapshot::new(
+            OsState::new(),
+            vec![record],
+            unfinished(vec![doomed.clone()])
+        )
+        .unwrap())
+    );
+
+    let owner = conformance::conformance_owner;
+    let logging = sharing_a_log(Defect::RecoversUnfinishedEffectsFromItsOwnLog);
+    let logged = conformance::op_for(GrantId::new(), owner(), broker("egressd"));
+    logging().grant(logged.clone(), GrantKind::Hot).unwrap();
+    assert_eq!(
+        logging().snapshot_os_state(),
+        Ok(EnforcementSnapshot::new(OsState::new(), Vec::new(), unfinished(vec![logged])).unwrap())
+    );
+
+    let planted = conformance::op_for(GrantId::new(), owner(), session_file("/skills/pr.md"));
+    let mut leaving =
+        DefectiveBackend::carrying(Defect::ApplyRemovalLeavesAnUnfinishedEffectOf(Call::Plant));
+    leaving.plant(planted.object()).unwrap();
+    leaving
+        .apply_removal(planted.removal(), &owner(), DrainSpec::forcing())
+        .unwrap();
+    assert_eq!(
+        leaving.snapshot_os_state(),
+        Ok(
+            EnforcementSnapshot::new(OsState::new(), Vec::new(), unfinished(vec![planted]))
+                .unwrap()
+        )
+    );
+
+    let granted = conformance::op_for(GrantId::new(), owner(), uds_socket("/run/egressd.uds"));
+    let mut leaving =
+        DefectiveBackend::carrying(Defect::ApplyRemovalLeavesAnUnfinishedEffectOf(Call::Grant));
+    leaving.grant(granted.clone(), GrantKind::Hot).unwrap();
+    leaving
+        .apply_removal(granted.removal(), &owner(), DrainSpec::forcing())
+        .unwrap();
+    assert_eq!(
+        leaving.snapshot_os_state(),
+        Ok(
+            EnforcementSnapshot::new(OsState::new(), Vec::new(), unfinished(vec![granted]))
+                .unwrap()
+        )
+    );
 }
