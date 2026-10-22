@@ -6,4 +6,5 @@
 
 pub mod bench_medians;
 pub mod bounded;
+pub mod quickstart;
 pub mod record_facts;
