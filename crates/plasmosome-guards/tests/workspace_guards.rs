@@ -427,8 +427,9 @@ fn tools_refusals_for(sections: &str) -> Vec<String> {
 fn assert_membrane_ships_the_tools(refusals: &[String]) {
     assert_eq!(refusals.len(), 1, "{refusals:?}");
     assert!(
-        refusals[0]
-            .starts_with("`plasmosome-membrane` has a non-dev dependency path to `plasmosome-tools`"),
+        refusals[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-tools`"
+        ),
         "{refusals:?}"
     );
 }

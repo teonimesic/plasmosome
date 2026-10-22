@@ -6,19 +6,15 @@ use std::process::Command;
 
 use plasmosome_tools::bench_medians::{ESTIMATES_LIMIT, run};
 
-const NAMES: [&str; 8] = [
-    "attach_detach",
-    "ledger_replay/10",
-    "ledger_replay/100",
-    "ledger_replay/1000",
-    "manifest_parse",
-    "reconciler_step",
-    "session_log_append",
-    "session_log_read",
-];
-
-const MEDIANS: [&str; 8] = [
-    "81234.5", "812.25", "8123", "81234.125", "0.75", "1.0", "65.000001", "1e3",
+const MEDIANS: [(&str, &str); 8] = [
+    ("attach_detach", "81234.5"),
+    ("ledger_replay/10", "812.25"),
+    ("ledger_replay/100", "8123"),
+    ("ledger_replay/1000", "81234.125"),
+    ("manifest_parse", "0.75"),
+    ("reconciler_step", "1.0"),
+    ("session_log_append", "65.000001"),
+    ("session_log_read", "1e3"),
 ];
 
 const LISTED: &str = "## Kernel benchmark medians
@@ -55,7 +51,7 @@ fn write_estimates(root: &Path, name: &str, text: &str) {
 
 fn criterion() -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("a scratch directory is created");
-    for (name, median) in NAMES.iter().zip(MEDIANS) {
+    for (name, median) in MEDIANS {
         write_estimates(directory.path(), name, &estimates(median));
     }
     directory
@@ -155,7 +151,9 @@ fn a_median_that_is_missing_or_not_a_number_is_named() {
 
         assert_one_line_naming(&outcome, 1, "session_log_read/new/estimates.json");
         assert!(
-            outcome.err.contains("has no number at median.point_estimate"),
+            outcome
+                .err
+                .contains("has no number at median.point_estimate"),
             "{text}: {:?}",
             outcome.err
         );
@@ -165,14 +163,23 @@ fn a_median_that_is_missing_or_not_a_number_is_named() {
 
 #[test]
 fn a_file_that_is_not_json_is_named() {
-    for text in ["", "{\"median\":", "NaN", "{\"median\":{\"point_estimate\":NaN}}"] {
+    for text in [
+        "",
+        "{\"median\":",
+        "NaN",
+        "{\"median\":{\"point_estimate\":NaN}}",
+    ] {
         let criterion = criterion();
         write_estimates(criterion.path(), "attach_detach", text);
 
         let outcome = run_on(criterion.path(), None);
 
         assert_one_line_naming(&outcome, 1, "attach_detach/new/estimates.json");
-        assert!(outcome.err.contains("is not JSON"), "{text}: {:?}", outcome.err);
+        assert!(
+            outcome.err.contains("is not JSON"),
+            "{text}: {:?}",
+            outcome.err
+        );
         assert_eq!(outcome.out, "");
     }
 }
@@ -186,7 +193,11 @@ fn padded_to(length: u64) -> String {
 #[test]
 fn a_file_at_the_bound_is_read() {
     let criterion = criterion();
-    write_estimates(criterion.path(), "reconciler_step", &padded_to(ESTIMATES_LIMIT));
+    write_estimates(
+        criterion.path(),
+        "reconciler_step",
+        &padded_to(ESTIMATES_LIMIT),
+    );
 
     let outcome = run_on(criterion.path(), Some(&criterion.path().join("summary.md")));
 
@@ -248,6 +259,43 @@ fn a_summary_that_cannot_be_opened_fails_after_printing() {
 
     assert_one_line_naming(&outcome, 1, "cannot append to");
     assert_eq!(outcome.out, LISTED);
+}
+
+struct ClosedPipe;
+
+impl std::io::Write for ClosedPipe {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+#[test]
+fn a_stdout_that_cannot_be_written_fails_before_the_summary() {
+    let criterion = criterion();
+    let summary = criterion.path().join("summary.md");
+    let mut err = Vec::new();
+
+    let code = run(
+        &[criterion.path().as_os_str().to_owned()],
+        Some(&summary),
+        &mut ClosedPipe,
+        &mut err,
+    );
+
+    let outcome = Outcome {
+        code,
+        out: String::new(),
+        err: String::from_utf8(err).unwrap(),
+    };
+    assert_one_line_naming(&outcome, 1, "cannot write to stdout");
+    assert!(
+        !summary.exists(),
+        "the summary was written after stdout failed"
+    );
 }
 
 #[test]
