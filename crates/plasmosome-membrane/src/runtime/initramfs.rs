@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read};
-use std::os::unix::fs::FileExt;
+use std::io::Read;
 
-use super::artifacts::VerifiedArtifact;
+use super::artifacts::{Positioned, VerifiedArtifact};
 use super::digest::Digest;
 use super::recipe::ArtifactRole;
 
@@ -45,7 +44,8 @@ pub enum InitramfsRefusal {
     BadName { offset: u64, reason: &'static str },
     /// A second entry has this name.
     DuplicateEntry { name: String },
-    /// This entry is a symbolic link.
+    /// This entry is a symbolic link. A `TRAILER!!!` with a symlink mode is one too: the kernel
+    /// reads it as a link and never as the trailer.
     SymlinkEntry { name: String },
     /// This entry is neither a regular file, a directory nor a symlink; `mode` is its mode field.
     UnsupportedType { name: String, mode: u32 },
@@ -139,8 +139,8 @@ impl std::error::Error for InitramfsRefusal {}
 /// Otherwise it reads the archive from offset 0 to its end with positioned reads through
 /// `initramfs.file()`, never by path, through a limit of the bound plus one byte. The archive
 /// must be uncompressed newc whose entries are plain relative names, regular files with one link
-/// or directories, each name once with its parent before it, ending in `TRAILER!!!` and then only
-/// zero bytes. It must hold a regular, executable, non-empty `init`, a `plasmosome` directory and
+/// or directories, each name once with its parent before it, ending in a `TRAILER!!!` with no body
+/// and no symlink mode, and then only zero bytes. It must hold a regular, executable, non-empty `init`, a `plasmosome` directory and
 /// a regular `plasmosome/guest-policy` whose bytes hash to `guest_policy.digest()`.
 ///
 /// It reads the bytes the descriptor holds now and does not hash them again. A write through a
@@ -196,6 +196,10 @@ pub(crate) fn audit_newc(
     loop {
         let entry = read_entry(bytes, at)?;
         if entry.name == TRAILER {
+            if entry.mode & TYPE_BITS == SYMLINK {
+                let name = entry.name.to_string();
+                return Err(InitramfsRefusal::SymlinkEntry { name });
+            }
             if !entry.data.is_empty() {
                 return Err(bad_field(entry.at, "filesize"));
             }
@@ -392,19 +396,6 @@ fn read_bounded(file: &File, size: u64, bound: u64) -> Result<Vec<u8>, Initramfs
     match bytes.len() as u64 {
         read if read > bound => Err(InitramfsRefusal::TooLarge { bytes: read }),
         _ => Ok(bytes),
-    }
-}
-
-struct Positioned<'a> {
-    file: &'a File,
-    offset: u64,
-}
-
-impl Read for Positioned<'_> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let read = self.file.read_at(buffer, self.offset)?;
-        self.offset += read as u64;
-        Ok(read)
     }
 }
 
