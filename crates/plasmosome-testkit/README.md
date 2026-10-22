@@ -114,11 +114,12 @@ with real resources. For each sample capability, drain and entry point, the clau
 an invalid doomed operation is refused before any effect; that the unfinished operation is
 reported exactly, with no standing object and no record; that a retry through either entry point
 returns `IncompleteEffect` again; that another owner's grant or apply, a plant, a revoke, and a
-removal naming another owner or capability are refused and change nothing; and that the exact
-removal clears the effect and nothing else. It compares an `IncompleteEffect` by class and
-address, never by its detail. Each step has its own defective backend. A withdrawal that fails
-after its release has no clause, because no reserved owner arms it: `FakeBackend`'s tests, the
-ledger's detach test and `tests/attach_detach_residue.rs` cover it.
+removal naming another owner or capability are refused and change nothing; and that, of two equal
+unfinished effects, each exact removal clears its own and nothing else. It removes them in grant
+order and in reverse, and each order has its own defective backend. It compares an
+`IncompleteEffect` by class and address, never by its detail. Each step has its own defective
+backend. A withdrawal that fails after its release has no clause, because no reserved owner arms
+it: `FakeBackend`'s tests, the ledger's detach test and `tests/attach_detach_residue.rs` cover it.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012

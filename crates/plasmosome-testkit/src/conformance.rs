@@ -1248,17 +1248,20 @@ pub fn doomed_owner() -> CellOwner {
 /// owner's grant or apply at its address and a plant there return `IdentityConflict`, a revoke of
 /// its handle returns `UnknownHandle`, and a removal naming another owner or capability returns
 /// `UnknownObject`, each changing nothing; that an invalid operation of that owner is refused with
-/// `InvalidOperation` and changes nothing; and that the exact removal clears the effect and
-/// nothing else. An error is compared by class and address, never by its detail. The factory's
-/// backend must fail every grant or apply owned by `doomed_owner()` after its first effect. Each
-/// pass withdraws at most one holding on a fresh backend, so the clause has no withdrawal order to
-/// walk.
+/// `InvalidOperation` and changes nothing; and that, of two such effects, each exact removal clears
+/// its own effect and nothing else. An error is compared by class and address, never by its
+/// detail. The factory's backend must fail every grant or apply owned by `doomed_owner()` after its
+/// first effect. Each pass removes its two effects in grant order or in reverse, and every message
+/// of that walk names its order.
 pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBackend>(
     make: impl Fn() -> B,
 ) {
     for capability in sample_capabilities() {
         for drain in drains() {
-            for entry in [Entry::Grant, Entry::Apply] {
+            for (entry, order) in [Entry::Grant, Entry::Apply]
+                .into_iter()
+                .flat_map(|entry| orders().map(|order| (entry, order)))
+            {
                 let mut backend = make();
                 let peer_request = hot_grant(conformance_owner(), &capability);
                 let peer = grant_prepared(&mut backend, &peer_request);
@@ -1284,19 +1287,22 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                     );
                 }
                 let op = op_for(GrantId::new(), doomed_owner(), capability.clone());
+                let twin = op_for(GrantId::new(), doomed_owner(), capability.clone());
                 let removal = op.removal();
-                let failure = entry.run(&mut backend, &op);
-                contract_assert!(
-                    incomplete_at(&failure, &op),
-                    "{} of the doomed operation must return IncompleteEffect at its address, not {failure:?}",
-                    entry.with_article()
-                );
+                for doomed in [&op, &twin] {
+                    let failure = entry.run(&mut backend, doomed);
+                    contract_assert!(
+                        incomplete_at(&failure, doomed),
+                        "{} of the doomed operation must return IncompleteEffect at its address, not {failure:?}",
+                        entry.with_article()
+                    );
+                }
                 let failed = observe(&mut backend);
                 assert_account(
                     &failed,
                     std::slice::from_ref(&peer_object),
                     std::slice::from_ref(&peer),
-                    std::slice::from_ref(&op),
+                    &[op.clone(), twin.clone()],
                     "an unfinished operation must be reported exactly, with no standing object and no record",
                 );
                 for retry in [Entry::Grant, Entry::Apply] {
@@ -1380,14 +1386,22 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                         "a refused removal naming another {field} changed the account"
                     );
                 }
-                contract_unwrap!(backend.apply_removal(removal, &doomed_owner(), drain));
-                assert_account(
-                    &observe(&mut backend),
-                    std::slice::from_ref(&peer_object),
-                    std::slice::from_ref(&peer),
-                    &[],
-                    "the exact removal must clear the unfinished effect and nothing else",
-                );
+                let walk = order.arrange_ops(vec![op, twin]);
+                for (index, gone) in walk.iter().enumerate() {
+                    contract_assert_eq!(
+                        backend.apply_removal(gone.removal(), &doomed_owner(), drain),
+                        Ok(()),
+                        "the exact removal of an unfinished effect in {} must succeed",
+                        order.name()
+                    );
+                    assert_account(
+                        &observe(&mut backend),
+                        std::slice::from_ref(&peer_object),
+                        std::slice::from_ref(&peer),
+                        &walk[index + 1..],
+                        "the exact removal must clear the unfinished effect and nothing else",
+                    );
+                }
             }
         }
     }

@@ -116,6 +116,9 @@ enum Defect {
     DoomedOwnerValidatesAfterTheEffect,
     CleanupKeepsTheMarker,
     IncompleteCleanupTakesEqualPeers,
+    IncompleteCleanupTakesEqualUnfinishedPeers,
+    IncompleteCleanupOnlyInGrantOrder,
+    IncompleteCleanupOnlyInReversePushOrder,
     RecoversUnfinishedEffectsFromItsOwnLog,
     ApplyRemovalLeavesAnUnfinishedEffectOf(Call),
 }
@@ -166,6 +169,7 @@ struct DefectiveBackend {
     pending_record_drops: Vec<Handle>,
     landing_record_drops: Vec<Handle>,
     incomplete: BTreeMap<Handle, UniverseOp>,
+    failure_order: Vec<Handle>,
 }
 
 impl DefectiveBackend {
@@ -190,6 +194,7 @@ impl DefectiveBackend {
             pending_record_drops: Vec::new(),
             landing_record_drops: Vec::new(),
             incomplete: BTreeMap::new(),
+            failure_order: Vec::new(),
         };
         let recovered = backend.recovery_log.borrow().clone();
         for entry in recovered {
@@ -248,6 +253,7 @@ impl DefectiveBackend {
         }
         self.incomplete
             .insert(operation.handle(), operation.clone());
+        self.failure_order.push(operation.handle());
         Err(incomplete_effect(operation))
     }
 
@@ -266,9 +272,27 @@ impl DefectiveBackend {
             return Err(unknown_object(removal, owner));
         }
         let address = unfinished.handle();
+        let mut pending = self
+            .failure_order
+            .iter()
+            .filter(|held| self.incomplete.contains_key(held));
+        let out_of_order = match self.defect {
+            Defect::IncompleteCleanupOnlyInGrantOrder => pending.next() != Some(&address),
+            Defect::IncompleteCleanupOnlyInReversePushOrder => pending.last() != Some(&address),
+            _ => false,
+        };
+        if out_of_order {
+            return Err(unknown_object(removal, owner));
+        }
         self.drained(owner, &removal.capability, address, drain, |backend| {
             if backend.defect != Defect::CleanupKeepsTheMarker {
                 backend.incomplete.remove(&address);
+            }
+            if backend.defect == Defect::IncompleteCleanupTakesEqualUnfinishedPeers {
+                backend.incomplete.retain(|_, held| {
+                    held.owner() != unfinished.owner()
+                        || held.capability() != unfinished.capability()
+                });
             }
             backend.drop_record(address);
             if backend.defect == Defect::IncompleteCleanupTakesEqualPeers {
@@ -3350,6 +3374,18 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
         (
             Defect::IncompleteCleanupTakesEqualPeers,
             "the exact removal must clear the unfinished effect and nothing else",
+        ),
+        (
+            Defect::IncompleteCleanupTakesEqualUnfinishedPeers,
+            "the exact removal must clear the unfinished effect and nothing else",
+        ),
+        (
+            Defect::IncompleteCleanupOnlyInGrantOrder,
+            "removal of an unfinished effect in reverse-push-order must succeed",
+        ),
+        (
+            Defect::IncompleteCleanupOnlyInReversePushOrder,
+            "removal of an unfinished effect in grant-order must succeed",
         ),
     ] {
         assert_rejected(reason, || {
