@@ -30,7 +30,7 @@ one.
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
-| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, and the crate-private `sources::Probes` refuses one inside a Mount source under rule 5 |
+| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, the crate-private `sources::Probes` refuses one inside a Mount source under rule 5, and `sources::Guard` refuses a Mount source over a guarded directory under §6 |
 | `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell. Its file judge is public, so `plasmosome-membrane` judges with the same code: `check_file` applies the rule to the file a walk reaches, and `verify_file` also hashes it |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
@@ -781,8 +781,9 @@ a case-insensitive volume, or spelled through `/System/Volumes/Data`, holds what
   source with its cell and pass the request's cell. A request for an existing cell checked as if
   it made a new cell, or a held source labelled as declared, checks less, and nothing signals it.
 - A declared source that does not open is skipped. Spec 022 says it cannot be mounted either.
-  That holds only once §6's source guard (native task plasmosome-98hv) refuses it at resolution
-  and spec 017's Mount adapter walks it again at apply. Neither exists yet.
+  That holds only once §6's source guard, below, refuses it at resolution and spec 017's Mount
+  adapter walks it again at apply. Nothing calls the guard yet, and the adapter does not exist
+  yet.
 - On macOS a firmlink such as `/Users`, `/private` or `/usr/local` opens a directory of the data
   volume, so that directory has a second parent that no walk from `/` sees. Rule 5 counts both
   chains. It opens `/System/Volumes/Data` followed by the directory's path, one component more at
@@ -812,8 +813,57 @@ observation gives no sources. Two more cases escape it:
   joining the directory's path to `/System/Volumes/Data`, so such a firmlink would hide it.
   `/usr/share/firmlinks` lists none on macOS 26.6.2.
 
-The guard that keeps a new Mount source away from spec 022 §6's guarded directories comes with
-native task plasmosome-98hv.
+Spec 022 §6's source guard keeps a new Mount source away from the directories that decide what
+cells get. It is `operator::sources::Guard`, and nothing calls it yet either. `Guard::new` takes
+each guarded directory with its `GuardedKind`, the one list of guarded kinds: the instance root,
+the registry root, and the directories of the control socket, the configuration file, the
+controller executable, the operator file, each listed declaration and each `cell_runtime`
+Artifact. It opens each one with `Walk::identities`, which judges no directory, so a directory
+below a group-writable one, such as Homebrew's `Cellar`, stays guarded. A trusted file guards the
+directory it was read from, by the chain of that same read. A guarded directory that does not
+open refuses every Mount of the request, naming its kind and path.
+
+`Guard::check` opens a new source from `/` with the full walk: no symlink is followed, every
+directory above the source meets rule 2, and the source must be a directory. The source itself is
+not judged, so a 0777 source below good ancestors passes. The guard then refuses the source when,
+by device and inode alone, it is the same directory as, inside or above a guarded directory. A
+sibling named `<dir>-x` passes, and a source spelled in another case on a case-insensitive volume
+is the same directory. Each `GuardRefusal` displays as one sentence, for a 108's `detail`. An
+overlap names the source, the relation, the kind and the guarded directory's path.
+
+On macOS the guard also refuses every source that is the data volume, lies inside it, or lies
+above it: `/`, `/System`, `/System/Volumes`, `/System/Volumes/Data`, and every spelling through
+it, such as `/System/Volumes/Data/usr`. Each of these holds a firmlinked directory under a second
+spelling that no walk from `/` through the firmlink passes. A spelling through
+`/System/Volumes/Data` is refused even where it would be safe: name the directory through its
+firmlink instead. A guarded directory reached through the data volume refuses the request too.
+Each firmlink target is its own path and lies inside no other target (`/usr/share/firmlinks` on
+macOS 26.6.2). So a directory inside the data volume above a target can be named only through
+`/System/Volumes/Data`, and that spelling is refused. A data volume that does not open for any
+reason but a missing name refuses every Mount.
+
+The guard's limits:
+
+- It judges a source when a request resolves it. A holding is not judged again when the guarded
+  set changes later, such as a reconfigured root, an upgraded controller or a new `cell_runtime`
+  Artifact. Rule 5 still refuses a newly listed declaration inside a held source when it is read.
+- Spec 022 does not guard a mount point inside the source that reaches a guarded directory, or
+  another view of a guarded directory with a different identity, such as a FUSE or bindfs mount.
+- A Linux bind mount of a directory inside a guarded directory, placed elsewhere and declared as
+  a source, passes, though spec 022 §6 refuses it. It has the directory's device and inode, but
+  its chain from `/` holds no guarded directory. Only root can make one. This is reasoned from the
+  code, not measured; rule 5 has the same limit above.
+- A guarded directory moved to a new parent after `Guard::new`, or a trusted file's directory
+  moved after the file was read, is judged by its old chain, so a source at the new parent
+  passes. Only the operator or the controller's UID can make that move.
+- A source renamed and replaced after the check needs write access to its parent, which meets
+  rule 2, so only root or the controller's UID can do it. What is at the path at apply is what is
+  mounted.
+- On macOS the guard relies on each firmlink target being its own path and lying inside no other
+  target. If a target lay inside another under another name, a source at the outer target would
+  pass, with nothing refusing. A macOS test reads `/usr/share/firmlinks` and fails on such a
+  table, but only where the suite runs. CI's `macos` job runs on `macos-26`, and nothing reads the
+  file at run time.
 
 ## Artifacts
 
