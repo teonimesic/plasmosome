@@ -1,0 +1,5 @@
+id = "inline"
+description = "Dotted keys in inline tables, and floats."
+impl.wasm = "c.wasm"
+x = { a.b = 1, c = [1.5, { d.e = 2 }] }
+y = 2.5

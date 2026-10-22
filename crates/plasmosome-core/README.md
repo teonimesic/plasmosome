@@ -23,7 +23,7 @@ one.
 | `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's cell ID allocation, `supervisor.lock` and `membraned.log`, its `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
-| `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. Callers gather the facts and carry out the outcome |
+| `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. A lock the controller cannot test is its own fact, `Untestable`, and `decide` sets that cell aside as `lock_untestable` whatever its marker and journal. `LockFact` serializes as spec 001's `lock` values, and each `SetAsideReason` as spec 001's name for that reason. It has six of spec 001's eight reasons: `retire_unlogged` and `retire_failed` come with plasmosome-66wy. Callers gather the facts and carry out the outcome |
 | `supervisor_start` | Spec 023 §4's start: `start_supervisor` runs one cell's `membraned` detached, with an exact argv, an empty environment and only descriptors 0 to 4, and then writes it the config record. Nothing calls it yet |
 | `closure` | What removing a plugin takes, with no IO. `AttachmentGraph` holds one cell's attached plugins, the providers each one directly requires, and which ones were asked for by name; a provider is attached before its requirers. `stranded_by` lists the plugins that directly require a given one, which `plasmid.remove` must refuse to strand. `removal_closure` gives that plugin, every plugin that transitively requires it, and every unnamed provider required only by plugins it takes, followed down the chain. Spec 011's `plasmid.remove` and spec 028's expiry are to share it, so the two cannot take different sets; nothing calls it yet |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary. Its config may carry spec 023's `cell_runtime`, read as `CellRuntime` |
@@ -307,7 +307,17 @@ calls them yet.
 - `CellDir::probe_supervisor_lock` tries the lock on a fresh read-only descriptor. `Held` means
   another open of the file holds it, even one in this process. `Free` keeps the lock it took
   until the returned `SupervisorLock` is dropped. `Missing` means no entry is there, and nothing
-  is created. A symlink is refused, and so is anything but a regular file.
+  is created. A symlink is refused, and so is anything but a regular file. An `flock` that fails
+  for a reason other than another holder is `Io`.
+- `CellDir::test_supervisor_lock` tests the lock as spec 023 §8's check does, and is the one way
+  the check's callers test it. It probes, and creates and locks a missing lock as
+  `create_supervisor_lock` does. It returns `LockTest`: `Held`, `Free` holding the lock, or
+  `Untestable` with the error. Every error of the probe or the create is `Untestable`, whatever
+  its kind, and holds nothing. So a symlink, a directory or other entry that is not a regular
+  file, a lock it cannot open, an `flock` error other than another holder, and a missing lock it
+  cannot create and lock are all untestable, as is a create whose directory sync fails after it
+  named the lock. `LockTest::fact` gives the `LockFact` that `decide` takes. Spec 023 §4 step 6's
+  wait keeps the probe, since it must not create a missing lock.
 - Nothing here calls `LOCK_UN`. An `flock` lock belongs to the open file, so it is released only
   when every descriptor of that open file is closed: the copy handed to `membraned` keeps it
   held after the controller drops its own. A forked child that has not called `exec` keeps it
@@ -322,8 +332,8 @@ calls them yet.
 `InstanceRoot::retire` still does not check the supervisor lock its caller must hold. A caller
 holds it when it has a `SupervisorLock` whose `identity()` equals the cell's
 `supervisor_lock_identity()`: one from `create_supervisor_lock` that it has not handed over, or
-one from a `Free` probe. `retire` does not take one yet. Nothing calls `retire`, and its first
-caller is where the shape of that call will be known.
+one from a `Free` probe or a `Free` `LockTest`. `retire` does not take one yet. Nothing calls
+`retire`, and its first caller is where the shape of that call will be known.
 
 ## Starting membraned
 
