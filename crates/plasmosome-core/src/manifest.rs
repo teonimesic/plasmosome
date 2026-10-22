@@ -4226,6 +4226,11 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 vec!["2001:db8::", "2001:db8:ffff:ffff::1"],
                 vec!["2001:db9::1", "2001:db7:ffff::", "192.0.2.1"],
             ),
+            (
+                "2001:db8::/48",
+                vec!["2001:db8::", "2001:db8:0:ffff::1"],
+                vec!["2001:db8:1::", "192.0.2.1", "0.0.0.0"],
+            ),
         ] {
             let cidr = Cidr::parse(network).unwrap();
             for address in inside {
