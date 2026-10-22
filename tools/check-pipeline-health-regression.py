@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Defend health-report uncertainty, delivery windows, pagination, security issues and read-only failure boundaries."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -15,12 +16,22 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 
 
 SOURCE = Path(__file__).resolve().with_name("check-pipeline-health")
 API = runpy.run_path(str(SOURCE))
 NOW = datetime(2026, 9, 12, 15, tzinfo=timezone.utc)
 START = NOW - timedelta(hours=1)
+
+
+class Skipped(Exception):
+    """A row that cannot run on this platform, with the reason the run prints."""
+
+
+def only_on_macos(reason):
+    if sys.platform != "darwin":
+        raise Skipped(f"macOS only: {reason}")
 
 
 def responses(*items):
@@ -562,8 +573,13 @@ def runner_refused_group_of_exited_leader():
         assert child.stdout.closed and child.stderr.closed, "a refused group left its pipes open"
         assert "after reap" not in calls, f"signalled a group after its leader was reaped: {calls}"
         assert len(calls) == 1, f"expected exactly one killpg, saw {calls}"
-        if sys.platform == "darwin":
-            assert calls == ["kernel"], f"the kernel did not refuse a group whose only member is a zombie: {calls}"
+    return calls
+
+
+def the_kernel_refuses_killpg_on_a_group_whose_only_member_is_a_zombie():
+    only_on_macos("killpg on a group whose leader exited unreaped returns EPERM only on Darwin")
+    calls = runner_refused_group_of_exited_leader()
+    assert calls == ["kernel"], f"the kernel did not refuse a group whose only member is a zombie: {calls}"
 
 
 def runner_refused_group_of_live_leader():
@@ -654,22 +670,108 @@ def runner_ends_descendants_of_exited_leader():
                     pass
 
 
-def main():
-    native_uncertainty()
-    delivery_boundaries()
-    security_issues()
-    cli_security_issues()
-    cli_failure_isolation()
-    cli_readonly_startup()
-    runner_boundaries()
-    cli_exit_metadata()
-    runner_released_group_identity()
-    runner_refused_group_of_exited_leader()
-    runner_refused_group_of_live_leader()
-    runner_refused_group_of_exiting_leader()
-    runner_ends_descendants_of_exited_leader()
-    print("PASS: native uncertainty/ownership/drift/pause, complete-or-unknown delivery windows/pagination, security issues with ages or unknown, CLI clock/failure isolation, bounded reaped source commands")
+def only_on_macos_skips_by_name_off_darwin():
+    platform = sys.platform
+    try:
+        sys.platform = "linux"
+        try:
+            only_on_macos("a probe reason")
+        except Skipped as skipped:
+            assert str(skipped) == "macOS only: a probe reason", skipped
+        else:
+            raise AssertionError("only_on_macos let a row run off Darwin")
+        sys.platform = "darwin"
+        try:
+            returned = only_on_macos("a probe reason")
+        except Skipped as skipped:
+            raise AssertionError(f"only_on_macos skipped a row on Darwin: {skipped}") from None
+        assert returned is None, returned
+    finally:
+        sys.platform = platform
+
+
+def a_failed_row_fails_the_run_whatever_rows_skip():
+    def passes():
+        pass
+
+    def fails():
+        raise AssertionError("broken")
+
+    def crashes():
+        raise RuntimeError("crashed")
+
+    def exits():
+        raise SystemExit(0)
+
+    def ends():
+        sys.exit()
+
+    def skips():
+        raise Skipped("macOS only: a probe reason")
+
+    def run(rows):
+        try:
+            return run_rows(rows)
+        except SystemExit as error:
+            return f"ended by {error!r}"
+
+    printed, errors = io.StringIO(), io.StringIO()
+    with redirect_stdout(printed), redirect_stderr(errors):
+        statuses = [run([skips, fails]), run([crashes, skips]), run([passes, skips]), run([exits, passes]), run([ends, passes])]
+    assert statuses == [1, 1, 0, 1, 1], statuses
+    assert printed.getvalue().splitlines() == [
+        "skip skips: macOS only: a probe reason", "FAIL fails: AssertionError: broken", "0 passed, 1 failed, 1 skipped",
+        "FAIL crashes: RuntimeError: crashed", "skip skips: macOS only: a probe reason", "0 passed, 1 failed, 1 skipped",
+        "ok passes", "skip skips: macOS only: a probe reason", "1 passed, 0 failed, 1 skipped",
+        "FAIL exits: SystemExit: exit code 0", "ok passes", "1 passed, 1 failed, 0 skipped",
+        "FAIL ends: SystemExit: exit code None", "ok passes", "1 passed, 1 failed, 0 skipped",
+    ], printed.getvalue()
+    assert errors.getvalue().count("Traceback") == 4, errors.getvalue()
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+        long_run = run([passes] * len(TESTS) + [fails])
+    assert long_run == 1, f"one failed row in a run as long as TESTS ended {long_run!r}"
+
+
+def run_rows(rows):
+    passed, failed, skipped = [], [], []
+    for row in rows:
+        try:
+            row()
+        except Skipped as reason:
+            skipped.append(row.__name__)
+            print(f"skip {row.__name__}: {reason}")
+        except (Exception, SystemExit) as error:
+            failed.append(row.__name__)
+            detail = f"exit code {error.code!r}" if isinstance(error, SystemExit) else error
+            print(f"FAIL {row.__name__}: {type(error).__name__}: {detail}", flush=True)
+            traceback.print_exception(error)
+        else:
+            passed.append(row.__name__)
+            print(f"ok {row.__name__}")
+    print(f"{len(passed)} passed, {len(failed)} failed, {len(skipped)} skipped")
+    return 1 if failed else 0
+
+
+TESTS = [
+    only_on_macos_skips_by_name_off_darwin,
+    native_uncertainty,
+    delivery_boundaries,
+    security_issues,
+    cli_security_issues,
+    cli_failure_isolation,
+    cli_readonly_startup,
+    runner_boundaries,
+    cli_exit_metadata,
+    runner_released_group_identity,
+    runner_refused_group_of_exited_leader,
+    the_kernel_refuses_killpg_on_a_group_whose_only_member_is_a_zombie,
+    runner_refused_group_of_live_leader,
+    runner_refused_group_of_exiting_leader,
+    runner_ends_descendants_of_exited_leader,
+    a_failed_row_fails_the_run_whatever_rows_skip,
+]
 
 
 if __name__ == "__main__":
-    main()
+    a_failed_row_fails_the_run_whatever_rows_skip()
+    sys.exit(run_rows(TESTS))

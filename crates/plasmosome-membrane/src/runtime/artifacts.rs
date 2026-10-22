@@ -388,9 +388,9 @@ fn hash(checked: &Checked) -> Result<Digest, ArtifactFault> {
     Digest::of_reader(bounded).map_err(|error| io_fault("pread", &error))
 }
 
-struct Positioned<'a> {
-    file: &'a File,
-    offset: u64,
+pub(crate) struct Positioned<'a> {
+    pub(crate) file: &'a File,
+    pub(crate) offset: u64,
 }
 
 impl Read for Positioned<'_> {
@@ -436,6 +436,24 @@ fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
         Ok(())
     } else {
         Err(ArtifactFault::ChangedWhileHashing)
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn verified_for_test(role: ArtifactRole, path: &std::path::Path) -> VerifiedArtifact {
+    let file = File::open(path).expect("the test file opens");
+    let metadata = stat(&file).expect("fstat");
+    VerifiedArtifact {
+        role,
+        path: RecipePath::parse(path.to_str().expect("UTF-8")).expect("a canonical path"),
+        walk: Walk::from_root(path).expect("the walk starts"),
+        identity: FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        },
+        stamp: stamp(&metadata),
+        digest: Digest::of(b""),
+        file,
     }
 }
 
