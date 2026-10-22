@@ -1579,6 +1579,14 @@ mod tests {
         reset_reap_record();
         witness_unconsumed_exit(pid, VmmState::Exited { code: 5 });
         assert_eq!(child.observe(), Ok(VmmState::Exited { code: 5 }));
+        assert_eq!(
+            child.wait_once(
+                SupervisionOperation::Reap,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT
+            ),
+            Ok(Some(VmmState::Exited { code: 5 })),
+            "a WNOWAIT wait still sees the exit"
+        );
         assert!(
             !reaped_by_a_handle(pid),
             "a WNOWAIT observation consumed nothing, so it is not a reap"
