@@ -224,14 +224,16 @@ impl PrivateListener {
     /// `dir` is walked and judged again before the socket is created, and again after it is
     /// bound; if that second check fails, its error is returned and the socket at the temporary
     /// name in the held directory is removed, but only if the effective UID owns it.
-    /// `BindEscaped` means no socket owned by the effective UID is at the temporary name in the
-    /// held directory after bind. `BadName` holds `name` itself, not a path. `PathTooLong`,
-    /// `AddressInUse` and the other failures before `bind` name `name`'s path. The directory
-    /// checks' errors name the directory component that broke the rule. Every other error from
-    /// `bind` on names the temporary's path. A hard exit before the rename leaves the temporary,
-    /// which nothing removes. The socket's own address, as `getsockname` reports it, is the
-    /// temporary name. A caller that forks from another thread must hold its descriptor lock
-    /// around this call, because on macOS the socket is created before it is marked
+    /// `BindEscaped` means that after bind the temporary name in the held directory holds no
+    /// socket owned by the effective UID, or holds an entry other than the one found there just
+    /// after bind. If the socket goes before `fchmodat` reaches it, or after its mode is checked,
+    /// the result is `Io` from `fchmodat` or from the rename. `BadName` holds `name` itself, not a
+    /// path. `PathTooLong`, `AddressInUse` and the other failures before `bind` name `name`'s
+    /// path. The directory checks' errors name the directory component that broke the rule. Every
+    /// other error from `bind` on names the temporary's path. A hard exit before the rename leaves
+    /// the temporary, which nothing removes. The socket's own address, as `getsockname` reports
+    /// it, is the temporary name. A caller that forks from another thread must hold its descriptor
+    /// lock around this call, because on macOS the socket is created before it is marked
     /// close-on-exec.
     pub fn bind(
         dir: PrivateDir,
@@ -1900,10 +1902,11 @@ mod tests {
 
     #[test]
     fn publish_reports_bind_escaped_when_the_temporary_goes_after_its_mode_is_set() {
-        for planted in [false, true] {
+        for plant in [false, true] {
             let (_root, cell, dir) = private_cell();
             let temporary = cell.join(DRAWN);
             let mut mode = None;
+            let mut planted = None;
             let refusal = refusal_of(publish_drawing(
                 dir,
                 "sock",
@@ -1913,8 +1916,11 @@ mod tests {
                     if step == Step::Restricted {
                         mode = Some(fs::symlink_metadata(&temporary).expect("stat").mode());
                         fs::remove_file(&temporary).expect("unlink");
-                        if planted {
-                            fs::write(&temporary, b"planted").expect("write");
+                        if plant {
+                            let other = UnixListener::bind(&temporary).expect("bind another");
+                            set_mode(&temporary, 0o600);
+                            let ino = fs::symlink_metadata(&temporary).expect("stat").ino();
+                            planted = Some((other, ino));
                         }
                     }
                 },
@@ -1925,13 +1931,15 @@ mod tests {
                 PrivateSocketError::BindEscaped {
                     path: temporary.clone()
                 },
-                "planted: {planted}"
+                "plant: {plant}"
             );
-            if planted {
-                assert_eq!(fs::read(&temporary).expect("the file stays"), b"planted");
-                assert_eq!(entries(&cell), vec![temporary]);
-            } else {
-                assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+            match planted {
+                Some((_other, ino)) => {
+                    let left = fs::symlink_metadata(&temporary).expect("the other socket stays");
+                    assert_eq!((left.file_type().is_socket(), left.ino()), (true, ino));
+                    assert_eq!(entries(&cell), vec![temporary]);
+                }
+                None => assert_eq!(entries(&cell), Vec::<PathBuf>::new()),
             }
         }
     }

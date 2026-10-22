@@ -550,9 +550,10 @@ alive), and the file-type check still rejects regular files and symlinks even if
 are recycled. A leaf symlink at the configured path is an entry already there, so it is refused
 before `bind`, which would otherwise follow it. When the check `PrivateListener` repeats after
 `bind` fails, the start is refused and the socket just bound is removed from its temporary name
-only while it is still that socket by device and inode. If no socket owned by the effective UID is
-at the temporary name in that directory after `bind` (`BindEscaped`), the start unlinks nothing and
-can leave the just-bound socket for the operator. `SIGKILL` is the case no destructor covers,
+only while it is still that socket by device and inode. `BindEscaped` means that after `bind` the
+temporary name in that directory holds no socket owned by the effective UID, or holds an entry
+other than the one found there just after `bind`. Then the start unlinks nothing and can leave the
+just-bound socket for the operator. `SIGKILL` is the case no destructor covers,
 because a killed process runs none, so the path survives the daemon and the next start refuses it
 and says why. A `SIGKILL` during the start, before the rename, leaves the socket under its
 temporary name instead, which no start refuses and nothing removes.
