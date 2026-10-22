@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -238,7 +239,176 @@ static int record(int argc, char **argv) {
     return fclose(report) == 0 ? 0 : BROKEN;
 }
 
+#if defined(__APPLE__)
+#include <sys/socket.h>
+#include <sys/un.h>
+
+extern int sandbox_init(const char *, unsigned int, char **);
+extern void sandbox_free_error(char *);
+#if defined(PLASMOSOME_FIXTURE_LIBRARY)
+extern int plasmosome_fake(void);
+#endif
+
+#define RECIPE_CAP (1U << 20)
+
+static char *read_bounded(int fd) {
+    char *text = calloc(RECIPE_CAP + 2, 1);
+    if (text == NULL) _exit(BROKEN);
+    size_t used = 0;
+    for (;;) {
+        ssize_t got = read(fd, text + used, RECIPE_CAP + 1 - used);
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) _exit(BROKEN);
+        if (got == 0) return text;
+        used += (size_t)got;
+        if (used > RECIPE_CAP) _exit(BROKEN);
+    }
+}
+
+static void field(const char *text, const char *key, char *out, size_t capacity) {
+    const char *at = strstr(text, key);
+    if (at == NULL) _exit(BROKEN);
+    at += strlen(key);
+    size_t used = 0;
+    while (*at != '"') {
+        unsigned char byte = (unsigned char)*at++;
+        if (byte == 0 || used + 1 >= capacity) _exit(BROKEN);
+        if (byte == '\\') {
+            byte = (unsigned char)*at++;
+            switch (byte) {
+            case '"': case '\\': case '/': break;
+            case 'n': byte = '\n'; break;
+            case 'r': byte = '\r'; break;
+            case 't': byte = '\t'; break;
+            case 'b': byte = '\b'; break;
+            case 'f': byte = '\f'; break;
+            default: _exit(BROKEN);
+            }
+        }
+        out[used++] = (char)byte;
+    }
+    out[used] = 0;
+}
+
+static void mark_started(const char *control) {
+    char marker[4096];
+    if (strlen(control) >= sizeof(marker)) _exit(BROKEN);
+    strcpy(marker, control);
+    for (int index = 0; index < 2; index++) {
+        char *slash = strrchr(marker, '/');
+        if (slash == NULL) _exit(BROKEN);
+        *slash = 0;
+    }
+    size_t used = strlen(marker);
+    int written = snprintf(marker + used, sizeof(marker) - used, "/markers/started-%d", getpid());
+    if (written < 0 || (size_t)written >= sizeof(marker) - used) _exit(BROKEN);
+    int fd = open(marker, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 || close(fd) != 0) _exit(BROKEN);
+}
+
+static int connect_lane(const char *path) {
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    size_t length = strlen(path);
+    if (length >= sizeof(address.sun_path)) _exit(BROKEN);
+    memcpy(address.sun_path, path, length + 1);
+    address.sun_len = (unsigned char)(offsetof(struct sockaddr_un, sun_path) + length + 1);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&address, address.sun_len) != 0) _exit(BROKEN);
+    return fd;
+}
+
+static void hello(int fd, int id, const char *lane, const char *boot, const char *policy) {
+    char expected[128], request[128], reply[256];
+    int length = snprintf(expected, sizeof(expected),
+        "{\"id\":%d,\"method\":\"hello\",\"params\":{\"lane\":\"%s\"}}\n", id, lane);
+    if (length <= 0 || (size_t)length >= sizeof(expected)) _exit(BROKEN);
+    size_t used = 0;
+    while (used < (size_t)length) {
+        ssize_t got = read(fd, request + used, (size_t)length - used);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) _exit(80);
+        used += (size_t)got;
+    }
+    if (memcmp(request, expected, used) != 0) _exit(80);
+    length = snprintf(reply, sizeof(reply),
+        "{\"id\":%d,\"result\":{\"boot\":\"%s\",\"policy\":\"%s\"}}\n", id, boot, policy);
+    if (length <= 0 || (size_t)length >= sizeof(reply)) _exit(BROKEN);
+    used = 0;
+    while (used < (size_t)length) {
+        ssize_t sent = write(fd, reply + used, (size_t)length - used);
+        if (sent < 0 && errno == EINTR) continue;
+        if (sent <= 0) _exit(BROKEN);
+        used += (size_t)sent;
+    }
+}
+
+static int shim(const char *mode) {
+    char *recipe = read_bounded(RECIPE_FD);
+    close(RECIPE_FD);
+    char control[104], data[104], host[4096], policy[65], boot[65];
+    field(recipe, "\"control_path\":\"", control, sizeof(control));
+    field(recipe, "\"data_path\":\"", data, sizeof(data));
+    field(recipe, "\"host_policy\":{\"path\":\"", host, sizeof(host));
+    const char *guest = strstr(recipe, "\"guest_policy\":{");
+    if (guest == NULL) _exit(BROKEN);
+    field(guest, "\"sha256\":\"", policy, sizeof(policy));
+    if (strlen(policy) != 64) _exit(BROKEN);
+    free(recipe);
+    mark_started(control);
+    if (strcmp(mode, "exit-early") == 0) _exit(66);
+    if (strcmp(mode, "silent") == 0) { for (;;) pause(); }
+    int random = open("/dev/urandom", O_RDONLY);
+    unsigned char bytes[32];
+    size_t used = 0;
+    while (used < sizeof(bytes)) {
+        ssize_t got = read(random, bytes + used, sizeof(bytes) - used);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) _exit(BROKEN);
+        used += (size_t)got;
+    }
+    close(random);
+    for (size_t index = 0; index < sizeof(bytes); index++) {
+        snprintf(boot + index * 2, 3, "%02x", bytes[index]);
+    }
+    if (strcmp(mode, "shim-worker") == 0) {
+        pid_t worker = fork();
+        if (worker < 0) _exit(BROKEN);
+        if (worker == 0) { for (;;) pause(); }
+        dprintf(STDERR_FILENO, "worker=%d\n", worker);
+    }
+    if (strcmp(mode, "shim-unconfined") != 0) {
+        int fd = open(host, O_RDONLY);
+        if (fd < 0) _exit(67);
+        char *profile = read_bounded(fd);
+        close(fd);
+        char *error = NULL;
+        if (sandbox_init(profile, 0, &error) != 0) {
+            if (error != NULL) { dprintf(STDERR_FILENO, "%s\n", error); sandbox_free_error(error); }
+            _exit(67);
+        }
+        free(profile);
+    }
+    if (strcmp(mode, "shim-bad-policy") == 0) policy[0] = policy[0] == '0' ? '1' : '0';
+    int normal = connect_lane(control);
+    hello(normal, 1, "normal", boot, policy);
+    int withdrawal = connect_lane(control);
+    hello(withdrawal, 2, "withdrawal", boot, policy);
+    int association = connect_lane(data);
+    char buffer[256];
+    for (;;) {
+        ssize_t got = read(association, buffer, sizeof(buffer));
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) break;
+    }
+    for (;;) pause();
+}
+#endif
 int main(int argc, char **argv) {
+#if defined(PLASMOSOME_FIXTURE_LIBRARY)
+    if (plasmosome_fake() != 0) return BROKEN;
+#endif
     if (argc < 1 || argv[0] == NULL) {
         return USAGE;
     }
@@ -247,5 +417,11 @@ int main(int argc, char **argv) {
     if (strcmp(mode, "record") == 0) {
         return record(argc, argv);
     }
+#if defined(__APPLE__)
+    const char *modes[] = {"shim", "shim-unconfined", "shim-worker", "shim-bad-policy", "exit-early", "silent"};
+    for (size_t index = 0; index < sizeof(modes) / sizeof(modes[0]); index++) {
+        if (strcmp(mode, modes[index]) == 0) return shim(mode);
+    }
+#endif
     return USAGE;
 }

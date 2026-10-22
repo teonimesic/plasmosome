@@ -17,7 +17,18 @@ use target_cache::{Fixture, cache_root, declared_target};
 
 const FAKE_COMPILER_ARGUMENTS: [&str; 4] = ["-std=c11", "-Wall", "-Wextra", "-Werror"];
 
-const FAKE_MODES: [&str; 1] = ["record"];
+#[cfg(not(target_os = "macos"))]
+const FAKE_MODES: &[&str] = &["record"];
+#[cfg(target_os = "macos")]
+const FAKE_MODES: &[&str] = &[
+    "record",
+    "shim",
+    "shim-unconfined",
+    "shim-worker",
+    "shim-bad-policy",
+    "exit-early",
+    "silent",
+];
 
 static FAKE_DIRECTORY: Fixture = Fixture::new(build_runtime_fake);
 
@@ -40,7 +51,7 @@ fn build_runtime_fake() -> PathBuf {
 /// from the base name of `argv[0]`.
 ///
 /// The fake is compiled with the host C compiler once per source into
-/// `plasmosome-runtime-fake/<key>/runtime-fake` inside the Cargo target
+/// `plasmosome-runtime-fake/<key>/bin/runtime-fake` inside the Cargo target
 /// directory, as `supervision_fixture` is, and each mode is a hard link to
 /// it. Each test process runs it once with no mode before the first path is
 /// returned, so macOS spends the first-exec cost of a freshly linked binary
@@ -58,22 +69,25 @@ pub fn runtime_fake(mode: &str) -> PathBuf {
 fn compile_runtime_fake(root: &Path) -> PathBuf {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/runtime_fake.c");
     let key = root.join(fake_key(&source));
+    let bin = key.join("bin");
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&key)
+        .create(&bin)
         .unwrap_or_else(|error| {
             panic!(
                 "the runtime fake cache directory {} is created, readable only by its owner: {error}",
                 key.display()
             )
         });
-    let fake = key.join("runtime-fake");
+    #[cfg(target_os = "macos")]
+    compile_library(&key);
+    let fake = bin.join("runtime-fake");
     if !fake.exists() {
         publish_fake(&source, &fake);
     }
     for mode in FAKE_MODES {
-        if let Err(error) = fs::hard_link(&fake, key.join(mode))
+        if let Err(error) = fs::hard_link(&fake, bin.join(mode))
             && error.kind() != ErrorKind::AlreadyExists
         {
             panic!("the runtime fake is linked as mode {mode}: {error}");
@@ -91,7 +105,7 @@ fn compile_runtime_fake(root: &Path) -> PathBuf {
         "the compiled runtime fake {} refuses a name that is no mode; if it is stale, run `cargo clean`",
         fake.display()
     );
-    key
+    bin
 }
 
 fn fake_key(source: &Path) -> String {
@@ -103,6 +117,8 @@ fn fake_key(source: &Path) -> String {
     });
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
+    #[cfg(target_os = "macos")]
+    include_bytes!("runtime_fake_library.c").hash(&mut hasher);
     FAKE_COMPILER_ARGUMENTS.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -114,12 +130,17 @@ fn publish_fake(source: &Path, fake: &Path) {
         std::process::id(),
         CALLS.fetch_add(1, Ordering::Relaxed)
     ));
-    let compiled = Command::new("cc")
-        .args(FAKE_COMPILER_ARGUMENTS)
-        .arg(source)
-        .arg("-o")
-        .arg(&unique)
-        .status();
+    let mut compiler = Command::new("cc");
+    compiler.args(FAKE_COMPILER_ARGUMENTS);
+    #[cfg(target_os = "macos")]
+    compiler.arg("-DPLASMOSOME_FIXTURE_LIBRARY").arg(
+        fake.parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("lib/libplasmosome-fake.dylib"),
+    );
+    let compiled = compiler.arg(source).arg("-o").arg(&unique).status();
     let published = match &compiled {
         Ok(status) if status.success() => fs::hard_link(&unique, fake),
         _ => Ok(()),
@@ -145,5 +166,44 @@ fn publish_fake(source: &Path, fake: &Path) {
             "the compiled runtime fake is published at {}: {error}",
             fake.display()
         );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn compile_library(key: &Path) {
+    let lib = key.join("lib");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&lib)
+        .or_else(|error| {
+            if error.kind() == ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+        .unwrap();
+    let library = lib.join("libplasmosome-fake.dylib");
+    if library.exists() {
+        return;
+    }
+    let temporary = tempfile::NamedTempFile::new_in(&lib).unwrap();
+    let source =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/runtime_fake_library.c");
+    let status = Command::new("cc")
+        .args(FAKE_COMPILER_ARGUMENTS)
+        .args([
+            "-dynamiclib",
+            "-install_name",
+            "@executable_path/../lib/libplasmosome-fake.dylib",
+        ])
+        .arg(source)
+        .arg("-o")
+        .arg(temporary.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the fixture library compiles: {status}");
+    if let Err(error) = fs::hard_link(temporary.path(), &library) {
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists, "{error}");
     }
 }

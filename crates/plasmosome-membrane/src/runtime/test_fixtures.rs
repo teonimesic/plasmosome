@@ -7,6 +7,16 @@ pub(crate) mod fake {
 
 pub(crate) mod newc;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod host_policy {
+    include!("../../tests/support/host_policy.rs");
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) mod bundle;
+#[cfg(target_os = "macos")]
+pub(crate) use bundle::FixtureBundle;
+
 pub(crate) fn artifact(path: &str, digit: char) -> Value {
     json!({"path": path, "sha256": digit.to_string().repeat(64)})
 }
