@@ -457,7 +457,7 @@ mod tests {
 
     use crate::{
         BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,
-        RecipeError, SessionFileRecipe, UdsRecipe,
+        RecipeError, SessionFileRecipe, UdsRecipe, canonical_ip_literal,
     };
 
     const SEED: &str = "/etc/plasmosome/seed";
@@ -1132,6 +1132,41 @@ mod tests {
             ("0:0:0:0:0:ffff:7f00:1", "127.0.0.1"),
         ] {
             assert_refused(&proxy(destination, 443), embedded_ipv4(destination, ipv4));
+        }
+    }
+
+    #[test]
+    fn canonical_ip_literal_accepts_only_the_ip_literals_a_destination_accepts() {
+        for text in [
+            "::",
+            "::1",
+            "10.0.0.1",
+            "2001:db8::1",
+            "::ffff:0:c000:200",
+            "64:ff9b::c000:200",
+        ] {
+            assert_eq!(canonical_ip_literal(text), text.parse().ok(), "{text}");
+            assert_accepted(&proxy(text, 443));
+        }
+        for text in [
+            "::2",
+            "::0.0.0.2",
+            "::ffff:0:0",
+            "::ffff:192.0.2.1",
+            "::192.0.2.1",
+            "::ffff:0:192.0.2.0",
+            "2001:DB8::1",
+            "2001:db8:0::1",
+            "010.0.0.1",
+            "[::1]",
+            " ::1",
+            "api.github.com",
+            "",
+        ] {
+            assert_eq!(canonical_ip_literal(text), None, "{text}");
+            if text.parse::<IpAddr>().is_ok() {
+                assert!(proxy(text, 443).check().is_err(), "{text}");
+            }
         }
     }
 

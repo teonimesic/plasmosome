@@ -924,12 +924,13 @@ fn binding_keys(text: &str, bindings: &toml::Table) -> Result<Vec<String>, Manif
     if bindings.len() < 2 {
         return Ok(bindings.keys().cloned().collect());
     }
-    let in_file_order: ProvidesInFileOrder = toml::from_str(text).map_err(ManifestError::Parse)?;
-    Ok(in_file_order.provides.0)
+    let in_parse_order: ProvidesInParseOrder =
+        toml::from_str(text).map_err(ManifestError::Parse)?;
+    Ok(in_parse_order.provides.0)
 }
 
 #[derive(serde::Deserialize)]
-struct ProvidesInFileOrder {
+struct ProvidesInParseOrder {
     provides: BindingKeys,
 }
 
@@ -4681,12 +4682,19 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
         let portless = "[network]\nhosts = [\"a.example\"]\n";
         let ported = "[network]\nhosts = [\"a.example\"]\nports = [443]\n";
         let mocked = |hosts: &str| format!("[mock]\nhosts = [{hosts}]");
-        for (tail, field, hosts) in [
-            (mocked("\"b.example\""), "mock", vec!["b.example"]),
+        for (tail, field, named, unnamed) in [
+            (mocked("\"b.example\""), "mock", vec!["b.example"], vec![]),
             (
                 mocked("\"b.example\", \"c.example\", \"b.example\""),
                 "mock",
                 vec!["b.example", "c.example"],
+                vec![],
+            ),
+            (
+                mocked("\"b.example\", \"c.example\", \"d.example\""),
+                "mock",
+                vec!["b.example", "c.example", "d.example"],
+                vec![],
             ),
             (
                 format!(
@@ -4695,26 +4703,40 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 ),
                 "mock",
                 vec!["b.example", "c.example"],
+                vec!["a.example"],
+            ),
+            (
+                format!(
+                    "{portless}{}",
+                    mocked("\"b.example\", \"a.example\", \"c.example\", \"d.example\"")
+                ),
+                "mock",
+                vec!["b.example", "c.example", "d.example"],
+                vec!["a.example"],
             ),
             (
                 format!("[network]\nhosts = []\n{}", mocked("\"b.example\"")),
                 "mock",
                 vec!["b.example"],
+                vec![],
             ),
             (
                 format!("{ported}{}", mocked("\"a.example\", \"B.example\"")),
                 "mock.hosts[1]",
                 vec!["B.example"],
+                vec!["a.example"],
             ),
             (
                 format!("{ported}{}", mocked("\"192.0.2.1\"")),
                 "mock.hosts[0]",
                 vec!["192.0.2.1"],
+                vec!["a.example"],
             ),
             (
                 format!("{ported}{}", mocked("\"b.example\", \"c.example\"")),
                 "network.hosts",
                 vec!["b.example"],
+                vec!["a.example"],
             ),
             (
                 format!(
@@ -4723,15 +4745,22 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 ),
                 "network.hosts",
                 vec!["b.example", "c.example"],
+                vec![],
             ),
         ] {
             let declaration = declared(&tail);
             assert_eq!(field_refusal(&declaration).1, field, "{tail}");
             let detail = refusal_detail(&declaration);
-            for host in hosts {
+            for host in named {
                 assert!(
                     detail.contains(&toml_string(host)),
                     "{tail}\n{detail} does not name {host}"
+                );
+            }
+            for host in unnamed {
+                assert!(
+                    !detail.contains(&toml_string(host)),
+                    "{tail}\n{detail} names {host}, which [network] declares"
                 );
             }
         }
