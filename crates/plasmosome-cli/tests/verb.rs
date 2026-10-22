@@ -481,7 +481,12 @@ fn a_state_change_that_loses_its_answer_exits_3() {
             let fake = FakeDaemon::start(&socket, vec![answer]);
             let mut line = vec!["cell", command, "--cell", "c", "--socket", text(&socket)];
             line.extend(extra);
-            let ran = run_with(&line, Vars::default(), &SystemClock, closed_stdout);
+            let clock: &'static dyn Clock = if cause == "deadline" {
+                scripted(&[0])
+            } else {
+                &SystemClock
+            };
+            let ran = run_with(&line, Vars::default(), clock, closed_stdout);
             let expected = match (changes_state, cause) {
                 (_, "kernel") | (true, _) => Exit::OutcomeUnknown,
                 (false, "reply_too_large") => Exit::Refused,
@@ -539,6 +544,8 @@ fn terminal_controls() -> Vec<char> {
         (0x00, 0x1f),
         (0x7f, 0x7f),
         (0x80, 0x9f),
+        (0x061c, 0x061c),
+        (0x200e, 0x200f),
         (0x202a, 0x202e),
         (0x2066, 0x2069),
     ]
@@ -553,8 +560,8 @@ fn a_sent_line_escapes_every_control_and_is_one_line() {
     let controls = terminal_controls();
     assert_eq!(
         controls.len(),
-        74,
-        "spec 025 section 3 names 74 code points"
+        77,
+        "spec 025 section 3 names 77 code points"
     );
     let [escape, newline, backslash] =
         [0x1b, 0x0a, 0x5c].map(|code| char::from_u32(code).expect("a character"));
@@ -706,10 +713,12 @@ fn a_line_of_exactly_the_bound_is_sent() {
         "{\"id\":1,\"method\":\"cell.new\",\"params\":{\"genome\":\"\"}}",
         BOUND,
     );
-    outcome(
-        &run(&["germinate", &genome, "--socket", text(&socket)]),
-        Exit::Done,
-    );
+    let variable = Vars {
+        home: None,
+        kernel: Some("work".into()),
+    };
+    let line = ["germinate", &genome, "--socket", text(&socket)];
+    outcome(&run_with(&line, variable, &SystemClock, false), Exit::Done);
     assert_eq!(the_one_request(&fake).len(), BOUND + 1);
     drop(fake);
     let listener = listening(&socket);
