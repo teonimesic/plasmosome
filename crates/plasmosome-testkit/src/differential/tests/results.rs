@@ -625,6 +625,15 @@ fn a_write_that_fails_partway_leaves_no_file_and_a_retry_writes_it() {
     let refusal = format!("{:?}", refusal.expect_err("the write fails"));
     assert!(refusal.starts_with("Io(") && refusal.contains("the disk is full"));
     assert_eq!(listed(dir.path()), 0);
+    let unsynced = |file: &mut File, text: &[u8]| {
+        file.write_all(text)?;
+        *file = File::options().write(true).open("/dev/null")?;
+        Ok(())
+    };
+    let refusal = write_with(read(&manifest, &runs), &record(), dir.path(), unsynced);
+    let refusal = refusal.expect_err("the sync fails");
+    assert!(matches!(refusal, ResultsRefusal::Io(_)));
+    assert_eq!(listed(dir.path()), 0);
     let path = write_results(read(&manifest, &runs), &record(), dir.path()).expect("a retry");
     let whole = fs::read_to_string(path).expect("the file reads back");
     assert_eq!(whole, text(&manifest, &runs));

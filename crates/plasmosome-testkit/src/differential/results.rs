@@ -76,8 +76,9 @@ pub enum Outcome<'a> {
 }
 
 /// Why a results file was not written. Every refusal but `Io` comes before any file is created.
-/// After `Io`, no file is left at the name, so a retry with the same name can write it. The
-/// hidden temporary file is removed too, unless removing it fails, and then it is left behind.
+/// After `Io`, this write has left no file at the name, so unless the name already existed, a
+/// retry with the same name can write it. The hidden temporary file is removed too, unless
+/// removing it fails, and then it is left behind.
 #[derive(Debug)]
 pub enum ResultsRefusal {
     BadDate { date: String },
