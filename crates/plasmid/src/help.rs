@@ -16,9 +16,9 @@ prints the sections it still needs; see plasmid new --help. A command that is no
 with not_served, reads no environment variable and reaches no socket. plasmid <command> --help
 describes one command.
 
-Global flags, before or after the command, never after --:
+Global flags, anywhere among the command words, never after --:
   --kernel NAME      the kernel instance a command reaches
-  --socket PATH      the control socket a command reaches
+  --socket PATH      the control socket a command reaches, absolute with no empty, . or .. component
   --deadline-ms N    the time a command may take, from 1 to 3600000 milliseconds
   --json             the JSON form, the default
   --human            a form for a person, which nothing may parse
@@ -26,14 +26,15 @@ Global flags, before or after the command, never after --:
   --version          the version, as the sole argument
 
 --kernel, --socket and --deadline-ms are for commands that reach a socket, and none of those is
-served yet. A command that is not served reads only --json and --human of these flags, and
-plasmid new takes none of them but -h and --help.
+served yet. Each takes the next argument as its value, even one that starts with -, but never --.
+A command that is not served reads only --json and --human of these flags, and plasmid new takes
+none of them but -h and --help.
 
 With -h or --help before --, only the command words are judged. No flag is a fault then, known or
 unknown, with or without a value, given once or twice, and a usage error names the first bad word.
 Without them, --version anywhere before -- but as the sole argument is a usage error. Otherwise a
-usage error names the first fault on the line, flag or word, reading from the left, and a flag given
-twice is one.
+usage error names the first fault on the line, flag, value or word, reading from the left, and a
+flag given twice is one.
 
 Environment:
   PLASMOSOME_KERNEL  works as --kernel, for commands that reach a socket
