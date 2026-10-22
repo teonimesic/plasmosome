@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::io::Read;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The most bytes one saved input may hold: libFuzzer's `-max_len` in the weekly job.
 pub const MAX_INPUT_BYTES: usize = 4096;
@@ -16,46 +15,66 @@ pub fn replay(target: &str, check: fn(&[u8])) {
     replay_dir(&corpus.join(target), check);
 }
 
-/// Passes every saved input in `dir` to `check`, in name order, and panics once at the end
-/// naming every input whose check panicked.
+/// Passes every saved input in `dir`, as [`read_corpus`] reads them, to `check`, in name
+/// order, and panics once at the end naming every input whose check panicked.
 ///
-/// It reads each regular file whose name does not start with `.`. It panics, naming the
-/// directory, when `dir` cannot be listed, holds no input, or holds more than
-/// [`MAX_CORPUS_BYTES`] in all, and naming the file when one input holds more than
-/// [`MAX_INPUT_BYTES`].
+/// Each check runs on a thread named `input <name>`, so a check that overflows its stack, which
+/// ends the process, still names its input.
 pub fn replay_dir(dir: &Path, check: fn(&[u8])) {
     let inputs = read_corpus(dir);
+    let count = inputs.len();
     let mut panicked = Vec::new();
-    for (name, bytes) in &inputs {
-        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| check(bytes))) {
+    for (name, bytes) in inputs {
+        let run = std::thread::Builder::new()
+            .name(format!("input {name}"))
+            .spawn(move || check(&bytes))
+            .unwrap_or_else(|error| panic!("{name} gets no thread: {error}"));
+        if let Err(payload) = run.join() {
             panicked.push(format!("{name}: {}", panic_message(payload.as_ref())));
         }
     }
     assert!(
         panicked.is_empty(),
-        "{} of the {} inputs in {} panicked:\n{}",
+        "{} of the {count} inputs in {} panicked:\n{}",
         panicked.len(),
-        inputs.len(),
         dir.display(),
         panicked.join("\n")
     );
 }
 
-fn read_corpus(dir: &Path) -> Vec<(String, Vec<u8>)> {
+/// Lists `dir` once and reads every entry whose name does not start with `.`, in name order,
+/// as `(name, bytes)`.
+///
+/// Before it opens any input, it panics naming every such entry that is not a regular file, a
+/// directory or a symbolic link among them. It panics naming `dir` when `dir` cannot be listed,
+/// holds no input, or holds more than [`MAX_CORPUS_BYTES`] in all, and as [`read_input`] does.
+pub fn read_corpus(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let listing = std::fs::read_dir(dir)
         .unwrap_or_else(|error| panic!("the corpus {} cannot be listed: {error}", dir.display()));
-    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut paths = Vec::new();
+    let mut refused = Vec::new();
     for entry in listing {
         let entry = entry.unwrap_or_else(|error| {
             panic!("the corpus {} cannot be listed: {error}", dir.display())
         });
+        if entry.file_name().as_encoded_bytes().starts_with(b".") {
+            continue;
+        }
         let kind = entry
             .file_type()
             .unwrap_or_else(|error| panic!("{} cannot be read: {error}", entry.path().display()));
-        if kind.is_file() && !entry.file_name().as_encoded_bytes().starts_with(b".") {
+        if kind.is_file() {
             paths.push(entry.path());
+        } else {
+            refused.push(entry.path().display().to_string());
         }
     }
+    assert!(
+        refused.is_empty(),
+        "the corpus {} holds entries that are not regular files, which the replay would not read: {}",
+        dir.display(),
+        refused.join(", ")
+    );
     paths.sort();
     assert!(
         !paths.is_empty(),
@@ -65,7 +84,9 @@ fn read_corpus(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut total = 0;
     let mut inputs = Vec::new();
     for path in paths {
-        let bytes = read_input(&path);
+        let file = std::fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("{} cannot be read: {error}", path.display()));
+        let bytes = read_input(&path, file);
         total += bytes.len();
         assert!(
             total <= MAX_CORPUS_BYTES,
@@ -81,13 +102,13 @@ fn read_corpus(dir: &Path) -> Vec<(String, Vec<u8>)> {
     inputs
 }
 
-fn read_input(path: &Path) -> Vec<u8> {
+/// Reads at most [`MAX_INPUT_BYTES`] plus one byte from `source`, and panics naming `path` when
+/// `source` holds more than [`MAX_INPUT_BYTES`] or cannot be read.
+pub fn read_input(path: &Path, source: impl Read) -> Vec<u8> {
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| {
-            file.take(MAX_INPUT_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-        })
+    source
+        .take(MAX_INPUT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .unwrap_or_else(|error| panic!("{} cannot be read: {error}", path.display()));
     assert!(
         bytes.len() <= MAX_INPUT_BYTES,
@@ -97,7 +118,8 @@ fn read_input(path: &Path) -> Vec<u8> {
     bytes
 }
 
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+/// The text a panic carried, or a fixed phrase when it carried none.
+pub fn panic_message(payload: &(dyn Any + Send)) -> String {
     payload
         .downcast_ref::<String>()
         .cloned()
