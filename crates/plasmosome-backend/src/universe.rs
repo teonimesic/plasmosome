@@ -1373,7 +1373,7 @@ mod tests {
 
     const OWNER_FIELDS: [&str; 2] = ["owner.cell", "owner.plugin"];
 
-    fn generated_fields(class: UniverseClass) -> &'static [&'static str] {
+    fn capability_fields(class: UniverseClass) -> &'static [&'static str] {
         match class {
             UniverseClass::SessionFile => &[
                 "SessionFile.path",
@@ -1404,8 +1404,8 @@ mod tests {
         }
     }
 
-    fn generated_names(class: UniverseClass) -> Vec<&'static str> {
-        generated_fields(class)
+    fn holding_fields(class: UniverseClass) -> Vec<&'static str> {
+        capability_fields(class)
             .iter()
             .chain(&OWNER_FIELDS)
             .copied()
@@ -1462,8 +1462,14 @@ mod tests {
                 name: text(0, ["egressd", "ingress"]),
                 launch: BrokerLaunch {
                     command: vec![
-                        "/usr/libexec/plasmosome-broker".to_string(),
-                        text(1, ["--audit", "--trace"]),
+                        text(
+                            1,
+                            [
+                                "/usr/libexec/plasmosome-broker",
+                                "/usr/libexec/plasmosome-tracer",
+                            ],
+                        ),
+                        "--audit".to_string(),
                     ],
                     control_socket: text(
                         2,
@@ -1496,7 +1502,7 @@ mod tests {
     fn holding(class: UniverseClass, mask: u32) -> OsObject {
         OsObject {
             id: GrantId::new(),
-            owner: generated_owner(mask >> generated_fields(class).len()),
+            owner: generated_owner(mask >> capability_fields(class).len()),
             capability: generated(class, mask),
         }
     }
@@ -1514,21 +1520,22 @@ mod tests {
         let (mut session, mut socket, mut proxy, mut broker, mut mount) =
             (false, false, false, false, false);
         for class in GENERATED_CLASSES {
-            match class {
-                UniverseClass::SessionFile => session = true,
-                UniverseClass::UdsPath => socket = true,
-                UniverseClass::ProxyMap => proxy = true,
-                UniverseClass::BrokerPid => broker = true,
-                UniverseClass::Mount => mount = true,
+            let first = generated(class, 0);
+            match &first {
+                Capability::SessionFile { .. } => session = true,
+                Capability::UdsSocket { .. } => socket = true,
+                Capability::ProxyMap { .. } => proxy = true,
+                Capability::Broker { .. } => broker = true,
+                Capability::Mount { .. } => mount = true,
             }
-            let (selection, recipe) = field_names(&generated(class, 0));
+            let (selection, recipe) = field_names(&first);
             let mut named: Vec<&str> = selection.iter().chain(recipe).copied().collect();
             named.sort_unstable();
-            let mut listed = generated_fields(class).to_vec();
+            let mut listed = capability_fields(class).to_vec();
             listed.sort_unstable();
             assert_eq!(listed, named, "{class:?}");
 
-            let names = generated_names(class);
+            let names = holding_fields(class);
             let mut sorted_names = names.clone();
             sorted_names.sort_unstable();
             for mask in 0..(1u32 << names.len()) {
@@ -1554,14 +1561,15 @@ mod tests {
         }
         assert!(
             session && socket && proxy && broker && mount,
-            "the generated holdings leave out a universe class: {GENERATED_CLASSES:?}"
+            "the generated holdings leave out a capability variant or universe class: \
+             {GENERATED_CLASSES:?}"
         );
     }
 
     #[test]
     fn canonical_equivalence_tells_two_holdings_apart_when_any_one_field_differs() {
         for class in GENERATED_CLASSES {
-            let names = generated_names(class);
+            let names = holding_fields(class);
             for mask in 0..(1u32 << names.len()) {
                 let x = holding(class, mask);
                 let x2 = OsObject {
@@ -1583,8 +1591,20 @@ mod tests {
                     pair.canonically_equivalent(&reissued),
                     "new grant ids alone changed the canonical account of {x:?}"
                 );
+                let leaves = holding_leaves(&x);
+                let one = state_of(std::slice::from_ref(&x));
                 for (bit, field) in names.iter().enumerate() {
                     let y = holding(class, mask ^ (1 << bit));
+                    assert_ne!(
+                        leaves,
+                        holding_leaves(&y),
+                        "the generator's bit {bit} ({field}) changes nothing at {x:?}"
+                    );
+                    let other = state_of(std::slice::from_ref(&y));
+                    assert!(
+                        !one.canonically_equivalent(&other) && !other.canonically_equivalent(&one),
+                        "one holding on each side hid a changed {field} of {class:?} at {x:?}"
+                    );
                     for mixed in [
                         state_of(&[
                             OsObject {
