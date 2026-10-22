@@ -4,6 +4,7 @@ use plasmosome_testkit::conformance;
 fn fake_backend() -> FakeBackend {
     let mut backend = FakeBackend::new();
     backend.stall_graceful_drains_for_owner(conformance::stalled_owner());
+    backend.fail_after_effect_for_owner(conformance::doomed_owner(), "the readiness probe failed");
     backend
 }
 
@@ -70,4 +71,9 @@ fn fake_backend_returns_the_original_entry_to_a_retry_and_promotes_nothing() {
 #[test]
 fn fake_backends_fresh_from_the_factory_share_no_authority() {
     conformance::fresh_backends_share_no_authority(fake_backend);
+}
+
+#[test]
+fn fake_backend_keeps_a_failed_grant_incomplete_until_its_exact_withdrawal() {
+    conformance::failed_grants_stay_incomplete_until_exact_withdrawal(fake_backend);
 }

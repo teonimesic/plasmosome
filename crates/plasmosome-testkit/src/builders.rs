@@ -80,6 +80,7 @@ impl ManifestBuilder {
             }),
             requires: Vec::new(),
             provides_tools: self.tools,
+            provides: Vec::new(),
             secrets: Vec::new(),
             commands: None,
             workspace: None,
