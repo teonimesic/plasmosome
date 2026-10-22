@@ -16,8 +16,7 @@ pub mod readiness;
 /// sandbox, the audit of the helper's Mach-O load names, the check that the initramfs binds the
 /// guest policy, the exec of the VMM helper that recipe names, the supervisor's control and data
 /// listeners, the transcript of the helper's diagnostics, and the helper's own judges and libkrun
-/// call plan. The paths and the recipe are
-/// `plasmosome-core`'s, re-exported here.
+/// call plan. The paths and the recipe are `plasmosome-core`'s, re-exported here.
 pub mod runtime;
 mod spawn_lock;
 pub mod vmm;

@@ -386,7 +386,8 @@ pub struct ImageCount {
 /// dyld writes an `@executable_path/../` load; any other `..` matches nothing. Under the helper's
 /// directory, `.`, a doubled `/` and a trailing `/` are folded away too. Each such name names the
 /// same file, or with a trailing `/` no file at all; anywhere else they match nothing. Refuses
-/// `Inventory` naming the first other image.
+/// `Inventory` naming the first other image. It also refuses when no image is the helper: dyld
+/// always lists the helper's own image, so a list without it is incomplete.
 #[cfg(target_os = "macos")]
 pub fn judge_loaded_images(
     images: &[String],
@@ -408,8 +409,10 @@ fn judge_images_with(
         system: 0,
         listed: 0,
     };
+    let mut helper_seen = false;
     for name in images {
         let resolved = resolved_name(name, helper_dir);
+        helper_seen |= resolved.as_deref() == Some(helper.as_str());
         let listed = std::iter::once(helper)
             .chain(recipe.libraries().iter().map(|library| library.path()))
             .any(|path| resolved.as_deref() == Some(path.as_str()));
@@ -429,6 +432,16 @@ fn judge_images_with(
         }
         return Err(refused(
             "is not the helper, a listed library or a sealed system library".to_owned(),
+        ));
+    }
+    if !helper_seen {
+        return Err(refuse(
+            HelperExit::Inventory,
+            format!(
+                "the helper {:?} is not among the {} loaded images",
+                helper.as_str(),
+                images.len()
+            ),
         ));
     }
     Ok(count)
@@ -977,6 +990,9 @@ mod tests {
         let detail = "the host policy is longer than 65536 bytes";
         assert_eq!(refusal, Err(refuse(HostPolicy, detail)));
         assert_eq!(exit_of(read_host_policy(Broken)), HostPolicy);
+        let unterminated = read_host_policy(&b"(version 1)"[..]);
+        let detail = "the host policy must hold exactly one NUL, as its last byte";
+        assert_eq!(unterminated, Err(refuse(HostPolicy, detail)));
     }
 
     #[test]
@@ -1055,12 +1071,36 @@ mod tests {
             "/opt/cell/binx/../lib/libkrun.1.dylib",
             "/opt/cell/binkrun-helper",
             "/opt/cell/bin../lib/libkrun.1.dylib",
+            "/opt/cell/bin/../../../usr/lib/libSystem.B.dylib",
+            "/opt/homebrew/opt/llvm/lib/libkrun.1.dylib",
             "libkrunfw.5.dylib",
             "/usr/lib/libSyst\u{e9}m.dylib",
         ] {
             let refusal = judge_images_with(&names(&[HELPER, name]), &fixture(), sealed);
             let detail =
                 format!("{name:?} is not the helper, a listed library or a sealed system library");
+            assert_eq!(refusal, Err(refuse(Inventory, detail)));
+        }
+    }
+
+    #[test]
+    fn the_first_bad_image_is_named() {
+        let images = names(&[HELPER, "/opt/x/a.dylib", "/opt/x/b.dylib"]);
+        let refusal = judge_images_with(&images, &fixture(), sealed);
+        let detail =
+            "\"/opt/x/a.dylib\" is not the helper, a listed library or a sealed system library";
+        assert_eq!(refusal, Err(refuse(Inventory, detail)));
+    }
+
+    #[test]
+    fn an_inventory_without_the_helper_refuses() {
+        let system_only = names(&["/usr/lib/libSystem.B.dylib"]);
+        for images in [Vec::new(), system_only, names(&[LIBRARY])] {
+            let refusal = judge_images_with(&images, &fixture(), sealed);
+            let detail = format!(
+                "the helper {HELPER:?} is not among the {} loaded images",
+                images.len()
+            );
             assert_eq!(refusal, Err(refuse(Inventory, detail)));
         }
     }
