@@ -23,14 +23,14 @@ one.
 | `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's cell ID allocation, `supervisor.lock` and `membraned.log`, its `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
-| `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. Callers gather the facts and carry out the outcome |
+| `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. A lock the controller cannot test is its own fact, `Untestable`, and `decide` sets that cell aside as `lock_untestable` whatever its marker and journal. `LockFact` serializes as spec 001's `lock` values, and each `SetAsideReason` as spec 001's name for that reason. It has six of spec 001's eight reasons: `retire_unlogged` and `retire_failed` come with plasmosome-66wy. Callers gather the facts and carry out the outcome |
 | `supervisor_start` | Spec 023 §4's start: `start_supervisor` runs one cell's `membraned` detached, with an exact argv, an empty environment and only descriptors 0 to 4, and then writes it the config record. Nothing calls it yet |
 | `closure` | What removing a plugin takes, with no IO. `AttachmentGraph` holds one cell's attached plugins, the providers each one directly requires, and which ones were asked for by name; a provider is attached before its requirers. `stranded_by` lists the plugins that directly require a given one, which `plasmid.remove` must refuse to strand. `removal_closure` gives that plugin, every plugin that transitively requires it, and every unnamed provider required only by plugins it takes, followed down the chain. Spec 011's `plasmid.remove` and spec 028's expiry are to share it, so the two cannot take different sets; nothing calls it yet |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary. Its config may carry spec 023's `cell_runtime`, read as `CellRuntime` |
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
-| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4 |
+| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, and the crate-private `sources::Probes` refuses one inside a Mount source under rule 5 |
 | `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
@@ -307,7 +307,17 @@ calls them yet.
 - `CellDir::probe_supervisor_lock` tries the lock on a fresh read-only descriptor. `Held` means
   another open of the file holds it, even one in this process. `Free` keeps the lock it took
   until the returned `SupervisorLock` is dropped. `Missing` means no entry is there, and nothing
-  is created. A symlink is refused, and so is anything but a regular file.
+  is created. A symlink is refused, and so is anything but a regular file. An `flock` that fails
+  for a reason other than another holder is `Io`.
+- `CellDir::test_supervisor_lock` tests the lock as spec 023 §8's check does, and is the one way
+  the check's callers test it. It probes, and creates and locks a missing lock as
+  `create_supervisor_lock` does. It returns `LockTest`: `Held`, `Free` holding the lock, or
+  `Untestable` with the error. Every error of the probe or the create is `Untestable`, whatever
+  its kind, and holds nothing. So a symlink, a directory or other entry that is not a regular
+  file, a lock it cannot open, an `flock` error other than another holder, and a missing lock it
+  cannot create and lock are all untestable, as is a create whose directory sync fails after it
+  named the lock. `LockTest::fact` gives the `LockFact` that `decide` takes. Spec 023 §4 step 6's
+  wait keeps the probe, since it must not create a missing lock.
 - Nothing here calls `LOCK_UN`. An `flock` lock belongs to the open file, so it is released only
   when every descriptor of that open file is closed: the copy handed to `membraned` keeps it
   held after the controller drops its own. A forked child that has not called `exec` keeps it
@@ -322,8 +332,8 @@ calls them yet.
 `InstanceRoot::retire` still does not check the supervisor lock its caller must hold. A caller
 holds it when it has a `SupervisorLock` whose `identity()` equals the cell's
 `supervisor_lock_identity()`: one from `create_supervisor_lock` that it has not handed over, or
-one from a `Free` probe. `retire` does not take one yet. Nothing calls `retire`, and its first
-caller is where the shape of that call will be known.
+one from a `Free` probe or a `Free` `LockTest`. `retire` does not take one yet. Nothing calls
+`retire`, and its first caller is where the shape of that call will be known.
 
 ## Starting membraned
 
@@ -641,6 +651,16 @@ its start.
 `PrivateDir` and `list_trusted_dir` run on this walk, each with its own rule for the last
 directory.
 
+`Walk::identities` is spec 022 §3 rule 1's walk alone, and it is crate-private. It opens every
+component, the last as a directory, without following a symlink, and judges no directory. It
+returns the identity of the start and of every directory down to the last. A symlink, a missing
+name, a component that is not a directory and a directory above the last that the effective UID
+cannot search each refuse. The last directory is opened for search only. On macOS that is
+`O_SEARCH`, so a last directory the effective UID cannot search refuses too. On Linux it is
+`O_PATH`, which opens that directory anyway and returns its identity. It shows which directories
+a path passes, not whether they can be trusted, so the public walk's promise that every directory
+passed meets the ancestor rule still holds.
+
 ## Trusted files
 
 `operator::trusted::TrustedFile::open` reads a file under spec 022 §3 rules 1 to 4: the operator
@@ -659,11 +679,13 @@ component or the value found.
 | `links` | the file does not have exactly one link: a second link, or none once it is unlinked |
 | `mode` | group or other can write it, or a macOS ACL allow entry grants write |
 | `size` | it holds more than 1,048,576 bytes, found by reading at most one byte more |
+| `inside_mount_source` | its directory is, or lies inside, a Mount source ([Mount sources](#mount-sources)) |
 
 The parent, type and owner checks also judge a file the controller cannot open. On macOS the
 path is `/private/etc/...` or `/private/var/...`: `/etc` and `/var` are symlinks, so a path
-through them is `path`. Rule 5, no trusted file inside a Mount source, and rule 6, the content,
-are not checked here.
+through them is `path`. Rule 5, no trusted file inside a Mount source, is a separate check on an
+open `TrustedFile`, described under [Mount sources](#mount-sources). Rule 6, the content, is not
+checked here.
 
 Most unit tests build their files under a canonical temp directory and walk from it, so they run
 on Linux below a sticky `/tmp`. One test opens a file through the walk from `/`, so its test root
@@ -672,6 +694,59 @@ that is the per-user temp directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, w
 says. On Linux it tries `XDG_RUNTIME_DIR` when it is set, then the test binary's directory. If no
 base passes, the test fails and names each base with the ancestor that refused it. The test that
 `/etc/hosts` is `parent` skips as root, because root owns `/etc`.
+
+## Mount sources
+
+A cell and the controller run as one host UID, so a workload with a read-write Mount can write
+anything inside its source. Spec 022 §3 rule 5 keeps the files that decide what cells get out of
+every Mount source. `operator::sources` checks it, and nothing calls it yet.
+
+`Probes::probe` takes every Mount source a cell holds or has pending, and every one the operator
+file declares, each with its holder. It opens each path once with `Walk::identities`, so no
+symlink is followed and no directory is judged. `Probes::check` then refuses an open
+`TrustedFile` with `inside_mount_source` when a source's identity is on a chain of the file's
+directory: the directory is that source, or lies below it. Only device and inode are compared,
+never path text. So a sibling named `<source>-x` passes, and a source spelled in another case on
+a case-insensitive volume, or spelled through `/System/Volumes/Data`, holds what it names.
+
+- A held or pending source that no longer opens, renamed away or now a symlink, refuses only the
+  requests that resolve for its own cell. No other cell is blocked. The caller must label such a
+  source with its cell and pass the request's cell. A request for an existing cell checked as if
+  it made a new cell, or a held source labelled as declared, checks less, and nothing signals it.
+- A declared source that does not open is skipped. Spec 022 says it cannot be mounted either.
+  That holds only once §6's source guard (native task plasmosome-98hv) refuses it at resolution
+  and spec 017's Mount adapter walks it again at apply. Neither exists yet.
+- On macOS a firmlink such as `/Users`, `/private` or `/usr/local` opens a directory of the data
+  volume, so that directory has a second parent that no walk from `/` sees. Rule 5 counts both
+  chains. It opens `/System/Volumes/Data` followed by the directory's path, one component more at
+  a time, until a spelling opens a directory on the file's chain: the firmlink's target. Every
+  directory on the way to it counts too. So `/System`, `/System/Volumes`, `/System/Volumes/Data`
+  and `/System/Volumes/Data/usr` each hold a file under `/usr/local`, while
+  `/System/Volumes/Data/usr` does not hold one under `/private`. Nothing below the target is
+  opened by path again, so renaming a directory there after the file was opened does not hide the
+  second chain. A spelling that is missing, or none that opens a directory on the chain, means
+  the directory has no second parent. If a spelling or the data volume does not open for any
+  other reason, every file it concerns is refused rather than leave the hole open.
+- On macOS a file opened through `/System/Volumes/Data`, in any letter case, is refused. A walk
+  from there misses the firmlink's own parents, such as the system `/usr` above `/usr/local`. The
+  same file opened through its firmlink passes unless a source holds it. If
+  `/System/Volumes/Data` is missing there are no firmlinks and neither macOS rule applies. Linux
+  has no firmlinks.
+
+Rule 5's limits in spec 022 hold as written. It opens the path recorded at attach, so an operator
+who renames a held Mount root, or a directory above it, escapes it. A quarantine report with no
+observation gives no sources. Two more cases escape it:
+
+- A view of a directory inside a source, placed somewhere else, such as a Linux bind mount or a
+  bindfs (macFUSE) view on macOS. A file under the view has a chain without the source, so it
+  passes. Only root or the operator can make such a view; a cell cannot mount anything on the
+  host.
+- A firmlink whose data-side name differs from its own path. Rule 5 finds the second chain by
+  joining the directory's path to `/System/Volumes/Data`, so such a firmlink would hide it.
+  `/usr/share/firmlinks` lists none on macOS 26.6.2.
+
+The guard that keeps a new Mount source away from spec 022 §6's guarded directories comes with
+native task plasmosome-98hv.
 
 ## Artifacts
 
