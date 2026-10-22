@@ -552,6 +552,9 @@ fn ranges_are_the_semver_compatible_part() {
     for version in ["1.2", "x.y.z", "", "1.2.3.4", "1..3", "+1.2.3"] {
         assert!(ranged(version).is_err(), "{version:?} must be refused");
     }
+    let odd = [locked("odd", "1.2")];
+    let refused = "odd in Cargo.lock: \"1.2\" is not a version of the form x.y.z";
+    assert_eq!(findings(&odd, &odd, &[]), [refused]);
     for range in ["0.8.23", "01", "0.08", "0", "0.0", "1.0", "", "0.x"] {
         assert!(!is_range(range), "{range:?} is not a range");
     }
