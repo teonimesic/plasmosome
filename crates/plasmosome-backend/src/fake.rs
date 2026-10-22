@@ -103,13 +103,13 @@ impl FakeBackend {
 
     fn admitted(&self, operation: &UniverseOp) -> Result<(), BackendError> {
         checked(&operation.object())?;
-        if let Some(cause) = self.refused_owners.get(operation.owner()) {
-            return Err(BackendError::Fault(cause.clone()));
-        }
         match self.incomplete.get(&operation.handle()) {
             Some(unfinished) if unfinished.operation == *operation => Err(unfinished.error()),
             Some(_) => Err(identity_conflict(operation.handle())),
-            None => Ok(()),
+            None => match self.refused_owners.get(operation.owner()) {
+                Some(cause) => Err(BackendError::Fault(cause.clone())),
+                None => Ok(()),
+            },
         }
     }
 
