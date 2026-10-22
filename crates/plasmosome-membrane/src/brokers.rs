@@ -257,7 +257,9 @@ mod tests {
 
     struct SleepForever;
 
-    impl Launch for SleepForever {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch only calls pause, forever, which is async-signal-safe.
+    unsafe impl Launch for SleepForever {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             loop {
