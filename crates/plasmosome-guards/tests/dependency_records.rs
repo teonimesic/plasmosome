@@ -386,6 +386,25 @@ fn resolve(
     Ok((direct, sourced))
 }
 
+fn unlocked(held: &[Package], sourced: &[Package]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for Package {
+        name,
+        version,
+        lockfile,
+        ..
+    } in sourced
+    {
+        let same = |lock: &Package| (&lock.name, &lock.version) == (name, version);
+        if !held.iter().filter(|lock| lock.source.is_some()).any(same) {
+            problems.push(format!(
+                "the resolve names {name} {version}, which {lockfile} does not lock"
+            ));
+        }
+    }
+    problems
+}
+
 fn guard(root: &Path, cargo: &OsStr) -> Vec<String> {
     let listing = run_bounded(
         Command::new("git")
@@ -419,18 +438,7 @@ fn guard(root: &Path, cargo: &OsStr) -> Vec<String> {
         };
         match resolve(root, cargo, lockfile) {
             Ok((members, sourced)) => {
-                for package in sourced {
-                    let same = |lock: &Package| {
-                        lock.source.is_some()
-                            && (&lock.name, &lock.version) == (&package.name, &package.version)
-                    };
-                    if !held.iter().any(same) {
-                        let (name, version) = (&package.name, &package.version);
-                        problems.push(format!(
-                            "the resolve names {name} {version}, which {lockfile} does not lock"
-                        ));
-                    }
-                }
+                problems.extend(unlocked(&held, &sourced));
                 direct.extend(members);
             }
             Err(error) => problems.push(format!("cannot read the resolve of {lockfile}: {error}")),
@@ -720,6 +728,37 @@ fn path_packages_never_count() {
         ..locked("plasmosome-core", "0.1.0")
     }];
     assert_eq!(findings(&path, &path, &[]), NONE);
+}
+
+#[test]
+fn a_lockfile_is_read_as_cargo_writes_it_and_checked_against_the_resolve() {
+    let lock = "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+    let held = locked_in(lock, "Cargo.lock").expect("the lockfile reads");
+    let read: Vec<_> = held
+        .iter()
+        .map(|package| (package.name.as_str(), package.source.is_some()))
+        .collect();
+    assert_eq!(read, [("app", false), ("itoa", true)]);
+    assert_eq!(unlocked(&held, &[locked("itoa", "1.0.18")]), NONE);
+    let resolved = [locked("itoa", "1.0.19"), locked("app", "0.1.0")];
+    let expected = ["itoa 1.0.19", "app 0.1.0"]
+        .map(|package| format!("the resolve names {package}, which Cargo.lock does not lock"));
+    assert_eq!(unlocked(&held, &resolved), expected);
+    assert_eq!(
+        locked_in("version = 4\n", "Cargo.lock").map(|held| held.len()),
+        Ok(0)
+    );
+    for (text, refused) in [
+        (
+            "[[package]]\nname = \"itoa\"\n",
+            "Cargo.lock holds a [[package]] without a name and a version",
+        ),
+        ("package = 1\n", "Cargo.lock: `package` is not an array"),
+        ("version = \n", "Cargo.lock is not TOML: "),
+    ] {
+        let error = locked_in(text, "Cargo.lock").err().unwrap_or_default();
+        assert!(error.starts_with(refused), "{text:?} gave {error:?}");
+    }
 }
 
 #[test]
