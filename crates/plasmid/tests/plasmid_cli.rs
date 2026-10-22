@@ -254,6 +254,10 @@ fn help_is_read_from_a_value_and_up_to_a_bare_flag_it_does_not_know() {
             &["add", "x", "--kernel", "a", "--kernel", "b", "--help"],
             command_help("add"),
         ),
+        (
+            &["--kernel", "../x", "add", "x", "--help"],
+            command_help("add"),
+        ),
     ] {
         let output = run(arguments);
         assert_eq!(output.status.code(), Some(0), "{arguments:?}: {output:?}");
@@ -284,6 +288,7 @@ fn only_an_unknown_flag_shaped_like_name_equals_value_is_read_past() {
 fn help_after_dashes_is_not_read() {
     for flag in ["--help", "-h"] {
         assert_not_served(&run(&["add", "x", "--", flag]), "plasmid.add");
+        assert_not_served(&run(&["add", "x", "--", flag, "--"]), "plasmid.add");
         let error = usage_error(&run(&["--", flag]));
         assert_eq!(error["argument"], "--", "{flag}");
     }
@@ -304,7 +309,24 @@ fn help_says_help_and_a_misplaced_version_count_only_before_dashes() {
         .join(" ");
     for phrase in [
         "With -h or --help before --, only the command words are judged.",
-        "--version anywhere before -- but as the sole argument is a usage error.",
+        "Without them, --version anywhere before -- but as the sole argument is a usage error.",
+    ] {
+        assert!(words.contains(phrase), "the help says {phrase:?}: {words}");
+    }
+}
+
+#[test]
+fn help_says_where_a_global_flag_and_its_value_stand() {
+    let words = binary_help()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for phrase in [
+        "Global flags, anywhere among the command words, never after --:",
+        "Each takes the next argument as its value, even one that starts with -, but never --.",
+        "names the first fault on the line, flag, value or word, reading from the left",
+        "--socket PATH the control socket a command reaches, absolute with no empty, . or .. \
+         component",
     ] {
         assert!(words.contains(phrase), "the help says {phrase:?}: {words}");
     }
@@ -332,6 +354,13 @@ fn unserved_commands_refuse_with_not_served() {
         &["add", "x", "--kernel"],
     ] {
         assert_not_served(&run(arguments), "plasmid.add");
+    }
+    for (arguments, method) in [
+        (&["--kernel", "../x", "add", "x"][..], "plasmid.add"),
+        (&["--socket", "rel", "list"], "plasmid.list"),
+        (&["list", "--deadline-ms", "0"], "plasmid.list"),
+    ] {
+        assert_not_served(&run(arguments), method);
     }
 
     for arguments in [
