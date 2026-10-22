@@ -14,8 +14,9 @@ pub mod readiness;
 /// outcome of removing a path, the 4090 hello requests and reply judge, the strictly parsed
 /// `RuntimeRecipe` that launches a cell, the supervisor's own observation of a helper's Darwin
 /// sandbox, the audit of the helper's Mach-O load names, the exec of the VMM helper that recipe
-/// names, the supervisor's control and data listeners, and the transcript of the helper's
-/// diagnostics. The paths and the recipe are `plasmosome-core`'s, re-exported here.
+/// names, the supervisor's control and data listeners, the transcript of the helper's
+/// diagnostics, and the helper's own judges and libkrun call plan. The paths and the recipe are
+/// `plasmosome-core`'s, re-exported here.
 pub mod runtime;
 mod spawn_lock;
 pub mod vmm;

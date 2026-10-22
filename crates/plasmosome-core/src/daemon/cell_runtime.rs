@@ -8,8 +8,8 @@ use crate::runtime::cell_id::{MAX_CELL_NUMBER, format_cell_id};
 use crate::runtime::cell_paths::{CellPaths, CellPathsError};
 use crate::runtime::path::{PathError, RecipePath};
 use crate::runtime::recipe::{
-    Artifact, ArtifactRole, PlatformLimits, RecipeRefusal, RuntimeRecipe, RuntimeTemplate,
-    TemplateRefusal,
+    Artifact, ArtifactRole, HostLimitsError, PlatformLimits, RecipeRefusal, RuntimeRecipe,
+    RuntimeTemplate, TemplateRefusal,
 };
 use crate::runtime::supervisor_config::{ConfigRecordRefusal, SupervisorConfig};
 use crate::state::CELLS_DIR;
@@ -91,7 +91,7 @@ pub enum CellRuntimeError {
     /// `key` is not a JSON integer from 1 to `u64::MAX`.
     BadDeadline { key: &'static str },
     /// The host did not report the limits a recipe is checked against.
-    Host(RecipeRefusal),
+    Host(HostLimitsError),
     /// `instance_root` is not a path a recipe accepts: it must also have no trailing `/`, no
     /// empty, `.` or `..` component, and must not be `/`.
     InstanceRoot { fault: PathError },
@@ -117,7 +117,7 @@ pub enum CellRuntimeError {
 pub(super) fn read(
     value: &Value,
     instance_root: &Path,
-    limits: impl FnOnce() -> Result<PlatformLimits, RecipeRefusal>,
+    limits: impl FnOnce() -> Result<PlatformLimits, HostLimitsError>,
 ) -> Result<CellRuntime, CellRuntimeError> {
     let Value::Object(entries) = value else {
         return Err(CellRuntimeError::NotAnObject);
@@ -268,8 +268,8 @@ mod tests {
     use crate::runtime::fixtures::{LIMITS, artifact, digest, valid_recipe};
     use crate::runtime::path::{PathError, RecipePath};
     use crate::runtime::recipe::{
-        Architecture, Artifact, ArtifactRole, PathRole, PlatformLimits, RecipeRefusal,
-        RuntimeRecipe, RuntimeTemplate, TemplateRefusal,
+        Architecture, Artifact, ArtifactRole, HostLimitsError, PathRole, PlatformLimits,
+        RecipeRefusal, RuntimeRecipe, RuntimeTemplate, TemplateRefusal,
     };
     use crate::runtime::supervisor_config::{
         ConfigRecordRefusal, MAX_RECORD_BYTES, SupervisorConfig,
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn a_host_that_will_not_report_its_limits_refuses_a_cell_runtime() {
-        let unavailable = RecipeRefusal::HostLimitUnavailable {
+        let unavailable = HostLimitsError::Unavailable {
             limit: "physical memory",
         };
         let refusal = read_config(&config_text(ROOT, Some(&runtime().to_string())), || {
