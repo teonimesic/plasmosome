@@ -272,7 +272,12 @@ every run of every lane, as run and not normalized. Every name and value from th
 runs, a reader or a configuration goes inside a JSON or text block, and the date, the name and
 the digests outside them are checked first, so none can break the file apart. The text goes to a
 temporary name in the same directory, and is linked to its name only once it is whole and
-synced, so a write that fails leaves no file at the name, and a retry can write it.
+synced, so a write that fails leaves no file at the name, and a retry can write it. Three edges
+fail closed, with nothing left at the name: on a filesystem without hard links every write
+fails; the temporary name is about 15 bytes longer than the final name, so a name near the
+255-byte limit is refused; and a writer killed mid-write can leave a hidden `.tmp` file, which
+`.gitignore` does not cover. A write whose temporary cannot be removed leaves one too, beside
+the whole file it linked to the name.
 
 It writes nothing, and names what is wrong, for a date that is not a calendar date written
 `YYYY-MM-DD`, a name other than lowercase letters, digits and hyphens, a lane with runs or a

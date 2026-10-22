@@ -43,6 +43,18 @@ fn config(lane: Lane) -> LaneConfig {
     LaneConfig { lane, settings }
 }
 
+fn digest_table(none: &str) -> String {
+    let mut table = "| Input | SHA-256 |\n| --- | --- |\n".to_string();
+    for (index, name) in DIGESTS.split(',').enumerate() {
+        let shown = match name {
+            "harness" | "session" if !none.is_empty() => none.to_string(),
+            _ => format!("`{}`", digest(index + 1)),
+        };
+        table.push_str(&format!("| {name} | {shown} |\n"));
+    }
+    table + "\n"
+}
+
 fn record() -> Record {
     let (image, kernel, libkrun, fixtures) = (digest(1), digest(2), digest(3), digest(4));
     let (harness, session) = (Some(digest(5)), Some(digest(6)));
@@ -203,8 +215,7 @@ fn a_manifest_refused_at_load_is_a_failed_run_with_no_probes() {
     assert_eq!(why(&text), format!("load refused the manifest: {channel}"));
     assert_eq!(section(&text, "### absent"), "No configuration given.\n\n");
     let none = "none: no run carries a transcript";
-    let digests = format!("| harness | {none} |\n| session | {none} |\n");
-    assert!(section(&text, "## Digests").contains(&digests));
+    assert_eq!(section(&text, "## Digests"), digest_table(none));
     let refused = "None: the manifest was refused before any run.\n";
     let table = section(&text, "## Normalization table as run");
     assert_eq!(table, format!("{refused}\n"));
@@ -297,6 +308,9 @@ fn a_reader_refusal_is_a_failed_run_naming_the_lane_and_the_subject() {
         assert_eq!(why(&text), expected);
         let table = section(&text, "## Normalization table as run");
         assert_eq!(json_in(table), manifest_json()["rules"]);
+        assert_eq!(section(&text, "## Digests"), digest_table(""));
+        let open = json!(config(Lane::Open).settings);
+        assert_eq!(json_in(section(&text, "### open")), open);
         let runs = "None: a reader refused a lane's output, so no run was read.\n";
         assert_eq!(section(&text, "## Runs"), runs);
         record.configs.clear();
@@ -310,8 +324,7 @@ fn a_reader_refusal_is_a_failed_run_naming_the_lane_and_the_subject() {
         refusal,
     };
     let text = written(outcome, &record).expect("written");
-    let digests = "| harness | none given |\n| session | none given |\n";
-    assert!(section(&text, "## Digests").contains(digests));
+    assert_eq!(section(&text, "## Digests"), digest_table("none given"));
     let refusal = &reader(Lane::Cell, Subject::Transcript, "");
     let mut record = self::record();
     record.digests.session = None;
@@ -581,6 +594,23 @@ fn a_link_at_the_name_is_never_written_through() {
         assert_eq!(fs::read_to_string(&target).ok().as_deref(), kept);
         assert_eq!(listed(dir.path()), 1 + usize::from(kept.is_some()));
     }
+}
+
+#[test]
+fn a_link_at_a_temporary_name_is_never_written_through() {
+    let (manifest, runs) = (manifest(), runs());
+    let dir = TempDir::new().expect("a temporary directory");
+    let target = dir.path().join("target");
+    let pid = std::process::id();
+    for count in 0..4096 {
+        let temporary = format!(".2026-10-22-staged-suite.md.{pid}-{count}.tmp");
+        symlink(&target, dir.path().join(temporary)).expect("a dangling link");
+    }
+    let refusal = write_results(read(&manifest, &runs), &record(), dir.path());
+    let refusal = refusal.expect_err("a link at the temporary name");
+    assert!(matches!(refusal, ResultsRefusal::Io(error) if error.kind() == EXISTS));
+    assert!(fs::symlink_metadata(&target).is_err());
+    assert_eq!(listed(dir.path()), 4096);
 }
 
 #[test]

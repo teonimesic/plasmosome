@@ -76,7 +76,8 @@ pub enum Outcome<'a> {
 }
 
 /// Why a results file was not written. Every refusal but `Io` comes before any file is created.
-/// After `Io`, no file is left at the name, so a retry with the same name can write it.
+/// After `Io`, no file is left at the name, so a retry with the same name can write it. The
+/// hidden temporary file is removed too, unless removing it fails, and then it is left behind.
 #[derive(Debug)]
 pub enum ResultsRefusal {
     BadDate { date: String },
@@ -96,8 +97,10 @@ pub enum ResultsRefusal {
 /// declares, so a manifest with none, which `judge` refuses, reads `0` and fails. It holds each
 /// lane's configuration, the eight digests, the normalization table as run, and every probe's
 /// status and observation and the transcript and its status in every run of every lane, all as
-/// run, not normalized. The text goes to a temporary name in `dir` first, and is linked to its
-/// name only once it is whole and synced, so a write that fails leaves no file at the name.
+/// run, not normalized. The text goes to a hidden temporary name in `dir` first, and is linked to
+/// its name only once it is whole and synced, so a write that fails leaves no file at the name.
+/// Once the link is made the write has succeeded: the temporary is then removed, and if removing
+/// it fails, it is left behind and the path is still returned.
 pub fn write_results(
     outcome: Outcome<'_>,
     record: &Record,
@@ -129,11 +132,8 @@ pub(super) fn write_with(
         .and_then(|()| file.sync_all())
         .and_then(|()| fs::hard_link(&temporary, &path));
     drop(file);
-    let removed = fs::remove_file(&temporary);
-    if linked.is_ok() && removed.is_err() {
-        fs::remove_file(&path).ok();
-    }
-    linked.and(removed).map_err(ResultsRefusal::Io)?;
+    fs::remove_file(&temporary).ok();
+    linked.map_err(ResultsRefusal::Io)?;
     Ok(path)
 }
 

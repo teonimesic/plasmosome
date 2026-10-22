@@ -37,6 +37,7 @@ Every place the kernel touches the world outside the process, and the seam that 
 | Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |
 | Directory syncs that can fail (instance root) | the private `SyncDirectory` function that `InstanceRoot` and `CellDir` carry (`plasmosome-core::instance`) | `recording_sync` in core's unit tests |
 | Directory reads that can fail (cell discovery, the trusted-directory listing) | the private name iterator that `collect_names` (`plasmosome-core::instance`) and `listed_from` (`plasmosome-core::private_socket`) take | a `Vec` of names and read errors in core's unit tests |
+| File writes that can fail (the differential's results file) | the write function that the private `write_with` takes (`plasmosome-testkit::differential::results`); `write_results` passes `File::write_all` | a write that writes 512 bytes and then fails, in the differential's results tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 | Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`; writers that refuse every write, fail only on flush, or fail only their first write; one that records the largest piece; all in plasmosome-cli's tests |
 | Time (lifetime bounds, the fence, expiry scheduling) | `Clock` (`plasmosome-backend::clock`), `SystemClock` in `plasmosome-core::clock` | `ManualClock` |
