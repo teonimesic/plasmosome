@@ -432,9 +432,70 @@ fn the_fixture_cache_sits_in_the_nearest_directory_cargo_tagged_whatever_the_lay
 }
 
 #[test]
-#[should_panic(expected = "/work/target/debug/membraned")]
 fn the_fixture_cache_refuses_an_executable_outside_a_cargo_target_directory() {
-    fixture::fixture_cache_root(Path::new("/work/target/debug/membraned"));
+    let outside = untagged_temporary_directory();
+    let executable = outside.path().join("debug/membraned");
+
+    let refused = std::panic::catch_unwind(|| fixture::fixture_cache_root(&executable))
+        .expect_err("an executable with no tagged ancestor has no fixture cache");
+
+    let message = panic_message(refused);
+    assert!(
+        message.contains(&executable.display().to_string()) && message.contains("CACHEDIR.TAG"),
+        "the refusal names the executable and the missing tag: {message}"
+    );
+}
+
+const REFUSAL: &str =
+    "fixture_cache::the_fixture_cache_refuses_an_executable_outside_a_cargo_target_directory";
+
+fn refusal_run_with(temporary: &Path) -> (bool, String) {
+    let child = Command::new(std::env::current_exe().expect("the test executable has a path"))
+        .args(["--exact", REFUSAL])
+        .env("TMPDIR", temporary)
+        .output()
+        .expect("a second test process starts");
+    (
+        child.status.success(),
+        String::from_utf8_lossy(&child.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn the_refusal_test_needs_an_untagged_temporary_directory_and_leaves_it_empty() {
+    let clean = untagged_temporary_directory();
+    let (passed, report) = refusal_run_with(clean.path());
+    assert!(
+        passed && report.contains("test result: ok. 1 passed"),
+        "the refusal test passes in an untagged temporary directory:\n{report}"
+    );
+    assert_eq!(
+        entries(clean.path()),
+        Vec::<String>::new(),
+        "the refusal test removes its temporary directory when it passes"
+    );
+
+    let planted = tempfile::tempdir().unwrap();
+    std::fs::write(planted.path().join("CACHEDIR.TAG"), TAG).expect("a tag is planted");
+    let inside = planted.path().join("tmp");
+    std::fs::create_dir(&inside).expect("a temporary directory is made inside the tagged one");
+    let (passed, report) = refusal_run_with(&inside);
+    assert!(
+        !passed
+            && report.contains(
+                "this test needs a temporary directory outside any Cargo target directory; "
+            )
+            && report.contains(&format!(
+                " has a tagged ancestor {}\n",
+                planted.path().display()
+            )),
+        "the refusal test fails on its precondition, naming the tagged ancestor:\n{report}"
+    );
+    assert_eq!(
+        entries(&inside),
+        Vec::<String>::new(),
+        "the refusal test removes its temporary directory when its precondition fails"
+    );
 }
 
 #[test]
