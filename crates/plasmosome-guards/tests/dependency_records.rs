@@ -151,6 +151,10 @@ fn read_record(
     let stem = file
         .strip_prefix(RECORDS)
         .and_then(|name| name.strip_suffix(".toml"));
+    let own_name = format!(
+        "must be the string {:?}, the file's own name",
+        stem.unwrap_or_default()
+    );
     let mut problems = Vec::new();
     let mut problem = |field: &str, what: &str| problems.push(format!("{file}: `{field}` {what}"));
     for key in table.keys().filter(|key| !FIELDS.contains(&key.as_str())) {
@@ -159,25 +163,15 @@ fn read_record(
     for field in FIELDS {
         match table.get(field) {
             None => problem(field, "is missing"),
-            Some(value) if field == "name" && value.as_str() != stem => problem(
-                field,
-                &format!(
-                    "must be the string {:?}, the file's own name",
-                    stem.unwrap_or_default()
-                ),
-            ),
+            Some(value) if field == "name" && value.as_str() != stem => problem(field, &own_name),
             Some(value) if field != "name" && !valid(field, value) => problem(field, shape(field)),
             Some(_) => {}
         }
     }
-    if let Some(estimate) = table
-        .get("write_it_instead")
-        .and_then(toml::Value::as_table)
-    {
-        for key in estimate
-            .keys()
-            .filter(|key| !["lines", "how"].contains(&key.as_str()))
-        {
+    let estimate = table.get("write_it_instead");
+    if let Some(estimate) = estimate.and_then(toml::Value::as_table) {
+        let extra = |key: &&String| !["lines", "how"].contains(&key.as_str());
+        for key in estimate.keys().filter(extra) {
             problem(&format!("write_it_instead.{key}"), "is not a field");
         }
         match estimate.get("lines").map(toml::Value::as_integer) {
@@ -196,18 +190,13 @@ fn read_record(
         if is_label(label) {
             named.insert(label.to_string());
         } else {
-            problem(
-                "brings",
-                &format!("entry {label:?} must be \"<name>@<range>\""),
-            );
+            let entry = format!("entry {label:?} must be \"<name>@<range>\"");
+            problem("brings", &entry);
         }
     }
     let name = table.get("name").and_then(toml::Value::as_str);
-    let range = table
-        .get("range")
-        .and_then(toml::Value::as_str)
-        .filter(|range| is_range(range));
-    if let (Some(name), Some(range)) = (name, range) {
+    let range = table.get("range").and_then(toml::Value::as_str);
+    if let (Some(name), Some(range)) = (name, range.filter(|range| is_range(range))) {
         named.insert(format!("{name}@{range}"));
         own.insert(format!("{name}@{range}"));
     }
@@ -246,12 +235,8 @@ fn findings(locked: &[Package], direct: &[Package], records: &[Record]) -> Vec<S
             ));
         }
     }
-    versions
-        .into_iter()
-        .chain(unnamed)
-        .chain(orphans)
-        .chain(fields)
-        .collect()
+    let sets = [versions, unnamed, orphans].into_iter().flatten();
+    sets.chain(fields).collect()
 }
 
 fn refusal(findings: &[String]) -> Option<String> {
@@ -356,10 +341,10 @@ fn resolve(
         .map_err(|error| format!("its JSON does not parse: {error}"))?;
     let text = |value: &serde_json::Value| value.as_str().map(str::to_string);
     let mut packages = BTreeMap::new();
-    for package in metadata["packages"]
+    let listed = metadata["packages"]
         .as_array()
-        .ok_or("it lists no packages")?
-    {
+        .ok_or("it lists no packages")?;
+    for package in listed {
         let name = text(&package["name"]).unwrap_or_default();
         let version = text(&package["version"]).unwrap_or_default();
         let package_id = text(&package["id"]);
@@ -418,10 +403,7 @@ fn guard(root: &Path, cargo: &OsStr) -> Vec<String> {
         Ok(listing) => String::from_utf8_lossy(&listing).into_owned(),
         Err(error) => return vec![format!("git ls-files failed, so nothing was read: {error}")],
     };
-    let tracked: BTreeSet<&str> = listing
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .collect();
+    let tracked: BTreeSet<&str> = listing.split_terminator('\0').collect();
     let mut problems = Vec::new();
     let mut locked = Vec::new();
     let mut direct = Vec::new();
@@ -808,21 +790,13 @@ fn files_are_read_through_a_bound_of_8_mib() {
 #[test]
 fn command_output_is_read_through_a_bound_of_64_mib() {
     let zeros = |count: u64| {
-        run_bounded(
-            Command::new("head")
-                .arg("-c")
-                .arg(count.to_string())
-                .arg("/dev/zero"),
-        )
+        let count = count.to_string();
+        run_bounded(Command::new("head").args(["-c", &count, "/dev/zero"]))
     };
-    assert_eq!(
-        zeros(MAX_OUTPUT_BYTES).map(|output| output.len() as u64),
-        Ok(MAX_OUTPUT_BYTES)
-    );
-    assert_eq!(
-        zeros(MAX_OUTPUT_BYTES + 1),
-        Err("its output is larger than 64 MiB".to_string())
-    );
+    let at = zeros(MAX_OUTPUT_BYTES).map(|output| output.len() as u64);
+    assert_eq!(at, Ok(MAX_OUTPUT_BYTES));
+    let past = Err("its output is larger than 64 MiB".to_string());
+    assert_eq!(zeros(MAX_OUTPUT_BYTES + 1), past);
 }
 
 struct Fixture {
