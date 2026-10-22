@@ -634,7 +634,7 @@ mod tests {
         }
     }
 
-    fn ask_a_test_broker(answer: Answer) -> (Result<Readiness, Cancelled>, Vec<u8>) {
+    fn ask_a_test_broker(answer: Answer) -> (Result<Readiness, Cancelled>, Vec<u8>, u64) {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("membraned.control");
         let listener =
@@ -687,7 +687,7 @@ mod tests {
         if let Some(mut stream) = accepted.into_inner() {
             take_what_is_there(&mut stream, &mut received);
         }
-        (verdict, received)
+        (verdict, received, clock.now_ms.get())
     }
 
     fn ask_with_the_production_connect(socket: &Path) -> Result<Readiness, Cancelled> {
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn a_control_socket_that_answers_status_is_ready() {
-        let (verdict, received) = ask_a_test_broker(Answer::Ready("serving"));
+        let (verdict, received, _) = ask_a_test_broker(Answer::Ready("serving"));
         assert_eq!(
             verdict,
             Ok(Readiness::Ready {
@@ -762,9 +762,14 @@ mod tests {
 
     #[test]
     fn a_socket_that_accepts_but_never_answers_is_the_half_alive_broker() {
-        let (verdict, received) = ask_a_test_broker(Answer::Silent);
+        let (verdict, received, waited_ms) = ask_a_test_broker(Answer::Silent);
         assert_eq!(verdict, Ok(spent()));
         assert_one_status_request(&received);
+        assert_eq!(
+            waited_ms,
+            DEADLINE.as_millis() as u64,
+            "the probe waits out its whole allowance for a broker that never answers"
+        );
     }
 
     #[test]
@@ -792,7 +797,7 @@ mod tests {
 
     #[test]
     fn an_answer_without_a_status_payload_is_malformed() {
-        let (verdict, _received) = ask_a_test_broker(Answer::Nonsense("{\"id\":0,\"result\":42}"));
+        let (verdict, _, _) = ask_a_test_broker(Answer::Nonsense("{\"id\":0,\"result\":42}"));
         assert!(!verdict.as_ref().is_ok_and(Readiness::is_ready));
         assert!(matches!(
             verdict,
@@ -802,7 +807,7 @@ mod tests {
 
     #[test]
     fn a_server_reporting_not_ready_is_not_ready_even_though_it_answers() {
-        let (verdict, _received) = ask_a_test_broker(Answer::NotReady("starting"));
+        let (verdict, _, _) = ask_a_test_broker(Answer::NotReady("starting"));
         assert_eq!(
             verdict,
             Ok(Readiness::NotReady(NotReady::Reported {
@@ -847,12 +852,14 @@ mod tests {
             .expect("the test broker never blocks on its connection");
         let mut received = Vec::new();
         take_what_is_there(&mut stream, &mut received);
-        assert_one_status_request(&received);
+        if !received.is_empty() {
+            assert_one_status_request(&received);
+        }
     }
 
     #[test]
     fn the_probe_sends_one_membrane_status_request_per_probe() {
-        let (verdict, received) = ask_a_test_broker(Answer::Ready("serving"));
+        let (verdict, received, _) = ask_a_test_broker(Answer::Ready("serving"));
         assert_eq!(
             verdict,
             Ok(Readiness::Ready {

@@ -649,7 +649,7 @@ mod tests {
         let broker_socket = dir.path().join("b0.uds");
         let pidfile = dir.path().join("b0.pid");
         let deadline = Duration::from_millis(250);
-        let fixed = Instant::now();
+        let fixed = Instant::now() + Duration::from_secs(3600);
         let asks = Asks::default();
 
         let daemon = start_with(
