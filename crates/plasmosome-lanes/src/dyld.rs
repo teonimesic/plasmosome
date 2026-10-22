@@ -7,25 +7,32 @@ use std::path::{Path, PathBuf};
 /// record is `docs/dependencies/native/libkrun.toml`.
 pub const LIBKRUNFW: &str = "libkrunfw.5.dylib";
 
-/// The `LC_RPATH` entries of the pinned bundle's libkrun. That libkrun's record is
+/// The `LC_RPATH` entries of the pinned bundle's libkrun, each written as an absolute path in the
+/// load command, as `leaf_search` needs. That libkrun's record is
 /// `docs/dependencies/native/libkrun.toml`.
 pub const LIBKRUN_RPATHS: &[&str] = &["/opt/homebrew/opt/llvm/lib"];
 
-/// The OS cryptex prefix. Right after a path, dyld tries this prefix followed by that path, with
-/// no separator between them, so a leaf name `L` becomes `/System/Volumes/Preboot/Cryptexes/OSL`.
-/// Measured on macOS 26.6.2 (25G83).
-pub const CRYPTEX_PREFIX: &str = "/System/Volumes/Preboot/Cryptexes/OS";
+const CRYPTEX_PREFIX: &str = "/System/Volumes/Preboot/Cryptexes/OS";
 
-/// dyld's default fallback directories for a leaf name, for a binary built with an SDK from fall
-/// 2023 or later, as `lane-vmm` is. An older binary also gets `/usr/local/lib` (dyld(1)).
+/// dyld's default fallback directories for a leaf name, for a binary linked against an SDK from
+/// fall 2023 or later, as `lane-vmm` is. A binary linked against an older SDK also gets
+/// `/usr/local/lib` (dyld(1)).
 pub const FALLBACK_DIRS: &[&str] = &["/usr/lib"];
 
 /// Every path dyld tries for a `dlopen` of the leaf name `leaf`, each once, in the order dyld first
 /// tries it: `cwd` joined with `leaf`, the cryptex copy of `leaf`, each entry of `rpaths` joined
 /// with `leaf` followed by its cryptex copy, then each fallback directory joined with `leaf`.
 ///
-/// `leaf` must hold no `/`. `rpaths` are the absolute `LC_RPATH` entries of the image that calls
-/// `dlopen`, then those of the main executable. `lane-vmm` has none of its own. The list is for
+/// A cryptex copy is `/System/Volumes/Preboot/Cryptexes/OS` followed by the path, with no
+/// separator between them, so `L` becomes `/System/Volumes/Preboot/Cryptexes/OSL`. dyld tries it
+/// right after the leaf name and after each rpath entry written as an absolute path. It tries none
+/// after the `/usr/lib` fallback, after an `@executable_path` entry it expanded, or after a
+/// relative entry. Measured on macOS 26.6.2 (25G83); an `@loader_path` entry was not measured.
+///
+/// `leaf` must hold no `/`. `rpaths` are the `LC_RPATH` entries written as absolute paths in the
+/// load commands of the image that calls `dlopen`, then in those of the main executable. Pass no
+/// entry that starts with `@` and no relative one, expanded or not: dyld gave the ones measured no
+/// cryptex copy, and this list would add one. `lane-vmm` has no entry of its own. The list is for
 /// an unrestricted process with no `DYLD_` variable set, which `lane-vmm` refuses first. A
 /// restricted process, such as a platform binary, skips the `cwd` path.
 pub fn leaf_search(cwd: &Path, leaf: &str, rpaths: &[&str]) -> Vec<PathBuf> {

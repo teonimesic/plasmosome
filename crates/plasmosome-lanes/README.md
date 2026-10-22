@@ -58,12 +58,15 @@ running until the guest powers off.
      cryptex copy;
    - `/usr/lib/libkrunfw.5.dylib`.
 
-   These were measured on macOS 26.6.2 (25G83) with `DYLD_PRINT_SEARCHING`, and a macOS test in
+   These were measured on macOS 26.6.2 (25G83) with `DYLD_PRINT_SEARCHING`. A macOS test in
    `tests/dyld.rs` compares the rule with the list the running dyld reports for a name that
-   exists nowhere. dlopen(3) also names `/usr/local/lib`. dyld(1) gives that fallback only to
-   binaries built before fall 2023, and the measured search never tries it. Nothing from the
-   bundle has loaded yet. A `DYLD_` variable can already have run code, though: dyld acts on it
-   before `main` (see Limits).
+   exists nowhere. Its test binary has no `LC_RPATH`, so it checks only the three paths that need
+   none: the working directory, the cryptex leaf and `/usr/lib`. The rpath path and its cryptex
+   copy rest on the measurement, and the unit tests of the measured list pin them. dlopen(3) also
+   names `/usr/local/lib`. dyld(1) gives that fallback only to binaries linked against an SDK
+   older than fall 2023's, and the measured search never tries it. Nothing from the bundle has
+   loaded yet. A `DYLD_` variable can already have run code, though: dyld acts on it before
+   `main` (see Limits).
 3. Exit 64 if `root_image` resolves to a file inside the bundle. The root disk is writable, as
    the cell's is, so each lane gives its own copy of the image.
 4. Check the bundle with `verify_bundle`. The directory's name must be the first 16 hex digits
@@ -251,12 +254,15 @@ the bundle's `base/rootfs.raw` as its writable root image.
   lanes load the library as shipped. This is owner gate O-6. Step 2 refuses the run when that
   name exists anywhere dyld would look, before libkrun loads. On this Mac,
   `/opt/homebrew/opt/llvm/lib` is owned by the user who installed Homebrew, the same user who
-  runs the lanes. `/System/Volumes/Preboot/Cryptexes`, where the cryptex copy of the leaf name
-  would go, is mode 0777, root-owned, with no file flags. Whether a process of that user can
-  create a file there was not measured. So a process running as that user can still place the
-  file in the Homebrew directory after step 2 and before `krun_create_ctx`. Step 6 then refuses
-  the run, but the library's initializers have already run. That window belongs to owner gate
-  O-4, the same-UID limit.
+  runs the lanes. So a process running as that user can still place the file there after step 2
+  and before `krun_create_ctx`. Step 6 then refuses the run, but the library's initializers have
+  already run. That window belongs to owner gate O-4, the same-UID limit.
+  `/System/Volumes/Preboot/Cryptexes`, where the cryptex copy of the leaf name would go, is mode
+  0777 with no sticky bit, root-owned, with no file flags. So if it accepts a new file at all, it
+  accepts one from any local user, not only the one who runs the lanes. Whether any user can
+  create a file there is part of owner gate O-6, and it was not measured. If one can, a process
+  of any local user can use the same window at
+  `/System/Volumes/Preboot/Cryptexes/OSlibkrunfw.5.dylib`, which is outside O-4's same-UID scope.
   Step 6's call in `lane-vmm` has no test, because no test can plant a library in that window
   without a race; `unverified_images`, which it calls, is tested directly. No task here will add
   one.

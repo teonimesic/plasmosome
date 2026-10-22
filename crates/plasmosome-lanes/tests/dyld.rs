@@ -186,6 +186,8 @@ fn a_dyld_variable_whose_name_is_not_utf8_is_still_named() {
 #[cfg(target_os = "macos")]
 mod live {
     use std::ffi::{CStr, CString};
+    use std::fs::File;
+    use std::io::Read;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -195,23 +197,63 @@ mod live {
 
     const NAME: &str = "live::dyld_tries_exactly_the_leaf_search_for_a_name_that_exists_nowhere";
     const PROBE: &str = "PLASMOSOME_LANES_DYLD_PROBE";
+    const PROFILE: &str = "LLVM_PROFILE_FILE";
+    const UNKNOWN_DYLD: &str = "DYLD_PLASMOSOME_LANES_UNKNOWN";
     const MATCHED: &str = "dlerror's tried list matched: ";
 
-    fn the_same_test_again_with_an_empty_environment() {
-        let probe = format!("libplasmosome-probe-{}-absent.dylib", std::process::id());
-        let output = Command::new(std::env::current_exe().expect("the test binary's path"))
+    fn unguessable_probe() -> String {
+        let mut bits = [0u8; 16];
+        File::open("/dev/urandom")
+            .and_then(|mut random| random.read_exact(&mut bits))
+            .expect("16 bytes from /dev/urandom");
+        let hex: String = bits.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("libplasmosome-probe-{hex}-absent.dylib")
+    }
+
+    fn the_probe_alone_with(extra: &[(&str, &str)]) -> (bool, String) {
+        let mut probe = Command::new(std::env::current_exe().expect("the test binary's path"));
+        probe
             .args(["--exact", NAME, "--nocapture"])
             .env_clear()
-            .env(PROBE, &probe)
+            .env(PROBE, unguessable_probe());
+        if let Some(profile) = std::env::var_os(PROFILE) {
+            probe.env(PROFILE, profile);
+        }
+        let output = probe
+            .envs(extra.iter().copied())
             .output()
             .expect("the test binary runs again");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let text = format!(
+            "{}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.success() && text.contains(MATCHED), text)
+    }
+
+    #[test]
+    fn each_probe_name_holds_128_random_bits() {
+        let (first, second) = (unguessable_probe(), unguessable_probe());
+        let bits = first
+            .strip_prefix("libplasmosome-probe-")
+            .and_then(|rest| rest.strip_suffix("-absent.dylib"))
+            .expect("the probe name's shape");
+
+        assert_ne!(first, second);
+        assert!(
+            bits.len() == 32 && bits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn the_probe_fails_naming_a_dyld_variable_it_inherits() {
+        let (passed, output) = the_probe_alone_with(&[(UNKNOWN_DYLD, "1")]);
 
         assert!(
-            output.status.success() && stdout.lines().any(|line| line.contains(MATCHED)),
-            "the probe with an empty environment did not pass ({}):\n{stdout}\n{stderr}",
-            output.status
+            !passed && output.contains(UNKNOWN_DYLD),
+            "the probe passed with {UNKNOWN_DYLD} set, or did not name it:\n{output}"
         );
     }
 
@@ -219,7 +261,12 @@ mod live {
     #[allow(unsafe_code)]
     fn dyld_tries_exactly_the_leaf_search_for_a_name_that_exists_nowhere() {
         let Some(probe) = std::env::var_os(PROBE) else {
-            return the_same_test_again_with_an_empty_environment();
+            let (passed, output) = the_probe_alone_with(&[]);
+            assert!(
+                passed,
+                "the probe with an empty environment did not pass:\n{output}"
+            );
+            return;
         };
         let probe = probe.into_string().expect("the probe name is UTF-8");
         let cwd = std::env::current_dir().expect("a working directory");
@@ -228,9 +275,11 @@ mod live {
         assert_eq!(planted(&expected), Vec::<PathBuf>::new());
         let name = CString::new(probe).expect("the probe name holds no NUL");
 
-        // SAFETY: `name` is NUL-terminated and outlives the call. No path on the expected list
-        // exists, as asserted just above, so dyld loads nothing and no initializer runs. dlerror
-        // is read on the same thread right after the failed dlopen, before any other dl call.
+        // SAFETY: `name` is NUL-terminated and outlives the call. The parent drew 128 bits of it
+        // from /dev/urandom just before it started this process, so nobody can know the name in
+        // time to plant a file under it at any path dyld tries. So dyld loads nothing, and no
+        // initializer runs. dlerror is read on the same thread right after the failed dlopen,
+        // before any other dl call.
         let (handle, error) = unsafe {
             let handle = libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
             (handle, libc::dlerror())

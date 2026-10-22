@@ -934,9 +934,13 @@ ran with effective uid 0, which is what that observation looks at. On macOS a ne
 the group of the directory it is made in, so the group M1's plain run shows is that of the folder
 the lane was made in, not one the share chose.
 
-Owner gate O-6 was open while these ran: a library planted in `/opt/homebrew/opt/llvm/lib` would
-load before `lane-vmm` checks any image. Nothing was planted there, and that directory was not
-changed. Nothing here needed root on the host or a second host uid (owner gate O-8).
+Owner gate O-6 was open while these ran: a library planted in `/opt/homebrew/opt/llvm/lib`, or in
+`/System/Volumes/Preboot/Cryptexes` as `OSlibkrunfw.5.dylib`, would load before `lane-vmm` checks
+any image. Nothing was planted in either directory, and neither was changed. The Cryptexes
+directory is mode 0777, so if it accepts a new file, it accepts one from any local user, which
+the same-UID gate O-4 does not cover. Whether any user can create a file there is part of O-6,
+and it was not measured. Nothing here needed root on the host or a second host uid (owner gate
+O-8).
 
 - Host: {host}.
 - Test commit: `{commit}`.
