@@ -1119,9 +1119,9 @@ impl CellDir {
 /// A cell's `supervisor.lock`, open and holding its `flock`. The lock belongs to the open file,
 /// not to this value: dropping it closes this descriptor and releases the lock only once no
 /// other descriptor of the same open file remains, such as the copy handed to `membraned`.
-/// Nothing here calls `LOCK_UN`. A process forked from this one that has not called `exec`
-/// keeps the lock alive after this value is dropped; a dropped [`WriterLock`] calls `LOCK_UN`
-/// instead. The descriptor is close-on-exec.
+/// Nothing here calls `LOCK_UN` on a supervisor lock it returns. A process forked from this one
+/// that has not called `exec` keeps the lock alive after this value is dropped; a dropped
+/// [`WriterLock`] calls `LOCK_UN` instead. The descriptor is close-on-exec.
 #[must_use = "dropping the SupervisorLock releases the cell's supervisor lock"]
 pub struct SupervisorLock {
     file: File,
@@ -3489,6 +3489,79 @@ mod tests {
         drop(copy);
     }
 
+    #[cfg(target_os = "macos")]
+    struct Immutable {
+        file: fs::File,
+        flags: u32,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Immutable {
+        #[allow(unsafe_code)]
+        fn set(fd: BorrowedFd<'_>, made_here: &Path) -> Self {
+            let file = fs::File::from(fd.try_clone_to_owned().expect("the descriptor is copied"));
+            assert_eq!(
+                identity(&file.metadata().expect("the file's metadata")),
+                identity_at(made_here),
+                "only a file this test made is made immutable"
+            );
+            let flags = stat_of(file.as_fd()).expect("the file's flags").st_flags;
+            // SAFETY: fchflags takes no pointer, and `file` stays open for the call.
+            let set = unsafe { libc::fchflags(file.as_raw_fd(), flags | libc::UF_IMMUTABLE) };
+            assert_eq!(set, 0, "fchflags: {}", io::Error::last_os_error());
+            Self { file, flags }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for Immutable {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            // SAFETY: fchflags takes no pointer, and `self.file` stays open for the call.
+            let cleared = unsafe { libc::fchflags(self.file.as_raw_fd(), self.flags) };
+            if cleared != 0 && !thread::panicking() {
+                panic!("fchflags: {}", io::Error::last_os_error());
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_failed_mode_change_releases_its_flock_while_a_copy_of_its_descriptor_is_open() {
+        let (_dir, root) = temp_root();
+        let instance = recording_root(&root);
+        let path = root.join("controller.lock");
+        let immutable = Rc::new(RefCell::new(None));
+        let copy = {
+            let (set, made_here) = (Rc::clone(&immutable), path.clone());
+            copy_the_next_lock_taken_then(move |fd| {
+                *set.borrow_mut() = Some(Immutable::set(fd, &made_here));
+            })
+        };
+        let failed = instance.lock();
+        drop(
+            immutable
+                .borrow_mut()
+                .take()
+                .expect("the hook made the lock file immutable"),
+        );
+        expect_match!(failed, Err(LockError::Io { path: named, source }) => {
+            assert_eq!(named, path);
+            assert_eq!(source.raw_os_error(), Some(libc::EPERM), "{source}");
+        });
+        let copy = the_copy(&copy);
+        assert!(
+            a_separate_open_can_lock(&path),
+            "a copy of a lock() whose mode change failed keeps the lock"
+        );
+        drop(
+            instance
+                .lock()
+                .expect("the retry takes the lock while the copy is open"),
+        );
+        drop(copy);
+    }
+
     #[test]
     fn create_cell_dir_syncs_the_root_and_cells_on_every_call() {
         let (_dir, root) = temp_root();
@@ -5208,6 +5281,12 @@ mod tests {
     }
 
     fn copy_the_next_lock_taken() -> Rc<RefCell<Option<OwnedFd>>> {
+        copy_the_next_lock_taken_then(|_| ())
+    }
+
+    fn copy_the_next_lock_taken_then(
+        then: impl FnOnce(BorrowedFd<'_>) + 'static,
+    ) -> Rc<RefCell<Option<OwnedFd>>> {
         let copy = Rc::new(RefCell::new(None));
         let kept = Rc::clone(&copy);
         let work: LockHook = Box::new(move |fd| {
@@ -5215,6 +5294,7 @@ mod tests {
                 .try_clone_to_owned()
                 .expect("the lock's descriptor is copied");
             *kept.borrow_mut() = Some(copied);
+            then(fd);
         });
         AFTER_TAKING_A_LOCK.with(|slot| *slot.borrow_mut() = Some(work));
         copy
