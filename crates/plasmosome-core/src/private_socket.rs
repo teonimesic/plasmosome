@@ -1,7 +1,7 @@
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,13 @@ impl PrivateDir {
     /// The device and inode of the directory held open.
     pub fn identity(&self) -> DirIdentity {
         self.identity
+    }
+
+    /// The directory held open, for calls made relative to it such as `openat`, `fstatat` and
+    /// `unlinkat`. They reach this directory even after its path is renamed or names another
+    /// one. The caller must not close it or change its flags.
+    pub fn as_fd(&self) -> BorrowedFd<'_> {
+        self.dir.as_fd()
     }
 
     /// Walks the path again and requires the same judgments and the same directory identity.
@@ -1292,6 +1299,33 @@ mod tests {
                 path: root.path().join("cell")
             })
         );
+    }
+
+    #[test]
+    fn the_lent_descriptor_reaches_the_directory_held_open_after_its_path_is_replaced() {
+        let root = test_root();
+        make_dir(&root.path().join("cell"), 0o700);
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        fs::rename(root.path().join("cell"), root.path().join("moved")).expect("rename");
+        make_dir(&root.path().join("cell"), 0o700);
+        let lent = fs::File::from(dir.as_fd().try_clone_to_owned().expect("dup"));
+        let held = lent.metadata().expect("fstat");
+        assert_eq!(
+            DirIdentity {
+                dev: held.dev(),
+                ino: held.ino()
+            },
+            dir.identity()
+        );
+        let entry = c"made";
+        assert_eq!(stat_at(&OwnedFd::from(lent), entry), Err(libc::ENOENT));
+        fs::write(root.path().join("moved/made"), b"").expect("a file in the moved directory");
+        let lent = dir.as_fd().try_clone_to_owned().expect("dup");
+        assert_eq!(
+            stat_at(&lent, entry).map(|facts| facts.kind),
+            Ok(Kind::Regular)
+        );
+        assert!(!root.path().join("cell/made").exists());
     }
 
     #[test]
