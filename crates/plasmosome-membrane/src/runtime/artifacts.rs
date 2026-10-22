@@ -1,15 +1,22 @@
 use std::fmt;
-use std::fs::{File, Metadata};
-use std::io::{self, Read};
-use std::os::fd::AsFd;
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::fs::File;
 use std::path::PathBuf;
 
-use plasmosome_core::nofollow::{Facts, Kind, Walk, WalkRefusal, acl_grants_write, effective_uid};
+use plasmosome_core::artifact::{CheckedFile, Stamp, check_file, verify_file};
+use plasmosome_core::nofollow::{Walk, WalkRefusal};
 
 use super::digest::Digest;
 use super::path::RecipePath;
 use super::recipe::{Artifact, ArtifactRole, RuntimeRecipe};
+
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        unused_imports,
+        reason = "off macOS nothing in this crate reads through it yet"
+    )
+)]
+pub(crate) use plasmosome_core::artifact::Positioned;
 
 /// The device and inode of a verified file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +62,7 @@ impl VerifiedArtifact {
 
     /// Its size in bytes when it was hashed.
     pub fn size(&self) -> u64 {
-        self.stamp.size
+        self.stamp.size()
     }
 
     /// The digest of its bytes, equal to the pinned one.
@@ -69,11 +76,12 @@ impl VerifiedArtifact {
         &self.file
     }
 
-    /// Opens the path again from the same "/" descriptor, applies every check except the hash,
-    /// and compares the device, inode, size, modification time and change time with the
-    /// verified ones. A path that now names another file, even one with the same bytes, is
-    /// `Replaced`. A change in place that moved the size or a time, such as a write through a
-    /// descriptor opened for writing before the file was locked, is `ChangedSinceVerification`.
+    /// Opens the path again from the same "/" descriptor and applies every check except the hash,
+    /// with core's `artifact::check_file`. Then it compares the device, inode, size, modification
+    /// time and change time with the verified ones. A path that now names another file, even one
+    /// with the same bytes, is `Replaced`. A change in place that moved the size or a time, such
+    /// as a write through a descriptor opened for writing before the file was locked, is
+    /// `ChangedSinceVerification`.
     ///
     /// It sees a change to the file's bytes only if the change moves the device, inode, size,
     /// modification time or change time. A shared mapping made before the file was locked, from
@@ -87,14 +95,15 @@ impl VerifiedArtifact {
             path: self.path.as_path().to_path_buf(),
             fault,
         };
-        let checked = open_checked(&self.walk).map_err(refuse)?;
-        if checked.identity != self.identity {
+        let checked = check_file(&self.walk).map_err(|fault| refuse(fault.into()))?;
+        let found = checked_identity(&checked);
+        if found != self.identity {
             return Err(refuse(ArtifactFault::Replaced {
                 verified: self.identity,
-                found: checked.identity,
+                found,
             }));
         }
-        if checked.stamp != self.stamp {
+        if checked.stamp() != self.stamp {
             return Err(refuse(ArtifactFault::ChangedSinceVerification));
         }
         Ok(())
@@ -126,50 +135,30 @@ pub struct ArtifactRefusal {
 /// The first rule an artifact broke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactFault {
-    /// The no-follow walk from "/" refused. Its path field names where it stopped: a path that
-    /// is not absolute and normal, a symlink, a missing name, a component that is not a
-    /// directory, a directory owned by neither root nor the effective UID, one group or other
-    /// can write, or one it could not open. On macOS it also refuses a directory with any ACL
-    /// allow entry granting write (add_file, add_subdirectory, delete_child, delete,
-    /// writesecurity, chown, generic write or generic all), whoever the entry names, and one on a
-    /// volume mounted with ownership ignored.
-    Walk(WalkRefusal),
-    /// The artifact is not a regular file.
-    NotRegular { kind: Kind },
-    /// The artifact is owned by `uid`, which is neither root nor the effective UID.
-    ForeignOwner { uid: u32 },
-    /// Someone may write the artifact: its mode has a write bit.
-    Writable { mode: u32 },
-    /// The artifact's mode has the set-user-ID or set-group-ID bit.
-    SetIdBits { mode: u32 },
-    /// On macOS, the artifact carries an ACL allow entry granting write data, append data, write
-    /// attributes, write extended attributes, write security, chown, delete, or generic write or
-    /// all, whoever the entry names.
-    WriteAcl,
-    /// Neither `uchg` nor `schg` is set on the artifact.
-    NotImmutable,
-    /// This platform cannot show the artifact immutable. Off macOS, every artifact that passes
-    /// the other rules is refused this way.
-    ImmutabilityUnverifiable,
-    /// The artifact's size, modification time or change time moved while it was hashed.
-    ChangedWhileHashing,
+    /// A rule of core's file judge, the one the controller applies before `cell.new` allocates a
+    /// cell: the walk from "/", the kind, the owner, the write and set-id bits, the ACL,
+    /// immutability, a change while hashing, or the digest. Core's `artifact::ArtifactFault`
+    /// says what each means.
+    Rule(plasmosome_core::artifact::ArtifactFault),
     /// The artifact's size, modification time or change time moved after it was verified, so
     /// something changed it in place.
     ChangedSinceVerification,
-    /// The bytes hash to `actual`, not the pinned `expected`.
-    DigestMismatch { expected: Digest, actual: Digest },
     /// The path now names another file than the one verified.
     Replaced {
         verified: FileIdentity,
         found: FileIdentity,
     },
-    /// A call on the open descriptor failed with this errno.
-    Io { op: &'static str, errno: i32 },
+}
+
+impl From<plasmosome_core::artifact::ArtifactFault> for ArtifactFault {
+    fn from(fault: plasmosome_core::artifact::ArtifactFault) -> Self {
+        ArtifactFault::Rule(fault)
+    }
 }
 
 impl From<WalkRefusal> for ArtifactFault {
     fn from(refusal: WalkRefusal) -> Self {
-        ArtifactFault::Walk(refusal)
+        ArtifactFault::Rule(refusal.into())
     }
 }
 
@@ -184,68 +173,26 @@ impl std::error::Error for ArtifactRefusal {}
 impl fmt::Display for ArtifactFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ArtifactFault::Walk(refusal) => write!(f, "{refusal}"),
-            ArtifactFault::NotRegular { kind } => {
-                write!(f, "it is {}, not a regular file", kind_name(*kind))
-            }
-            ArtifactFault::ForeignOwner { uid } => write!(
-                f,
-                "it is owned by uid {uid}, neither root nor the effective uid"
-            ),
-            ArtifactFault::Writable { mode } => {
-                write!(f, "it has mode {mode:04o}, with a write bit")
-            }
-            ArtifactFault::SetIdBits { mode } => write!(
-                f,
-                "it has mode {mode:04o}, with a set-user-ID or set-group-ID bit"
-            ),
-            ArtifactFault::WriteAcl => f.write_str("it carries an ACL allow entry granting write"),
-            ArtifactFault::NotImmutable => f.write_str("it has neither uchg nor schg set"),
-            ArtifactFault::ImmutabilityUnverifiable => {
-                f.write_str("this platform cannot show it immutable")
-            }
-            ArtifactFault::ChangedWhileHashing => {
-                f.write_str("its size or times moved while it was hashed")
-            }
+            ArtifactFault::Rule(fault) => write!(f, "{fault}"),
             ArtifactFault::ChangedSinceVerification => {
                 f.write_str("its size or times moved after it was verified")
-            }
-            ArtifactFault::DigestMismatch { expected, actual } => {
-                write!(f, "it hashes to {actual}, not the pinned {expected}")
             }
             ArtifactFault::Replaced { verified, found } => write!(
                 f,
                 "the path names device {} inode {}, not the verified device {} inode {}",
                 found.dev, found.ino, verified.dev, verified.ino
             ),
-            ArtifactFault::Io { op, errno } => write!(f, "{op} failed with errno {errno}"),
         }
-    }
-}
-
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Directory => "a directory",
-        Kind::Regular => "a regular file",
-        Kind::Socket => "a socket",
-        Kind::Symlink => "a symlink",
-        Kind::Other => "a FIFO, a device or another special file",
     }
 }
 
 /// Verifies one pinned artifact as spec 001 §4.2 asks, before anything trusts its bytes.
 ///
-/// Walks `artifact.path()` from "/" one component at a time without following a symlink; every
-/// directory on the way must be owned by root or the effective UID and writable by neither group
-/// nor other, with no sticky-bit exception, and on macOS carry no ACL allow entry, whoever it
-/// names, that grants a right to replace its entries, and sit on no volume mounted with
-/// ownership ignored. The last name is opened without blocking and must be a regular file owned
-/// by root or the effective UID, with no write bit, no set-id bit, no ACL entry granting write,
-/// and `uchg` or `schg` set. Only then are its bytes hashed through that descriptor, reading at
-/// most one byte past the size it was checked at, and compared with `artifact.sha256()`. Its
-/// size, modification time and change time must not move while it is hashed. A file that breaks
-/// a rule is refused, never trusted after hashing. Off macOS, every artifact that passes the
-/// other rules is refused `ImmutabilityUnverifiable`.
+/// Walks `artifact.path()` from "/" with `Walk::from_root`, then judges and hashes the file with
+/// core's `artifact::verify_file`, the check the controller runs before `cell.new` allocates a
+/// cell, so a file the controller admits is one this admits. Core's README, "Artifacts", gives
+/// the rule. This keeps the walk, the open descriptor and the stamp taken at the check, so
+/// [`VerifiedArtifact::reconfirm`] can open the path again from the same "/".
 ///
 /// On macOS pass the canonical path, `/private/var/...` rather than `/var/...`: a symlink
 /// anywhere on the path is refused. Root and the effective UID can still change an artifact
@@ -269,33 +216,15 @@ pub fn verify_artifact(
     };
     let walk =
         Walk::from_root(artifact.path().as_path()).map_err(|refusal| refuse(refusal.into()))?;
-    let checked = open_checked(&walk).map_err(refuse)?;
-    verify_checked(role, artifact, walk, checked).map_err(refuse)
-}
-
-fn verify_checked(
-    role: ArtifactRole,
-    artifact: &Artifact,
-    walk: Walk,
-    checked: Checked,
-) -> Result<VerifiedArtifact, ArtifactFault> {
-    let digest = hash(&checked)?;
-    let after = stamp(&stat(&checked.file)?);
-    judge_unchanged(checked.stamp, after)?;
-    if digest != *artifact.sha256() {
-        return Err(ArtifactFault::DigestMismatch {
-            expected: *artifact.sha256(),
-            actual: digest,
-        });
-    }
+    let checked = verify_file(&walk, artifact.sha256()).map_err(|fault| refuse(fault.into()))?;
     Ok(VerifiedArtifact {
         role,
         path: artifact.path().clone(),
         walk,
-        file: checked.file,
-        identity: checked.identity,
-        stamp: checked.stamp,
-        digest,
+        identity: checked_identity(&checked),
+        stamp: checked.stamp(),
+        digest: *artifact.sha256(),
+        file: checked.into_file(),
     })
 }
 
@@ -321,164 +250,28 @@ pub fn verify_recipe_artifacts(
     })
 }
 
-struct Checked {
-    file: File,
-    identity: FileIdentity,
-    stamp: Stamp,
-}
-
-fn open_checked(walk: &Walk) -> Result<Checked, ArtifactFault> {
-    let euid = effective_uid();
-    let opened = walk.open_file(|reached| judge_artifact(&reached.facts, euid))?;
-    let identity = FileIdentity {
-        dev: opened.facts.dev,
-        ino: opened.facts.ino,
-    };
-    let file = File::from(opened.fd);
-    if acl_grants_write(file.as_fd()).map_err(|error| io_fault("acl", &error))? {
-        return Err(ArtifactFault::WriteAcl);
-    }
-    let metadata = stat(&file)?;
-    judge_immutability(&metadata)?;
-    Ok(Checked {
-        file,
-        identity,
-        stamp: stamp(&metadata),
-    })
-}
-
-fn stat(file: &File) -> Result<Metadata, ArtifactFault> {
-    file.metadata().map_err(|error| io_fault("fstat", &error))
-}
-
-fn stamp(metadata: &Metadata) -> Stamp {
-    Stamp {
-        size: metadata.size(),
-        modified: (metadata.mtime(), metadata.mtime_nsec()),
-        changed: (metadata.ctime(), metadata.ctime_nsec()),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn judge_immutability(metadata: &Metadata) -> Result<(), ArtifactFault> {
-    use std::os::macos::fs::MetadataExt;
-    judge_flags(metadata.st_flags())
-}
-
-#[cfg(target_os = "macos")]
-fn judge_flags(flags: u32) -> Result<(), ArtifactFault> {
-    if flags & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0 {
-        Ok(())
-    } else {
-        Err(ArtifactFault::NotImmutable)
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn judge_immutability(_metadata: &Metadata) -> Result<(), ArtifactFault> {
-    Err(ArtifactFault::ImmutabilityUnverifiable)
-}
-
-fn hash(checked: &Checked) -> Result<Digest, ArtifactFault> {
-    let bounded = Positioned {
-        file: &checked.file,
-        offset: 0,
-    }
-    .take(checked.stamp.size.saturating_add(1));
-    Digest::of_reader(bounded).map_err(|error| io_fault("pread", &error))
-}
-
-pub(crate) struct Positioned<'a> {
-    pub(crate) file: &'a File,
-    pub(crate) offset: u64,
-}
-
-impl Read for Positioned<'_> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let read = self.file.read_at(buffer, self.offset)?;
-        self.offset += read as u64;
-        Ok(read)
-    }
-}
-
-fn io_fault(op: &'static str, error: &io::Error) -> ArtifactFault {
-    ArtifactFault::Io {
-        op,
-        errno: error.raw_os_error().unwrap_or(libc::EIO),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Stamp {
-    size: u64,
-    modified: (i64, i64),
-    changed: (i64, i64),
-}
-
-fn judge_artifact(facts: &Facts, euid: u32) -> Result<(), ArtifactFault> {
-    if facts.kind != Kind::Regular {
-        return Err(ArtifactFault::NotRegular { kind: facts.kind });
-    }
-    if facts.uid != 0 && facts.uid != euid {
-        return Err(ArtifactFault::ForeignOwner { uid: facts.uid });
-    }
-    if facts.mode & 0o222 != 0 {
-        return Err(ArtifactFault::Writable { mode: facts.mode });
-    }
-    if facts.mode & 0o6000 != 0 {
-        return Err(ArtifactFault::SetIdBits { mode: facts.mode });
-    }
-    Ok(())
-}
-
-fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
-    if before == after {
-        Ok(())
-    } else {
-        Err(ArtifactFault::ChangedWhileHashing)
+fn checked_identity(checked: &CheckedFile) -> FileIdentity {
+    let facts = checked.facts();
+    FileIdentity {
+        dev: facts.dev,
+        ino: facts.ino,
     }
 }
 
 #[cfg(all(test, not(target_os = "macos")))]
-pub(crate) fn verified_for_test(role: ArtifactRole, path: &std::path::Path) -> VerifiedArtifact {
-    let file = File::open(path).expect("the test file opens");
-    let metadata = stat(&file).expect("fstat");
-    VerifiedArtifact {
-        role,
-        path: RecipePath::parse(path.to_str().expect("UTF-8")).expect("a canonical path"),
-        walk: Walk::from_root(path).expect("the walk starts"),
-        identity: FileIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        },
-        stamp: stamp(&metadata),
-        digest: Digest::of(b""),
-        file,
-    }
-}
+pub(crate) use tests::verified_for_test;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime::strict_json;
     use crate::runtime::test_fixtures::tree::{ArtifactTree, make_fifo};
+    use plasmosome_core::artifact::ArtifactFault as CoreFault;
+    use plasmosome_core::nofollow::Kind;
     use std::os::unix::fs::{OpenOptionsExt, symlink};
     use std::path::Path;
     use std::sync::mpsc;
     use std::time::Duration;
-
-    const EUID: u32 = 501;
-    const OTHER: u32 = 502;
-
-    fn facts(kind: Kind, uid: u32, mode: u32) -> Facts {
-        Facts {
-            kind,
-            uid,
-            mode,
-            dev: 1,
-            ino: 2,
-        }
-    }
 
     fn artifact_at(path: &Path, sha256: &Digest) -> Artifact {
         let text = serde_json::json!({
@@ -494,102 +287,38 @@ mod tests {
         verify_artifact(ArtifactRole::Kernel, &artifact_at(path, sha256))
     }
 
-    fn fault_of(outcome: Result<VerifiedArtifact, ArtifactRefusal>) -> ArtifactFault {
+    fn fault_of(outcome: Result<VerifiedArtifact, ArtifactRefusal>) -> CoreFault {
         match outcome {
             Ok(verified) => panic!("{} verified", verified.path().as_str()),
-            Err(refusal) => refusal.fault,
+            Err(ArtifactRefusal {
+                fault: ArtifactFault::Rule(fault),
+                ..
+            }) => fault,
+            Err(refusal) => panic!("{:?} is not a rule of core's judge", refusal.fault),
         }
     }
 
-    fn walk_fault(path: &Path) -> ArtifactFault {
+    fn walk_fault(path: &Path) -> CoreFault {
         fault_of(verify_pinned(path, &Digest::of(b"kernel")))
     }
 
-    #[test]
-    fn the_judge_accepts_a_regular_file_of_root_or_the_effective_uid_with_no_write_or_set_id_bit() {
-        for accepted in [
-            facts(Kind::Regular, EUID, 0o444),
-            facts(Kind::Regular, 0, 0o555),
-            facts(Kind::Regular, EUID, 0o400),
-            facts(Kind::Regular, EUID, 0o1555),
-        ] {
-            assert_eq!(judge_artifact(&accepted, EUID), Ok(()), "{accepted:?}");
-        }
-    }
-
-    #[test]
-    fn the_judge_refuses_another_type_a_foreign_owner_a_write_bit_and_a_set_id_bit_in_that_order() {
-        use ArtifactFault::{ForeignOwner, SetIdBits, Writable};
-        use Kind::{Directory, Other, Regular, Socket, Symlink};
-        let not_regular = |kind| ArtifactFault::NotRegular { kind };
-        let rows = [
-            (facts(Directory, EUID, 0o555), not_regular(Directory)),
-            (facts(Other, EUID, 0o444), not_regular(Other)),
-            (facts(Socket, EUID, 0o444), not_regular(Socket)),
-            (facts(Symlink, EUID, 0o444), not_regular(Symlink)),
-            (facts(Other, OTHER, 0o666), not_regular(Other)),
-            (facts(Regular, OTHER, 0o444), ForeignOwner { uid: OTHER }),
-            (facts(Regular, OTHER, 0o4777), ForeignOwner { uid: OTHER }),
-            (facts(Regular, EUID, 0o644), Writable { mode: 0o644 }),
-            (facts(Regular, EUID, 0o464), Writable { mode: 0o464 }),
-            (facts(Regular, 0, 0o446), Writable { mode: 0o446 }),
-            (facts(Regular, EUID, 0o4755), Writable { mode: 0o4755 }),
-            (facts(Regular, EUID, 0o4555), SetIdBits { mode: 0o4555 }),
-            (facts(Regular, 0, 0o2555), SetIdBits { mode: 0o2555 }),
-        ];
-        for (facts, fault) in rows {
-            assert_eq!(judge_artifact(&facts, EUID), Err(fault), "{facts:?}");
-        }
-    }
-
-    #[test]
-    fn a_size_modification_or_change_time_that_moved_while_hashing_refuses() {
-        let before = Stamp {
-            size: 10,
-            modified: (100, 1),
-            changed: (200, 2),
-        };
-        assert_eq!(judge_unchanged(before, before), Ok(()));
-        for after in [
-            Stamp { size: 11, ..before },
-            Stamp {
-                modified: (100, 2),
-                ..before
-            },
-            Stamp {
-                changed: (201, 2),
-                ..before
-            },
-        ] {
-            assert_eq!(
-                judge_unchanged(before, after),
-                Err(ArtifactFault::ChangedWhileHashing),
-                "{after:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_hash_stops_one_byte_past_the_size_the_check_stamped_after_the_file_grows() {
-        let tree = ArtifactTree::new();
-        let path = tree.file("kernel", b"kernel", 0o644);
-        let file = File::open(&path).expect("the file opens");
-        let metadata = stat(&file).expect("fstat");
-        let checked = Checked {
-            file,
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn verified_for_test(role: ArtifactRole, path: &Path) -> VerifiedArtifact {
+        use std::os::unix::fs::MetadataExt;
+        let file = File::open(path).expect("the test file opens");
+        let metadata = file.metadata().expect("fstat");
+        VerifiedArtifact {
+            role,
+            path: RecipePath::parse(path.to_str().expect("UTF-8")).expect("a canonical path"),
+            walk: Walk::from_root(path).expect("the walk starts"),
             identity: FileIdentity {
                 dev: metadata.dev(),
                 ino: metadata.ino(),
             },
-            stamp: stamp(&metadata),
-        };
-        assert_eq!(hash(&checked), Ok(Digest::of(b"kernel")));
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .and_then(|mut writer| io::Write::write_all(&mut writer, b" and more"))
-            .expect("the file grows");
-        assert_eq!(hash(&checked), Ok(Digest::of(b"kernel ")));
+            stamp: Stamp::of(&metadata),
+            digest: Digest::of(b""),
+            file,
+        }
     }
 
     #[test]
@@ -601,13 +330,13 @@ mod tests {
         symlink(&file, tree.join("kernel-link")).expect("symlink");
         assert_eq!(
             walk_fault(&tree.join("link/kernel")),
-            ArtifactFault::Walk(WalkRefusal::Symlink {
+            CoreFault::Walk(WalkRefusal::Symlink {
                 path: tree.join("link")
             })
         );
         assert_eq!(
             walk_fault(&tree.join("kernel-link")),
-            ArtifactFault::Walk(WalkRefusal::Symlink {
+            CoreFault::Walk(WalkRefusal::Symlink {
                 path: tree.join("kernel-link")
             })
         );
@@ -618,13 +347,13 @@ mod tests {
         let tree = ArtifactTree::new();
         assert_eq!(
             walk_fault(&tree.join("absent/kernel")),
-            ArtifactFault::Walk(WalkRefusal::Missing {
+            CoreFault::Walk(WalkRefusal::Missing {
                 path: tree.join("absent")
             })
         );
         assert_eq!(
             walk_fault(&tree.join("kernel")),
-            ArtifactFault::Walk(WalkRefusal::Missing {
+            CoreFault::Walk(WalkRefusal::Missing {
                 path: tree.join("kernel")
             })
         );
@@ -639,7 +368,7 @@ mod tests {
             crate::runtime::test_fixtures::tree::set_mode(&dir, mode);
             assert_eq!(
                 walk_fault(&dir.join("kernel")),
-                ArtifactFault::Walk(WalkRefusal::Replaceable { path: dir, mode }),
+                CoreFault::Walk(WalkRefusal::Replaceable { path: dir, mode }),
                 "{name}"
             );
         }
@@ -651,7 +380,7 @@ mod tests {
         let dir = tree.dir("kernel", 0o555);
         assert_eq!(
             walk_fault(&dir),
-            ArtifactFault::NotRegular {
+            CoreFault::NotRegular {
                 kind: Kind::Directory
             }
         );
@@ -677,7 +406,7 @@ mod tests {
         let _ = worker.join();
         assert_eq!(
             fault.expect("the verification returns within 2 s"),
-            ArtifactFault::NotRegular { kind: Kind::Other }
+            CoreFault::NotRegular { kind: Kind::Other }
         );
     }
 
@@ -688,7 +417,7 @@ mod tests {
         let path = tree.file("kernel", b"kernel", 0o444);
         assert_eq!(
             fault_of(verify_pinned(&path, &Digest::of(b"kernel"))),
-            ArtifactFault::ImmutabilityUnverifiable
+            CoreFault::ImmutabilityUnverifiable
         );
     }
 
@@ -711,34 +440,17 @@ mod tests {
     #[test]
     fn each_fault_says_what_was_found() {
         use ArtifactFault::*;
-        use Kind::{Directory, Other, Regular, Socket, Symlink};
-        let (expected, actual) = (Digest::of(b"a"), Digest::of(b"b"));
-        let mismatch = format!("{actual}, not the pinned {expected}");
         let replaced = Replaced {
             verified: FileIdentity { dev: 7, ino: 8 },
             found: FileIdentity { dev: 7, ino: 9 },
         };
-        let io = Io {
-            op: "fstat",
-            errno: 5,
-        };
         let rows = [
-            (NotRegular { kind: Other }, "special file, not a regular"),
-            (NotRegular { kind: Directory }, "a directory, not"),
-            (NotRegular { kind: Socket }, "a socket, not"),
-            (NotRegular { kind: Symlink }, "a symlink, not"),
-            (NotRegular { kind: Regular }, "a regular file, not"),
-            (ForeignOwner { uid: OTHER }, "owned by uid 502"),
-            (Writable { mode: 0o644 }, "mode 0644, with a write bit"),
-            (SetIdBits { mode: 0o4555 }, "mode 4555, with a set-user"),
-            (WriteAcl, "ACL allow entry granting write"),
-            (NotImmutable, "neither uchg nor schg"),
-            (ImmutabilityUnverifiable, "cannot show it immutable"),
-            (ChangedWhileHashing, "moved while it was hashed"),
+            (
+                Rule(CoreFault::NotImmutable),
+                "it has neither uchg nor schg set",
+            ),
             (ChangedSinceVerification, "moved after it was verified"),
-            (DigestMismatch { expected, actual }, &mismatch),
             (replaced, "inode 9, not the verified device 7 inode 8"),
-            (io, "fstat failed with errno 5"),
         ];
         for (fault, part) in rows {
             let shown = fault.to_string();
@@ -773,6 +485,10 @@ mod tests {
 
         fn reconfirmed(verified: &VerifiedArtifact) -> Result<(), ArtifactFault> {
             verified.reconfirm().map_err(|refusal| refusal.fault)
+        }
+
+        fn by_rule(fault: CoreFault) -> Result<(), ArtifactFault> {
+            Err(ArtifactFault::Rule(fault))
         }
 
         #[allow(unsafe_code)]
@@ -884,21 +600,20 @@ mod tests {
                 .expect("the per-user temp directory is under /private/var");
             assert_eq!(
                 walk_fault(Path::new(alias)),
-                ArtifactFault::Walk(WalkRefusal::Symlink {
+                CoreFault::Walk(WalkRefusal::Symlink {
                     path: "/var".into()
                 })
             );
         }
 
         #[test]
-        fn a_wrong_pin_refuses_with_the_pinned_and_the_actual_digest() {
+        fn a_wrong_pin_refuses_with_the_digest_found() {
             let tree = ArtifactTree::new();
             let path = tree.immutable_file("kernel", b"kernel");
             assert_eq!(
                 fault_of(verify_pinned(&path, &Digest::of(b"another kernel"))),
-                ArtifactFault::DigestMismatch {
-                    expected: Digest::of(b"another kernel"),
-                    actual: Digest::of(b"kernel"),
+                CoreFault::Digest {
+                    found: Digest::of(b"kernel")
                 }
             );
         }
@@ -914,99 +629,15 @@ mod tests {
             let pin = Digest::of(b"kernel");
             assert_eq!(
                 fault_of(verify_pinned(&plain, &pin)),
-                ArtifactFault::NotImmutable
+                CoreFault::NotImmutable
             );
             assert_eq!(
                 fault_of(verify_pinned(&writable, &pin)),
-                ArtifactFault::Writable { mode: 0o644 }
+                CoreFault::Writable { mode: 0o644 }
             );
             assert_eq!(
                 fault_of(verify_pinned(&set_id, &pin)),
-                ArtifactFault::SetIdBits { mode: 0o4555 }
-            );
-        }
-
-        #[test]
-        fn only_uchg_or_schg_counts_as_immutable() {
-            use libc::{SF_APPEND, SF_IMMUTABLE, UF_APPEND, UF_HIDDEN, UF_IMMUTABLE, UF_NODUMP};
-            for flags in [
-                UF_IMMUTABLE,
-                SF_IMMUTABLE,
-                UF_IMMUTABLE | SF_IMMUTABLE,
-                UF_IMMUTABLE | UF_NODUMP,
-            ] {
-                assert_eq!(judge_flags(flags), Ok(()), "{flags:#x}");
-            }
-            for flags in [0, UF_NODUMP, UF_HIDDEN, UF_APPEND, SF_APPEND] {
-                let refused = Err(ArtifactFault::NotImmutable);
-                assert_eq!(judge_flags(flags), refused, "{flags:#x}");
-            }
-        }
-
-        fn checked_at(path: &Path) -> (Walk, Checked) {
-            let walk = Walk::from_root(path).expect("the walk starts at /");
-            let checked = open_checked(&walk).expect("the locked file passes the checks");
-            (walk, checked)
-        }
-
-        const CLOCK_PROBE_WRITES: u32 = 100_000;
-
-        fn change_time_after_a_write(probe: &File) -> (i64, i64) {
-            probe
-                .write_all_at(b"tick", 0)
-                .expect("the probe is written");
-            let probed = probe.metadata().expect("fstat");
-            (probed.ctime(), probed.ctime_nsec())
-        }
-
-        fn after_the_clock_passes(tree: &ArtifactTree, stamp: Stamp) {
-            let probe = fs::OpenOptions::new()
-                .write(true)
-                .open(tree.file("clock", b"", 0o644))
-                .expect("the clock probe opens");
-            let mut probed = change_time_after_a_write(&probe);
-            let mut writes = 1;
-            while probed <= stamp.changed {
-                assert!(
-                    writes < CLOCK_PROBE_WRITES,
-                    "the file clock does not move on writes: after {writes} probe writes, far \
-                     more than the one APFS needs, the probe's change time {probed:?} is not past \
-                     the checked change time {:?}",
-                    stamp.changed
-                );
-                probed = change_time_after_a_write(&probe);
-                writes += 1;
-            }
-        }
-
-        #[test]
-        fn a_held_writer_rewriting_the_same_bytes_after_the_check_is_refused_as_changed() {
-            let tree = ArtifactTree::new();
-            let bytes = vec![7; 4 << 20];
-            let path = tree.file("rootfs.raw", &bytes, 0o644);
-            let writer = fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .expect("a writer opened before the lock");
-            set_mode(&path, 0o444);
-            set_flags(&path, libc::UF_IMMUTABLE);
-            let artifact = artifact_at(&path, &Digest::of(&bytes));
-            let verify = |(walk, checked): (Walk, Checked)| {
-                verify_checked(ArtifactRole::RootImage, &artifact, walk, checked).map(|_| ())
-            };
-            assert_eq!(
-                verify(checked_at(&path)),
-                Ok(()),
-                "with no write it verifies"
-            );
-            let (walk, checked) = checked_at(&path);
-            after_the_clock_passes(&tree, checked.stamp);
-            writer
-                .write_all_at(&bytes[..16], 0)
-                .expect("the held writer still writes under uchg");
-            assert_eq!(
-                verify((walk, checked)),
-                Err(ArtifactFault::ChangedWhileHashing)
+                CoreFault::SetIdBits { mode: 0o4555 }
             );
         }
 
@@ -1020,11 +651,11 @@ mod tests {
             set_flags(&path, libc::UF_IMMUTABLE);
             assert_eq!(
                 fault_of(verify_pinned(&path, &Digest::of(b"kernel"))),
-                ArtifactFault::WriteAcl
+                CoreFault::WriteAcl
             );
             assert_eq!(
                 fault_of(verify_pinned(&unlocked, &Digest::of(b"kernel"))),
-                ArtifactFault::WriteAcl
+                CoreFault::WriteAcl
             );
         }
 
@@ -1116,7 +747,7 @@ mod tests {
             assert_eq!(descriptors_naming(&identity).len(), 1, "after it passed");
             set_flags(&path, 0);
             for _ in 0..50 {
-                assert_eq!(reconfirmed(&verified), Err(ArtifactFault::NotImmutable));
+                assert_eq!(reconfirmed(&verified), by_rule(CoreFault::NotImmutable));
             }
             assert_eq!(descriptors_naming(&identity).len(), 1, "after it refused");
         }
@@ -1127,11 +758,11 @@ mod tests {
             let path = tree.immutable_file("kernel", b"kernel");
             let verified = verify_pinned(&path, &Digest::of(b"kernel")).expect("verifies");
             set_flags(&path, 0);
-            assert_eq!(reconfirmed(&verified), Err(ArtifactFault::NotImmutable));
+            assert_eq!(reconfirmed(&verified), by_rule(CoreFault::NotImmutable));
             set_mode(&path, 0o644);
             set_flags(&path, libc::UF_IMMUTABLE);
-            let writable = ArtifactFault::Writable { mode: 0o644 };
-            assert_eq!(reconfirmed(&verified), Err(writable));
+            let writable = CoreFault::Writable { mode: 0o644 };
+            assert_eq!(reconfirmed(&verified), by_rule(writable));
         }
 
         #[test]
@@ -1143,7 +774,7 @@ mod tests {
             set_mode(&boot, 0o775);
             assert_eq!(
                 reconfirmed(&verified),
-                Err(ArtifactFault::Walk(WalkRefusal::Replaceable {
+                by_rule(CoreFault::Walk(WalkRefusal::Replaceable {
                     path: boot,
                     mode: 0o775
                 }))
@@ -1164,7 +795,7 @@ mod tests {
             assert_eq!(identity_of(&path), verified.identity());
             assert_eq!(
                 reconfirmed(&verified),
-                Err(ArtifactFault::Walk(WalkRefusal::Symlink { path: boot }))
+                by_rule(CoreFault::Walk(WalkRefusal::Symlink { path: boot }))
             );
         }
 
