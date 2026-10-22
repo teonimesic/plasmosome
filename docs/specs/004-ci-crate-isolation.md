@@ -99,11 +99,18 @@ blocked on owner decisions. This spec ships the strongest check available short 
   spec 026's pin made untrue.
 
 `macos` and `coverage` run on every pull request and every push to main: the workflow's triggers
-carry no `paths` filter and neither job has an `if:`. Each step runs one command, except that a
-captured test step is one pipeline under `shell: bash`, which GitHub runs with `-eo pipefail`, so
-the pipeline fails when any command in it fails; the implementing task rewords `ci.yml`'s header
-to say so. On a push each commit has its own concurrency group, so no run on main is cancelled;
-only a pull request cancels its superseded run.
+carry no `paths` filter and neither job has an `if:`. Each step runs one command, with two
+exceptions, and `ci.yml`'s header says so. A captured test step is one pipeline under
+`shell: bash`, which GitHub runs with `-eo pipefail`, so the pipeline fails when any command in it
+fails. A summary step, which prints a report and gates nothing, may run several commands under
+`set -eu` with no pipe, so any failed command, or an unset variable, fails the step. On a push each
+commit has its own concurrency group, so no run on main is cancelled; only a pull request cancels
+its superseded run.
+
+Amended on 2026-10-22, by a ruling Main made under the owner's delegation on plasmosome-boa9: the
+summary step's exception is new. `coverage`'s summary step runs `cargo llvm-cov report` and prints
+its table with `printf` since plasmosome-boa9 took the Python out of it, and a failure of either
+fails the step.
 
 ### What the matrix does and does not prove
 

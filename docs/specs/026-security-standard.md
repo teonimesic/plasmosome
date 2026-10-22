@@ -550,15 +550,17 @@ when Q1 is answered. It never names a route nobody receives.
 This spec governs a PR, whatever task it maps to, when the PR changes any of these: a lockfile; a
 manifest's dependency, `[lints]`, `[patch]` or `[replace]` tables; `.cargo/config*`, `build.rs`,
 `clippy.toml`, `rust-toolchain*` or `deny.toml`; a library root's `#![doc(test(...))]`; anything
-under `.github/`, `.githooks/`, `tools/` or `docs/dependencies/`; `unsafe` or native code; a pin of
-a native artifact that section 1 records, such as `PINNED_BUNDLE_ID` in
-`crates/plasmosome-lanes/src/bundle.rs`; a parser
-of less-trusted bytes or a fuzz corpus; or `SECURITY.md`. Its reviewer checks the reviewer rows of
-section 7, and reads any change under `tools/` as a workflow change, whether or not a workflow
-names the file. Workflows run scripts there, and a module added beside a Python script can shadow
-the standard-library module of that name. So a PR that only adds a file under `tools/` can switch a
-check off and still pass its own CI. Amended on 2026-10-20: the doctest attribute and `tools/` were
-not in this list. Amended on 2026-10-21: native artifact pins were not in this list.
+under `.github/`, `.githooks/`, `tools/`, `crates/plasmosome-tools/` or `docs/dependencies/`;
+`unsafe` or native code; a pin of a native artifact that section 1 records, such as
+`PINNED_BUNDLE_ID` in `crates/plasmosome-lanes/src/bundle.rs`; a parser of less-trusted bytes or a
+fuzz corpus; or `SECURITY.md`. Its reviewer checks the reviewer rows of section 7, and reads any
+change under `tools/` or `crates/plasmosome-tools/` as a workflow change, whether or not a workflow
+names the file. Workflows run programs from both. A module added beside a Python script in `tools/`
+can shadow the standard-library module of that name, and a change to a tool's Rust code can make it
+pass what it should refuse. So a PR that only changes a file in either place can switch a check off
+and still pass its own CI. Amended on 2026-10-20: the doctest attribute and `tools/` were not in
+this list. Amended on 2026-10-21: native artifact pins were not in this list. Amended on 2026-10-22:
+this did not name `crates/plasmosome-tools/`.
 
 ## Changes proposed to accepted specs and documents
 
