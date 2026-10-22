@@ -352,8 +352,10 @@ fn refused(path: &RecipePath, fault: CellDirectoryFault) -> CellDirectoryRefusal
 /// Why a cell directory or a writable root was refused: a path and the first rule it broke. The
 /// path is the one asked for, except that a private directory that no longer reconfirms inside
 /// [`WritableRoot::create`] gives the directory's path. A refusal from `create` leaves no file it
-/// made, with two exceptions: the empty new file stays if its `fstat` fails, and the copy stays if
-/// removing it fails or finds another object at the name.
+/// made, with three exceptions: the empty new file stays if its `fstat` fails; the copy stays if
+/// removing it fails or finds another object at the name; and a copy renamed away stays under its
+/// new name, because its removal then finds the name gone, or unlinks an object put at the name
+/// between the inspection and the unlink.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellDirectoryRefusal {
     pub path: RecipePath,
@@ -415,7 +417,7 @@ impl fmt::Display for CellDirectoryFault {
             CellDirectoryFault::Source(fault) => {
                 write!(
                     f,
-                    "the root image changed or moved after it was verified: {fault}"
+                    "the root image did not pass its reconfirm after the copy: {fault}"
                 )
             }
             CellDirectoryFault::Io { op, errno } => write!(f, "{op} failed with errno {errno}"),
@@ -797,8 +799,10 @@ mod tests {
         let moved = cell.base.join("moved");
         fs::rename(&cell.dir, &moved).expect("rename");
         make_dir(&cell.dir, 0o700);
+        let refusal = copy_of(&cell.root_img(), &dir, b"bytes").expect_err("the copy is refused");
+        assert_eq!(refusal.path.as_path(), cell.dir);
         assert_eq!(
-            fault_of(copy_of(&cell.root_img(), &dir, b"bytes")),
+            refusal.fault,
             private(PrivateSocketError::Replaced {
                 path: cell.dir.clone()
             })
@@ -947,7 +951,14 @@ mod tests {
             (CopyMismatch { expected, actual }, &mismatch),
             (
                 Source(ArtifactFault::ChangedSinceVerification),
-                "the root image changed or moved after it was verified: its size or times",
+                "the root image did not pass its reconfirm after the copy: its size or times moved",
+            ),
+            (
+                Source(ArtifactFault::Io {
+                    op: "openat",
+                    errno: 24,
+                }),
+                "the root image did not pass its reconfirm after the copy: openat failed with errno 24",
             ),
             (
                 Io {
