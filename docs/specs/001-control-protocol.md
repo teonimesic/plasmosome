@@ -1712,7 +1712,7 @@ is a claim that the text above may not be corrected.
    refused with `ambiguous_instance` and the candidate list. Cell selection (§2) is **not yet**:
    code `100` and its `candidates` field exist, but no served verb takes a cell, so nothing
    resolves one. Amended on 2026-10-21, when spec 025's amendment A gave instance selection to
-   the command line (#296). Until then this item read
+   the command line (plasmosome-6yev). Until then this item read
    "Ambiguity-as-error with candidate lists is the only selection semantics — **delivered** (§2)."
 6. Ledger replayable-from-log and residue-empty as standing rows — ledger property green
    today (rule 3); the D4 residue row re-points at the membrane in P1 step 2.
