@@ -1,0 +1,26 @@
+[package]
+name = "plasmosome-tools"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lib]
+name = "plasmosome_tools"
+path = "src/lib.rs"
+bench = false
+
+[[bin]]
+name = "bench-medians"
+path = "src/bin/bench_medians.rs"
+bench = false
+
+[lints]
+workspace = true
