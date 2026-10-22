@@ -639,9 +639,12 @@ directory.
 `Walk::identities` is spec 022 §3 rule 1's walk alone, and it is crate-private. It opens every
 component, the last as a directory, without following a symlink, and judges no directory. It
 returns the identity of the start and of every directory down to the last. A symlink, a missing
-name, a component that is not a directory and a directory the effective UID cannot search each
-refuse. It shows which directories a path passes, not whether they can be trusted, so the public
-walk's promise that every directory passed meets the ancestor rule still holds.
+name, a component that is not a directory and a directory above the last that the effective UID
+cannot search each refuse. The last directory is opened for search only. On macOS that is
+`O_SEARCH`, so a last directory the effective UID cannot search refuses too. On Linux it is
+`O_PATH`, which opens that directory anyway and returns its identity. It shows which directories
+a path passes, not whether they can be trusted, so the public walk's promise that every directory
+passed meets the ancestor rule still holds.
 
 ## Trusted files
 
@@ -686,24 +689,47 @@ every Mount source. `operator::sources` checks it, and nothing calls it yet.
 `Probes::probe` takes every Mount source a cell holds or has pending, and every one the operator
 file declares, each with its holder. It opens each path once with `Walk::identities`, so no
 symlink is followed and no directory is judged. `Probes::check` then refuses an open
-`TrustedFile` with `inside_mount_source` when a source's identity is in the file's chain: the
-file's directory is that source, or lies below it. Only device and inode are compared, never path
-text, so a sibling named `<source>-x` passes.
+`TrustedFile` with `inside_mount_source` when a source's identity is on a chain of the file's
+directory: the directory is that source, or lies below it. Only device and inode are compared,
+never path text. So a sibling named `<source>-x` passes, and a source spelled in another case on
+a case-insensitive volume, or spelled through `/System/Volumes/Data`, holds what it names.
 
 - A held or pending source that no longer opens, renamed away or now a symlink, refuses only the
-  requests that resolve for its own cell. No other cell is blocked.
-- A declared source that does not open is skipped. It cannot be mounted either.
-- On macOS, a file whose chain passes `/System/Volumes/Data` is refused. A firmlink such as
-  `/Users` or `/private` opens a directory of that data volume, so the directory has a second
-  parent that no walk from `/` sees, and identities cannot decide what holds it. The same path
-  through its firmlink passes. If `/System/Volumes/Data` is missing there are no firmlinks and no
-  such rule; if it does not open, every file is refused rather than leave the hole open. Linux
+  requests that resolve for its own cell. No other cell is blocked. The caller must label such a
+  source with its cell and pass the request's cell. A request for an existing cell checked as if
+  it made a new cell, or a held source labelled as declared, checks less, and nothing signals it.
+- A declared source that does not open is skipped. Spec 022 says it cannot be mounted either.
+  That holds only once §6's source guard (native task plasmosome-98hv) refuses it at resolution
+  and spec 017's Mount adapter walks it again at apply. Neither exists yet.
+- On macOS a firmlink such as `/Users`, `/private` or `/usr/local` opens a directory of the data
+  volume, so that directory has a second parent that no walk from `/` sees. Rule 5 counts both
+  chains. It opens `/System/Volumes/Data` followed by the directory's path, and when that
+  spelling opens the same directory, every directory on the way counts too. So `/System`,
+  `/System/Volumes`, `/System/Volumes/Data` and `/System/Volumes/Data/usr` each hold a file under
+  `/usr/local`, while `/System/Volumes/Data/usr` does not hold one under `/private`. A spelling
+  that is missing, or that opens another directory, means the directory has no second parent. If
+  the spelling or the data volume does not open for any other reason, every file it concerns is
+  refused rather than leave the hole open.
+- On macOS a file opened through `/System/Volumes/Data`, in any letter case, is refused. A walk
+  from there misses the firmlink's own parents, such as the system `/usr` above `/usr/local`. The
+  same file opened through its firmlink passes unless a source holds it. If
+  `/System/Volumes/Data` is missing there are no firmlinks and neither macOS rule applies. Linux
   has no firmlinks.
 
 Rule 5's limits in spec 022 hold as written. It opens the path recorded at attach, so an operator
-who renames a held Mount root escapes it, and a quarantine report with no observation gives no
-sources. The guard that keeps a new Mount source away from spec 022 §6's guarded directories
-comes with native task plasmosome-98hv.
+who renames a held Mount root, or a directory above it, escapes it. A quarantine report with no
+observation gives no sources. Two more cases escape it:
+
+- A view of a directory inside a source, placed somewhere else, such as a Linux bind mount or a
+  bindfs (macFUSE) view on macOS. A file under the view has a chain without the source, so it
+  passes. Only root or the operator can make such a view; a cell cannot mount anything on the
+  host.
+- A firmlink whose data-side name differs from its own path. Rule 5 finds the second chain by
+  joining the directory's path to `/System/Volumes/Data`, so such a firmlink would hide it.
+  `/usr/share/firmlinks` lists none on macOS 26.6.2.
+
+The guard that keeps a new Mount source away from spec 022 §6's guarded directories comes with
+native task plasmosome-98hv.
 
 ## Artifacts
 

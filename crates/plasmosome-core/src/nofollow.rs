@@ -186,8 +186,10 @@ impl Walk {
     /// judging any directory: spec 022 §3 rule 1's walk alone. It returns the identity of the start
     /// and of every directory below it, ending with the last. A symlink anywhere is `Symlink`, a
     /// missing name `Missing`, a component that is not a directory `NotDirectory`, and a
-    /// directory the effective UID cannot search `Io`. It shows which directories a path passes;
-    /// never trust what it reaches.
+    /// directory above the last that the effective UID cannot search `Io`. The last directory is
+    /// opened for search only: on macOS one the effective UID cannot search is `Io`, and on Linux
+    /// `O_PATH` opens it anyway and returns its identity. It shows which directories a path
+    /// passes; never trust what it reaches.
     pub(crate) fn identities(&self) -> Result<Vec<DirIdentity>, WalkRefusal> {
         let mut at = self.start_path.clone();
         let mut chain = vec![stat_fd(&self.start, &at)?.identity()];
