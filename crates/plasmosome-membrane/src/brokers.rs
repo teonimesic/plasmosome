@@ -997,6 +997,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_shutdown_seen_between_two_brokers_gives_no_verdict_for_the_one_that_answered() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let first = specs[0].control_socket.clone();
+        let clock = Clock::moving_only_when_advanced();
+        let prober = Rc::new(AnsweringProbe::answering(Ok(ready())));
+        let set =
+            BrokerSet::spawn(specs, forking(), Rc::clone(&prober)).expect("every broker forks");
+        let readings = Cell::new(0);
+        let read = clock.now();
+
+        let status = set.status_with(DEADLINE, &flag, || {
+            readings.set(readings.get() + 1);
+            if readings.get() == 4 {
+                flag.store(true, Ordering::Relaxed);
+            }
+            read()
+        });
+
+        assert_eq!(
+            status,
+            Err(Cancelled),
+            "shutdown was seen after `egressd` answered ready and before `dnsd` was asked, so the status has no verdict, not even a partial one"
+        );
+        assert_eq!(
+            prober.asked(),
+            [first],
+            "`dnsd` may not be asked once shutdown has been seen"
+        );
+        assert_eq!(
+            readings.get(),
+            4,
+            "the flag must rise at the check before `dnsd`: the budget's start, the checks before and after `egressd`, then that one"
+        );
+    }
+
     struct ReadyAfterProbe {
         after: Duration,
         reads: Mutex<Vec<(Option<Duration>, Instant)>>,
