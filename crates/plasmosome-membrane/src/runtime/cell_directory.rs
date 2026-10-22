@@ -70,9 +70,11 @@ impl PrivateDirectory {
 /// The per-cell RAW copy of the verified root image that spec 001 §4.2 calls `writable_root`.
 ///
 /// Only [`WritableRoot::create`] makes one, as a new file inside a [`PrivateDirectory`]. It keeps
-/// the file and that directory open. [`WritableRoot::remove`] removes it only while the name in
-/// the held directory still holds the file it created; dropping it does the same, so a refusal or
-/// a panic after the copy leaves no copy behind.
+/// the file and that directory open. [`WritableRoot::remove`] inspects the name in the held
+/// directory and unlinks it only if it still holds the file it created. The inspection and the
+/// unlink are two steps, so another writer can put an object at the name between them. Dropping
+/// it does the same, so a refusal or a panic after the copy removes the copy, unless that removal
+/// fails or finds another object at the name.
 #[derive(Debug)]
 pub struct WritableRoot {
     path: RecipePath,
@@ -87,13 +89,19 @@ impl WritableRoot {
     /// Creates `path` inside `parent` and copies the verified root image into it.
     ///
     /// `source` must be the recipe's root image, and `path`'s parent must be the path `parent` was
-    /// opened at, which must still pass [`PrivateDirectory::reconfirm`]. The name is created with
-    /// `O_CREAT | O_EXCL | O_NOFOLLOW`, so any entry already there, a symlink included, is
-    /// `Exists` and is left as it was. The file is set to mode 0600 whatever the umask. The bytes
-    /// are read through `source.file()` with positioned reads, at most one byte past the size it
-    /// was verified at, and hashed while they are written; a digest other than `source.digest()`
-    /// is `CopyMismatch`. The copy is synced, then `source.reconfirm()` must pass, or the refusal
-    /// is `Source`. Every refusal after the name was created removes the copy by identity.
+    /// opened at, which must still pass [`PrivateDirectory::reconfirm`]; that refusal carries the
+    /// directory's path, not `path`. The name is created with `O_CREAT | O_EXCL | O_NOFOLLOW`, so
+    /// any entry already there, a symlink included, is `Exists` and is left as it was. The file is
+    /// set to mode 0600 whatever the umask. The bytes are read through `source.file()` with
+    /// positioned reads, at most one byte past the size it was verified at, and hashed while they
+    /// are written; a digest other than `source.digest()` is `CopyMismatch`. The copy is synced,
+    /// then `source.reconfirm()` must pass, or the refusal is `Source`.
+    ///
+    /// A refusal after the new file's `fstat` removes the copy by identity, as
+    /// [`WritableRoot::remove`] does, and only as far as that removal can: one that fails, or
+    /// finds another object at the name, leaves what is there. If that `fstat` fails, right after
+    /// the file is created, the empty file stays at the name, since there is no identity to
+    /// remove it by.
     pub fn create(
         path: &RecipePath,
         parent: &PrivateDirectory,
@@ -341,8 +349,11 @@ fn refused(path: &RecipePath, fault: CellDirectoryFault) -> CellDirectoryRefusal
     }
 }
 
-/// Why a cell directory or a writable root was refused: the path asked for and the first rule it
-/// broke. When the refusal returns, no file this call created remains.
+/// Why a cell directory or a writable root was refused: a path and the first rule it broke. The
+/// path is the one asked for, except that a private directory that no longer reconfirms inside
+/// [`WritableRoot::create`] gives the directory's path. A refusal from `create` leaves no file it
+/// made, with two exceptions: the empty new file stays if its `fstat` fails, and the copy stays if
+/// removing it fails or finds another object at the name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CellDirectoryRefusal {
     pub path: RecipePath,
@@ -365,8 +376,10 @@ pub enum CellDirectoryFault {
     Exists,
     /// The bytes copied hash to `actual`, not the verified `expected`.
     CopyMismatch { expected: Digest, actual: Digest },
-    /// After the copy, the root image's `reconfirm` refused: its path names another file, or its
-    /// size or times moved since it was verified.
+    /// After the copy, the root image's `reconfirm` refused, and this is the fault it returned:
+    /// `Replaced` when its path names another file, `ChangedSinceVerification` when its size or
+    /// times moved since it was verified, or any other fault of the checks `reconfirm` repeats,
+    /// such as a walk, file type, owner, mode, ACL, immutability or `Io` fault.
     Source(ArtifactFault),
     /// A call failed with this errno.
     Io { op: &'static str, errno: i32 },
@@ -688,6 +701,21 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_whose_write_fails_is_an_io_refusal_named_write() {
+        let cell = Cell::new();
+        let path = cell.dir.join("read-only");
+        fs::write(&path, b"").expect("write");
+        let read_only = File::open(&path).expect("open");
+        assert_eq!(
+            copy_verified(&b"bytes"[..], &read_only, &Digest::of(b"bytes")),
+            Err(CellDirectoryFault::Io {
+                op: "write",
+                errno: libc::EBADF
+            })
+        );
+    }
+
+    #[test]
     fn an_entry_already_at_the_name_is_refused_as_exists_and_left_as_it_was() {
         let cell = Cell::new();
         let dir = opened(&cell.dir);
@@ -818,6 +846,20 @@ mod tests {
         let root = copy_of(&name, &dir, b"third").expect("the copy is made");
         fs::remove_file(&name).expect("rm");
         assert_eq!(root.remove(), RemoveOutcome::AlreadyGone);
+    }
+
+    #[test]
+    fn a_symlink_to_the_moved_copy_is_left_as_a_replacement() {
+        let cell = Cell::new();
+        let dir = opened(&cell.dir);
+        let name = cell.root_img();
+        let root = copy_of(&name, &dir, b"bytes").expect("the copy is made");
+        let moved = cell.dir.join("moved.img");
+        fs::rename(&name, &moved).expect("rename");
+        symlink(&moved, &name).expect("symlink");
+        assert_eq!(root.remove(), RemoveOutcome::LeftReplacement);
+        assert_eq!(fs::read_link(&name).expect("the symlink stays"), moved);
+        assert_eq!(fs::read(&moved).expect("the copy stays"), b"bytes");
     }
 
     #[test]
@@ -1038,6 +1080,33 @@ mod tests {
             assert_eq!(
                 fault_of(bundle.create(&source)),
                 CellDirectoryFault::Source(ArtifactFault::ChangedSinceVerification)
+            );
+            assert!(absent(&bundle.root_img()));
+        }
+
+        #[test]
+        fn a_root_image_a_held_writer_extended_is_copied_only_to_one_byte_past_its_size() {
+            let bundle = Bundle::new();
+            let bytes = image_bytes();
+            let path = bundle.tree.file("base/rootfs.raw", &bytes, 0o644);
+            let writer = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("a writer opened before the lock");
+            set_mode(&path, 0o444);
+            set_flags(&path, libc::UF_IMMUTABLE);
+            let source = verified(ArtifactRole::RootImage, &path, &bytes);
+            writer
+                .write_all_at(&vec![9; 4 << 20], bytes.len() as u64)
+                .expect("the held writer extends the image");
+            let mut first = bytes.clone();
+            first.push(9);
+            assert_eq!(
+                fault_of(bundle.create(&source)),
+                CellDirectoryFault::CopyMismatch {
+                    expected: Digest::of(&bytes),
+                    actual: Digest::of(&first),
+                }
             );
             assert!(absent(&bundle.root_img()));
         }

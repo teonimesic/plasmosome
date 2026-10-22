@@ -291,11 +291,14 @@ the component that broke it.
 
 `WritableRoot::create` makes the name in the held directory with `O_CREAT | O_EXCL | O_NOFOLLOW`,
 so any entry already there, a symlink included, is `Exists` and is left as it was. It copies
-through the verified descriptor, not the path, and hashes the bytes as it writes them. Then the
-root image must still pass `reconfirm()`, which refuses an image whose path names another file or
-whose size or times moved. Every refusal after the name was made removes the copy. The copy is a
-plain copy, not an APFS clone: a clone of a `uchg` file can carry the flag, and the copy must be
-writable.
+through the verified descriptor, not the path, reads at most one byte past the verified size, and
+hashes the bytes as it writes them. Then the root image must still pass `reconfirm()`. Its
+refusal is `Source` with whatever fault `reconfirm()` found: a path that names another file, a
+size or times that moved, or a fault of any check it repeats, such as a cleared `uchg`. A refusal
+after the new file's `fstat` removes the copy as `remove()` does, so a removal that fails, or that
+finds another object at the name, leaves what is there. If that `fstat` fails, the empty file
+stays, since there is no identity to remove it by. The copy is a plain copy, not an APFS clone: a
+clone of a `uchg` file can carry the flag, and the copy must be writable.
 
 `remove()` and dropping a `WritableRoot` unlink the name in the held directory only while it is
 still the file that was made, by device and inode. A cell directory renamed after the copy still
