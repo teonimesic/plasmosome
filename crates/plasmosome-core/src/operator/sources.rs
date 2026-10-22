@@ -348,7 +348,9 @@ impl Guard {
     /// volume, lies inside it or lies above it, such as `/System`, since such a source holds a
     /// firmlinked directory under a second spelling. Last it refuses a source that is the same
     /// directory as, inside or above a guarded directory, naming the first such directory in the
-    /// order given.
+    /// order given. It relies on every firmlink target being its own path and lying inside no
+    /// other target, which a test pins against `/usr/share/firmlinks`; a target inside another
+    /// under another name would let a source at the outer target pass.
     pub(crate) fn check(&self, source: &Path) -> Result<(), GuardRefusal> {
         self.check_with(source, Walk::from_root)
     }
@@ -1487,6 +1489,20 @@ mod tests {
             guard.check(&root.join("ops")),
             overlap(&root, "ops", Same, OperatorFile, "ops")
         );
+        let over = Err(GuardRefusal::Overlap {
+            source: PathBuf::from("/"),
+            relation: Above,
+            what: InstanceRoot,
+            guarded: root.join("inst"),
+        });
+        #[cfg(target_os = "macos")]
+        let expected = above(PathBuf::from("/"), Path::new("/System/Volumes/Data"));
+        #[cfg(target_os = "linux")]
+        let expected = over.clone();
+        assert_eq!(guard.check(Path::new("/")), expected);
+        let inst = [(InstanceRoot, root.join("inst"))];
+        let blind = Guard::new_with(&inst, &[], Walk::from_root, Ok(None)).expect("opens");
+        assert_eq!(blind.check(Path::new("/")), over);
         assert_eq!(
             Guard::new(&[(InstanceRoot, root.join("absent"))], &[]).map(|_| ()),
             Err(GuardRefusal::Guarded {
@@ -1497,6 +1513,61 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn a_source_above_two_guarded_directories_names_the_first_given() {
+        let root = TestRoot::new();
+        dirs(&root, &["two", "two/a", "two/b"]);
+        for (first, second) in [("two/a", "two/b"), ("two/b", "two/a")] {
+            let guard = guard(&root, &[(InstanceRoot, first), (RegistryRoot, second)]);
+            assert_eq!(
+                source(&guard.expect("opens"), &root, "two"),
+                overlap(&root, "two", Above, InstanceRoot, first)
+            );
+        }
+    }
+
+    fn firmlinks_fit_the_guard(table: &str) -> Result<(), String> {
+        let entries: Vec<_> = table
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.split_once('\t').unwrap_or((line, "")))
+            .collect();
+        for &(path, target) in &entries {
+            if path.strip_prefix('/') != Some(target) {
+                return Err(format!("{path} opens {target}, another name"));
+            }
+            if let Some((_, outer)) = entries
+                .iter()
+                .find(|&&(_, other)| other != target && Path::new(target).starts_with(other))
+            {
+                return Err(format!("{target} lies inside {outer}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_firmlink_check_refuses_a_nested_target_and_another_name() {
+        let fits = firmlinks_fit_the_guard;
+        assert_eq!(fits("/Users\tUsers\n/usr/local\tusr/local\n"), Ok(()));
+        assert_eq!(
+            fits("/Library\tLibrary\n/Library/foo\tLibrary/foo\n"),
+            Err("Library/foo lies inside Library".to_string())
+        );
+        assert_eq!(
+            fits("/Users\tUsers\n/home\tUsers/home\n"),
+            Err("/home opens Users/home, another name".to_string())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn no_firmlink_target_lies_inside_another_or_has_another_name() {
+        let table = fs::read_to_string("/usr/share/firmlinks").expect("macOS lists its firmlinks");
+        assert_ne!(table.trim(), "");
+        assert_eq!(firmlinks_fit_the_guard(&table), Ok(()));
     }
 
     #[test]

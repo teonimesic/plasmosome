@@ -763,8 +763,8 @@ directory above the source meets rule 2, and the source must be a directory. The
 not judged, so a 0777 source below good ancestors passes. The guard then refuses the source when,
 by device and inode alone, it is the same directory as, inside or above a guarded directory. A
 sibling named `<dir>-x` passes, and a source spelled in another case on a case-insensitive volume
-is the same directory. Each `GuardRefusal` displays as one sentence naming the source, the
-relation, the kind and the path, for a 108's `detail`.
+is the same directory. Each `GuardRefusal` displays as one sentence, for a 108's `detail`. An
+overlap names the source, the relation, the kind and the guarded directory's path.
 
 On macOS the guard also refuses every source that is the data volume, lies inside it, or lies
 above it: `/`, `/System`, `/System/Volumes`, `/System/Volumes/Data`, and every spelling through
@@ -772,10 +772,10 @@ it, such as `/System/Volumes/Data/usr`. Each of these holds a firmlinked directo
 spelling that no walk from `/` through the firmlink passes. A spelling through
 `/System/Volumes/Data` is refused even where it would be safe: name the directory through its
 firmlink instead. A guarded directory reached through the data volume refuses the request too.
-No firmlink target lies inside another (`/usr/share/firmlinks` on macOS 26.6.2), so every other
-directory on a target's data-side chain is the target itself, whose identity is that of its
-firmlinked spelling. A data volume that does not open for any reason but a missing name refuses
-every Mount.
+Each firmlink target is its own path and lies inside no other target (`/usr/share/firmlinks` on
+macOS 26.6.2). So a directory inside the data volume above a target can be named only through
+`/System/Volumes/Data`, and that spelling is refused. A data volume that does not open for any
+reason but a missing name refuses every Mount.
 
 The guard's limits:
 
@@ -784,9 +784,19 @@ The guard's limits:
   Artifact. Rule 5 still refuses a newly listed declaration inside a held source when it is read.
 - Spec 022 does not guard a mount point inside the source that reaches a guarded directory, or
   another view of a guarded directory with a different identity, such as a FUSE or bindfs mount.
+- A Linux bind mount of a directory inside a guarded directory, placed elsewhere and declared as
+  a source, passes, though spec 022 §6 refuses it. It has the directory's device and inode, but
+  its chain from `/` holds no guarded directory. Only root can make one. This is reasoned from the
+  code, not measured; rule 5 has the same limit above.
+- A guarded directory, or a trusted file's directory, moved to a new parent after `Guard::new` is
+  judged by its old chain, so a source at the new parent passes. Only the operator or the
+  controller's UID can make that move.
 - A source renamed and replaced after the check needs write access to its parent, which meets
   rule 2, so only root or the controller's UID can do it. What is at the path at apply is what is
   mounted.
+- On macOS the guard relies on each firmlink target being its own path and lying inside no other
+  target. If a target lay inside another under another name, a source at the outer target would
+  pass, with nothing refusing. A macOS test reads `/usr/share/firmlinks` and fails first.
 
 ## Artifacts
 
