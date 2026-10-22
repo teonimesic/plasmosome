@@ -954,11 +954,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_report_pipe_a_concurrent_spawn_inherited_leaves_the_exec_unconfirmed_at_the_deadline() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = dir
-            .path()
-            .canonicalize()
-            .expect("the temporary directory has a canonical path");
+        let (_dir, path) = crate::nofollow::fixtures::walkable_temp_dir("ss");
         let root = InstanceRoot::open(&path).expect("the instance root opens");
         let writer = root.lock().expect("the writer lock is free");
         let id = CellId::from("cell-1");

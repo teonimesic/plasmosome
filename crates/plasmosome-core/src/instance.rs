@@ -52,9 +52,12 @@ type Identity = (u64, u64);
 /// `membraned`'s socket check applies to them (spec 001 §4.1): owned by root or the effective
 /// UID, writable by neither group nor other with no sticky-bit exception, and on macOS carrying
 /// no ACL allow entry that lets anyone replace its entries and on no volume mounted with
-/// ownership ignored. So a root under which every membrane would refuse its socket is refused
-/// when it is opened, before anything is made in it. Every name beneath the root is opened
-/// relative to this descriptor without following a symlink.
+/// ownership ignored. So a root whose path the socket check's ancestor rule refuses is refused
+/// when it is opened, before anything is made in it. An inheritable ACL entry that replaces
+/// nothing, such as one that allows read, still passes `open`; a cell directory made under it
+/// inherits the entry, and the socket check refuses that directory. Refusing such a root is
+/// plasmosome-zfgs's. Every name beneath the root is opened relative to this descriptor without
+/// following a symlink.
 ///
 /// Private modes (0700 for directories, 0600 for files) are set with `fchmod`, whatever the
 /// umask. A directory this user cannot read, such as one a umask of 0477 left at 0300, is first
@@ -2439,7 +2442,6 @@ mod tests {
         real: Option<PathBuf>,
         refusal: WalkRefusal,
         socket_check: bool,
-        closed_parent: Option<(PathBuf, u32)>,
     }
 
     fn refused_at(open: PathBuf, real: Option<PathBuf>, refusal: WalkRefusal) -> Refused {
@@ -2448,7 +2450,6 @@ mod tests {
             real,
             refusal,
             socket_check: true,
-            closed_parent: None,
         }
     }
 
@@ -2473,7 +2474,6 @@ mod tests {
             real,
             refusal,
             socket_check,
-            closed_parent,
         } = refused;
         match InstanceRoot::open(&open) {
             Err(InstanceRootError::Untrusted {
@@ -2486,14 +2486,8 @@ mod tests {
             other => panic!("{row}: expected Untrusted, got {other:?}"),
         }
         if let Some(real) = &real {
-            if let Some((parent, _)) = &closed_parent {
-                set_mode(parent, 0o700);
-            }
             assert_eq!(entries_of(real), Vec::<PathBuf>::new(), "{row}");
             make_cell_dir_by_hand(real);
-            if let Some((parent, mode)) = &closed_parent {
-                set_mode(parent, *mode);
-            }
         }
         if socket_check {
             assert_eq!(
@@ -2517,14 +2511,11 @@ mod tests {
         make_dir(&parent.join("inst"), 0o700);
         set_mode(&parent, mode);
         let root = parent.join("inst");
-        Refused {
-            closed_parent: Some((parent.clone(), mode)),
-            ..refused_at(
-                root.clone(),
-                Some(root),
-                WalkRefusal::Replaceable { path: parent, mode },
-            )
-        }
+        refused_at(
+            root.clone(),
+            Some(root),
+            WalkRefusal::Replaceable { path: parent, mode },
+        )
     }
 
     fn root_at(base: &Path, mode: u32) -> Refused {
@@ -2561,7 +2552,6 @@ mod tests {
             real: Some(root),
             refusal: WalkRefusal::NotNormal { path: spelled },
             socket_check: false,
-            closed_parent: None,
         }
     }
 
@@ -2620,7 +2610,7 @@ mod tests {
     type Row = (&'static str, fn(&Path) -> Refused);
 
     #[test]
-    fn a_root_is_refused_exactly_where_its_cell_socket_would_be() {
+    fn a_root_is_refused_where_its_cell_socket_would_be() {
         let rows: Vec<Row> = vec![
             ("parent 0777", |base| under_parent(base, 0o777)),
             ("parent 0770", |base| under_parent(base, 0o770)),
@@ -2730,6 +2720,9 @@ mod tests {
         make_dir(&parent, 0o711);
         make_dir(&parent.join("inst"), 0o700);
         assert_opens_where_its_socket_would("search-only parent", &parent.join("inst"));
+        let base = TestRoot::walkable_from_root();
+        make_dir(&base.join("inst"), 0o755);
+        assert_opens_where_its_socket_would("root 0755", &base.join("inst"));
         #[cfg(target_os = "macos")]
         {
             let base = TestRoot::walkable_from_root();
@@ -2758,20 +2751,22 @@ mod tests {
             return;
         }
         let locked = base.join("locked");
+        let root = locked.join("mid/inst");
         make_dir(&locked, 0o700);
-        make_dir(&locked.join("inst"), 0o700);
+        make_dir(&locked.join("mid"), 0o700);
+        make_dir(&root, 0o700);
         set_mode(&locked, 0o000);
-        let outcome = InstanceRoot::open(&locked.join("inst"));
+        let outcome = InstanceRoot::open(&root);
         set_mode(&locked, 0o700);
         #[cfg(target_os = "macos")]
         let unopened = locked.clone();
         #[cfg(target_os = "linux")]
-        let unopened = locked.join("inst");
+        let unopened = locked.join("mid");
         expect_match!(outcome, Err(InstanceRootError::Open { path, source }) => {
             assert_eq!(path, unopened);
             assert_eq!(source.raw_os_error(), Some(libc::EACCES));
         });
-        assert_eq!(entries_of(&locked.join("inst")), Vec::<PathBuf>::new());
+        assert_eq!(entries_of(&root), Vec::<PathBuf>::new());
     }
 
     #[test]

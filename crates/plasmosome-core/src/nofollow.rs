@@ -171,7 +171,7 @@ impl Walk {
 
     /// Opens the last component as a directory and holds it to the rule every directory above it
     /// meets: the ancestor rule, then on macOS no ACL allow entry that lets anyone replace its
-    /// entries. `InstanceRoot::open` and `list_trusted_dir` both reach the rule through this.
+    /// entries.
     pub(crate) fn open_trusted_directory(&self) -> Result<Opened, WalkRefusal> {
         let euid = effective_uid();
         let opened =
