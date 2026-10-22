@@ -6,8 +6,8 @@ Each one refuses a mistake you cannot take back, or one the tree would have to c
 for: a crate reaching a registry under a name nobody claimed, two packages answering to the same
 binary name, test scaffolding shipping outside `[dev-dependencies]`, a commit crediting a model or
 somebody no reader can trace, the private research corpus reaching a public tree, a commit that
-swaps or wraps what cargo builds through committed Cargo configuration or a toolchain file, and a
-skill Claude Code cannot find.
+swaps or wraps what cargo builds through committed Cargo configuration or a toolchain file, a
+locked package no dependency record names, and a skill Claude Code cannot find.
 
 Nothing here pins a design. A guard is worth its cost when the thing it prevents is permanent or
 public, or when [spec 013](../../docs/specs/013-what-earns-a-guard.md)'s operational carve-out
@@ -29,6 +29,7 @@ each crate's `AGENTS.md`, where it can be argued with.
 | `provenance_guard` | The private research corpus reaching this public tree — and it refuses when the search it depends on cannot run |
 | `skill_discovery` | A skill under `.agents/skills/` with no committed symlink under `.claude/skills/`, which no tool then lists |
 | `build_input_guard` | A commit that swaps or wraps what cargo builds through committed Cargo configuration or a toolchain file, judged from the object store before anything runs; any submodule, whose files the commit does not hold; and any tracked `.gitattributes`, through which checkout could write a file other than the blob the step judged, which a maintainer lifts only by changing the step. It tests `.githooks/build-input-guard`, spec 026's git-only step, which `gates` runs first. A clean verdict does not yet cover `[patch]`, `[replace]`, path dependencies outside the repository, symlinks that leave it, or lockfile sources other than crates.io: a reviewer reads those by hand until plasmosome-jfm2 |
+| `every_dependency_has_a_review_record` | A third-party package locked in any tracked `Cargo.lock` whose `name@range` no record in `docs/dependencies/` names, as its own or in its `brings`; a direct dependency, of any kind and behind any feature, without a record of its own at its locked range, even when another record's `brings` names it; a record missing one of its ten fields, holding one of the wrong shape, or holding a key that is not a field; and a lockfile that no longer matches its manifests. Each refusal names the package, or the file and the field. It reads each tracked lockfile and `cargo metadata --locked --all-features`, which runs no build script or proc macro, so `gates` runs it second, before format, clippy or the tests; compiling it builds only this crate and its own dev-dependencies. It skips `docs/dependencies/native/`, and whether a record's contents are right stays the reviewer's to judge |
 
 Tests: `cargo test -p plasmosome-guards`
 
