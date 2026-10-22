@@ -10,14 +10,20 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// # Safety
 ///
 /// `launch` runs in the child of a fork, and the parent may have other
-/// threads, as it does under the test harness. So until it execs or exits,
+/// threads, as it does in production and under the test harness. Until it ends,
 /// an implementation may only make async-signal-safe calls, such as
-/// `execve`, `_exit`, `pause` and raw system calls. It must not allocate,
-/// wait for a lock or use Rust's stdio, which all take locks: another thread
+/// `execve`, `_exit`, `pause` and raw system calls. It must not allocate or free
+/// memory, wait for a lock or use Rust's stdio, which all take locks: another thread
 /// may have held one at the fork, and then the child waits forever. Lay out
 /// everything the child needs in the parent, before the fork.
 ///
-/// An implementation must also never panic. A panic in the forked child
+/// It must not drop anything that owns heap memory or run any other destructor,
+/// including by unwinding. Dropping a `BoundSocket` or a `WritableRoot` in the
+/// child would unlink the daemon's live socket or remove the cell's writable root.
+/// It ends with `execve`, `_exit` or a loop of `pause`, never `std::process::exit`
+/// or `libc::exit`, which run exit handlers and flush stdio.
+///
+/// An implementation must also never panic or unwind. A panic in the forked child
 /// runs the panic hook, which allocates and takes locks to write its
 /// message. A panic that escapes is contained by exiting the child with
 /// code 70, but only after the hook has run.
@@ -39,7 +45,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// }
 /// ```
 ///
-/// The same implementation without `unsafe` does not compile:
+/// A safe implementation does not compile. The compiling twin above adds `unsafe`,
+/// the impl's `#[allow(unsafe_code)]` and its SAFETY comment. Neither extra line
+/// changes whether this safe impl compiles: it needs no allow, and comments have
+/// no effect on compilation. The register package's doctests inherit no unsafe lint.
 ///
 /// ```compile_fail,E0200
 /// struct ExitsAtOnce;
@@ -54,7 +63,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// ```
 #[allow(unsafe_code)]
 pub unsafe trait Launch {
-    /// Runs inside the forked child and never returns.
+    /// Only `VmmChild::spawn` calls this, in the child it forks.
+    /// Callers must never call it themselves.
     fn launch(self) -> !;
 }
 
@@ -928,17 +938,18 @@ mod tests {
         }
     }
 
-    struct PanicOnLaunch;
+    struct PanicOnLaunch(Box<dyn std::any::Any + Send>);
 
     #[allow(unsafe_code)]
-    // SAFETY: This launcher breaks the contract on purpose, so a test can see ExitOnUnwind exit the
-    // child with 70. In the child, launch panics, so the panic hook runs there: it allocates and
-    // takes locks to write the message. Then the unwind reaches ExitOnUnwind. A lock another
-    // thread held at the fork would stall the child. Its test would then fail within DEADLINE,
-    // and the handle's drop would kill the child.
+    // SAFETY: This launcher breaks the no-unwind duty on purpose, as the only witness of exit 70.
+    // The parent builds its payload before the fork. resume_unwind skips the panic hook, so it
+    // cannot stall on a hook lock another thread held at the fork. The child has its own copy of
+    // memory, and ExitOnUnwind exits before any parent fixture's frame unwinds or the payload
+    // drops. If the child stalls, its test fails once DEADLINE runs out and the handle's drop
+    // kills and reaps it.
     unsafe impl Launch for PanicOnLaunch {
         fn launch(self) -> ! {
-            panic!("a launcher that breaks its no-panic contract")
+            std::panic::resume_unwind(self.0)
         }
     }
 
@@ -1636,7 +1647,10 @@ mod tests {
                 },
             ),
             (
-                Box::new(|| VmmChild::spawn(PanicOnLaunch)),
+                Box::new(|| {
+                    let payload = Box::new("a launcher that breaks its no-unwind contract");
+                    VmmChild::spawn(PanicOnLaunch(payload))
+                }),
                 VmmState::Exited { code: 70 },
             ),
         ] {

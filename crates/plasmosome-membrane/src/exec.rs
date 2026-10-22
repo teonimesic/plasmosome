@@ -138,9 +138,9 @@ impl std::fmt::Debug for ExecCommand {
 }
 
 #[allow(unsafe_code)]
-// SAFETY: In the child, launch calls execve with the program, argv and envp that new laid out in
-// the parent, and _exit(127) if execve returns. Both are async-signal-safe. It never drops the
-// command, so nothing is freed in the child, and nothing in it can panic.
+// SAFETY: In the child, launch calls execve with the program, argv and envp that ExecCommand::new
+// laid out in the parent, and _exit(127) if execve returns. Both are async-signal-safe. It never
+// drops the command, so nothing is freed in the child, and nothing in it can panic.
 unsafe impl Launch for ExecCommand {
     #[allow(unsafe_code)]
     fn launch(self) -> ! {
