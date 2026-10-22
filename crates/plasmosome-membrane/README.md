@@ -313,18 +313,18 @@ same next header the audit would read. A `TRAILER!!!` with a symlink mode takes 
 before its name is compared, so the kernel tries to make a link and never sees a trailer; the
 audit refuses it as a symlink. The kernel keeps a mode in a 16-bit `umode_t` (181, 191), and the
 audit reads the type from the same low 16 bits. The kernel also skips an entry whose name is over
-4,096 bytes (294, 306), and it keeps the last of two entries with one name. It skips zero bytes between entries; the
-audit refuses them, and the qualified archive has none. 6.12.91 parses a header field with
-`simple_strtoul` and master with `hex2bin`; the audit takes exactly 8 hexadecimal digits, which
-both read the same way.
+4,096 bytes (294, 306), and it keeps the last of two entries with one name. It skips zero bytes
+between entries; the audit refuses them, and the qualified archive has none. 6.12.91 parses a
+header field with `simple_strtoul` and master with `hex2bin`; the audit takes exactly 8
+hexadecimal digits, which both read the same way.
 
 It reads the bytes the descriptor holds now and does not hash them again, so the limit stated for
 `reconfirm()` above holds here too: a write through a shared writable mapping made before the file
-was locked can change them unseen. Bytes appended after verification are read and refused as data
-after the trailer. The cell, plasmosome-7em, which is not built yet, must call `reconfirm()` after
-this check, just before the launch that opens the initramfs by path. Off macOS no artifact
-verifies, so `verify_initramfs` runs only in tests, on artifacts that
-`artifacts::verified_for_test` builds.
+was locked can change them unseen. Non-zero bytes appended after verification are read and refused
+as data after the trailer; appended zero bytes pass, as the kernel skips them. The cell,
+plasmosome-7em, which is not built yet, must call `reconfirm()` after this check, just before the
+launch that opens the initramfs by path. Off macOS no artifact verifies, so `verify_initramfs`
+runs only in tests, on artifacts that `artifacts::verified_for_test` builds.
 
 ## Launching the VMM helper
 

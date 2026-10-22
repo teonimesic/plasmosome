@@ -880,6 +880,8 @@ mod tests {
             let entries = with(0, |entry| entry.mode = REGULAR | 0o444 | execute);
             assert_eq!(audit(&entries), Ok(binding(3)), "{execute:o}");
         }
+        let above_bit_15 = with(0, |entry| entry.mode = 0x10000 | REGULAR | 0o755);
+        assert_eq!(audit(&above_bit_15), Ok(binding(3)));
     }
 
     #[test]
