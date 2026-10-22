@@ -1798,10 +1798,19 @@ struct Inherited {
 
 static INHERITED: OnceLock<Inherited> = OnceLock::new();
 
-// SAFETY: The loader calls each function in this section once, before `main` and before the
-// standard library's start-up ignores SIGPIPE or reopens a closed 0, 1 or 2 on /dev/null, so
-// `record_inherited` sees what `execve` handed over. It needs nothing that start-up sets: it
-// makes plain libc calls and sets a OnceLock.
+/// The loader calls each function in this section once, before `main` and before the standard
+/// library's start-up ignores SIGPIPE or reopens a closed 0, 1 or 2 on /dev/null, so
+/// `record_inherited` sees what `execve` handed over. It needs nothing that start-up sets: it
+/// makes plain libc calls and sets a OnceLock.
+///
+/// Neither entry collides with anything else the process loads. `__DATA,__mod_init_func` and
+/// `.init_array` are the input sections for an object's initializer pointers. The linker adds
+/// this entry to the ones other objects put there and writes one list per image. On macOS it
+/// places that list in `__DATA_CONST,__mod_init_func`, or in `__TEXT,__init_offsets` when the
+/// minimum macOS is 12.0 or later. The loader calls every entry in the list, so this entry adds
+/// one call and replaces none. Each other image has its own list. The macOS half is measured.
+/// The Linux half is reasoned, not measured: CI's ubuntu `gates` job runs this test on Linux,
+/// which is only indirect evidence.
 #[used]
 #[allow(unsafe_code)]
 #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
