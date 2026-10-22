@@ -270,8 +270,6 @@ impl fmt::Display for Relation {
     }
 }
 
-/// Where the directory at the end of `source` lies against the one at the end of `guarded`, both
-/// chains from the same start. Only identities are compared.
 fn relation(source: &[DirIdentity], guarded: &[DirIdentity]) -> Option<Relation> {
     match (source.last(), guarded.last()) {
         (Some(reached), Some(dir)) if reached == dir => Some(Relation::Same),
@@ -1519,11 +1517,13 @@ mod tests {
     fn a_source_above_two_guarded_directories_names_the_first_given() {
         let root = TestRoot::new();
         dirs(&root, &["two", "two/a", "two/b"]);
-        for (first, second) in [("two/a", "two/b"), ("two/b", "two/a")] {
-            let guard = guard(&root, &[(InstanceRoot, first), (RegistryRoot, second)]);
+        let (a, b) = ((InstanceRoot, "two/a"), (RegistryRoot, "two/b"));
+        for given in [[a, b], [b, a]] {
+            let (what, first) = given[0];
+            let guard = guard(&root, &given).expect("opens");
             assert_eq!(
-                source(&guard.expect("opens"), &root, "two"),
-                overlap(&root, "two", Above, InstanceRoot, first)
+                source(&guard, &root, "two"),
+                overlap(&root, "two", Above, what, first)
             );
         }
     }
@@ -1552,10 +1552,15 @@ mod tests {
     fn the_firmlink_check_refuses_a_nested_target_and_another_name() {
         let fits = firmlinks_fit_the_guard;
         assert_eq!(fits("/Users\tUsers\n/usr/local\tusr/local\n"), Ok(()));
-        assert_eq!(
-            fits("/Library\tLibrary\n/Library/foo\tLibrary/foo\n"),
-            Err("Library/foo lies inside Library".to_string())
-        );
+        for table in [
+            "/Library\tLibrary\n/Library/foo\tLibrary/foo\n",
+            "/Library/foo\tLibrary/foo\n/Library\tLibrary\n",
+        ] {
+            assert_eq!(
+                fits(table),
+                Err("Library/foo lies inside Library".to_string())
+            );
+        }
         assert_eq!(
             fits("/Users\tUsers\n/home\tUsers/home\n"),
             Err("/home opens Users/home, another name".to_string())

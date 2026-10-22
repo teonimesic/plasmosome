@@ -853,15 +853,17 @@ The guard's limits:
   a source, passes, though spec 022 §6 refuses it. It has the directory's device and inode, but
   its chain from `/` holds no guarded directory. Only root can make one. This is reasoned from the
   code, not measured; rule 5 has the same limit above.
-- A guarded directory, or a trusted file's directory, moved to a new parent after `Guard::new` is
-  judged by its old chain, so a source at the new parent passes. Only the operator or the
-  controller's UID can make that move.
+- A guarded directory moved to a new parent after `Guard::new`, or a trusted file's directory
+  moved after the file was read, is judged by its old chain, so a source at the new parent
+  passes. Only the operator or the controller's UID can make that move.
 - A source renamed and replaced after the check needs write access to its parent, which meets
   rule 2, so only root or the controller's UID can do it. What is at the path at apply is what is
   mounted.
 - On macOS the guard relies on each firmlink target being its own path and lying inside no other
   target. If a target lay inside another under another name, a source at the outer target would
-  pass, with nothing refusing. A macOS test reads `/usr/share/firmlinks` and fails first.
+  pass, with nothing refusing. A macOS test reads `/usr/share/firmlinks` and fails on such a
+  table, but only where the suite runs. CI's `macos` job runs on `macos-26`, and nothing reads the
+  file at run time.
 
 ## Artifacts
 
