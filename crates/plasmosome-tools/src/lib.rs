@@ -5,3 +5,4 @@
 #![deny(clippy::exit)]
 
 pub mod bench_medians;
+pub mod quickstart;
