@@ -15,10 +15,11 @@ pub const RUNTIME_FD_ARG: &str = "--runtime-fd=3";
 /// The guest kernel command line, the same on both admitted architectures (spec 001 §4.2).
 pub const GUEST_CMDLINE: &str = "rdinit=/init panic=-1";
 
-/// The most bytes the helper reads from descriptor 3: a recipe line at its bound and its newline.
+/// The most bytes the helper accepts from descriptor 3: a recipe line at its bound and its
+/// newline.
 pub const MAX_RECIPE_BYTES: usize = MAX_RECORD_BYTES + 1;
 
-/// The most bytes of host policy the helper reads, its final NUL included.
+/// The most bytes of host policy the helper accepts, its final NUL included.
 pub const MAX_HOST_POLICY_BYTES: usize = 64 * 1024;
 
 const GUEST_CMDLINE_C: &CStr = c"rdinit=/init panic=-1";
@@ -45,7 +46,8 @@ pub enum HelperExit {
     /// The helper is not the recipe's, an artifact failed verification, or the writable root is
     /// not private.
     Verify = 66,
-    /// The host policy is not one NUL-terminated profile, was not applied, or did not deny.
+    /// The host policy is too long, unreadable or not one NUL-terminated profile, was not
+    /// applied, or did not deny.
     HostPolicy = 67,
     /// A loaded image is not the helper, a listed library or a sealed system library.
     Inventory = 68,
@@ -271,7 +273,9 @@ pub fn parse_recipe(bytes: &[u8], limits: &PlatformLimits) -> Result<RuntimeReci
 }
 
 /// Checks that `current_exe`, the path this process was executed from, is the recipe's helper.
-/// Refuses `Verify`.
+/// It compares path components, so `.`, a doubled `/` and a trailing `/` are folded away in the
+/// helper's own path. Each such spelling names the helper, or with a trailing `/` no file at all.
+/// A `..` part does not pass. Refuses `Verify`.
 pub fn judge_self(current_exe: &Path, recipe: &RuntimeRecipe) -> Result<(), HelperRefusal> {
     let helper = recipe.helper().path();
     if current_exe == helper.as_path() {
@@ -379,7 +383,9 @@ pub struct ImageCount {
 /// Each must be the recipe's helper, one of its libraries, or a system name: canonical ASCII
 /// under `/usr/lib/` or `/System/Library/` whose deepest existing part is on the sealed system
 /// volume. A name under the helper's directory may climb out of it with leading `..` parts, as
-/// dyld writes an `@executable_path/../` load; any other `..` matches nothing. Refuses
+/// dyld writes an `@executable_path/../` load; any other `..` matches nothing. Under the helper's
+/// directory, `.`, a doubled `/` and a trailing `/` are folded away too. Each such name names the
+/// same file, or with a trailing `/` no file at all; anywhere else they match nothing. Refuses
 /// `Inventory` naming the first other image.
 #[cfg(target_os = "macos")]
 pub fn judge_loaded_images(
@@ -569,9 +575,10 @@ pub fn krun_plan(recipe: &RuntimeRecipe) -> Vec<KrunCall> {
 /// after `CreateCtx` and `None` before it, and returns what libkrun returned. `after_create` runs
 /// once, as soon as `CreateCtx` returns a context of 0 or more and before the next call; its
 /// refusal is returned as it is. A negative context, or any other call that returns nonzero,
-/// stops at once with `Krun` naming the call and the value, and no later call is made.
-/// `krun_start_enter` returns only on error, so whatever it returns refuses `Krun`, and so does a
-/// plan that ends without it: there is no success to return.
+/// stops at once with `Krun` naming the call (and, for `krun_add_vsock_port2`, its port) and the
+/// value, and no later call is made. `krun_start_enter` returns only on error, so whatever it
+/// returns refuses `Krun`, and so does a plan that ends without it: there is no success to
+/// return.
 pub fn run_plan(
     plan: &[KrunCall],
     mut call: impl FnMut(&KrunCall, Option<u32>) -> i32,
@@ -581,10 +588,11 @@ pub fn run_plan(
     for step in plan {
         let value = call(step, context);
         let failed = || {
-            refuse(
-                HelperExit::Krun,
-                format!("{} returned {value}", step.name()),
-            )
+            let name = match step {
+                KrunCall::AddVsockPort2 { port, .. } => format!("{}({port})", step.name()),
+                _ => step.name().to_owned(),
+            };
+            refuse(HelperExit::Krun, format!("{name} returned {value}"))
         };
         match step {
             KrunCall::CreateCtx => {
@@ -895,6 +903,13 @@ mod tests {
                 "it has 2 links, not 1",
             ),
             (
+                WritableRootFacts {
+                    nlink: 0,
+                    ..PRIVATE
+                },
+                "it has 0 links, not 1",
+            ),
+            (
                 WritableRootFacts { uid: 0, ..PRIVATE },
                 "it is owned by uid 0, not the effective uid 501",
             ),
@@ -1038,6 +1053,8 @@ mod tests {
             "/opt/x/../cell/lib/libkrun.1.dylib",
             "/opt/cell/bin/sub/../../lib/libkrun.1.dylib",
             "/opt/cell/binx/../lib/libkrun.1.dylib",
+            "/opt/cell/binkrun-helper",
+            "/opt/cell/bin../lib/libkrun.1.dylib",
             "libkrunfw.5.dylib",
             "/usr/lib/libSyst\u{e9}m.dylib",
         ] {
@@ -1142,6 +1159,19 @@ mod tests {
                 "{plan:?}"
             );
         }
+    }
+
+    #[test]
+    fn vm_config_is_the_recipes() {
+        let mut value = recipe_value(HELPER);
+        value["vcpus"] = 2.into();
+        value["memory_mib"] = 1024.into();
+        let plan = krun_plan(&recipe(&value));
+        let expected = KrunCall::SetVmConfig {
+            vcpus: 2,
+            ram_mib: 1024,
+        };
+        assert_eq!(plan[2], expected);
     }
 
     #[test]
@@ -1301,7 +1331,12 @@ mod tests {
             for value in [-22, 1] {
                 let outcome = run(&krun_plan(&fixture()), Some((at, value)), Ok(()));
                 assert_eq!(outcome.calls.len(), at + 1, "{at}");
-                let detail = format!("{name} returned {value}");
+                let label = match at {
+                    11 => format!("{name}(4090)"),
+                    12 => format!("{name}(4091)"),
+                    _ => name.to_owned(),
+                };
+                let detail = format!("{label} returned {value}");
                 assert_eq!(outcome.refusal, refuse(Krun, detail));
             }
         }
