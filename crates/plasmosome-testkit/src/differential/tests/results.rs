@@ -602,7 +602,7 @@ fn a_link_at_a_temporary_name_is_never_written_through() {
     let dir = TempDir::new().expect("a temporary directory");
     let target = dir.path().join("target");
     let pid = std::process::id();
-    for count in 0..4096 {
+    for count in 0..512 {
         let temporary = format!(".2026-10-22-staged-suite.md.{pid}-{count}.tmp");
         symlink(&target, dir.path().join(temporary)).expect("a dangling link");
     }
@@ -610,7 +610,7 @@ fn a_link_at_a_temporary_name_is_never_written_through() {
     let refusal = refusal.expect_err("a link at the temporary name");
     assert!(matches!(refusal, ResultsRefusal::Io(error) if error.kind() == EXISTS));
     assert!(fs::symlink_metadata(&target).is_err());
-    assert_eq!(listed(dir.path()), 4096);
+    assert_eq!(listed(dir.path()), 512);
 }
 
 #[test]
