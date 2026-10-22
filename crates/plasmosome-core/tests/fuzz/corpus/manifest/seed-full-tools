@@ -1,0 +1,18 @@
+id = "github-pr"
+description = "Read and comment on pull requests."
+version = "0.1.0"
+impl.wasm = "components/github-pr.wasm"
+
+[requires]
+capabilities = ["network:hosts=api.github.com"]
+
+[provides]
+"github:tools" = { tools = { "pr.read" = "Read a pull request.", "pr.comment" = "Post a comment on a pull request." } }
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+pin_cidrs = ["140.82.112.0/20"]
+
+[lifecycle]
+drain_ms = 750
