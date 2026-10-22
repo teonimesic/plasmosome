@@ -110,6 +110,7 @@ pub enum RuleKind {
     BootId,
     MountId,
     ParentMountId,
+    PeerGroup,
     Device,
     Inode,
     SystemTime,
@@ -122,11 +123,12 @@ pub enum RuleKind {
 
 impl RuleKind {
     /// Every rule kind, in §6's order.
-    pub const ALL: [RuleKind; 12] = [
+    pub const ALL: [RuleKind; 13] = [
         RuleKind::Pid,
         RuleKind::BootId,
         RuleKind::MountId,
         RuleKind::ParentMountId,
+        RuleKind::PeerGroup,
         RuleKind::Device,
         RuleKind::Inode,
         RuleKind::SystemTime,
@@ -144,6 +146,7 @@ impl RuleKind {
             RuleKind::BootId => "boot_id",
             RuleKind::MountId => "mount_id",
             RuleKind::ParentMountId => "parent_mount_id",
+            RuleKind::PeerGroup => "peer_group",
             RuleKind::Device => "device",
             RuleKind::Inode => "inode",
             RuleKind::SystemTime => "system_time",
