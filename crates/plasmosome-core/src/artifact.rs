@@ -676,6 +676,19 @@ mod tests {
     }
 
     #[test]
+    fn a_read_that_fails_while_hashing_is_a_pread_fault_at_the_path() {
+        let root = with_file(0o444);
+        let path = root.join("lib");
+        let file = File::open(&path).expect("a directory opens for reading");
+        let stamp = Stamp::of(&file.metadata().expect("fstat"));
+        let facts = facts(Kind::Directory, effective_uid(), 0o755);
+        let found = digest_checked(&CheckedFile { file, facts, stamp }, &path);
+        let (op, errno) = ("pread", libc::EISDIR);
+        let fault = WalkRefusal::Io { op, path, errno };
+        assert_eq!(found, Err(ArtifactFault::Walk(fault)));
+    }
+
+    #[test]
     fn a_refusal_names_the_artifact_and_reads_on_the_wire_as_a_108_with_its_path() {
         let root = with_file(0o664);
         let refusal = verify_in(&root, "lib/membraned", BYTES).expect_err("refused");
