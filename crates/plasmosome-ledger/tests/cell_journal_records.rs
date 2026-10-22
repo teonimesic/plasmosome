@@ -354,6 +354,11 @@ fn invalid_sources_refuse() {
     assert_refused(CellJournalFaultKind::InvalidSource, rows);
     let genome_root = parse_record(&cell(), &encode_record(r).unwrap());
     assert_eq!(genome_root.as_ref(), Ok(r));
+    let mut genome_member = at(r, SOURCE);
+    genome_member["member"]["kind"] = json!("genome");
+    let refused = serde_json::from_value::<AttachmentSource>(genome_member).unwrap_err();
+    let refused = refused.to_string();
+    assert!(refused.contains("must be a plasmid"), "{refused}");
 }
 
 #[test]
