@@ -214,7 +214,12 @@ struct MountShape {
 /// field, but a `serde_json::Value` or `Map` keeps only the last copy of a repeated key, so a
 /// decode through one sees no repeat. Decoding and encoding both refuse any value `validate`
 /// refuses. A value built in memory is not checked: call `validate` before acting on it.
-/// Passing `validate` does not mean the program exists or the endpoints can be bound.
+/// Passing `validate` does not mean the program exists or the endpoints can be bound. Nor does
+/// it mean the endpoints are host-private, since `validate` reads no filesystem: spec 017 gives
+/// that to preflight, which checks each endpoint's private parent, and to the broker and its
+/// relay, which hold spec 001 §4.1's trusted-directory, socket-mode and peer user ID boundary
+/// before any data passes. Code that binds an endpoint outside that path must check the same
+/// itself.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrokerLaunch {
     pub command: Vec<String>,
@@ -857,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_value_in_any_absolute_field_is_refused() {
+    fn a_relative_value_in_any_path_field_is_refused() {
         for value in ["etc/plasmosome/seed", "./seed", "", " /etc/plasmosome/seed"] {
             let seed = b"seed\n".to_vec();
             assert_refused(&session_file(seed, value), relative("guest_path", value));
@@ -929,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_program_word_must_be_absolute() {
+    fn only_the_program_word_must_be_a_canonical_path() {
         assert_accepted(&launch(&[PROGRAM], CONTROL, DATA));
         assert_accepted(&launch(
             &[

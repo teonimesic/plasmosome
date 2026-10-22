@@ -182,7 +182,7 @@ impl<P: Probe> BrokerSet<P> {
         self.status_with(deadline, shutdown, Instant::now)
     }
 
-    fn status_with(
+    pub(crate) fn status_with(
         &self,
         deadline: Duration,
         shutdown: &AtomicBool,
