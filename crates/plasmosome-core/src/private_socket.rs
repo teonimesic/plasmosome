@@ -218,13 +218,14 @@ impl PrivateListener {
     /// bound; if that second check fails, its error is returned and the socket at the temporary
     /// name in the held directory is removed, but only if the effective UID owns it.
     /// `BindEscaped` means no socket owned by the effective UID is at the temporary name in the
-    /// held directory after bind. `PathTooLong`, `AddressInUse` and failures before `bind` name
-    /// `name`'s path. The directory checks' errors name the directory component that broke the
-    /// rule. Every other error from `bind` on names the temporary's path. A hard exit before the
-    /// rename leaves the temporary, which nothing removes. The socket's own address, as
-    /// `getsockname` reports it, is the temporary name. A caller that forks from another thread
-    /// must hold its descriptor lock around this call, because on macOS the socket is created
-    /// before it is marked close-on-exec.
+    /// held directory after bind. `BadName` holds `name` itself, not a path. `PathTooLong`,
+    /// `AddressInUse` and the other failures before `bind` name `name`'s path. The directory
+    /// checks' errors name the directory component that broke the rule. Every other error from
+    /// `bind` on names the temporary's path. A hard exit before the rename leaves the temporary,
+    /// which nothing removes. The socket's own address, as `getsockname` reports it, is the
+    /// temporary name. A caller that forks from another thread must hold its descriptor lock
+    /// around this call, because on macOS the socket is created before it is marked
+    /// close-on-exec.
     pub fn bind(
         dir: PrivateDir,
         name: &str,

@@ -564,7 +564,9 @@ socket through it too, as [Socket ownership](#socket-ownership) says, and so do
     appears at the name meanwhile is `AddressInUse` and is left as it was, and the temporary is
     removed. A Linux filesystem without `RENAME_NOREPLACE` fails the rename with `EINVAL`, which
     is `Io`; it never falls back to a rename that replaces. Errors from `bind`, `fchmodat`,
-    `listen`, `fcntl` and the rename name the temporary path. The socket's own address, as
+    `listen`, `fcntl` and the rename name the temporary path, except the rename's
+    `AddressInUse`, which names the configured path, and the error after eight draws, which
+    names the directory when no draw reached `bind`. The socket's own address, as
     `getsockname` reports it, stays the temporary name; no code here reads it. A hard kill before
     the rename leaves the temporary entry, which nothing removes. Measured on macOS 26.6.2 before
     this order: a client looping over `check_private_path` and `connect` saw the socket at mode
