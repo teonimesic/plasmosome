@@ -888,7 +888,15 @@ mod tests {
             }
             Box::new(leaf)
         };
-        for capability in LEAVES.into_iter().flat_map(own_capabilities) {
+        let drains = [
+            DrainSpec::graceful(Duration::from_millis(2)),
+            DrainSpec::forcing(),
+        ];
+        for (capability, drain) in LEAVES
+            .into_iter()
+            .flat_map(own_capabilities)
+            .flat_map(|capability| drains.map(|drain| (capability.clone(), drain)))
+        {
             for reversed in [false, true] {
                 let mut backend = CompositeBackend::new(armed(), armed(), armed()).unwrap();
                 let mut ops = owners
@@ -905,7 +913,7 @@ mod tests {
                 }
                 for (index, op) in ops.iter().enumerate() {
                     backend
-                        .apply_removal(op.removal(), op.owner(), DrainSpec::forcing())
+                        .apply_removal(op.removal(), op.owner(), drain)
                         .unwrap();
                     let left = ops[index + 1..].iter().map(unfinished).collect();
                     assert_eq!(

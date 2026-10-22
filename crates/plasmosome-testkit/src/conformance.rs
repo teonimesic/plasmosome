@@ -1330,6 +1330,11 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                     "a plant at an unfinished address must conflict"
                 );
                 contract_assert_eq!(
+                    observe(&mut backend),
+                    failed,
+                    "a refused plant changed the account"
+                );
+                contract_assert_eq!(
                     backend.revoke(op.handle(), drain),
                     Err(BackendError::UnknownHandle {
                         handle: op.handle()
@@ -1339,20 +1344,17 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                 contract_assert_eq!(
                     observe(&mut backend),
                     failed,
-                    "a refused plant or revoke changed the account"
+                    "a refused revoke changed the account"
                 );
-                let owners = [
-                    conformance_owner(),
-                    neighbour_of(&doomed_owner()),
-                    other_cell(&doomed_owner()),
-                ];
-                let others =
-                    owners
-                        .map(|owner| (op_for(op.id(), owner, capability.clone()), "owner"))
-                        .into_iter()
-                        .chain(changed_capabilities(&capability).map(|changed| {
-                            (op_for(op.id(), doomed_owner(), changed), "capability")
-                        }));
+                let [another_capability, another_recipe] = changed_capabilities(&capability);
+                let others = [
+                    (conformance_owner(), capability.clone(), "plugin and cell"),
+                    (neighbour_of(&doomed_owner()), capability.clone(), "plugin"),
+                    (other_cell(&doomed_owner()), capability.clone(), "cell"),
+                    (doomed_owner(), another_capability, "capability"),
+                    (doomed_owner(), another_recipe, "recipe"),
+                ]
+                .map(|(owner, sent, field)| (op_for(op.id(), owner, sent), field));
                 for (other, field) in others {
                     for call in [Entry::Grant, Entry::Apply, Entry::Plant] {
                         contract_assert_eq!(

@@ -111,12 +111,16 @@ enum Defect {
     AnotherOperationOverwritesIncomplete(Change, Call),
     PlantOverwritesIncomplete,
     IncompleteYieldsToAHolderOfItsCapability,
+    IncompleteYieldsToAnotherPluginInItsCell(Call),
+    IncompleteYieldsToItsPluginInAnotherCell(Call),
     RevokeTakesAnUnfinishedEffect,
     IncompleteCleanupIgnoresTheOwner,
     IncompleteCleanupIgnoresTheCapability,
+    IncompleteCleanupComparesOnlyTheSelection,
     IncompleteCleanupComparesOnlyTheCell,
     IncompleteCleanupComparesOnlyThePlugin,
     DoomedOwnerValidatesAfterTheEffect(Call),
+    RefusalChangesTheAccountUntilTheNextCall(Refusal),
     CleanupKeepsTheMarkerUnder(RevokePolicy),
     IncompleteCleanupTakesEqualPeers,
     IncompleteCleanupTakesEqualUnfinishedPeers,
@@ -149,6 +153,15 @@ enum Call {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    Retry,
+    Plant,
+    Revoke,
+    Conflict,
+    Removal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InfrastructureFailure {
     Factory,
     Grant,
@@ -173,6 +186,7 @@ struct DefectiveBackend {
     landing_record_drops: Vec<Handle>,
     incomplete: BTreeMap<Handle, UniverseOp>,
     failure_order: Vec<Handle>,
+    stray: Option<OsObject>,
 }
 
 impl DefectiveBackend {
@@ -198,6 +212,7 @@ impl DefectiveBackend {
             landing_record_drops: Vec::new(),
             incomplete: BTreeMap::new(),
             failure_order: Vec::new(),
+            stray: None,
         };
         let recovered = backend.recovery_log.borrow().clone();
         for entry in recovered {
@@ -226,10 +241,12 @@ impl DefectiveBackend {
         operation: &UniverseOp,
         call: Call,
     ) -> Result<bool, BackendError> {
-        let Some(unfinished) = self.incomplete.get(&operation.handle()) else {
+        let Some(unfinished) = self.incomplete.get(&operation.handle()).cloned() else {
             return Ok(false);
         };
-        let same = unfinished == operation && call != Call::Plant;
+        let same = unfinished == *operation && call != Call::Plant;
+        let (held, asking) = (unfinished.owner(), operation.owner());
+        let its_capability = unfinished.capability() == operation.capability();
         let overwrites = match self.defect {
             Defect::RetryContinuesCreation(continuing) => same && continuing == call,
             Defect::AnotherOperationOverwritesIncomplete(change, overwriting) => {
@@ -243,11 +260,33 @@ impl DefectiveBackend {
                         && issued.capability == operation.capability()
                 })
             }
+            Defect::IncompleteYieldsToAnotherPluginInItsCell(yielding) => {
+                yielding == call
+                    && its_capability
+                    && held.cell == asking.cell
+                    && held.plugin != asking.plugin
+            }
+            Defect::IncompleteYieldsToItsPluginInAnotherCell(yielding) => {
+                yielding == call
+                    && its_capability
+                    && held.plugin == asking.plugin
+                    && held.cell != asking.cell
+            }
             _ => false,
         };
         if overwrites {
             self.incomplete.remove(&operation.handle());
             return Ok(true);
+        }
+        let refusal = if same {
+            Refusal::Retry
+        } else if unfinished == *operation {
+            Refusal::Plant
+        } else {
+            Refusal::Conflict
+        };
+        if self.defect == Defect::RefusalChangesTheAccountUntilTheNextCall(refusal) {
+            self.stray = Some(a_stray_beside(&unfinished));
         }
         Err(if same {
             incomplete_effect(operation)
@@ -288,9 +327,17 @@ impl DefectiveBackend {
             }
             _ => unfinished.owner() == owner,
         };
-        let capability_matches = self.defect == Defect::IncompleteCleanupIgnoresTheCapability
-            || unfinished.capability() == removal.capability;
+        let capability_matches = match self.defect {
+            Defect::IncompleteCleanupIgnoresTheCapability => true,
+            Defect::IncompleteCleanupComparesOnlyTheSelection => {
+                selection_of(&unfinished.capability()) == selection_of(&removal.capability)
+            }
+            _ => unfinished.capability() == removal.capability,
+        };
         if !(owner_matches && capability_matches) {
+            if self.defect == Defect::RefusalChangesTheAccountUntilTheNextCall(Refusal::Removal) {
+                self.stray = Some(a_stray_beside(&unfinished));
+            }
             return Err(unknown_object(removal, owner));
         }
         let address = unfinished.handle();
@@ -514,6 +561,9 @@ impl DefectiveBackend {
             return self.mirrored_state();
         }
         let mut observed = self.state.clone();
+        if let Some(stray) = &self.stray {
+            let _ = observed.insert(stray.clone());
+        }
         for object in self.landed_effects.borrow().iter() {
             let _ = observed.insert(object.clone());
         }
@@ -834,6 +884,7 @@ impl EnforcementBackend for DefectiveBackend {
         operation: UniverseOp,
         kind: GrantKind,
     ) -> Result<LedgerEntry, BackendError> {
+        self.stray = None;
         if self.defect == Defect::GrantPanics {
             std::panic::panic_any(InfrastructureFailure::Grant);
         }
@@ -1037,6 +1088,7 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
+        self.stray = None;
         if self.refuses_grant_order(handle) || self.refuses_reverse_order(handle) {
             return Err(BackendError::UnknownHandle { handle });
         }
@@ -1051,6 +1103,9 @@ impl EnforcementBackend for DefectiveBackend {
             });
         }
         let Some(entry) = self.ledger.get(&handle).cloned() else {
+            if self.defect == Defect::RefusalChangesTheAccountUntilTheNextCall(Refusal::Revoke) {
+                self.stray = self.incomplete.get(&handle).map(a_stray_beside);
+            }
             if self.defect == Defect::UnknownRevokeTidiesResidue
                 && !self
                     .state
@@ -1145,6 +1200,7 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
+        self.stray = None;
         if !self.validated(&op, Call::Apply)? {
             return Ok(());
         }
@@ -1187,6 +1243,7 @@ impl EnforcementBackend for DefectiveBackend {
         owner: &CellOwner,
         drain: DrainSpec,
     ) -> Result<(), BackendError> {
+        self.stray = None;
         if self.defect == Defect::RemovalIsANoOp {
             return Ok(());
         }
@@ -1258,6 +1315,7 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
+        self.stray = None;
         if !self.validated(&object.operation(), Call::Plant)? {
             return Ok(());
         }
@@ -1408,6 +1466,13 @@ fn shadow_of(entry: &LedgerEntry) -> OsObject {
         id: GrantId::new(),
         owner: entry.owner.clone(),
         capability: session_file(&format!("/shadow/{}", entry.handle.id)),
+    }
+}
+
+fn a_stray_beside(unfinished: &UniverseOp) -> OsObject {
+    OsObject {
+        id: GrantId::new(),
+        ..unfinished.object()
     }
 }
 
@@ -3384,7 +3449,7 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
         ),
         (
             Defect::IncompleteYieldsToAHolderOfItsCapability,
-            "a grant naming another owner at an unfinished address must conflict",
+            "a grant naming another plugin and cell at an unfinished address must conflict",
         ),
         (
             Defect::RevokeTakesAnUnfinishedEffect,
@@ -3392,19 +3457,23 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
         ),
         (
             Defect::IncompleteCleanupIgnoresTheOwner,
-            "a removal naming another owner must not select an unfinished effect",
+            "a removal naming another plugin and cell must not select an unfinished effect",
         ),
         (
             Defect::IncompleteCleanupComparesOnlyTheCell,
-            "a removal naming another owner must not select an unfinished effect",
+            "a removal naming another plugin must not select an unfinished effect",
         ),
         (
             Defect::IncompleteCleanupComparesOnlyThePlugin,
-            "a removal naming another owner must not select an unfinished effect",
+            "a removal naming another cell must not select an unfinished effect",
         ),
         (
             Defect::IncompleteCleanupIgnoresTheCapability,
             "a removal naming another capability must not select an unfinished effect",
+        ),
+        (
+            Defect::IncompleteCleanupComparesOnlyTheSelection,
+            "a removal naming another recipe must not select an unfinished effect",
         ),
         (
             Defect::DoomedOwnerValidatesAfterTheEffect(Call::Grant),
@@ -3413,6 +3482,26 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
         (
             Defect::DoomedOwnerValidatesAfterTheEffect(Call::Apply),
             "a refused invalid doomed operation changed the account through an apply",
+        ),
+        (
+            Defect::RefusalChangesTheAccountUntilTheNextCall(Refusal::Retry),
+            "a retry through a grant changed the account",
+        ),
+        (
+            Defect::RefusalChangesTheAccountUntilTheNextCall(Refusal::Plant),
+            "a refused plant changed the account",
+        ),
+        (
+            Defect::RefusalChangesTheAccountUntilTheNextCall(Refusal::Revoke),
+            "a refused revoke changed the account",
+        ),
+        (
+            Defect::RefusalChangesTheAccountUntilTheNextCall(Refusal::Conflict),
+            "a grant naming another plugin and cell changed the account",
+        ),
+        (
+            Defect::RefusalChangesTheAccountUntilTheNextCall(Refusal::Removal),
+            "a refused removal naming another plugin and cell changed the account",
         ),
         (
             Defect::CleanupKeepsTheMarkerUnder(RevokePolicy::Graceful),
@@ -3443,17 +3532,33 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
             conformance::failed_grants_stay_incomplete_until_exact_withdrawal(carrying(defect))
         });
     }
-    for (change, field) in [
-        (Change::Owner, "owner"),
-        (Change::Key, "capability"),
-        (Change::Recipe, "capability"),
+    for (call, article) in [
+        (Call::Grant, "a grant"),
+        (Call::Apply, "an apply"),
+        (Call::Plant, "a plant"),
     ] {
-        for (call, article) in [
-            (Call::Grant, "a grant"),
-            (Call::Apply, "an apply"),
-            (Call::Plant, "a plant"),
+        for (defect, field) in [
+            (
+                Defect::AnotherOperationOverwritesIncomplete(Change::Owner, call),
+                "plugin and cell",
+            ),
+            (
+                Defect::IncompleteYieldsToAnotherPluginInItsCell(call),
+                "plugin",
+            ),
+            (
+                Defect::IncompleteYieldsToItsPluginInAnotherCell(call),
+                "cell",
+            ),
+            (
+                Defect::AnotherOperationOverwritesIncomplete(Change::Key, call),
+                "capability",
+            ),
+            (
+                Defect::AnotherOperationOverwritesIncomplete(Change::Recipe, call),
+                "recipe",
+            ),
         ] {
-            let defect = Defect::AnotherOperationOverwritesIncomplete(change, call);
             assert_rejected(
                 &format!("{article} naming another {field} at an unfinished address must conflict"),
                 || {

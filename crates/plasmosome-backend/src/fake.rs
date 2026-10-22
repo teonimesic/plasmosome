@@ -1641,7 +1641,14 @@ mod tests {
             cell_owner("cell-1", "network"),
             cell_owner("cell-2", "doomed"),
         ];
-        for capability in capabilities() {
+        let drains = [
+            DrainSpec::graceful(Duration::from_millis(2)),
+            DrainSpec::forcing(),
+        ];
+        for (capability, drain) in capabilities()
+            .into_iter()
+            .flat_map(|capability| drains.map(|drain| (capability.clone(), drain)))
+        {
             for (entry, reversed) in [(Entry::Grant, false), (Entry::Apply, true)] {
                 let mut backend = FakeBackend::new();
                 let mut ops = owners
@@ -1656,7 +1663,7 @@ mod tests {
                 }
                 for (index, op) in ops.iter().enumerate() {
                     backend
-                        .apply_removal(op.removal(), op.owner(), DrainSpec::forcing())
+                        .apply_removal(op.removal(), op.owner(), drain)
                         .unwrap();
                     let left: Vec<&UniverseOp> = ops[index + 1..].iter().collect();
                     assert_eq!(backend.snapshot_os_state(), Ok(account(&[], &[], &left)));
