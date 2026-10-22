@@ -1297,11 +1297,11 @@ mod tests {
 
     #[test]
     fn each_nonzero_setter_stops_at_that_call() {
-        for at in 2..13 {
+        for (at, name) in CALL_NAMES.into_iter().enumerate().take(13).skip(2) {
             for value in [-22, 1] {
                 let outcome = run(&krun_plan(&fixture()), Some((at, value)), Ok(()));
                 assert_eq!(outcome.calls.len(), at + 1, "{at}");
-                let detail = format!("{} returned {value}", CALL_NAMES[at]);
+                let detail = format!("{name} returned {value}");
                 assert_eq!(outcome.refusal, refuse(Krun, detail));
             }
         }
