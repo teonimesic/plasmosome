@@ -115,10 +115,14 @@ impl InstanceRoot {
     /// Another holder, in this process or another, makes this `Busy`; it never waits. The file is
     /// never unlinked.
     ///
-    /// The lock lasts until the returned value is dropped or the process dies, provided no
-    /// process forked from this one still has the lock file open without having called `exec`.
-    /// Such a child keeps the lock alive after this process dies, and an unlock from it releases
-    /// this process's lock. Close-on-exec covers a child only once it has called `exec`.
+    /// Dropping the returned value releases the lock at once: it calls `flock(LOCK_UN)` before its
+    /// descriptor closes, so a process that another thread is starting, which holds a copy of
+    /// every descriptor until its `exec`, does not keep the lock. The death of this process
+    /// releases the lock only once no process forked from it still has the lock file open without
+    /// having called `exec`: such a child keeps the lock alive after this process dies.
+    /// Close-on-exec covers a child only once it has called `exec`. A forked child must not run
+    /// the returned value's drop, or call `LOCK_UN` on its copy, because either releases this
+    /// process's lock.
     ///
     /// The lock assumes a local filesystem and does not check for one. On NFS and similar
     /// filesystems `flock` may be emulated, lost silently or held past a crash; spec 008 makes
@@ -592,12 +596,13 @@ impl InstanceRoot {
     }
 }
 
-/// The instance's writer lock. Dropping it releases the lock and leaves `controller.lock` in
-/// place; so does the death of the process holding it, unless a forked child that has not
-/// called `exec` still holds the file (see [`InstanceRoot::lock`]). Discovery, cell creation and
-/// journal appends take it as proof that the caller holds the lock of the same root. It also
-/// holds the instance's one allocation mutex, so [`InstanceRoot::allocate_cell`] calls that use
-/// it run one at a time.
+/// The instance's writer lock. Dropping it releases the lock with `flock(LOCK_UN)`, even while
+/// a process forked from this one still holds a copy of its descriptor, and leaves
+/// `controller.lock` in place. The death of the process holding it releases it too, unless a
+/// forked child that has not called `exec` still holds the file (see [`InstanceRoot::lock`]).
+/// Discovery, cell creation and journal appends take it as proof that the caller holds the lock
+/// of the same root. It also holds the instance's one allocation mutex, so
+/// [`InstanceRoot::allocate_cell`] calls that use it run one at a time.
 #[must_use = "dropping the WriterLock releases the instance lock"]
 pub struct WriterLock {
     file: File,
@@ -610,6 +615,12 @@ impl WriterLock {
     /// The lock file's path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        unlock(self.file.as_fd());
     }
 }
 
@@ -1084,7 +1095,8 @@ impl CellDir {
 /// not to this value: dropping it closes this descriptor and releases the lock only once no
 /// other descriptor of the same open file remains, such as the copy handed to `membraned`.
 /// Nothing here calls `LOCK_UN`. A process forked from this one that has not called `exec`
-/// keeps the lock alive, as it does the [`WriterLock`]. The descriptor is close-on-exec.
+/// keeps the lock alive after this value is dropped; a dropped [`WriterLock`] calls `LOCK_UN`
+/// instead. The descriptor is close-on-exec.
 #[must_use = "dropping the SupervisorLock releases the cell's supervisor lock"]
 pub struct SupervisorLock {
     file: File,
@@ -2160,6 +2172,12 @@ fn lock_exclusive_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
     Ok(())
 }
 
+#[allow(unsafe_code)]
+fn unlock(file: BorrowedFd<'_>) {
+    // SAFETY: flock takes no pointer, and the BorrowedFd keeps `file` open for the call.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
 fn sync_directory(dir: BorrowedFd<'_>) -> io::Result<()> {
     File::from(dir.try_clone_to_owned()?).sync_all()
 }
@@ -2420,6 +2438,28 @@ mod tests {
             inode,
             "the lock file is never replaced"
         );
+    }
+
+    #[test]
+    fn dropping_the_lock_releases_it_while_a_copy_of_its_descriptor_is_open() {
+        let (_dir, root) = temp_root();
+        let instance = open_root(&root);
+        let lock = instance.lock().expect("the first lock is taken");
+        let copy = lock
+            .file
+            .try_clone()
+            .expect("the lock's descriptor is copied");
+        drop(lock);
+        assert!(
+            a_separate_open_can_lock(&root.join("controller.lock")),
+            "a copy of a dropped WriterLock's descriptor keeps the lock"
+        );
+        drop(
+            instance
+                .lock()
+                .expect("the lock is free while the copy is open"),
+        );
+        drop(copy);
     }
 
     #[test]
