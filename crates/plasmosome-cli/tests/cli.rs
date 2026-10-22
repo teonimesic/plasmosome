@@ -535,6 +535,9 @@ fn the_full_parse_refuses_each_fault() {
     let escaped_name = format!("a{}[31m", escape_character());
     let overridden_name = with_control(0x202e);
     let csi_name = with_control(0x9b);
+    let arabic_marked_name = with_control(0x061c);
+    let left_marked_name = with_control(0x200e);
+    let right_marked_name = with_control(0x200f);
     let forty_digits = "1".repeat(40);
     let lossy = format!("a{}", char::REPLACEMENT_CHARACTER);
     let cases: Vec<(Vec<OsString>, Option<&str>)> = vec![
@@ -571,6 +574,18 @@ fn the_full_parse_refuses_each_fault() {
         (
             args(&["status", "--kernel", &csi_name]),
             Some(csi_name.as_str()),
+        ),
+        (
+            args(&["status", "--kernel", &arabic_marked_name]),
+            Some(arabic_marked_name.as_str()),
+        ),
+        (
+            args(&["status", "--kernel", &left_marked_name]),
+            Some(left_marked_name.as_str()),
+        ),
+        (
+            args(&["status", "--kernel", &right_marked_name]),
+            Some(right_marked_name.as_str()),
         ),
         (
             args(&["status", "--socket", "relative/control.uds"]),
