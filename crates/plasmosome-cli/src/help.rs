@@ -1,3 +1,4 @@
+use crate::args::{Flag, FlagKind};
 use crate::commands::Command;
 
 const ABOUT: &str = "\
@@ -83,10 +84,26 @@ pub(crate) fn command(command: &Command) -> String {
     } else {
         "Not served in this build: running it exits 2 with not_served."
     };
-    format!(
-        "Usage: {} [FLAGS]\n\n{sends}\n{served}\n\n{SEE_ALSO}",
-        usage(command)
-    )
+    let mut text = format!("Usage: {} [FLAGS]\n\n{sends}\n{served}\n", usage(command));
+    if !command.flags.is_empty() {
+        let flags: Vec<String> = command.flags.iter().map(written).collect();
+        text.push_str(&format!("Its own flags: {}.\n", flags.join(", ")));
+    }
+    if command.takes_argv {
+        text.push_str("Everything after -- is the workload's argv, passed unchanged.\n");
+    }
+    text.push('\n');
+    text.push_str(SEE_ALSO);
+    text
+}
+
+fn written(flag: &Flag) -> String {
+    match flag.kind {
+        FlagKind::Text => format!("{} VALUE", flag.name),
+        FlagKind::Integer => format!("{} N", flag.name),
+        FlagKind::Bare => flag.name.to_string(),
+        FlagKind::Mock => format!("{}[=MODE]", flag.name),
+    }
 }
 
 fn rows<'a>(text: &mut String, commands: impl Iterator<Item = &'a Command> + Clone) {
