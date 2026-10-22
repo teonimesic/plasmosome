@@ -1,8 +1,17 @@
+use std::fs;
+
 use plasmosome_cli::json::{
     Json, MAX_REPLY_BYTES, Number, Reason, ScanError, scan, write_compact, write_human,
 };
 
 const BACKSLASH: char = '\\';
+
+const SPEC_025: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/specs/025-plasmosome-command-line.md"
+);
+
+const TERMINAL_CONTROLS_PARAGRAPH: &str = "**Terminal controls are escaped in both forms.**";
 
 fn escaped(hex: &str) -> String {
     format!("{BACKSLASH}u{hex}")
@@ -17,6 +26,8 @@ fn terminal_controls() -> Vec<char> {
         (0x00, 0x1f),
         (0x7f, 0x7f),
         (0x80, 0x9f),
+        (0x061c, 0x061c),
+        (0x200e, 0x200f),
         (0x202a, 0x202e),
         (0x2066, 0x2069),
     ]
@@ -24,6 +35,42 @@ fn terminal_controls() -> Vec<char> {
     .flat_map(|(first, last)| first..=last)
     .map(character)
     .collect()
+}
+
+fn spec_025_terminal_controls() -> Vec<u32> {
+    let spec = fs::read_to_string(SPEC_025).expect("spec 025 is readable beside the crate");
+    let paragraph = spec
+        .lines()
+        .skip_while(|line| !line.starts_with(TERMINAL_CONTROLS_PARAGRAPH))
+        .take_while(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let list = paragraph
+        .split_once("The terminal controls are ")
+        .and_then(|(_, rest)| rest.split_once('.'))
+        .map(|(list, _)| list)
+        .unwrap_or_else(|| panic!("spec 025's list of terminal controls was not found"));
+    let mut points = Vec::new();
+    let mut range_open = false;
+    for piece in list.split("U+").skip(1) {
+        let rest =
+            piece.trim_start_matches(|c: char| c.is_ascii_digit() || ('A'..='F').contains(&c));
+        let digits = &piece[..piece.len() - rest.len()];
+        if !(4..=6).contains(&digits.len()) {
+            range_open = false;
+            continue;
+        }
+        let point = u32::from_str_radix(digits, 16).expect("upper-case hex digits");
+        if range_open {
+            let first = points.pop().expect("a range starts at a code point");
+            points.extend(first..=point);
+        } else {
+            points.push(point);
+        }
+        range_open = rest.trim() == "to";
+    }
+    points.sort_unstable();
+    points
 }
 
 fn number(text: &str) -> Json {
@@ -58,8 +105,8 @@ fn every_terminal_control_is_escaped() {
     let controls = terminal_controls();
     assert_eq!(
         controls.len(),
-        74,
-        "spec 025 section 3 names 74 code points"
+        77,
+        "spec 025 section 3 names 77 code points"
     );
     for &control in &controls {
         let key = format!("k{control}k");
@@ -102,7 +149,8 @@ fn every_terminal_control_is_escaped() {
 #[test]
 fn other_characters_pass_through_raw() {
     for code_point in [
-        0x20, 0x2f, 0x7e, 0xa0, 0xff, 0x2028, 0x2029, 0x202f, 0x2065, 0x206a, 0xfeff, 0x1f600,
+        0x20, 0x2f, 0x7e, 0xa0, 0xff, 0x061b, 0x061d, 0x200d, 0x2010, 0x2028, 0x2029, 0x202f,
+        0x2065, 0x206a, 0xfeff, 0x1f600,
     ] {
         let raw = character(code_point);
         assert_eq!(
@@ -110,6 +158,54 @@ fn other_characters_pass_through_raw() {
             format!("\"{raw}\""),
             "U+{code_point:04X} is not a terminal control and is written as UTF-8"
         );
+    }
+}
+
+#[test]
+fn every_character_is_escaped_exactly_when_spec_025_lists_it() {
+    let listed = spec_025_terminal_controls();
+    let tested: Vec<u32> = terminal_controls().into_iter().map(u32::from).collect();
+    assert_eq!(
+        listed, tested,
+        "the test's list of terminal controls is spec 025's list"
+    );
+    for character in (0..=0x10ffff).filter_map(char::from_u32) {
+        if character == '"' || character == BACKSLASH {
+            continue;
+        }
+        let point = u32::from(character);
+        let value = Json::String(character.to_string());
+        let compact = write_compact(&value);
+        let human = write_human(&value);
+        if listed.binary_search(&point).is_ok() {
+            let escape = compact
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+                .and_then(|rest| rest.strip_prefix(BACKSLASH))
+                .and_then(|rest| rest.strip_prefix('u'))
+                .filter(|hex| hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+            assert_eq!(
+                escape,
+                Some(point),
+                "U+{point:04X} is listed, so the compact form escapes it, not as {compact:?}"
+            );
+            assert_eq!(
+                human,
+                format!(r#""<U+{point:04X}>""#),
+                "U+{point:04X} is listed, so the human form shows it by its code point"
+            );
+        } else {
+            let raw = format!(r#""{character}""#);
+            assert_eq!(
+                compact, raw,
+                "U+{point:04X} is not listed, so the compact form writes it as UTF-8"
+            );
+            assert_eq!(
+                human, raw,
+                "U+{point:04X} is not listed, so the human form writes it as UTF-8"
+            );
+        }
     }
 }
 
