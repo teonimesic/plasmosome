@@ -318,14 +318,18 @@ calls them yet.
   cannot create and lock are all untestable, as is a create whose directory sync fails after it
   named the lock. `LockTest::fact` gives the `LockFact` that `decide` takes. Spec 023 §4 step 6's
   wait keeps the probe, since it must not create a missing lock.
-- Nothing here calls `LOCK_UN`. An `flock` lock belongs to the open file, so it is released only
-  when every descriptor of that open file is closed: the copy handed to `membraned` keeps it
-  held after the controller drops its own. A forked child that has not called `exec` keeps it
-  alive too.
-- The writer lock is released with `LOCK_UN`: a dropped `WriterLock` unlocks before its
-  descriptor closes, so a process that another thread is starting, which holds a copy of every
-  descriptor until its `exec`, does not keep it. The death of the process still leaves it held
-  while a forked child that has not called `exec` has the file open.
+- Nothing here calls `LOCK_UN` on a supervisor lock it returns. A `SupervisorLock`, whether from
+  `create_supervisor_lock`, a `Free` probe or a `Free` test, keeps the lock until every
+  descriptor of its open file is closed. An `flock` lock belongs to the open file, so the copy
+  handed to `membraned` keeps it held after the controller drops its own, and a forked child
+  that has not called `exec` keeps it alive too. A `create_supervisor_lock` that fails after its
+  `flock` calls `LOCK_UN` before it returns, when no copy has been handed on. Without it, a
+  process that another thread is starting, which holds a copy of every descriptor until its
+  `exec`, would keep a lock the call never returned.
+- The writer lock is released with `LOCK_UN`: a dropped `WriterLock`, and an `InstanceRoot::lock`
+  that fails after its `flock`, unlock before the descriptor closes, so the copy in a process
+  that another thread is starting does not keep it. The death of the process still leaves it
+  held while a forked child that has not called `exec` has the file open.
 - `CellDir::supervisor_lock_identity` gives the device and inode of the file at the name, so
   `membraned` can check that its descriptor 4 is this cell's lock (spec 023 §5, step 2).
   `SupervisorLock::identity` gives the same for the file it holds.

@@ -117,12 +117,12 @@ impl InstanceRoot {
     ///
     /// Dropping the returned value releases the lock at once: it calls `flock(LOCK_UN)` before its
     /// descriptor closes, so a process that another thread is starting, which holds a copy of
-    /// every descriptor until its `exec`, does not keep the lock. The death of this process
-    /// releases the lock only once no process forked from it still has the lock file open without
-    /// having called `exec`: such a child keeps the lock alive after this process dies.
-    /// Close-on-exec covers a child only once it has called `exec`. A forked child must not run
-    /// the returned value's drop, or call `LOCK_UN` on its copy, because either releases this
-    /// process's lock.
+    /// every descriptor until its `exec`, does not keep the lock. A call that fails after it took
+    /// the lock releases it the same way. The death of this process releases the lock only once
+    /// no process forked from it still has the lock file open without having called `exec`: such
+    /// a child keeps the lock alive after this process dies. Close-on-exec covers a child only
+    /// once it has called `exec`. A forked child must not run the returned value's drop, or call
+    /// `LOCK_UN` on its copy, because either releases this process's lock.
     ///
     /// The lock assumes a local filesystem and does not check for one. On NFS and similar
     /// filesystems `flock` may be emulated, lost silently or held past a crash; spec 008 makes
@@ -151,17 +151,23 @@ impl InstanceRoot {
             }
             locked => locked.map_err(io_error)?,
         }
-        change_mode(file.as_fd(), PRIVATE_FILE).map_err(io_error)?;
-        (self.sync)(self.dir.as_fd()).map_err(|source| LockError::Io {
-            path: self.path.clone(),
-            source,
-        })?;
-        Ok(WriterLock {
+        #[cfg(test)]
+        tests::after_taking_a_lock(file.as_fd());
+        let lock = WriterLock {
             file,
             path,
             root: self.identity,
             allocation: Mutex::new(()),
-        })
+        };
+        change_mode(lock.file.as_fd(), PRIVATE_FILE).map_err(|source| LockError::Io {
+            path: lock.path.clone(),
+            source,
+        })?;
+        (self.sync)(self.dir.as_fd()).map_err(|source| LockError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        Ok(lock)
     }
 
     /// Lists every entry of `<root>/cells` and classifies it, opening nothing through a symlink.
@@ -899,7 +905,10 @@ impl CellDir {
     /// entry named `supervisor.lock` is left as it was: a symlink is `Symlink`, a directory or
     /// other non-regular file is `NotARegularFile`, and a file is `AlreadyExists`. If the sync
     /// fails, the error is `Io` and the lock file stays in place: a retry is `AlreadyExists`, and
-    /// once nothing else holds it [`CellDir::probe_supervisor_lock`] reports it `Free`.
+    /// once nothing else holds it [`CellDir::probe_supervisor_lock`] reports it `Free`. Every
+    /// failure after the `flock` releases it with `LOCK_UN` before it returns, so a process that
+    /// another thread is starting, which holds a copy of every descriptor until its `exec`, does
+    /// not keep it. No copy has been handed on by then.
     ///
     /// Two calls for one cell at once can get in each other's way: the second call's first step
     /// removes the first call's temporary as a leftover, and the first call's rename then moves
@@ -917,18 +926,20 @@ impl CellDir {
     pub fn create_supervisor_lock(&self) -> Result<SupervisorLock, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOCK_FILE);
         self.remove_if_present(SUPERVISOR_LOCK_TEMPORARY)?;
-        let file = match self.lock_and_name_supervisor_lock(&path) {
+        let file = match self.create_locked_temporary() {
             Ok(file) => file,
             Err(error) => {
                 self.remove_if_present(SUPERVISOR_LOCK_TEMPORARY)?;
                 return Err(error);
             }
         };
-        #[cfg(test)]
-        tests::after_naming_the_lock();
-        self.check_lock_named(&file, &path)?;
-        self.sync_dir()?;
-        Ok(SupervisorLock { file, path })
+        match self.name_supervisor_lock(&file, &path) {
+            Ok(()) => Ok(SupervisorLock { file, path }),
+            Err(error) => {
+                unlock(file.as_fd());
+                Err(error)
+            }
+        }
     }
 
     fn check_lock_named(&self, file: &File, path: &Path) -> Result<(), CellDirError> {
@@ -943,13 +954,19 @@ impl CellDir {
         }
     }
 
-    fn lock_and_name_supervisor_lock(&self, path: &Path) -> Result<File, CellDirError> {
+    fn create_locked_temporary(&self) -> Result<File, CellDirError> {
         let file = self.create_private_file(SUPERVISOR_LOCK_TEMPORARY)?;
         lock_exclusive_nonblocking(file.as_fd())
             .map_err(cell_dir_io(&self.entry_path(SUPERVISOR_LOCK_TEMPORARY)))?;
         #[cfg(test)]
+        tests::after_taking_a_lock(file.as_fd());
+        Ok(file)
+    }
+
+    fn name_supervisor_lock(&self, file: &File, path: &Path) -> Result<(), CellDirError> {
+        #[cfg(test)]
         tests::before_naming_the_lock();
-        match rename_no_replace(
+        let renamed = match rename_no_replace(
             self.dir.as_fd(),
             SUPERVISOR_LOCK_TEMPORARY,
             self.dir.as_fd(),
@@ -963,8 +980,16 @@ impl CellDir {
                     Ok(Kind::Regular) | Err(_) => CellDirError::AlreadyExists { path },
                 })
             }
-            renamed => renamed.map(|()| file).map_err(cell_dir_io(path)),
+            renamed => renamed.map_err(cell_dir_io(path)),
+        };
+        if let Err(error) = renamed {
+            self.remove_if_present(SUPERVISOR_LOCK_TEMPORARY)?;
+            return Err(error);
         }
+        #[cfg(test)]
+        tests::after_naming_the_lock();
+        self.check_lock_named(file, path)?;
+        self.sync_dir()
     }
 
     /// Tries `supervisor.lock` on a fresh descriptor (spec 023 §4 step 6, §7 step 4 and §8),
@@ -2241,20 +2266,23 @@ mod tests {
         }
     }
 
-    #[allow(unsafe_code)]
     fn a_separate_open_can_lock(path: &Path) -> bool {
-        let file = fs::File::open(path).expect("the file opens for a lock attempt");
-        // SAFETY: flock takes no pointer, and `file` stays open until this function returns.
-        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        taken == 0
+        a_separate_open_can_take(path, libc::LOCK_EX)
+    }
+
+    fn a_separate_open_can_share(path: &Path) -> bool {
+        a_separate_open_can_take(path, libc::LOCK_SH)
     }
 
     #[allow(unsafe_code)]
-    fn a_separate_open_can_share(path: &Path) -> bool {
+    fn a_separate_open_can_take(path: &Path, kind: libc::c_int) -> bool {
         let file = fs::File::open(path).expect("the file opens for a lock attempt");
         // SAFETY: flock takes no pointer, and `file` stays open until this function returns.
-        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
-        taken == 0
+        let taken = unsafe { libc::flock(file.as_raw_fd(), kind | libc::LOCK_NB) } == 0;
+        if taken {
+            unlock(file.as_fd());
+        }
+        taken
     }
 
     #[allow(unsafe_code)]
@@ -3436,6 +3464,29 @@ mod tests {
         let _lock = instance.lock().expect("the retry takes the lock");
         assert_eq!(syncs_of(&root), 2);
         assert_eq!(mode_of(&root.join("controller.lock")), 0o600);
+    }
+
+    #[test]
+    fn a_failed_lock_releases_its_flock_while_a_copy_of_its_descriptor_is_open() {
+        let (_dir, root) = temp_root();
+        let instance = recording_root(&root);
+        let copy = copy_the_next_lock_taken();
+        fail_next_sync_of(&root);
+        expect_match!(instance.lock(), Err(LockError::Io { path, source }) => {
+            assert_eq!(path, root);
+            assert_injected(&source);
+        });
+        let copy = the_copy(&copy);
+        assert!(
+            a_separate_open_can_lock(&root.join("controller.lock")),
+            "a copy of a failed lock()'s descriptor keeps the lock"
+        );
+        drop(
+            instance
+                .lock()
+                .expect("the retry takes the lock while the copy is open"),
+        );
+        drop(copy);
     }
 
     #[test]
@@ -5139,12 +5190,40 @@ mod tests {
 
     type SyncHook = Box<dyn FnMut(BorrowedFd<'_>)>;
 
+    type LockHook = Box<dyn FnOnce(BorrowedFd<'_>)>;
+
     thread_local! {
         static BETWEEN_LISTINGS: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static BEFORE_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static AFTER_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
+        static AFTER_TAKING_A_LOCK: RefCell<Option<LockHook>> = const { RefCell::new(None) };
         static ON_SYNC: RefCell<Option<SyncHook>> = const { RefCell::new(None) };
         static FAIL_NEXT_PROBE_LOCK: Cell<Option<i32>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn after_taking_a_lock(fd: BorrowedFd<'_>) {
+        if let Some(work) = AFTER_TAKING_A_LOCK.with(|slot| slot.borrow_mut().take()) {
+            work(fd);
+        }
+    }
+
+    fn copy_the_next_lock_taken() -> Rc<RefCell<Option<OwnedFd>>> {
+        let copy = Rc::new(RefCell::new(None));
+        let kept = Rc::clone(&copy);
+        let work: LockHook = Box::new(move |fd| {
+            let copied = fd
+                .try_clone_to_owned()
+                .expect("the lock's descriptor is copied");
+            *kept.borrow_mut() = Some(copied);
+        });
+        AFTER_TAKING_A_LOCK.with(|slot| *slot.borrow_mut() = Some(work));
+        copy
+    }
+
+    fn the_copy(copy: &Rc<RefCell<Option<OwnedFd>>>) -> OwnedFd {
+        copy.borrow_mut()
+            .take()
+            .expect("the lock's descriptor was copied right after its flock")
     }
 
     pub(super) fn probe_lock_result(locked: io::Result<()>) -> io::Result<()> {
@@ -5884,6 +5963,54 @@ mod tests {
         );
         drop(free_once_released(&dir));
         expect_match!(dir.create_supervisor_lock(), Err(CellDirError::AlreadyExists { .. }) => ());
+    }
+
+    #[test]
+    fn a_create_whose_sync_fails_releases_its_flock_while_a_copy_of_its_descriptor_is_open() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let cell_path = root.join("cells/cell-1");
+        let copy = copy_the_next_lock_taken();
+        fail_next_sync_of(&cell_path);
+        expect_match!(dir.create_supervisor_lock(), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, cell_path);
+            assert_injected(&source);
+        });
+        let copy = File::from(the_copy(&copy));
+        assert_eq!(
+            dir.supervisor_lock_identity()
+                .expect("the lock file is in place"),
+            file_identity(&copy).expect("the copy's identity"),
+            "supervisor.lock names the file the failed create locked"
+        );
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(_)) => ());
+        drop(copy);
+    }
+
+    #[test]
+    fn a_create_whose_rename_fails_releases_its_flock_while_a_copy_of_its_descriptor_is_open() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let copy = copy_the_next_lock_taken();
+        let mut rename = Some((lock_temporary_path(&root), lock_path(&root)));
+        on_naming_the_lock(move || {
+            if let Some((temporary, lock)) = rename.take() {
+                fs::rename(&temporary, &lock).expect("a second creator names the temporary");
+            }
+        });
+        expect_match!(dir.create_supervisor_lock(), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, lock_path(&root));
+            assert_eq!(source.kind(), io::ErrorKind::NotFound, "{source}");
+        });
+        let copy = File::from(the_copy(&copy));
+        assert_eq!(
+            dir.supervisor_lock_identity()
+                .expect("the second creator's rename left a file at the name"),
+            file_identity(&copy).expect("the copy's identity"),
+            "supervisor.lock names the file the failed create locked"
+        );
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Free(_)) => ());
+        drop(copy);
     }
 
     #[test]
