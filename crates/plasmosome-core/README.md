@@ -30,7 +30,7 @@ one.
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
-| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4 |
+| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, and the crate-private `sources::Probes` refuses one inside a Mount source under rule 5 |
 | `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
@@ -643,6 +643,16 @@ its start.
 `PrivateDir` and `list_trusted_dir` run on this walk, each with its own rule for the last
 directory.
 
+`Walk::identities` is spec 022 §3 rule 1's walk alone, and it is crate-private. It opens every
+component, the last as a directory, without following a symlink, and judges no directory. It
+returns the identity of the start and of every directory down to the last. A symlink, a missing
+name, a component that is not a directory and a directory above the last that the effective UID
+cannot search each refuse. The last directory is opened for search only. On macOS that is
+`O_SEARCH`, so a last directory the effective UID cannot search refuses too. On Linux it is
+`O_PATH`, which opens that directory anyway and returns its identity. It shows which directories
+a path passes, not whether they can be trusted, so the public walk's promise that every directory
+passed meets the ancestor rule still holds.
+
 ## Trusted files
 
 `operator::trusted::TrustedFile::open` reads a file under spec 022 §3 rules 1 to 4: the operator
@@ -661,11 +671,13 @@ component or the value found.
 | `links` | the file does not have exactly one link: a second link, or none once it is unlinked |
 | `mode` | group or other can write it, or a macOS ACL allow entry grants write |
 | `size` | it holds more than 1,048,576 bytes, found by reading at most one byte more |
+| `inside_mount_source` | its directory is, or lies inside, a Mount source ([Mount sources](#mount-sources)) |
 
 The parent, type and owner checks also judge a file the controller cannot open. On macOS the
 path is `/private/etc/...` or `/private/var/...`: `/etc` and `/var` are symlinks, so a path
-through them is `path`. Rule 5, no trusted file inside a Mount source, and rule 6, the content,
-are not checked here.
+through them is `path`. Rule 5, no trusted file inside a Mount source, is a separate check on an
+open `TrustedFile`, described under [Mount sources](#mount-sources). Rule 6, the content, is not
+checked here.
 
 Most unit tests build their files under a canonical temp directory and walk from it, so they run
 on Linux below a sticky `/tmp`. One test opens a file through the walk from `/`, so its test root
@@ -674,6 +686,59 @@ that is the per-user temp directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, w
 says. On Linux it tries `XDG_RUNTIME_DIR` when it is set, then the test binary's directory. If no
 base passes, the test fails and names each base with the ancestor that refused it. The test that
 `/etc/hosts` is `parent` skips as root, because root owns `/etc`.
+
+## Mount sources
+
+A cell and the controller run as one host UID, so a workload with a read-write Mount can write
+anything inside its source. Spec 022 §3 rule 5 keeps the files that decide what cells get out of
+every Mount source. `operator::sources` checks it, and nothing calls it yet.
+
+`Probes::probe` takes every Mount source a cell holds or has pending, and every one the operator
+file declares, each with its holder. It opens each path once with `Walk::identities`, so no
+symlink is followed and no directory is judged. `Probes::check` then refuses an open
+`TrustedFile` with `inside_mount_source` when a source's identity is on a chain of the file's
+directory: the directory is that source, or lies below it. Only device and inode are compared,
+never path text. So a sibling named `<source>-x` passes, and a source spelled in another case on
+a case-insensitive volume, or spelled through `/System/Volumes/Data`, holds what it names.
+
+- A held or pending source that no longer opens, renamed away or now a symlink, refuses only the
+  requests that resolve for its own cell. No other cell is blocked. The caller must label such a
+  source with its cell and pass the request's cell. A request for an existing cell checked as if
+  it made a new cell, or a held source labelled as declared, checks less, and nothing signals it.
+- A declared source that does not open is skipped. Spec 022 says it cannot be mounted either.
+  That holds only once §6's source guard (native task plasmosome-98hv) refuses it at resolution
+  and spec 017's Mount adapter walks it again at apply. Neither exists yet.
+- On macOS a firmlink such as `/Users`, `/private` or `/usr/local` opens a directory of the data
+  volume, so that directory has a second parent that no walk from `/` sees. Rule 5 counts both
+  chains. It opens `/System/Volumes/Data` followed by the directory's path, one component more at
+  a time, until a spelling opens a directory on the file's chain: the firmlink's target. Every
+  directory on the way to it counts too. So `/System`, `/System/Volumes`, `/System/Volumes/Data`
+  and `/System/Volumes/Data/usr` each hold a file under `/usr/local`, while
+  `/System/Volumes/Data/usr` does not hold one under `/private`. Nothing below the target is
+  opened by path again, so renaming a directory there after the file was opened does not hide the
+  second chain. A spelling that is missing, or none that opens a directory on the chain, means
+  the directory has no second parent. If a spelling or the data volume does not open for any
+  other reason, every file it concerns is refused rather than leave the hole open.
+- On macOS a file opened through `/System/Volumes/Data`, in any letter case, is refused. A walk
+  from there misses the firmlink's own parents, such as the system `/usr` above `/usr/local`. The
+  same file opened through its firmlink passes unless a source holds it. If
+  `/System/Volumes/Data` is missing there are no firmlinks and neither macOS rule applies. Linux
+  has no firmlinks.
+
+Rule 5's limits in spec 022 hold as written. It opens the path recorded at attach, so an operator
+who renames a held Mount root, or a directory above it, escapes it. A quarantine report with no
+observation gives no sources. Two more cases escape it:
+
+- A view of a directory inside a source, placed somewhere else, such as a Linux bind mount or a
+  bindfs (macFUSE) view on macOS. A file under the view has a chain without the source, so it
+  passes. Only root or the operator can make such a view; a cell cannot mount anything on the
+  host.
+- A firmlink whose data-side name differs from its own path. Rule 5 finds the second chain by
+  joining the directory's path to `/System/Volumes/Data`, so such a firmlink would hide it.
+  `/usr/share/firmlinks` lists none on macOS 26.6.2.
+
+The guard that keeps a new Mount source away from spec 022 §6's guarded directories comes with
+native task plasmosome-98hv.
 
 ## Artifacts
 
