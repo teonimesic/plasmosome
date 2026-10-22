@@ -1,11 +1,11 @@
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{Mutex, PoisonError};
@@ -13,6 +13,7 @@ use std::sync::{Mutex, PoisonError};
 use plasmosome_backend::{BootSession, CellId};
 use serde_json::Value;
 
+use crate::nofollow::{Walk, WalkRefusal};
 use crate::runtime::cell_id::{MAX_CELL_NUMBER, format_cell_id, parse_cell_id};
 use crate::runtime::cell_paths::RUNTIME_DIR;
 use crate::runtime::line::{LineFault, read_line};
@@ -46,9 +47,14 @@ const MARKER_READ_LIMIT: u64 = MAX_MARKER_BYTES as u64 + 1;
 type SyncDirectory = fn(BorrowedFd<'_>) -> io::Result<()>;
 type Identity = (u64, u64);
 
-/// An opened instance root directory. The operator supplies and trusts the root, so `open` may
-/// reach it through a symlink; every name beneath it is opened relative to this descriptor
-/// without following a symlink.
+/// An opened instance root directory. `open` walks the root's path from `/` without following a
+/// symlink. `/`, every directory below it and the root itself must pass the ancestor rule that
+/// `membraned`'s socket check applies to them (spec 001 §4.1): owned by root or the effective
+/// UID, writable by neither group nor other with no sticky-bit exception, and on macOS carrying
+/// no ACL allow entry that lets anyone replace its entries and on no volume mounted with
+/// ownership ignored. So a root under which every membrane would refuse its socket is refused
+/// when it is opened, before anything is made in it. Every name beneath the root is opened
+/// relative to this descriptor without following a symlink.
 ///
 /// Private modes (0700 for directories, 0600 for files) are set with `fchmod`, whatever the
 /// umask. A directory this user cannot read, such as one a umask of 0477 left at 0300, is first
@@ -66,8 +72,9 @@ type Identity = (u64, u64);
 /// `retire` reports `Io` with `ENOENT`.
 ///
 /// On macOS private modes do not restrict access when the root or `cells` carries an
-/// inheritable ACL: the new entry inherits it and the mode does not show it. Nothing here
-/// removes or checks ACLs.
+/// inheritable ACL: the new entry inherits it and the mode does not show it. `open` refuses an
+/// allow entry on the root or above it that lets anyone replace entries. Other entries, and
+/// entries on what the root contains, are not checked, and nothing here removes an ACL.
 #[derive(Debug)]
 pub struct InstanceRoot {
     dir: OwnedFd,
@@ -77,28 +84,24 @@ pub struct InstanceRoot {
 }
 
 impl InstanceRoot {
-    /// Opens the directory at `path`, which must be absolute. A relative path is refused rather
-    /// than resolved against the current directory.
+    /// Opens the directory at `path`, which must be absolute and normal: no empty, `.` or `..`
+    /// component and no trailing `/`. A relative path is `NotAbsolute`, never resolved against
+    /// the current directory. A path the rule above refuses is `Untrusted`, naming the root and
+    /// the component that broke the rule. A component that is missing or cannot be opened is
+    /// `Open`, naming that component. It creates nothing.
     pub fn open(path: &Path) -> Result<InstanceRoot, InstanceRootError> {
         if !path.is_absolute() {
             return Err(InstanceRootError::NotAbsolute {
                 path: path.to_path_buf(),
             });
         }
-        let dir = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY)
-            .open(path)
-            .and_then(|dir| Ok((identity_of(&dir.metadata()?), dir)))
-            .map_err(|source| InstanceRootError::Open {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        let (identity, dir) = dir;
+        let opened = Walk::from_root(path)
+            .and_then(|walk| walk.open_trusted_directory())
+            .map_err(|refusal| root_refusal(path, refusal))?;
         Ok(InstanceRoot {
-            dir: OwnedFd::from(dir),
+            dir: opened.fd,
             path: path.to_path_buf(),
-            identity,
+            identity: (opened.facts.dev, opened.facts.ino),
             sync: sync_directory,
         })
     }
@@ -1373,8 +1376,21 @@ pub enum CellDirError {
 /// Why an instance root could not be opened.
 #[derive(Debug)]
 pub enum InstanceRootError {
-    NotAbsolute { path: PathBuf },
-    Open { path: PathBuf, source: io::Error },
+    NotAbsolute {
+        path: PathBuf,
+    },
+    /// The walk refused `root`'s path. `refusal` names the component that broke the rule.
+    Untrusted {
+        root: PathBuf,
+        refusal: WalkRefusal,
+    },
+    Open {
+        /// The root, or the directory above it that is missing or this user cannot search. On
+        /// Linux the walk opens a directory this user cannot search, so this names the entry
+        /// below it.
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 /// Why the writer lock was not taken. `Busy` means another open of the lock file holds it.
@@ -1631,9 +1647,14 @@ impl fmt::Display for InstanceRootError {
             InstanceRootError::NotAbsolute { path } => {
                 write!(f, "{} is not an absolute path", path.display())
             }
+            InstanceRootError::Untrusted { root, refusal } => write!(
+                f,
+                "the instance root {} is refused: {refusal}",
+                root.display()
+            ),
             InstanceRootError::Open { path, source } => write!(
                 f,
-                "cannot open the instance root {}: {source}",
+                "cannot open {}, the instance root or a directory above it: {source}",
                 path.display()
             ),
         }
@@ -1643,6 +1664,7 @@ impl fmt::Display for InstanceRootError {
 impl std::error::Error for InstanceRootError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            InstanceRootError::Untrusted { refusal, .. } => Some(refusal),
             InstanceRootError::Open { source, .. } => Some(source),
             InstanceRootError::NotAbsolute { .. } => None,
         }
@@ -1769,8 +1791,21 @@ fn out_of_descriptors(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
 }
 
-fn identity_of(metadata: &std::fs::Metadata) -> Identity {
-    (metadata.dev(), metadata.ino())
+fn root_refusal(root: &Path, refusal: WalkRefusal) -> InstanceRootError {
+    match refusal {
+        WalkRefusal::Missing { path } => InstanceRootError::Open {
+            path,
+            source: io::Error::from_raw_os_error(libc::ENOENT),
+        },
+        WalkRefusal::Io { path, errno, .. } => InstanceRootError::Open {
+            path,
+            source: io::Error::from_raw_os_error(errno),
+        },
+        refusal => InstanceRootError::Untrusted {
+            root: root.to_path_buf(),
+            refusal,
+        },
+    }
 }
 
 enum DirectoryRefusal {
@@ -2186,6 +2221,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    #[cfg(target_os = "macos")]
+    use crate::nofollow::fixtures::add_acl;
+    use crate::nofollow::fixtures::{TestRoot, make_dir};
+    use crate::private_socket::{PrivateDir, PrivateSocketError};
 
     macro_rules! expect_match {
         ($value:expr, $pattern:pat => $then:expr) => {
@@ -2347,6 +2386,317 @@ mod tests {
             assert_eq!(path, missing);
             assert_eq!(source.kind(), io::ErrorKind::NotFound);
         });
+    }
+
+    struct Refused {
+        open: PathBuf,
+        real: Option<PathBuf>,
+        refusal: WalkRefusal,
+        socket_check: bool,
+    }
+
+    fn refused_at(open: PathBuf, real: Option<PathBuf>, refusal: WalkRefusal) -> Refused {
+        Refused {
+            open,
+            real,
+            refusal,
+            socket_check: true,
+        }
+    }
+
+    fn entries_of(path: &Path) -> Vec<PathBuf> {
+        let mut entries: Vec<PathBuf> = fs::read_dir(path)
+            .expect("the directory lists")
+            .map(|entry| entry.expect("an entry").path())
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    fn make_cell_dir_by_hand(root: &Path) -> PathBuf {
+        make_dir(&root.join("cells"), 0o700);
+        make_dir(&root.join("cells/cell-1"), 0o700);
+        root.join("cells/cell-1")
+    }
+
+    fn assert_refused_where_its_socket_would_be(row: &str, refused: Refused) {
+        let Refused {
+            open,
+            real,
+            refusal,
+            socket_check,
+        } = refused;
+        match InstanceRoot::open(&open) {
+            Err(InstanceRootError::Untrusted {
+                root,
+                refusal: found,
+            }) => {
+                assert_eq!(root, open, "{row}");
+                assert_eq!(found, refusal, "{row}");
+            }
+            other => panic!("{row}: expected Untrusted, got {other:?}"),
+        }
+        if let Some(real) = &real {
+            assert_eq!(entries_of(real), Vec::<PathBuf>::new(), "{row}");
+            make_cell_dir_by_hand(real);
+        }
+        if socket_check {
+            assert_eq!(
+                PrivateDir::open(&open.join("cells/cell-1")).map(|dir| dir.path().to_path_buf()),
+                Err(PrivateSocketError::from(refusal)),
+                "{row}: membraned's socket check refuses the same component"
+            );
+        }
+    }
+
+    fn assert_opens_where_its_socket_would(row: &str, root: &Path) {
+        let opened = InstanceRoot::open(root).unwrap_or_else(|error| panic!("{row}: {error}"));
+        assert_eq!(opened.path(), root, "{row}");
+        let cell = make_cell_dir_by_hand(root);
+        PrivateDir::open(&cell).unwrap_or_else(|error| panic!("{row}: {error}"));
+    }
+
+    fn under_parent(base: &Path, mode: u32) -> Refused {
+        let parent = base.join("p");
+        make_dir(&parent, 0o700);
+        make_dir(&parent.join("inst"), 0o700);
+        set_mode(&parent, mode);
+        let root = parent.join("inst");
+        refused_at(
+            root.clone(),
+            Some(root),
+            WalkRefusal::Replaceable { path: parent, mode },
+        )
+    }
+
+    fn root_at(base: &Path, mode: u32) -> Refused {
+        let root = base.join("inst");
+        make_dir(&root, mode);
+        refused_at(
+            root.clone(),
+            Some(root.clone()),
+            WalkRefusal::Replaceable { path: root, mode },
+        )
+    }
+
+    fn through_a_symlink(base: &Path, link: &str, target: &str, open: &str) -> Refused {
+        make_dir(&base.join("real"), 0o700);
+        make_dir(&base.join("real/inst"), 0o700);
+        symlink(base.join(target), base.join(link)).expect("the link is made");
+        refused_at(
+            base.join(open),
+            Some(base.join("real/inst")),
+            WalkRefusal::Symlink {
+                path: base.join(link),
+            },
+        )
+    }
+
+    fn with_a_trailing_slash(base: &Path) -> Refused {
+        let root = base.join("inst");
+        make_dir(&root, 0o700);
+        let mut spelled = root.clone().into_os_string();
+        spelled.push("/");
+        let spelled = PathBuf::from(spelled);
+        Refused {
+            open: spelled.clone(),
+            real: Some(root),
+            refusal: WalkRefusal::NotNormal { path: spelled },
+            socket_check: false,
+        }
+    }
+
+    fn a_file(base: &Path) -> Refused {
+        let root = base.join("inst");
+        fs::write(&root, b"").expect("the file is written");
+        refused_at(root.clone(), None, WalkRefusal::NotDirectory { path: root })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn under_parent_with_acl(base: &Path, rule: &str) -> Refused {
+        let parent = base.join("p");
+        make_dir(&parent, 0o755);
+        make_dir(&parent.join("inst"), 0o700);
+        add_acl(&parent, rule);
+        let root = parent.join("inst");
+        refused_at(
+            root.clone(),
+            Some(root),
+            WalkRefusal::ReplaceableByAcl { path: parent },
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn root_with_acl(base: &Path) -> Refused {
+        let root = base.join("inst");
+        make_dir(&root, 0o700);
+        add_acl(&root, "everyone allow add_subdirectory");
+        refused_at(
+            root.clone(),
+            Some(root.clone()),
+            WalkRefusal::ReplaceableByAcl { path: root },
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn under_a_foreign_owner(_: &Path) -> Refused {
+        let foreign = Path::new("/private/var/at");
+        let metadata = fs::symlink_metadata(foreign).expect("/private/var/at exists");
+        let euid = crate::nofollow::effective_uid();
+        assert!(
+            metadata.is_dir() && metadata.uid() != 0 && metadata.uid() != euid,
+            "{} must be a directory owned by neither root nor uid {euid} for this row",
+            foreign.display()
+        );
+        refused_at(
+            foreign.join("inst"),
+            None,
+            WalkRefusal::ForeignOwner {
+                path: foreign.to_path_buf(),
+                uid: metadata.uid(),
+            },
+        )
+    }
+
+    type Row = (&'static str, fn(&Path) -> Refused);
+
+    #[test]
+    fn a_root_is_refused_exactly_where_its_cell_socket_would_be() {
+        let mut rows: Vec<Row> = vec![
+            ("parent 0777", |base| under_parent(base, 0o777)),
+            ("parent 0770", |base| under_parent(base, 0o770)),
+            ("parent 0707", |base| under_parent(base, 0o707)),
+            ("parent sticky 1777", |base| under_parent(base, 0o1777)),
+            ("root 0770", |base| root_at(base, 0o770)),
+            ("symlink above", |base| {
+                through_a_symlink(base, "link", "real", "link/inst")
+            }),
+            ("symlink last", |base| {
+                through_a_symlink(base, "last", "real/inst", "last")
+            }),
+            ("trailing slash", with_a_trailing_slash),
+            ("a file", a_file),
+        ];
+        #[cfg(target_os = "macos")]
+        rows.extend::<[Row; 6]>([
+            ("add_subdirectory on the parent", |base| {
+                under_parent_with_acl(base, "everyone allow add_subdirectory")
+            }),
+            ("delete_child on the parent", |base| {
+                under_parent_with_acl(base, "everyone allow delete_child")
+            }),
+            ("add_file for staff on the parent", |base| {
+                under_parent_with_acl(base, "staff allow add_file")
+            }),
+            ("inherit-only add_subdirectory on the parent", |base| {
+                under_parent_with_acl(
+                    base,
+                    "everyone allow add_subdirectory,directory_inherit,only_inherit",
+                )
+            }),
+            ("add_subdirectory on the root", root_with_acl),
+            ("a foreign owner above", under_a_foreign_owner),
+        ]);
+        for (row, setup) in rows {
+            let base = TestRoot::walkable_from_root();
+            assert_refused_where_its_socket_would_be(row, setup(base.path()));
+        }
+        let base = TestRoot::walkable_from_root();
+        make_dir(&base.join("inst"), 0o700);
+        assert_opens_where_its_socket_would("clean", &base.join("inst"));
+    }
+
+    #[test]
+    fn a_root_in_the_system_temp_directory_is_refused() {
+        #[cfg(target_os = "macos")]
+        let sticky = Path::new("/private/tmp");
+        #[cfg(target_os = "linux")]
+        let sticky = Path::new("/tmp");
+        let held = tempfile::Builder::new()
+            .prefix("ir")
+            .tempdir_in(sticky)
+            .expect("a directory in the sticky temp directory");
+        set_mode(held.path(), 0o700);
+        let root = held.path().join("inst");
+        make_dir(&root, 0o700);
+        assert_refused_where_its_socket_would_be(
+            "the sticky temp directory",
+            refused_at(
+                root.clone(),
+                Some(root),
+                WalkRefusal::Replaceable {
+                    path: sticky.to_path_buf(),
+                    mode: 0o1777,
+                },
+            ),
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let root = held.path().join("through-tmp");
+            make_dir(&root, 0o700);
+            let name = held.path().file_name().expect("the directory has a name");
+            assert_refused_where_its_socket_would_be(
+                "spelled through /tmp",
+                refused_at(
+                    Path::new("/tmp").join(name).join("through-tmp"),
+                    Some(root),
+                    WalkRefusal::Symlink {
+                        path: PathBuf::from("/tmp"),
+                    },
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_under_a_parent_that_replaces_nothing_opens() {
+        let base = TestRoot::walkable_from_root();
+        let parent = base.join("p");
+        make_dir(&parent, 0o711);
+        make_dir(&parent.join("inst"), 0o700);
+        assert_opens_where_its_socket_would("search-only parent", &parent.join("inst"));
+        #[cfg(target_os = "macos")]
+        {
+            let base = TestRoot::walkable_from_root();
+            let parent = base.join("p");
+            make_dir(&parent, 0o755);
+            make_dir(&parent.join("inst"), 0o700);
+            add_acl(&parent, "everyone deny delete");
+            add_acl(&parent, "everyone allow list,search");
+            assert_opens_where_its_socket_would(
+                "a parent that denies delete and allows list and search",
+                &parent.join("inst"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_unsearchable_ancestor_is_an_open_error_naming_it() {
+        let base = TestRoot::walkable_from_root();
+        let absent = base.join("absent");
+        expect_match!(InstanceRoot::open(&absent.join("inst")), Err(InstanceRootError::Open { path, source }) => {
+            assert_eq!(path, absent);
+            assert_eq!(source.raw_os_error(), Some(libc::ENOENT));
+        });
+        if crate::nofollow::effective_uid() == 0 {
+            println!("skipped the unsearchable case: root searches every directory");
+            return;
+        }
+        let locked = base.join("locked");
+        make_dir(&locked, 0o700);
+        make_dir(&locked.join("inst"), 0o700);
+        set_mode(&locked, 0o000);
+        let outcome = InstanceRoot::open(&locked.join("inst"));
+        set_mode(&locked, 0o700);
+        #[cfg(target_os = "macos")]
+        let unopened = locked.clone();
+        #[cfg(target_os = "linux")]
+        let unopened = locked.join("inst");
+        expect_match!(outcome, Err(InstanceRootError::Open { path, source }) => {
+            assert_eq!(path, unopened);
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+        });
+        assert_eq!(entries_of(&locked.join("inst")), Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -3592,6 +3942,10 @@ mod tests {
     fn every_error_names_what_it_refused_and_keeps_its_cause() {
         let cause = Some(eio().to_string());
         let invalid = || CellPathError::NotACellName("..".to_string());
+        let replaceable = || WalkRefusal::Replaceable {
+            path: PathBuf::from("/inst"),
+            mode: 0o777,
+        };
         let refused = [
             refused_at!(LockError::Busy),
             refused_at!(LockError::Symlink),
@@ -3636,6 +3990,14 @@ mod tests {
             ),
             (Box::new(JournalRefusal::Symlink), "journal", None),
             (Box::new(JournalRefusal::NotRegular), "journal", None),
+            (
+                Box::new(InstanceRootError::Untrusted {
+                    root: PathBuf::from("/inst/x"),
+                    refusal: replaceable(),
+                }),
+                "/inst/x",
+                Some(replaceable().to_string()),
+            ),
         ];
         rows.extend(refused.into_iter().map(|error| (error, "/inst/x", None)));
         rows.extend(
