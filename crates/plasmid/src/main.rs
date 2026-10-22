@@ -2,6 +2,7 @@ mod args;
 mod envelope;
 mod help;
 mod new;
+mod values;
 
 use std::ffi::OsString;
 use std::io::Write;
