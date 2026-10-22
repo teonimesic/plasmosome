@@ -344,7 +344,10 @@ pub(crate) fn nul_free(field: &'static str, value: &str) -> Result<(), RecipeErr
     Ok(())
 }
 
-pub(crate) fn canonical_path(field: &'static str, value: &str) -> Result<(), RecipeError> {
+/// Checks that `value` is a canonical absolute path: NUL-free, starting with `/`, and with no
+/// empty, `.` or `..` component, so `/` itself and a trailing `/` are refused. `field` names the
+/// value in the error. The path is never rewritten and the filesystem is never read.
+pub fn canonical_path(field: &'static str, value: &str) -> Result<(), RecipeError> {
     nul_free(field, value)?;
     let Some(rest) = value.strip_prefix('/') else {
         return Err(RecipeError::NotAbsolute {
@@ -375,6 +378,16 @@ fn destination(value: &str) -> Result<(), RecipeError> {
     }
 }
 
+/// Returns the address `text` spells when it is an IP literal that `ProxyRecipe::validate`
+/// accepts as a destination: spelled exactly as `IpAddr` displays it, and with no IPv4 address
+/// in IPv4-mapped or IPv4-compatible form, though `::` and `::1` are accepted. Anything else,
+/// a DNS name included, is `None`. `plasmosome_core::manifest::Cidr::parse` uses it for the
+/// address of a pin, so a pin and a destination follow one rule.
+pub fn canonical_ip_literal(text: &str) -> Option<IpAddr> {
+    let address = text.parse().ok()?;
+    ip_literal(text, address).ok().map(|()| address)
+}
+
 fn ip_literal(value: &str, address: IpAddr) -> Result<(), RecipeError> {
     if let IpAddr::V6(v6) = address
         && let Some(ipv4) = embedded_ipv4(v6)
@@ -398,6 +411,13 @@ fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
         return None;
     }
     address.to_ipv4()
+}
+
+/// True when `host` is a host a proxy may be granted by name: a DNS name as
+/// `ProxyRecipe::validate` defines it, written in lower case. An IP literal, a name whose last
+/// label is a number, a trailing dot and any upper-case letter are refused, never rewritten.
+pub fn is_proxy_host(host: &str) -> bool {
+    is_dns_name(host) && !host.bytes().any(|byte| byte.is_ascii_uppercase())
 }
 
 fn is_dns_name(value: &str) -> bool {
@@ -437,7 +457,7 @@ mod tests {
 
     use crate::{
         BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,
-        RecipeError, SessionFileRecipe, UdsRecipe,
+        RecipeError, SessionFileRecipe, UdsRecipe, canonical_ip_literal,
     };
 
     const SEED: &str = "/etc/plasmosome/seed";
@@ -1112,6 +1132,41 @@ mod tests {
             ("0:0:0:0:0:ffff:7f00:1", "127.0.0.1"),
         ] {
             assert_refused(&proxy(destination, 443), embedded_ipv4(destination, ipv4));
+        }
+    }
+
+    #[test]
+    fn canonical_ip_literal_accepts_only_the_ip_literals_a_destination_accepts() {
+        for text in [
+            "::",
+            "::1",
+            "10.0.0.1",
+            "2001:db8::1",
+            "::ffff:0:c000:200",
+            "64:ff9b::c000:200",
+        ] {
+            assert_eq!(canonical_ip_literal(text), text.parse().ok(), "{text}");
+            assert_accepted(&proxy(text, 443));
+        }
+        for text in [
+            "::2",
+            "::0.0.0.2",
+            "::ffff:0:0",
+            "::ffff:192.0.2.1",
+            "::192.0.2.1",
+            "::ffff:0:192.0.2.0",
+            "2001:DB8::1",
+            "2001:db8:0::1",
+            "010.0.0.1",
+            "[::1]",
+            " ::1",
+            "api.github.com",
+            "",
+        ] {
+            assert_eq!(canonical_ip_literal(text), None, "{text}");
+            if text.parse::<IpAddr>().is_ok() {
+                assert!(proxy(text, 443).check().is_err(), "{text}");
+            }
         }
     }
 
