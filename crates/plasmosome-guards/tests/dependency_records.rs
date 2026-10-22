@@ -805,6 +805,26 @@ fn files_are_read_through_a_bound_of_8_mib() {
     assert_eq!(binary, Err("is not UTF-8".to_string()));
 }
 
+#[test]
+fn command_output_is_read_through_a_bound_of_64_mib() {
+    let zeros = |count: u64| {
+        run_bounded(
+            Command::new("head")
+                .arg("-c")
+                .arg(count.to_string())
+                .arg("/dev/zero"),
+        )
+    };
+    assert_eq!(
+        zeros(MAX_OUTPUT_BYTES).map(|output| output.len() as u64),
+        Ok(MAX_OUTPUT_BYTES)
+    );
+    assert_eq!(
+        zeros(MAX_OUTPUT_BYTES + 1),
+        Err("its output is larger than 64 MiB".to_string())
+    );
+}
+
 struct Fixture {
     directory: TempDir,
 }
