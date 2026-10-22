@@ -103,6 +103,14 @@ fn open_up(path: &Path) {
 /// under `XDG_RUNTIME_DIR` when it is set, else under `CARGO_TARGET_TMPDIR`. Panics naming
 /// every base that cannot hold one, and the rule each broke.
 pub fn private_root() -> TestRoot {
+    TestRoot(private_dir())
+}
+
+/// Makes the same directory as [`private_root`], as a plain `TempDir`. Dropping it only removes
+/// it: it opens up no mode and, on macOS, starts no `/bin/chmod` to strip ACLs. Use it where the
+/// tests change no mode and plant no ACL, and where one of them holds a descriptor without
+/// close-on-exec, which a process another test started would inherit.
+pub fn private_dir() -> TempDir {
     let mut refusals = Vec::new();
     for base in root_bases() {
         let root = match tempfile::Builder::new().prefix("ps").tempdir_in(&base) {
@@ -121,7 +129,7 @@ pub fn private_root() -> TestRoot {
                 "{}: a {length}-byte root leaves fewer than {NAME_ROOM} bytes for a socket name",
                 base.display()
             )),
-            Ok(_) => return TestRoot(root),
+            Ok(_) => return root,
         }
     }
     panic!(

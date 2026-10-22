@@ -20,11 +20,11 @@ use plasmosome_membrane::cell_start::{CellStartRefusal, adopt_lock, read_config}
 use plasmosome_membrane::runtime::path::RecipePath;
 use plasmosome_membrane::runtime::recipe::{Architecture, PlatformLimits, RuntimeRecipe};
 use serde_json::json;
+use tempfile::TempDir;
 
+#[allow(dead_code)]
 #[path = "../../plasmosome-core/tests/support/private_root.rs"]
 mod private_root;
-
-use private_root::TestRoot;
 
 const FLOOD_BYTES: usize = 8 << 20;
 const READER_BUDGET: Duration = Duration::from_secs(30);
@@ -34,12 +34,12 @@ struct Instance {
     root: InstanceRoot,
     writer: WriterLock,
     path: PathBuf,
-    _dir: TestRoot,
+    _dir: TempDir,
 }
 
 impl Instance {
     fn new() -> Instance {
-        let dir = private_root::private_root();
+        let dir = private_root::private_dir();
         let path = fs::canonicalize(dir.path()).expect("the temporary directory resolves");
         let root = InstanceRoot::open(&path).expect("the instance root opens");
         let writer = root.lock().expect("the writer lock is free");
