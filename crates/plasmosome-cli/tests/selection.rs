@@ -109,6 +109,14 @@ fn backslash() -> char {
     char::from(0x5c_u8)
 }
 
+fn right_to_left_mark() -> char {
+    char::from_u32(0x200f).expect("U+200F is a code point")
+}
+
+fn left_to_right_mark() -> char {
+    char::from_u32(0x200e).expect("U+200E is a code point")
+}
+
 fn reply_as(name: &str) -> Answer {
     Answer::Reply(format!("{}\n", json!({"id": 1, "result": {"name": name}})).into_bytes())
 }
@@ -566,7 +574,11 @@ fn instances_itself_a_symbolic_link_refuses_the_selection() {
 
 #[test]
 fn a_bad_name_in_instances_refuses_the_selection() {
-    for bad in [format!("e{}", escape()), format!("a{}b", backslash())] {
+    for bad in [
+        format!("e{}", escape()),
+        format!("a{}b", backslash()),
+        format!("a{}b", right_to_left_mark()),
+    ] {
         let home = Home::new();
         let a = home.listening("a");
         home.dir(&bad);
@@ -640,6 +652,7 @@ fn a_bad_variable_is_a_usage_error_naming_it() {
         "a/b".into(),
         format!("a{}b", backslash()).into(),
         format!("a{}[31m", escape()).into(),
+        format!("a{}b", left_to_right_mark()).into(),
         OsString::from_vec(vec![b'a', 0xff]),
         OsString::from_vec(vec![b'a', 0, b'b']),
     ];
