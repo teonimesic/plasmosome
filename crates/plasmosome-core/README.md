@@ -463,11 +463,13 @@ the failing component when the configured path:
   permission, or that carries an ACL.
 
 [Private recovery sockets](#private-recovery-sockets) gives the full rules. Nothing is bound when
-one of these rules refuses it, and the daemon creates no directory. Otherwise the socket is set to
-mode 0600 before it listens, whatever the umask. A connection whose kernel-reported peer UID is
-not the daemon's effective UID is closed before a byte is read or written, and the daemon goes on
-to the next connection. Tests and scripts that bind under macOS's `TMPDIR` must pass its real
-path, `/private/var/folders/...`.
+one of these rules refuses it, and the daemon creates no directory. Otherwise the socket is bound
+at a temporary name in that directory, set to mode 0600 and made to listen there, whatever the
+umask, and only then renamed to the configured name by a rename that never replaces an entry. A
+client that finds the configured path finds a 0600 socket that accepts. A connection whose
+kernel-reported peer UID is not the daemon's effective UID is closed before a byte is read or
+written, and the daemon goes on to the next connection. Tests and scripts that bind under macOS's
+`TMPDIR` must pass its real path, `/private/var/folders/...`.
 
 `plasmosomed` refuses a control-socket path that already exists — a live socket, a stale socket,
 a regular file or a symlink — and never unlinks it: the start exits naming the path, and
@@ -498,11 +500,13 @@ socket from a later one only while the original inode stays allocated (its new n
 alive), and the file-type check still rejects regular files and symlinks even if inode numbers
 are recycled. A leaf symlink at the configured path is an entry already there, so it is refused
 before `bind`, which would otherwise follow it. When the check `PrivateListener` repeats after
-`bind` fails, the start is refused and the socket just bound is removed only while it is still
-that socket by device and inode. If no socket owned by the effective UID is at the name in that
-directory after `bind` (`BindEscaped`), the start unlinks nothing and can leave the just-bound
-socket for the operator. `SIGKILL` is the case no destructor covers, because a killed process
-runs none, so the path survives the daemon and the next start refuses it and says why.
+`bind` fails, the start is refused and the socket just bound is removed from its temporary name
+only while it is still that socket by device and inode. If no socket owned by the effective UID is
+at the temporary name in that directory after `bind` (`BindEscaped`), the start unlinks nothing and
+can leave the just-bound socket for the operator. `SIGKILL` is the case no destructor covers,
+because a killed process runs none, so the path survives the daemon and the next start refuses it
+and says why. A `SIGKILL` during the start, before the rename, leaves the socket under its
+temporary name instead, which no start refuses and nothing removes.
 
 Connections are taken one at a time. The shutdown flag is read between accepts and between reads,
 and both halves of a connection carry a timeout, so neither an idle client nor one that never
@@ -545,11 +549,31 @@ socket through it too, as [Socket ownership](#socket-ownership) says, and so do
     calls made relative to it, as the membrane's writable root copy does; they reach the
     directory that was opened even after its path is renamed or names another one.
 - `PrivateListener::bind` refuses any entry already at the name and never unlinks it.
+  - It binds the socket at a temporary name in the held directory, never at the configured name.
+    The temporary is as long as the socket address leaves room for, up to 16 bytes: `.` and then
+    characters from `0-9a-z`, or a single such character when only one byte is left. A
+    temporary that `bind` finds taken, or that equals the configured name ignoring ASCII case, is
+    drawn again; on a case-insensitive volume such a name would be the configured entry. After
+    eight draws it returns `Io` with `EADDRINUSE`, naming the last temporary `bind` found taken,
+    or the directory if every draw equalled the name ignoring case.
   - It walks and judges the directory again before it creates the socket, and again after
     `bind`. If the second check fails, it returns that check's error and removes the socket it
-    finds at the name in the held directory, but only if the effective UID owns it.
-  - It sets the socket to mode 0600 through the held directory before `listen`. On Linux,
-    glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
+    finds at the temporary name in the held directory, but only if the effective UID owns it.
+  - It sets the socket to mode 0600 through the held directory, makes it listen and makes it
+    nonblocking, all at the temporary name. Only then does it rename it to the configured name,
+    with `renameatx_np` and `RENAME_EXCL` on macOS and `renameat2` and `RENAME_NOREPLACE` on
+    Linux, so a client that finds the name finds a 0600 socket that accepts. An entry that
+    appears at the name meanwhile is `AddressInUse` and is left as it was, and the temporary is
+    removed. A Linux filesystem without `RENAME_NOREPLACE` fails the rename with `EINVAL`, which
+    is `Io`; it never falls back to a rename that replaces. Errors from `bind`, `fchmodat`,
+    `listen`, `fcntl` and the rename name the temporary path, except the rename's
+    `AddressInUse`, which names the configured path, and the error after eight draws, which
+    names the directory when no draw reached `bind`. The socket's own address, as
+    `getsockname` reports it, stays the temporary name; no code here reads it. A hard kill before
+    the rename leaves the temporary entry, which nothing removes. Measured on macOS 26.6.2 before
+    this order: a client looping over `check_private_path` and `connect` saw the socket at mode
+    0755, or at 0600 refusing the connection, in 363 to 404 of 500 binds.
+  - On Linux, glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
     `EOPNOTSUPP` without it. The socket is then matched by device and inode and set with
     `fchmodat` without that flag.
   - `close` closes the socket, then removes only the socket it created, matched by device and
