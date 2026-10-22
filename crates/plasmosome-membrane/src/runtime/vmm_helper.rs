@@ -1125,8 +1125,13 @@ mod tests {
     fn loaded_images_are_judged_against_the_real_sealed_volume() {
         let images = names(&[HELPER, "/usr/lib/libSystem.B.dylib"]);
         assert!(judge_loaded_images(&images, &fixture()).is_ok());
-        let off = names(&["/System/Library/Caches/libx.dylib"]);
-        assert_eq!(exit_of(judge_loaded_images(&off, &fixture())), Inventory);
+        let off = names(&[HELPER, "/System/Library/Caches/libx.dylib"]);
+        let detail =
+            "\"/System/Library/Caches/libx.dylib\" is a system name off the sealed system volume";
+        assert_eq!(
+            judge_loaded_images(&off, &fixture()),
+            Err(refuse(Inventory, detail))
+        );
     }
 
     fn text(path: &str) -> CString {
