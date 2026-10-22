@@ -381,8 +381,9 @@ pub enum CellDirectoryFault {
     CopyMismatch { expected: Digest, actual: Digest },
     /// After the copy, the root image's `reconfirm` refused, and this is the fault it returned:
     /// `Replaced` when its path names another file, `ChangedSinceVerification` when its size or
-    /// times moved since it was verified, or any other fault of the checks `reconfirm` repeats,
-    /// such as a walk, file type, owner, mode, ACL, immutability or `Io` fault.
+    /// times moved since it was verified, or the `Rule` fault of core's checks that `reconfirm`
+    /// repeats, such as a walk, file type, owner, mode, ACL or immutability fault, a failed call
+    /// being the walk's `Io`.
     Source(ArtifactFault),
     /// A call failed with this errno.
     Io { op: &'static str, errno: i32 },
@@ -931,6 +932,8 @@ mod tests {
     #[test]
     fn each_fault_says_what_was_found() {
         use CellDirectoryFault::*;
+        use plasmosome_core::artifact::ArtifactFault as CoreFault;
+        use plasmosome_core::nofollow::WalkRefusal;
         let (expected, actual) = (Digest::of(b"a"), Digest::of(b"b"));
         let mismatch = format!("{actual}, not the verified {expected}");
         let rows = [
@@ -955,11 +958,12 @@ mod tests {
                 "the root image did not pass its reconfirm after the copy: its size or times moved",
             ),
             (
-                Source(ArtifactFault::Io {
+                Source(ArtifactFault::Rule(CoreFault::Walk(WalkRefusal::Io {
                     op: "fstat",
+                    path: "/a/base/rootfs.raw".into(),
                     errno: 5,
-                }),
-                "the root image did not pass its reconfirm after the copy: fstat failed with errno 5",
+                }))),
+                "the root image did not pass its reconfirm after the copy: fstat failed at /a/base/rootfs.raw (errno 5)",
             ),
             (
                 Io {
