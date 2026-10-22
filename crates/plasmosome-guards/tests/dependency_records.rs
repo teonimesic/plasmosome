@@ -365,14 +365,15 @@ fn resolve(
         let source = text(&package["source"]);
         packages.insert(package_id, Package::new(name, version, source, lockfile));
     }
-    let members = metadata["workspace_members"]
-        .as_array()
-        .ok_or("it lists no members")?;
     let nodes = metadata["resolve"]["nodes"]
         .as_array()
         .ok_or("it holds no resolve")?;
+    let first_party = |node: &&serde_json::Value| {
+        let package = packages.get(&text(&node["id"]));
+        package.is_some_and(|package| package.source.is_none())
+    };
     let mut direct = Vec::new();
-    for node in nodes.iter().filter(|node| members.contains(&node["id"])) {
+    for node in nodes.iter().filter(first_party) {
         for dependency in node["deps"].as_array().into_iter().flatten() {
             let package = packages.get(&text(&dependency["pkg"]));
             direct.push(package.ok_or("a dependency names no package")?.clone());
@@ -985,14 +986,62 @@ fn a_dev_or_build_dependency_needs_a_record_of_its_own() {
 
 #[test]
 fn a_tracked_lockfile_cargo_does_not_read_is_a_finding() {
-    let fixture = Fixture::new(&[("alpha", "1.2.3", "")]);
+    let fixture = Fixture::new(&[
+        ("alpha", "1.2.3", "beta = \"0.4\"\n"),
+        ("beta", "0.4.1", ""),
+    ]);
     fixture.package("crates/app", "app", "\n[dependencies]\nalpha = \"1\"\n");
     fixture.lock("Cargo.toml");
-    fixture.record("alpha", "1", &[]);
+    fixture.record("alpha", "1", &["beta@0.4"]);
     fixture.write("crates/app/Cargo.lock", "version = 4\n");
     fixture.track();
-    let ignored = "the resolve names alpha 1.2.3, which crates/app/Cargo.lock does not lock";
-    assert_eq!(fixture.guard(), [ignored]);
+    let ignored = ["alpha 1.2.3", "beta 0.4.1"].map(|package| {
+        format!("the resolve names {package}, which crates/app/Cargo.lock does not lock")
+    });
+    assert_eq!(fixture.guard(), ignored);
+}
+
+fn orphans_of(workspace: &str, crates: &[(&str, &str)]) -> Vec<String> {
+    let fixture = Fixture::new(&[
+        ("alpha", "1.2.3", "beta = \"0.4\"\n"),
+        ("beta", "0.4.1", ""),
+    ]);
+    fixture.write(
+        "Cargo.toml",
+        &format!("[workspace]\nresolver = \"2\"\n{workspace}"),
+    );
+    for (directory, manifest) in crates {
+        let name = directory.rsplit('/').next().unwrap_or_default();
+        fixture.package(directory, name, manifest);
+    }
+    fixture.lock("Cargo.toml");
+    fixture.record("alpha", "1", &["beta@0.4"]);
+    fixture.track();
+    fixture.guard()
+}
+
+#[test]
+fn a_path_crate_outside_the_members_has_direct_dependencies() {
+    let workspace = "members = [\"crates/app\"]\nexclude = [\"crates/helper\"]\n";
+    let app = "\n[dependencies]\nalpha = \"1\"\nhelper = { path = \"../helper\" }\n";
+    let helper = "\n[dependencies]\nbeta = \"0.4\"\n";
+    let crates = [("crates/app", app), ("crates/helper", helper)];
+    assert_eq!(orphans_of(workspace, &crates), [orphan("beta@0.4")]);
+}
+
+#[test]
+fn a_direct_dependency_on_another_platform_or_member_needs_its_own_record() {
+    let app = "\n[dependencies]\nalpha = \"1\"\n";
+    let windows = format!("{app}\n[target.'cfg(windows)'.dependencies]\nbeta = \"0.4\"\n");
+    let one = "members = [\"crates/app\"]\n";
+    assert_eq!(
+        orphans_of(one, &[("crates/app", &windows)]),
+        [orphan("beta@0.4")]
+    );
+    let two = "members = [\"crates/app\", \"crates/other\"]\n";
+    let other = "\n[dependencies]\nbeta = \"0.4\"\n";
+    let crates = [("crates/app", app), ("crates/other", other)];
+    assert_eq!(orphans_of(two, &crates), [orphan("beta@0.4")]);
 }
 
 #[test]
