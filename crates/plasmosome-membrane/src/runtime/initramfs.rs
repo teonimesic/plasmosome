@@ -36,7 +36,9 @@ pub enum InitramfsRefusal {
     /// the other cpio formats and zero bytes between entries are refused here.
     NotNewc { offset: u64 },
     /// A header field of the entry at `offset` is not 8 hexadecimal digits, or is a `filesize`
-    /// other than 0 on a directory or the trailer, which the kernel would skip without reading.
+    /// other than 0 on a directory or the trailer. The kernel skips such a directory without
+    /// reading its name, so nothing under it is made. It skips a trailer's body too, and reads the
+    /// next header where the audit would, so for the trailer the refusal only fails closed.
     BadHeaderField { offset: u64, field: &'static str },
     /// The entry at `offset` has a check field other than 0.
     NonzeroCheck { offset: u64 },
@@ -140,8 +142,9 @@ impl std::error::Error for InitramfsRefusal {}
 /// `initramfs.file()`, never by path, through a limit of the bound plus one byte. The archive
 /// must be uncompressed newc whose entries are plain relative names, regular files with one link
 /// or directories, each name once with its parent before it, ending in a `TRAILER!!!` with no body
-/// and no symlink mode, and then only zero bytes. It must hold a regular, executable, non-empty `init`, a `plasmosome` directory and
-/// a regular `plasmosome/guest-policy` whose bytes hash to `guest_policy.digest()`.
+/// and no symlink mode, and then only zero bytes. It must hold a regular, executable, non-empty
+/// `init`, a `plasmosome` directory and a regular `plasmosome/guest-policy` whose bytes hash to
+/// `guest_policy.digest()`.
 ///
 /// It reads the bytes the descriptor holds now and does not hash them again. A write through a
 /// shared mapping made before the file was locked can change them without moving its size or
@@ -842,7 +845,8 @@ mod tests {
     #[test]
     fn a_trailer_with_a_symlink_mode_refuses_and_a_trailer_of_another_mode_passes() {
         let trailer = |mode| with(3, |entry| entry.mode = mode);
-        for mode in [SYMLINK, SYMLINK | 0o777] {
+        let above_bit_15 = 0x10000;
+        for mode in [SYMLINK, SYMLINK | 0o777, above_bit_15 | SYMLINK | 0o777] {
             assert_eq!(
                 audit(&trailer(mode)),
                 Err(SymlinkEntry {
@@ -851,7 +855,15 @@ mod tests {
                 "{mode:o}"
             );
         }
-        for mode in [0, REGULAR | 0o644, DIRECTORY | 0o755, 0o020644, 0o777] {
+        for mode in [
+            0,
+            REGULAR | 0o644,
+            DIRECTORY | 0o755,
+            0o020644,
+            0o777,
+            above_bit_15 | REGULAR | 0o644,
+            SYMLINK << 4,
+        ] {
             assert_eq!(audit(&trailer(mode)), Ok(binding(3)), "{mode:o}");
         }
     }
