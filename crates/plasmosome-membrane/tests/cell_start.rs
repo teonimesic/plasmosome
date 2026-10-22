@@ -2,12 +2,14 @@ use std::fs::{self, File};
 use std::io::{self, PipeWriter, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use plasmosome_backend::CellId;
+use plasmosome_core::nofollow::WalkRefusal;
 use plasmosome_core::runtime::cell_id::format_cell_id;
 use plasmosome_core::runtime::supervisor_config::{
     ConfigRecordRefusal, MAX_RECORD_BYTES, SupervisorConfig,
@@ -641,6 +643,25 @@ fn refuses_an_instance_root_that_does_not_open() {
             &refusal,
             CellStartRefusal::InstanceRoot(InstanceRootError::Open { source, .. })
                 if source.raw_os_error() == Some(libc::ENOENT)
+        ),
+        "{refusal:?}"
+    );
+}
+
+#[test]
+fn refuses_an_instance_root_the_ancestor_rule_refuses() {
+    let instance = Instance::new();
+    let controller = instance.cell(1);
+    fs::set_permissions(&instance.path, fs::Permissions::from_mode(0o770))
+        .expect("the root is made group-writable");
+    let refusal = refused_lock(&instance, handed_over(&controller), &instance.config(1));
+    assert!(
+        matches!(
+            &refusal,
+            CellStartRefusal::InstanceRoot(InstanceRootError::Untrusted {
+                root,
+                refusal: WalkRefusal::Replaceable { path, mode: 0o770 },
+            }) if root == &instance.path && path == &instance.path
         ),
         "{refusal:?}"
     );
