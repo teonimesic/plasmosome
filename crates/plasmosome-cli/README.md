@@ -339,7 +339,8 @@ today, is counted on the `Context`'s clock from the start of `handle`. In order:
    or `--` for the argv. Of two that contribute the same, it names the one given first, and a
    name from `PLASMOSOME_KERNEL`, which is not on the line, comes after every argument. A
    parameter is refused there and then, with `instance` only when `--socket` gave the socket.
-   The instance's name is refused once the socket is chosen, after `HOME` is read, so the error
+   The instance's name is refused later, once the socket is chosen. Without `--socket`, choosing
+   it reads `HOME`, so with `HOME` unset that exits 2 with `invalid_home`, not 64. The error
    carries `instance`, as `socket_path_too_long` does, and names `--kernel`'s name, or
    `PLASMOSOME_KERNEL` when the variable gave the name. An argument can reach the bound from a
    shell: a terminal control writes six bytes on the line, so about 175 KB of them fill it, well
@@ -422,7 +423,7 @@ On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it 
 | `map_refusal`, `PathOrigin` | A private-socket refusal to spec 025 §5's client error, by where the checked path came from |
 | `ClientCode`, `Exit` | The 18 client codes of spec 025 §4 and the six exit statuses they map to |
 | `Command`, `COMMANDS` | Spec 025 §2's command table: words, operands, wire method or registry name, whether it changes state, whether this build serves it, its own flags, whether it takes argv, its default deadline and its build |
-| `Build`, `VerbCall`, `VerbDeadline`, `InstanceParam` | A served command's build, and the one request it sends: the method, the parameters, whether it changes state, and the verb's `deadline_ms` |
+| `Build`, `VerbCall`, `VerbDeadline`, `InstanceParam` | A served command's build, and the one request it sends: the method, the parameters and the verb's `deadline_ms` |
 | `Flag`, `FlagKind` | A command's own flag: its name, its wire key, and what it takes and sends |
 | `CommandArgs`, `Param`, `ArgSource` | A served command's own flags, operands and argv as the parse read them, each as a wire parameter with where it came from |
 | `read`, `Reading`, `Invocation` | One command line read in spec 025's order, and a served command's checked flags |

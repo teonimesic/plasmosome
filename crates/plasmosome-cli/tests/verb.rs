@@ -534,21 +534,56 @@ fn a_state_change_that_loses_its_answer_exits_3() {
     );
 }
 
+fn terminal_controls() -> Vec<char> {
+    [
+        (0x00, 0x1f),
+        (0x7f, 0x7f),
+        (0x80, 0x9f),
+        (0x202a, 0x202e),
+        (0x2066, 0x2069),
+    ]
+    .into_iter()
+    .flat_map(|(first, last)| first..=last)
+    .map(|code| char::from_u32(code).expect("a code point"))
+    .collect()
+}
+
 #[test]
 fn a_sent_line_escapes_every_control_and_is_one_line() {
+    let controls = terminal_controls();
+    assert_eq!(
+        controls.len(),
+        74,
+        "spec 025 section 3 names 74 code points"
+    );
     let [escape, newline, backslash] =
         [0x1b, 0x0a, 0x5c].map(|code| char::from_u32(code).expect("a character"));
+    let mut cases: Vec<(String, String)> = controls
+        .iter()
+        .map(|&control| {
+            let written = format!("\"a{backslash}u{:04x}b\"", u32::from(control));
+            (format!("a{control}b"), written)
+        })
+        .collect();
+    cases.push((
+        format!("a{escape}{newline}b\"c{backslash}"),
+        format!("\"a{backslash}u001b{backslash}u000ab{backslash}\"c{backslash}{backslash}\""),
+    ));
     let root = private_root();
     let socket = root.path().join("control.uds");
-    let fake = FakeDaemon::start(&socket, vec![ok()]);
-    let cell = format!("a{escape}{newline}b\"c{backslash}");
-    let line = ["cell", "kill", "--cell", &cell, "--socket", text(&socket)];
-    outcome(&run(&line), Exit::Done);
-    let written =
-        format!("\"a{backslash}u001b{backslash}u000ab{backslash}\"c{backslash}{backslash}\"");
-    let expected =
-        format!("{{\"id\":1,\"method\":\"cell.kill\",\"params\":{{\"cell\":{written}}}}}{newline}");
-    assert_eq!(String::from_utf8(the_one_request(&fake)), Ok(expected));
+    let fake = FakeDaemon::start(&socket, cases.iter().map(|_| ok()).collect());
+    for (cell, _) in &cases {
+        let line = ["cell", "kill", "--cell", cell, "--socket", text(&socket)];
+        outcome(&run(&line), Exit::Done);
+    }
+    let sent = fake.ended(cases.len());
+    assert_eq!(fake.connections(), cases.len());
+    for ((cell, written), sent) in cases.iter().zip(sent) {
+        let expected = format!(
+            "{{\"id\":1,\"method\":\"cell.kill\",\"params\":{{\"cell\":{written}}}}}{newline}"
+        );
+        assert_eq!(String::from_utf8(sent), Ok(expected), "{cell:?}");
+    }
 }
 
 #[test]
@@ -798,6 +833,28 @@ fn the_bound_counts_the_deadline_the_call_can_send() {
         assert_eq!(envelope["error"]["argument"], longer.as_str(), "{words:?}");
         assert_never_reached(&listener);
     }
+
+    let home = Home::new();
+    let socket = home.socket("work");
+    let work = FakeDaemon::start(&socket, vec![ok()]);
+    let empty = "{\"id\":1,\"method\":\"cell.exec\",\"params\":{\"kernel\":\"work\",\"cell\":\"\",\"deadline_ms\":600000}}";
+    let cell = filler(empty, BOUND);
+    let longer = format!("{cell}a");
+    let deadline = ["--deadline-ms", "3600000"];
+    let over = [&["cell", "exec", "--cell", &longer][..], &deadline].concat();
+    let envelope = usage(&run_with(&over, home.vars(None), scripted(&[0, 0]), false));
+    assert_eq!(envelope["error"]["argument"], longer.as_str());
+    assert_eq!(
+        envelope["instance"],
+        json!({"name": "work", "socket": text(&socket)})
+    );
+    assert_eq!(work.connections(), 0);
+    let exact = [&["cell", "exec", "--cell", &cell][..], &deadline].concat();
+    let ran = run_with(&exact, home.vars(None), scripted(&[0, 0]), false);
+    outcome(&ran, Exit::Done);
+    let sent = the_one_request(&work);
+    assert_eq!(sent.len(), BOUND + 1);
+    assert!(sent.ends_with(b",\"deadline_ms\":600000}}\n"));
 }
 
 #[test]
@@ -807,8 +864,12 @@ fn the_argument_that_contributes_most_is_named_and_the_first_of_equals() {
     let listener = listening(&socket);
     let (a, b) = ("a".repeat(600_000), "b".repeat(600_000));
     let mock = format!("--mock={}", "m".repeat(1_100_000));
+    let control = char::from_u32(1).expect("U+0001 is a code point");
+    let genome: String = std::iter::repeat_n(control, 180_000).collect();
+    let cell = "a".repeat(500_000);
     for (case, (line, named)) in [
         (vec!["germinate", &a, "--cell", &b], a.as_str()),
+        (vec!["germinate", &genome, "--cell", &cell], genome.as_str()),
         (vec!["germinate", "--cell", &b, &a], b.as_str()),
         (vec!["germinate", "--now", "g", &mock], mock.as_str()),
         (
