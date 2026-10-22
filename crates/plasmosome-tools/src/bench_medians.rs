@@ -34,8 +34,9 @@ const HEADING: &str =
 /// that variable is unset.
 ///
 /// Returns 0 when both writes succeed. Returns 1 when a median cannot be read, and then writes
-/// nothing, or when the summary cannot be written. Returns 2 when `args` is not one argument.
-/// Each failure is one line on `err`.
+/// nothing; when `out` cannot be written, and then does not write the summary; or when the summary
+/// cannot be written. Returns 2 unless `args` is exactly one argument. Each failure is one line on
+/// `err`.
 pub fn run(
     args: &[OsString],
     summary: Option<&Path>,
@@ -90,8 +91,13 @@ fn median(path: &Path) -> Result<f64, String> {
     point_estimate(&bytes).map_err(|reason| format!("{shown} {reason}"))
 }
 
-/// Reads `median.point_estimate` from the text of an `estimates.json` as Python's `json` read it:
-/// the double nearest the number's text, and 0 for an integer zero.
+/// Reads `median.point_estimate` from the text of an `estimates.json` as Python's `json` read it.
+///
+/// `Value` refuses what is not JSON and checks that the field is a number, but it holds the number
+/// as serde_json converted it, which without the `float_roundtrip` feature can be one double off
+/// the nearest. So the value is the number's own text parsed by `str::parse`, which is correctly
+/// rounded, as Python's `json` is, and `{:.6}` rounds the double that `.6f` rounded. Python reads
+/// a number with no fraction or exponent as an `int`, which has no `-0`, so an integer zero is 0.
 fn point_estimate(bytes: &[u8]) -> Result<f64, String> {
     let estimates: Value =
         serde_json::from_slice(bytes).map_err(|error| format!("is not JSON: {error}"))?;
@@ -102,14 +108,10 @@ fn point_estimate(bytes: &[u8]) -> Result<f64, String> {
     {
         return Err(missing());
     }
-    // `Value` holds the number as serde_json converted it, which without its `float_roundtrip`
-    // feature can be one double off the nearest. Python's `json` is correctly rounded, and so is
-    // `str::parse` of the number's own text, so `{:.6}` here rounds the double `.6f` rounded.
     let (text, nearest) = member(bytes, "median")
         .and_then(|median| member(median.get().as_bytes(), "point_estimate"))
         .and_then(|number| Some((number.get(), number.get().parse::<f64>().ok()?)))
         .ok_or_else(missing)?;
-    // Python reads a number with no fraction or exponent as an `int`, and an `int` has no `-0`.
     let integer = !text.contains(['.', 'e', 'E']);
     Ok(if integer && nearest == 0.0 {
         0.0

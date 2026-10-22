@@ -1,9 +1,10 @@
 # Every gate is its own step: a `run: |` block reports only its last command's exit status,
-# so a multi-command step can pass while a gate inside it failed. One command per step.
-# The exception is a captured test step: one pipeline, `cargo test ... 2>&1 | tee -a FILE`, under
+# so a multi-command step can pass while a gate inside it failed. One command per step, with two
+# exceptions. A captured test step is one pipeline, `cargo test ... 2>&1 | tee -a FILE`, under
 # `shell: bash`. GitHub runs that as `bash --noprofile --norc -eo pipefail`, so the step fails when
 # any command in the pipeline fails. The default shell has no pipefail, and the step would pass
-# because tee succeeded.
+# because tee succeeded. A summary step, which prints a report and gates nothing, may run several
+# commands under `set -eu` with no pipe, so any failed command, or an unset variable, fails it.
 name: ci
 
 on:
