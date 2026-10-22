@@ -407,10 +407,10 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   missing, not a string, empty or only whitespace is refused naming `id`, with `fix`
   `id = "choose-a-stable-id"` and no plasmid id, before any other field is checked. So no refusal
   names a plasmid by a blank id. Whitespace is Unicode White_Space, as for a capability key: an
-  `id` made only of U+3000, or of U+00A0, U+0085 and U+2028, is blank, and one made only of U+FEFF
-  is not. The parsed `id` is what the author wrote: `" a"` stays `" a"`. Amended on 2026-10-22:
-  this had no rule for an empty or blank `id`; the parser refused an empty one and accepted a blank
-  one.
+  `id` made only of U+3000, or of U+00A0, U+0085 and U+2028, is blank, and one made only of U+FEFF,
+  U+200B or U+180E is not, since those are not White_Space. The parsed `id` is what the author
+  wrote: `" a"` stays `" a"`. Amended on 2026-10-22: this had no rule for an empty or blank `id`;
+  the parser refused an empty one and accepted a blank one.
 - **Each `[requires].capabilities` entry is a capability key: a string that is not empty or only
   whitespace.** An entry that is not a string, or is blank, is refused naming
   `requires.capabilities[i]`, where `i` is the entry's own index in the declaration, with `fix`
@@ -558,13 +558,18 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   error, a declaration over 1 MiB and one nested more than 32 levels carry none of the three.
   Catches: a field or plasmid only in `detail`, which a key or an id holding `: ` makes impossible
   to split, and a member sent as `null`. Amended on 2026-10-21: this item is new.
-- `id = " "`, `id = "\t"`, an `id` of U+3000, and an `id` of U+00A0, U+0085 and U+2028 written as
-  TOML escapes are each refused naming `id`, with `fix` `id = "choose-a-stable-id"` and no plasmid
-  id, both in a declaration that is otherwise valid and in one with no `description`. `id = " a"`
-  and an `id` of U+FEFF parse, each with the id exactly as written. Catches: a parser that refuses
-  only the empty id, one that trims only spaces or knows only ASCII whitespace, one that checks
-  `description` first, one that names the blank id as the plasmid, and one that trims the id it
-  keeps. Amended on 2026-10-22: this item is new.
+- An `id` made only of Unicode White_Space characters, one alone or several mixed, is refused
+  naming `id`, with `fix` `id = "choose-a-stable-id"` and no plasmid id, both in a declaration that
+  is otherwise valid and in one with no `description`. The ids tested are `" "`, `"\t"`, U+3000
+  raw and as a TOML escape, U+00A0, U+0085 and U+2028 together, U+1680, U+2029 and U+205F
+  together, and all 25 White_Space characters together, written as TOML escapes: U+0009 to
+  U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F and
+  U+3000. `id = " a"` and an `id` of U+FEFF, U+200B or U+180E parse, each with the id exactly as
+  written. Catches: a parser that refuses only the empty id, one that trims only spaces or knows
+  only ASCII whitespace, one whose own list of whitespace leaves out any White_Space character,
+  one that counts a character that is not White_Space as blank, one that checks `description`
+  first, one that names the blank id as the plasmid, and one that trims the id it keeps. Amended
+  on 2026-10-22: this item is new.
 - `requires.capabilities = ["a", 5, "b", "", " "]` is refused at `requires.capabilities[1]` with
   `fix` `remove this entry`. Each time the refused entry is removed, the next refusal is at
   `requires.capabilities[2]`, for `""` and then `" "`, and the result parses with requires `["a",

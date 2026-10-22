@@ -1880,7 +1880,13 @@ mod tests {
         assert_eq!(tools, expected);
     }
 
-    fn blank_tool_keys() -> [(String, String); 6] {
+    const WHITE_SPACE: [u32; 25] = [
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003,
+        0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F,
+        0x3000,
+    ];
+
+    fn blank_tool_keys() -> [(String, String); 7] {
         [
             ("\"\"".to_string(), String::new()),
             ("\" \"".to_string(), " ".to_string()),
@@ -1905,6 +1911,13 @@ mod tests {
                     concat!("\\", "u205F")
                 ),
                 [0x1680, 0x2029, 0x205F].map(raw).iter().collect(),
+            ),
+            (
+                format!(
+                    "\"{}\"",
+                    WHITE_SPACE.map(|code| format!("\\u{code:04X}")).concat()
+                ),
+                WHITE_SPACE.map(raw).iter().collect(),
             ),
         ]
     }
@@ -3186,23 +3199,19 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
 
     #[test]
     fn a_blank_id_is_refused_naming_id_and_no_plasmid() {
-        let mixed = format!(
-            "{}{}{LINE_SEPARATOR}",
-            concat!("\\", "u00A0"),
-            concat!("\\", "u0085")
-        );
-        for (written, decoded) in [
-            (" ".to_string(), " ".to_string()),
-            ("\\t".to_string(), raw(0x09).to_string()),
-            ("\u{3000}".to_string(), raw(0x3000).to_string()),
-            (concat!("\\", "u3000").to_string(), raw(0x3000).to_string()),
-            (mixed, [0xA0, 0x85, 0x2028].map(raw).iter().collect()),
-        ] {
+        let every: Vec<char> = (0..=0x10FFFF)
+            .filter_map(char::from_u32)
+            .filter(|character| character.is_whitespace())
+            .collect();
+        assert_eq!(WHITE_SPACE.map(raw).to_vec(), every);
+        let mut ids = Vec::from(blank_tool_keys());
+        ids.push(("\"\u{3000}\"".to_string(), raw(0x3000).to_string()));
+        for (written, decoded) in ids {
             for body in [
                 "description = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"",
                 "impl.wasm = \"pr.wasm\"",
             ] {
-                let declaration = format!("id = \"{written}\"\n{body}");
+                let declaration = format!("id = {written}\n{body}");
                 let fixture: toml::Table = toml::from_str(&declaration).unwrap();
                 assert_eq!(
                     fixture["id"].as_str(),
