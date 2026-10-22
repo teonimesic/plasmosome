@@ -119,11 +119,13 @@ impl Probes {
     /// file's directory or a directory above it. On macOS a firmlink gives a directory a second
     /// parent, so both chains count: the one from "/" the file was opened through, and the one
     /// through the data volume, found by opening `/System/Volumes/Data` followed by the
-    /// directory's path. So `/System`, `/System/Volumes`, `/System/Volumes/Data` and
-    /// `/System/Volumes/Data/usr` each hold a file under `/usr/local`. It also refuses when a
-    /// source the cell `resolving_for` holds did not open; when the file is reached through the
-    /// data volume; and when the data volume, or the directory's spelling through it, does not
-    /// open for any reason but a missing name. A declared source that did not open never refuses.
+    /// directory's path, one component more at a time, until a spelling opens a directory on the
+    /// first chain. So `/System`, `/System/Volumes`, `/System/Volumes/Data` and
+    /// `/System/Volumes/Data/usr` each hold a file under `/usr/local`, and a rename below the
+    /// firmlink after the file was opened does not change that. It also refuses when a source the
+    /// cell `resolving_for` holds did not open; when the file is reached through the data volume;
+    /// and when the data volume, or a spelling of the directory's path through it, does not open
+    /// for any reason but a missing name. A declared source that did not open never refuses.
     ///
     /// Pass the cell the request resolves for, or `None` only for a request that makes a new
     /// cell. `None` for an existing cell skips the sources that cell holds and that no longer
@@ -184,11 +186,14 @@ impl Probes {
     }
 }
 
-/// The second chain a firmlink gives the directory holding `path`: every identity a walk from "/"
-/// passes to the data volume followed by the directory's path, when that spelling opens the
-/// directory whose identity ends `chain`. It is empty when that spelling is missing or opens
-/// another directory, so the directory has no second parent. Any other refusal is `Err`, because
-/// a firmlink cannot then be ruled out.
+/// The second chain a firmlink gives the directory holding `path`. It opens the data volume
+/// followed by the first component of the directory's path, then the first two, and so on, and
+/// stops at the first spelling that opens a directory on `chain`: the firmlink's target. It
+/// returns every identity that walk passes. The directories below the target are on `chain`
+/// already and are never opened by path again, so a rename there after the file was opened cannot
+/// hide the second chain. It is empty when a spelling is missing, or when none opens a directory
+/// on `chain`, so the directory has no second parent. Any other refusal is `Err`, because a
+/// firmlink cannot then be ruled out.
 fn data_side(
     volume: &DataVolume,
     path: &Path,
@@ -196,17 +201,23 @@ fn data_side(
 ) -> Result<Vec<DirIdentity>, String> {
     let dir = path.parent().unwrap_or(path);
     let mut spelled = volume.path.clone();
-    spelled.extend(dir.iter().skip(1));
-    match Walk::from_root(&spelled).and_then(|walk| walk.identities()) {
-        Ok(found) if found.last() == chain.last() => Ok(found),
-        Ok(_) | Err(WalkRefusal::Missing { .. }) => Ok(Vec::new()),
-        Err(refusal) => Err(format!(
-            "the data-side spelling {} of {} does not open, so a firmlink cannot be ruled out: \
-             {refusal}",
-            spelled.display(),
-            dir.display()
-        )),
+    for name in dir.iter().skip(1) {
+        spelled.push(name);
+        match Walk::from_root(&spelled).and_then(|walk| walk.identities()) {
+            Ok(found) if found.last().is_some_and(|last| chain.contains(last)) => return Ok(found),
+            Ok(_) => {}
+            Err(WalkRefusal::Missing { .. }) => return Ok(Vec::new()),
+            Err(refusal) => {
+                return Err(format!(
+                    "the data-side spelling {} of {} does not open, so a firmlink cannot be \
+                     ruled out: {refusal}",
+                    spelled.display(),
+                    dir.display()
+                ));
+            }
+        }
     }
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -490,7 +501,7 @@ mod tests {
         let file = TrustedFile::open(&root.join("op.json")).expect("the file opens");
         let spelled = data_side(root.path());
         let spelled = spelled.to_str().expect("a UTF-8 temp path");
-        let rows = [
+        let mut rows = vec![
             ("/System", true),
             ("/System/Volumes", true),
             ("/System/Volumes/Data", true),
@@ -499,6 +510,11 @@ mod tests {
             ("/System/Volumes/Data/usr", false),
             ("/System/Volumes/Data/Users", false),
         ];
+        if fs::symlink_metadata("/system/volumes").is_ok() {
+            rows.push(("/system/volumes", true));
+        } else {
+            eprintln!("skipped /system/volumes: this Mac's system volume is case-sensitive");
+        }
         for (source, holds) in rows {
             let expected = if holds {
                 Err(TrustRefusal {
@@ -595,6 +611,54 @@ mod tests {
                 "the data-side spelling {data}/link of /link does not open, so a firmlink cannot \
                  be ruled out: {data}/link is a symlink, which the walk does not follow"
             ))
+        );
+        write_file(&root.join("x/data/plain"), b"", 0o600);
+        assert_eq!(
+            probe(&[]).check_at(Path::new("/plain/op.json"), &elsewhere, None),
+            Err(format!(
+                "the data-side spelling {data}/plain of /plain does not open, so a firmlink \
+                 cannot be ruled out: {data}/plain is not a directory"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_rename_below_the_firmlink_after_the_open_keeps_the_second_chain() {
+        let root = TestRoot::new();
+        dirs(
+            &root,
+            &["x", "x/data", "x/data/firmlinked", "x/data/firmlinked/ops"],
+        );
+        let chain = [
+            identity_of(Path::new("/")),
+            identity_of(&root.join("x/data/firmlinked")),
+            identity_of(&root.join("x/data/firmlinked/ops")),
+        ];
+        let probes = Probes::probe_with(
+            &[declared(&root, "x")],
+            walker(&root),
+            volume(&root, "x/data"),
+        );
+        let shown = Path::new("/firmlinked/ops/op.json");
+        let expected = format!(
+            "/firmlinked/ops/op.json lies inside mount source {}, which the operator file declares",
+            root.join("x").display()
+        );
+        fs::rename(
+            root.join("x/data/firmlinked/ops"),
+            root.join("x/data/firmlinked/moved"),
+        )
+        .expect("rename");
+        assert_eq!(
+            probes.check_at(shown, &chain, None),
+            Err(expected.clone()),
+            "renamed away"
+        );
+        dirs(&root, &["x/data/firmlinked/ops"]);
+        assert_eq!(
+            probes.check_at(shown, &chain, None),
+            Err(expected),
+            "another directory under the name"
         );
     }
 

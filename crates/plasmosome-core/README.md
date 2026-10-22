@@ -703,13 +703,15 @@ a case-insensitive volume, or spelled through `/System/Volumes/Data`, holds what
   and spec 017's Mount adapter walks it again at apply. Neither exists yet.
 - On macOS a firmlink such as `/Users`, `/private` or `/usr/local` opens a directory of the data
   volume, so that directory has a second parent that no walk from `/` sees. Rule 5 counts both
-  chains. It opens `/System/Volumes/Data` followed by the directory's path, and when that
-  spelling opens the same directory, every directory on the way counts too. So `/System`,
-  `/System/Volumes`, `/System/Volumes/Data` and `/System/Volumes/Data/usr` each hold a file under
-  `/usr/local`, while `/System/Volumes/Data/usr` does not hold one under `/private`. A spelling
-  that is missing, or that opens another directory, means the directory has no second parent. If
-  the spelling or the data volume does not open for any other reason, every file it concerns is
-  refused rather than leave the hole open.
+  chains. It opens `/System/Volumes/Data` followed by the directory's path, one component more at
+  a time, until a spelling opens a directory on the file's chain: the firmlink's target. Every
+  directory on the way to it counts too. So `/System`, `/System/Volumes`, `/System/Volumes/Data`
+  and `/System/Volumes/Data/usr` each hold a file under `/usr/local`, while
+  `/System/Volumes/Data/usr` does not hold one under `/private`. Nothing below the target is
+  opened by path again, so renaming a directory there after the file was opened does not hide the
+  second chain. A spelling that is missing, or none that opens a directory on the chain, means
+  the directory has no second parent. If a spelling or the data volume does not open for any
+  other reason, every file it concerns is refused rather than leave the hole open.
 - On macOS a file opened through `/System/Volumes/Data`, in any letter case, is refused. A walk
   from there misses the firmlink's own parents, such as the system `/usr` above `/usr/local`. The
   same file opened through its firmlink passes unless a source holds it. If
