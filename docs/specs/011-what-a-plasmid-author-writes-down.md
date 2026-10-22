@@ -567,7 +567,7 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   U+3000. `id = " a"` and an `id` of U+FEFF, U+200B or U+180E parse, each with the id exactly as
   written. Catches: a parser that refuses only the empty id, one that trims only spaces or knows
   only ASCII whitespace, one whose own list of whitespace leaves out any White_Space character,
-  one that counts a character that is not White_Space as blank, one that checks `description`
+  one that counts U+FEFF, U+200B or U+180E as blank, one that checks `description`
   first, one that names the blank id as the plasmid, and one that trims the id it keeps. Amended
   on 2026-10-22: this item is new.
 - `requires.capabilities = ["a", 5, "b", "", " "]` is refused at `requires.capabilities[1]` with
