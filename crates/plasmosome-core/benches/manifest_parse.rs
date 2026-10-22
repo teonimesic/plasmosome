@@ -27,6 +27,15 @@ fn bench(c: &mut Criterion) {
     c.bench_function("manifest_parse", |b| {
         b.iter(|| black_box(PlasmidManifest::parse(black_box(MANIFEST)).unwrap()))
     });
+    let two_bindings = MANIFEST.replace(
+        "\n[network]",
+        "\"github:issues\" = { tools = { \"issue.read\" = \"Read an issue.\" } }\n\n[network]",
+    );
+    let provides = PlasmidManifest::parse(&two_bindings).unwrap().provides;
+    assert_eq!(provides, ["github:tools", "github:issues"]);
+    c.bench_function("manifest_parse_two_bindings", |b| {
+        b.iter(|| black_box(PlasmidManifest::parse(black_box(&two_bindings)).unwrap()))
+    });
 }
 
 criterion_group!(benches, bench);
