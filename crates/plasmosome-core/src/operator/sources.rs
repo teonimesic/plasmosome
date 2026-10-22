@@ -164,7 +164,7 @@ impl Probes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nofollow::fixtures::{TestRoot, identity_of, make_dir, write_file};
+    use crate::nofollow::fixtures::{TestRoot, identity_of, make_dir, set_mode, write_file};
     use crate::nofollow::{Walk, WalkRefusal};
     use crate::operator::trusted::{TrustCheck, TrustRefusal, TrustedFile};
     use plasmosome_backend::CellId;
@@ -284,10 +284,13 @@ mod tests {
         let file = trusted(&root, "S/op.json");
         for cell in [None, Some("cell-1")] {
             let refusal = refused(&probes, &file, cell);
-            assert!(
-                refusal.reason.ends_with("which the operator file declares"),
-                "{}",
-                refusal.reason
+            assert_eq!(
+                refusal.reason,
+                format!(
+                    "{} lies inside mount source {}, which the operator file declares",
+                    root.join("S/op.json").display(),
+                    root.join("S").display()
+                )
             );
         }
         assert_eq!(checked(&probes, &trusted(&root, "T/op.json"), None), Ok(()));
@@ -335,13 +338,13 @@ mod tests {
         let probes = probe(&root, &[held("cell-1", &root, "link")]);
         let file = trusted(&root, "S/op.json");
         let refusal = refused(&probes, &file, Some("cell-1"));
-        assert!(
-            refusal.reason.ends_with(&format!(
-                "{} is a symlink, which the walk does not follow",
-                root.join("link").display()
-            )),
-            "{}",
-            refusal.reason
+        let link = root.join("link").display().to_string();
+        assert_eq!(
+            refusal.reason,
+            format!(
+                "mount source {link}, which cell-1 holds, does not open: {link} is a symlink, \
+                 which the walk does not follow"
+            )
         );
         assert_eq!(
             checked(&probes, &file, Some("cell-2")),
@@ -358,14 +361,14 @@ mod tests {
         let outside = trusted(&root, "y/op.json");
         let probes = Probes::probe_with(&[], walker(&root), volume(&root, "data"));
         let refusal = refused(&probes, &through, None);
-        assert!(
-            refusal.reason.starts_with(&format!(
-                "{} is reached through the data volume {}",
+        assert_eq!(
+            refusal.reason,
+            format!(
+                "{} is reached through the data volume {}, where a firmlink gives a directory a \
+                 second parent that no walk from / sees",
                 root.join("data/x/op.json").display(),
                 root.join("data").display()
-            )),
-            "{}",
-            refusal.reason
+            )
         );
         assert_eq!(checked(&probes, &outside, None), Ok(()));
         let blind = Probes::probe_with(&[], walker(&root), unopenable_volume());
@@ -383,13 +386,251 @@ mod tests {
         let root = TestRoot::walkable_from_root();
         write_file(&root.join("op.json"), b"{}", 0o600);
         let firmlinked = TrustedFile::open(&root.join("op.json")).expect("the file opens");
-        let spelled = data_side(&root.join("op.json"));
-        let through =
-            TrustedFile::open(&spelled).expect("the data-side spelling meets rules 1 to 4");
         let probes = Probes::probe(&[]);
-        let refusal = refused(&probes, &through, None);
-        assert_eq!(refusal.path, spelled);
         assert_eq!(probes.check(&firmlinked, None), Ok(()));
+        let spelled = data_side(&root.join("op.json"));
+        let mut spellings = vec![spelled.clone()];
+        if fs::symlink_metadata("/system/volumes/data").is_ok() {
+            let below = spelled
+                .strip_prefix("/System/Volumes/Data")
+                .expect("a data-side spelling");
+            spellings.push(Path::new("/system/volumes/data").join(below));
+        } else {
+            eprintln!(
+                "skipped the lower-case spelling: this Mac's system volume is case-sensitive"
+            );
+        }
+        for path in spellings {
+            let through =
+                TrustedFile::open(&path).expect("the data-side spelling meets rules 1 to 4");
+            assert_eq!(
+                probes.check(&through, None),
+                Err(TrustRefusal {
+                    path: path.clone(),
+                    check: TrustCheck::InsideMountSource,
+                    reason: format!(
+                        "{} is reached through the data volume /System/Volumes/Data, where a \
+                         firmlink gives a directory a second parent that no walk from / sees",
+                        path.display()
+                    ),
+                })
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn on_host(path: &str) -> Source {
+        Source {
+            holder: Holder::Declared,
+            path: PathBuf::from(path),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn inside(file: &Path, source: &str) -> String {
+        format!(
+            "{} lies inside mount source {source}, which the operator file declares",
+            file.display()
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_source_at_or_above_the_data_volume_holds_a_firmlinked_file() {
+        let root = TestRoot::walkable_from_root();
+        write_file(&root.join("op.json"), b"{}", 0o600);
+        let file = TrustedFile::open(&root.join("op.json")).expect("the file opens");
+        let spelled = data_side(root.path());
+        let spelled = spelled.to_str().expect("a UTF-8 temp path");
+        let rows = [
+            ("/System", true),
+            ("/System/Volumes", true),
+            ("/System/Volumes/Data", true),
+            ("/System/Volumes/Data/private", true),
+            (spelled, true),
+            ("/System/Volumes/Data/usr", false),
+            ("/System/Volumes/Data/Users", false),
+        ];
+        for (source, holds) in rows {
+            let expected = if holds {
+                Err(TrustRefusal {
+                    path: root.join("op.json"),
+                    check: TrustCheck::InsideMountSource,
+                    reason: inside(&root.join("op.json"), source),
+                })
+            } else {
+                Ok(())
+            };
+            let probes = Probes::probe(&[on_host(source)]);
+            assert_eq!(probes.check(&file, None), expected, "{source}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_data_side_directory_above_usr_local_holds_it() {
+        let local =
+            match Walk::from_root(Path::new("/usr/local")).and_then(|walk| walk.identities()) {
+                Ok(chain) => chain,
+                Err(WalkRefusal::Missing { .. }) => {
+                    eprintln!("skipped: this Mac has no /usr/local");
+                    return;
+                }
+                Err(refusal) => panic!("/usr/local does not open: {refusal}"),
+            };
+        let file = Path::new("/usr/local/op.json");
+        for (source, holds) in [
+            ("/System/Volumes/Data/usr", true),
+            ("/System/Volumes/Data", true),
+            ("/System/Volumes/Data/private", false),
+        ] {
+            let expected = if holds {
+                Err(inside(file, source))
+            } else {
+                Ok(())
+            };
+            let probes = Probes::probe(&[on_host(source)]);
+            assert_eq!(probes.check_at(file, &local, None), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_source_above_the_data_volume_holds_a_directory_a_firmlink_opens() {
+        let root = TestRoot::new();
+        dirs(
+            &root,
+            &["x", "x/data", "x/data/firmlinked", "x/data/other", "w"],
+        );
+        symlink("firmlinked", root.join("x/data/link")).expect("symlink");
+        let slash = identity_of(Path::new("/"));
+        let firmlinked = [slash, identity_of(&root.join("x/data/firmlinked"))];
+        let elsewhere = [slash, identity_of(&root.join("w"))];
+        let probe = |sources: &[Source]| {
+            Probes::probe_with(sources, walker(&root), volume(&root, "x/data"))
+        };
+        let shown = Path::new("/firmlinked/op.json");
+        for (relative, holds) in [
+            ("x", true),
+            ("x/data", true),
+            ("x/data/firmlinked", true),
+            ("x/data/other", false),
+            ("w", false),
+        ] {
+            let expected = if holds {
+                Err(format!(
+                    "/firmlinked/op.json lies inside mount source {}, which the operator file \
+                     declares",
+                    root.join(relative).display()
+                ))
+            } else {
+                Ok(())
+            };
+            let probes = probe(&[declared(&root, relative)]);
+            assert_eq!(
+                probes.check_at(shown, &firmlinked, None),
+                expected,
+                "{relative}"
+            );
+        }
+        let probes = probe(&[declared(&root, "x")]);
+        for spelled in ["/absent/op.json", "/other/op.json"] {
+            assert_eq!(
+                probes.check_at(Path::new(spelled), &elsewhere, None),
+                Ok(()),
+                "{spelled}"
+            );
+        }
+        let data = root.join("x/data").display().to_string();
+        assert_eq!(
+            probe(&[]).check_at(Path::new("/link/op.json"), &elsewhere, None),
+            Err(format!(
+                "the data-side spelling {data}/link of /link does not open, so a firmlink cannot \
+                 be ruled out: {data}/link is a symlink, which the walk does not follow"
+            ))
+        );
+    }
+
+    #[test]
+    fn probe_opens_each_source_from_the_root() {
+        let root = TestRoot::new();
+        dirs(&root, &["S", "T"]);
+        let probes = Probes::probe(&[held("cell-1", &root, "S"), held("cell-2", &root, "gone")]);
+        let file = trusted(&root, "S/op.json");
+        assert_eq!(
+            refused(&probes, &file, Some("cell-3")).reason,
+            format!(
+                "{} lies inside mount source {}, which cell-1 holds",
+                root.join("S/op.json").display(),
+                root.join("S").display()
+            )
+        );
+        let beside = trusted(&root, "T/op.json");
+        assert_eq!(checked(&probes, &beside, Some("cell-1")), Ok(()));
+        let gone = root.join("gone").display().to_string();
+        assert_eq!(
+            refused(&probes, &beside, Some("cell-2")).reason,
+            format!(
+                "mount source {gone}, which cell-2 holds, does not open: {gone} does not exist"
+            )
+        );
+    }
+
+    #[test]
+    fn a_source_spelled_in_another_case_holds_the_same_directory() {
+        let root = TestRoot::new();
+        dirs(&root, &["S"]);
+        if fs::symlink_metadata(root.join("s")).is_err() {
+            eprintln!("skipped: the temp directory is case-sensitive, so s and S are two names");
+            return;
+        }
+        let probes = probe(&root, &[held("cell-1", &root, "s")]);
+        let file = trusted(&root, "S/op.json");
+        assert_eq!(
+            refused(&probes, &file, Some("cell-2")).reason,
+            format!(
+                "{} lies inside mount source {}, which cell-1 holds",
+                root.join("S/op.json").display(),
+                root.join("s").display()
+            )
+        );
+    }
+
+    #[test]
+    fn every_source_is_checked_not_only_the_first() {
+        let root = TestRoot::new();
+        dirs(&root, &["A", "S"]);
+        let file = trusted(&root, "S/op.json");
+        let expected = format!(
+            "{} lies inside mount source {}, which the operator file declares",
+            root.join("S/op.json").display(),
+            root.join("S").display()
+        );
+        for first in [
+            declared(&root, "A"),
+            declared(&root, "missing"),
+            held("cell-1", &root, "missing"),
+        ] {
+            let probes = probe(&root, &[first, declared(&root, "S")]);
+            assert_eq!(refused(&probes, &file, Some("cell-2")).reason, expected);
+        }
+    }
+
+    #[test]
+    fn a_held_source_its_owner_cannot_list_still_holds_its_files() {
+        let root = TestRoot::new();
+        dirs(&root, &["S"]);
+        write_file(&root.join("S/op.json"), b"{}", 0o600);
+        set_mode(&root.join("S"), 0o300);
+        let file = TrustedFile::from_walk(root.walk("S/op.json")).expect("a 0300 directory opens");
+        let probes = probe(&root, &[held("cell-1", &root, "S")]);
+        assert_eq!(
+            refused(&probes, &file, Some("cell-2")).reason,
+            format!(
+                "{} lies inside mount source {}, which cell-1 holds",
+                root.join("S/op.json").display(),
+                root.join("S").display()
+            )
+        );
     }
 
     #[test]
