@@ -230,6 +230,7 @@ fn help_is_read_from_a_value_and_up_to_a_bare_flag_it_does_not_know() {
     for (arguments, expected) in [
         (&["--kernel", "--help"][..], binary.clone()),
         (&["--socket", "-h"], binary.clone()),
+        (&["--json", "--json", "--help"], binary.clone()),
         (&["--frob", "add", "x", "--help"], binary),
         (&["--frob=x", "add", "x", "--help"], command_help("add")),
         (
@@ -247,6 +248,10 @@ fn help_is_read_from_a_value_and_up_to_a_bare_flag_it_does_not_know() {
         ),
         (
             &["--kernel", "work", "add", "x", "--help"],
+            command_help("add"),
+        ),
+        (
+            &["add", "x", "--kernel", "a", "--kernel", "b", "--help"],
             command_help("add"),
         ),
     ] {
@@ -281,6 +286,27 @@ fn help_after_dashes_is_not_read() {
         assert_not_served(&run(&["add", "x", "--", flag]), "plasmid.add");
         let error = usage_error(&run(&["--", flag]));
         assert_eq!(error["argument"], "--", "{flag}");
+    }
+}
+
+#[test]
+fn version_after_dashes_is_not_read() {
+    assert_not_served(&run(&["add", "x", "--", "--version"]), "plasmid.add");
+    let error = usage_error(&run(&["new", "demo", "--", "--version"]));
+    assert_eq!(error["argument"], "--");
+}
+
+#[test]
+fn help_says_help_and_a_misplaced_version_count_only_before_dashes() {
+    let words = binary_help()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for phrase in [
+        "With -h or --help before --, only the command words are judged.",
+        "--version anywhere before -- but as the sole argument is a usage error.",
+    ] {
+        assert!(words.contains(phrase), "the help says {phrase:?}: {words}");
     }
 }
 
