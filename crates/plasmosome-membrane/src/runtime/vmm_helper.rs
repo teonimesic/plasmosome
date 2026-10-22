@@ -1778,6 +1778,23 @@ mod tests {
         }
 
         #[test]
+        fn a_descriptor_of_any_other_kernel_type_is_other() {
+            for kind in [libc::PROX_FDTYPE_KQUEUE, libc::PROX_FDTYPE_PSHM] {
+                let entry = libc::proc_fdinfo {
+                    proc_fd: 7,
+                    proc_fdtype: kind.cast_unsigned(),
+                };
+                let facts = descriptor_facts(&entry).map_err(|error| error.raw_os_error());
+                let other = DescriptorFacts {
+                    fd: 7,
+                    kind: DescriptorKind::Other,
+                    rdev: 0,
+                };
+                assert_eq!(facts, Ok(Some(other)), "type {kind}");
+            }
+        }
+
+        #[test]
         fn the_descriptor_observer_tells_a_pipe_from_a_named_fifo() {
             use DescriptorKind::*;
             let tree = ArtifactTree::new();
