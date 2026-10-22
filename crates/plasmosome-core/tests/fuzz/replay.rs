@@ -71,7 +71,7 @@ pub fn read_corpus(dir: &Path) -> Vec<(String, Vec<u8>)> {
     }
     assert!(
         refused.is_empty(),
-        "the corpus {} holds entries that are not regular files, which the replay would not read: {}",
+        "the corpus {} holds entries that are not regular files: {}",
         dir.display(),
         refused.join(", ")
     );
