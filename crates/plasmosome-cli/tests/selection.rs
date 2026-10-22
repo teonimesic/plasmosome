@@ -8,7 +8,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{PoisonError, RwLock, mpsc};
 use std::thread;
 
 use plasmosome_cli::{COMMANDS, Context, Exit, SystemClock, handle};
@@ -23,6 +23,12 @@ const MAX_PATH: usize = 103;
 const MAX_PATH: usize = 107;
 
 const VARIABLE: &str = "PLASMOSOME_KERNEL";
+
+/// Every process this binary starts runs under the read side, and every stale socket is made
+/// under the write side. A child being started holds a copy of every descriptor until its exec,
+/// and on macOS for its whole life if it starts before the socket is close-on-exec. A copy of a
+/// listener accepts connects after this process closes its own, so the socket would not be stale.
+static SPAWNS: RwLock<()> = RwLock::new(());
 
 struct Ran {
     exit: Exit,
@@ -206,7 +212,9 @@ impl Home {
     fn stale(&self, name: &str) -> u64 {
         self.dir(name);
         let socket = self.socket(name);
+        let spawns = SPAWNS.write().unwrap_or_else(PoisonError::into_inner);
         drop(UnixListener::bind(&socket).expect("a socket"));
+        drop(spawns);
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("0600");
         inode(&socket)
     }
@@ -611,10 +619,12 @@ fn a_failing_candidate_refuses_the_selection() {
 }
 
 fn mkfifo(path: &Path) {
+    let spawns = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
     let made = std::process::Command::new("mkfifo")
         .arg(path)
         .status()
         .expect("mkfifo runs");
+    drop(spawns);
     assert!(made.success(), "mkfifo {}", path.display());
 }
 
