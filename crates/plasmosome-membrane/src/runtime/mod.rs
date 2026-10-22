@@ -4,6 +4,7 @@ pub mod closure;
 pub mod confinement;
 pub use plasmosome_backend::digest;
 pub mod endpoints;
+pub mod handshake;
 pub mod hello;
 pub mod initramfs;
 pub mod launch;
