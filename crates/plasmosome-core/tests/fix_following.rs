@@ -84,16 +84,18 @@ fn applied(text: &str, field: &str, fix: &str) -> String {
 fn followed(start: &str) -> PlasmidManifest {
     let mut text = start.to_string();
     let mut steps: Vec<(String, String)> = Vec::new();
+    let mut written: Vec<String> = Vec::new();
     while steps.len() < 8 {
         match PlasmidManifest::parse(&text) {
             Ok(manifest) => return manifest,
             Err(ManifestError::Field { field, fix, .. }) => {
                 let step = (field, fix);
-                assert!(
-                    !steps.contains(&step),
-                    "{start}\n{step:?} repeats after {steps:?}"
-                );
                 text = applied(&text, &step.0, &step.1);
+                assert!(
+                    !written.contains(&text),
+                    "{start}\n{step:?} after {steps:?} writes a declaration already refused"
+                );
+                written.push(text.clone());
                 steps.push(step);
             }
             Err(error) => {
@@ -107,6 +109,7 @@ fn followed(start: &str) -> PlasmidManifest {
 fn followed_from_the_wire(start: &str) -> PlasmidManifest {
     let mut text = start.to_string();
     let mut steps: Vec<(String, String)> = Vec::new();
+    let mut written: Vec<String> = Vec::new();
     while steps.len() < 8 {
         let error = match PlasmidManifest::parse(&text) {
             Ok(manifest) => return manifest,
@@ -130,28 +133,29 @@ fn followed_from_the_wire(start: &str) -> PlasmidManifest {
             plasmid.as_deref().map(Json::from).as_ref(),
             "{start}\nthe 108's plasmid is the refusal's own: {line}"
         );
-        assert!(
-            !steps.contains(&step),
-            "{start}\n{step:?} repeats after {steps:?}"
-        );
         text = applied(&text, &step.0, &step.1);
+        assert!(
+            !written.contains(&text),
+            "{start}\n{step:?} after {steps:?} writes a declaration already refused"
+        );
+        written.push(text.clone());
         steps.push(step);
     }
     panic!("{start}\nhas no end after {steps:?}");
 }
 
 fn granted(manifest: &PlasmidManifest) -> (Vec<String>, Vec<String>) {
+    let mut hosts = Vec::new();
+    let mut pins = Vec::new();
+    if let Some(network) = &manifest.network {
+        hosts.extend(network.hosts.iter().cloned());
+        pins.extend(network.pin_cidrs.iter().map(ToString::to_string));
+    }
     let commands = manifest
         .commands
         .iter()
         .flat_map(|commands| &commands.commands);
-    let networks = manifest
-        .network
-        .iter()
-        .chain(commands.filter_map(|command| command.network.as_ref()));
-    let mut hosts = Vec::new();
-    let mut pins = Vec::new();
-    for network in networks {
+    for network in commands.filter_map(|command| command.network.as_ref()) {
         hosts.extend(network.hosts.iter().cloned());
         pins.extend(network.pin_cidrs.iter().cloned());
     }
@@ -164,94 +168,107 @@ fn chains() -> Vec<(String, Vec<&'static str>, Vec<&'static str>)> {
     let none: Vec<&str> = Vec::new();
     let tails: Vec<(&str, Vec<&str>, Vec<&str>)> = vec![
         ("", none.clone(), none.clone()),
-        ("[network]", example.clone(), none.clone()),
+        ("[network]", none.clone(), none.clone()),
         ("[network]\nports = [443]", example.clone(), none.clone()),
         (
             "[network]\nhosts = []\nports = [443]",
             example.clone(),
             none.clone(),
         ),
-        ("[network]\nhosts = [443]", example.clone(), none.clone()),
-        ("network = 443", example.clone(), none.clone()),
-        ("network = \"api.github.com\"", github.clone(), none.clone()),
         (
-            "network = [\"api.github.com\"]",
+            "[network]\nhosts = [443]\nports = [443]",
+            example.clone(),
+            none.clone(),
+        ),
+        ("network = 443", none.clone(), none.clone()),
+        ("network = \"api.github.com\"", none.clone(), none.clone()),
+        ("network = [\"api.github.com\"]", none.clone(), none.clone()),
+        (
+            "[network]\nhosts = \"api.github.com\"\nports = [443]",
             github.clone(),
             none.clone(),
         ),
         (
-            "[network]\nhosts = \"api.github.com\"",
+            "[network]\nhosts = 443\nports = [443]",
+            example.clone(),
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = \" \"\nports = [443]",
+            example.clone(),
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = [\"api.github.com\", 443]\nports = [443]",
             github.clone(),
             none.clone(),
         ),
-        ("[network]\nhosts = 443", example.clone(), none.clone()),
-        ("[network]\nhosts = \" \"", example.clone(), none.clone()),
         (
-            "[network]\nhosts = [\"api.github.com\", 443]",
-            github.clone(),
+            "[network]\nhosts = \"a\\\"b\\\\c\"\nports = [443]",
+            example.clone(),
             none.clone(),
         ),
         (
-            "[network]\nhosts = \"a\\\"b\\\\c\"",
-            vec!["a\"b\\c"],
+            "[network]\nhosts = \"x\\ny\"\nports = [443]",
+            example.clone(),
             none.clone(),
         ),
-        ("[network]\nhosts = \"x\\ny\"", vec!["x\ny"], none.clone()),
+        ("[network]\nhosts = \"x\\ny\"", none.clone(), none.clone()),
         (
-            "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = \"140.82.112.0/20\"",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = \"140.82.112.0/20\"",
             github.clone(),
             vec!["140.82.112.0/20"],
         ),
         (
-            "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = 20",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = 20",
             github.clone(),
             vec![EXAMPLE_PIN],
         ),
         (
-            "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [\"140.82.112.0/20\", 20]",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [\"140.82.112.0/20\", 20]",
             github.clone(),
             vec!["140.82.112.0/20"],
         ),
         (
-            "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20]",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [20]",
             github.clone(),
             vec![EXAMPLE_PIN],
         ),
         (
-            "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, 24]",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [20, 24]",
             github.clone(),
             vec![EXAMPLE_PIN],
         ),
         (
             "[mock]\nhosts = [\"api.github.com\"]",
-            github.clone(),
+            none.clone(),
             none.clone(),
         ),
         (
             "[mock]\nhosts = \"api.github.com\"",
-            github.clone(),
+            none.clone(),
             none.clone(),
         ),
         (
             "[mock]\nhosts = [\"a.example\", \"b.example\"]",
-            vec!["a.example", "b.example"],
+            none.clone(),
             none.clone(),
         ),
         ("[mock]\nhosts = []", none.clone(), none.clone()),
         ("[mock]\nhosts = 5", none.clone(), none.clone()),
         ("mock = 5", none.clone(), none.clone()),
         (
-            "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = \"api.github.com\"",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = \"api.github.com\"",
             github.clone(),
             none.clone(),
         ),
         (
-            "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"api.github.com\", 443]",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = [\"api.github.com\", 443]",
             github.clone(),
             none.clone(),
         ),
         (
-            "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = 5",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = 5",
             github.clone(),
             none.clone(),
         ),
@@ -261,22 +278,28 @@ fn chains() -> Vec<(String, Vec<&'static str>, Vec<&'static str>)> {
             none.clone(),
         ),
         (
-            "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"api.github.example\"]",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = [\"api.github.example\"]",
             vec!["api.github.com", "api.github.example"],
             none.clone(),
         ),
         (
-            "[network]\nhosts = [\"a.example\"]\n[mock]\nhosts = [\"a.example\", \"b.example\", \"c.example\"]",
+            "[network]\nhosts = [\"a.example\"]\nports = [443]\n\
+             [mock]\nhosts = [\"a.example\", \"b.example\", \"c.example\"]",
             vec!["a.example", "b.example", "c.example"],
             none.clone(),
         ),
         (
-            "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"b\\nc\"]",
-            vec!["api.github.com", "b\nc"],
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n[mock]\nhosts = [\"b\\nc\"]",
+            github.clone(),
             none.clone(),
         ),
         (
-            "[network]\nhosts = []\n[mock]\nhosts = [\"api.github.com\"]",
+            "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"b\\nc\"]",
+            none.clone(),
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = []\nports = [443]\n[mock]\nhosts = [\"api.github.com\"]",
             github.clone(),
             none.clone(),
         ),
@@ -286,49 +309,99 @@ fn chains() -> Vec<(String, Vec<&'static str>, Vec<&'static str>)> {
             none.clone(),
         ),
         (
-            "[network]\nhosts = 443\n[mock]\nhosts = [\"api.github.com\"]",
+            "[network]\nhosts = 443\nports = [443]\n[mock]\nhosts = [\"api.github.com\"]",
             github.clone(),
             none.clone(),
         ),
         (
-            "[network]\nhosts = [443]\n[mock]\nhosts = [\"api.github.com\"]",
+            "[network]\nhosts = [443]\nports = [443]\n[mock]\nhosts = [\"api.github.com\"]",
             github.clone(),
             none.clone(),
         ),
         (
             "network = 443\n[mock]\nhosts = [\"api.github.com\"]",
-            github.clone(),
+            none.clone(),
             none.clone(),
         ),
         (
             "network = \"api.github.com\"\n[mock]\nhosts = [\"api.github.com\"]",
-            github.clone(),
+            none.clone(),
             none.clone(),
         ),
         (
             "network = [\"a.example\", \"a.example\"]",
-            vec!["a.example"],
+            none.clone(),
             none.clone(),
         ),
         (
             "[mock]\nhosts = [\"a.example\", \"a.example\"]",
+            none.clone(),
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = []\nports = [443]\n[mock]\nhosts = [\"a.example\", \"a.example\"]",
             vec!["a.example"],
             none.clone(),
         ),
         (
-            "[network]\nhosts = []\n[mock]\nhosts = [\"a.example\", \"a.example\"]",
+            "[network]\nhosts = 443\nports = [443]\n[mock]\nhosts = [\"a.example\", \"a.example\"]",
             vec!["a.example"],
             none.clone(),
         ),
         (
-            "[network]\nhosts = 443\n[mock]\nhosts = [\"a.example\", \"a.example\"]",
-            vec!["a.example"],
-            none.clone(),
-        ),
-        (
-            "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, \"10.0.0.0/8\"]",
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\npin_cidrs = [20, \"10.0.0.0/8\"]",
             github.clone(),
             vec!["10.0.0.0/8"],
+        ),
+        (
+            "impl.wasm = \"pr.wasm\"\n[network]\nhosts = [\"api.github.com\"]\nports = [65536]",
+            none.clone(),
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = [\"a.example\", \"b.example\"]\nports = []",
+            none.clone(),
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443, 8080, 443]",
+            github.clone(),
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = [\"API.github.com\", \"a.example\", \"A.example\"]\nports = [443]",
+            vec!["api.github.com", "a.example"],
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = [\"192.0.2.1\", \"api.github.com\", \"api.github.com\"]\n\
+             ports = [443]",
+            github.clone(),
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+             pin_cidrs = [\"nonsense\", \"192.0.2.1/24\", \"also nonsense\"]",
+            github.clone(),
+            vec![EXAMPLE_PIN],
+        ),
+        (
+            "[network]\nhosts = [\"api.github.com\"]\nports = [443]\n\
+             [mock]\nhosts = [\"API.github.com\", \"uploads.github.com\"]",
+            vec!["api.github.com", "uploads.github.com"],
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = [\"api.github.com\"]\n\
+             [mock]\nhosts = [\"api.github.com\", \"uploads.github.com\"]",
+            none.clone(),
+            none.clone(),
+        ),
+        ("[workspace]", none.clone(), none.clone()),
+        (
+            "[workspace]\nmount = { dst = \"/a//b\" }",
+            none.clone(),
+            none.clone(),
         ),
         ("[impl]\nwasm = 5", none.clone(), none.clone()),
         ("impl = \"x.wasm\"", none.clone(), none.clone()),

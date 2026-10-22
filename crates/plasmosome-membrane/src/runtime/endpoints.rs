@@ -50,10 +50,6 @@ pub enum EndpointRefusal {
 
 /// One connection [`RuntimeListener::accept_ready`] took from the listener's
 /// queue.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
-)]
 #[derive(Debug)]
 pub(crate) enum Connection {
     /// A peer of the trusted uid: the stream, nonblocking and close-on-exec,
@@ -127,6 +123,21 @@ impl RuntimeListener {
         &self.path
     }
 
+    /// The listening descriptor, for a caller that polls it for a pending
+    /// connection. The listener keeps it open and owns it.
+    pub(crate) fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.listener.as_raw_fd()
+    }
+
+    /// Binds as [`RuntimeListener::bind`] does, but trusts peers of `uid`.
+    #[cfg(test)]
+    pub(crate) fn bind_for_uid(
+        path: &RecipePath,
+        uid: u32,
+    ) -> Result<RuntimeListener, EndpointRefusal> {
+        Self::bind_trusting(path, uid)
+    }
+
     /// Accepts one pending connection without blocking, holding the write
     /// side of the spawn lock. Core checks the peer's kernel uid and closes a
     /// refused peer's stream unread. A trusted stream is made nonblocking, and
@@ -137,10 +148,6 @@ impl RuntimeListener {
     /// cannot put a trusted stream back into blocking mode, or the spawn lock
     /// finds the accepted stream not close-on-exec. In the last two a
     /// connection was taken, and its stream is closed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "plasmosome-08k's handshake is the first caller")
-    )]
     pub(crate) fn accept_ready(&self) -> std::io::Result<Option<Connection>> {
         let mut refused = None;
         let taken =
@@ -194,11 +201,12 @@ impl RuntimeListener {
 /// then. A process that later inherits or receives the peer's descriptor, and
 /// sends on it, does not change it.
 ///
-/// On Darwin it is `LOCAL_PEERPID`'s: the last process that created, connected
-/// or sent on the peer's socket, as of this call. A process that inherited the
-/// connection and sent one byte before the call is the one reported, not the
-/// one that connected (measured on macOS 26.6.2). A match with a child's pid
-/// then shows only that the child was the last to use that socket.
+/// On Darwin it is `LOCAL_PEERPID`'s: the last process that created, connected,
+/// sent on or received on the peer's socket, as of this call, a read still
+/// waiting included. A process that inherited the connection and sent one
+/// byte, or only waits in a read on it, before the call is the one reported,
+/// not the one that connected (measured on macOS 26.6.2). A match with a
+/// child's pid then shows only that the child was the last to use that socket.
 ///
 /// When the peer closed its end before the call, Darwin fails with
 /// `ENOTCONN`, and Linux still reports the pid the connector had. On neither

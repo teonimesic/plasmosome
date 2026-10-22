@@ -9,7 +9,7 @@ Three things live here. The first is the **conformance suite** — the behaviora
 is held to the same functions, unchanged; a backend that fails one is the thing that is wrong.
 That is what makes the fake a model of enforcement rather than a hope about it.
 
-`FakeBackend` and `CompositeBackend` over three fake leaves both pass all thirteen clauses. The
+`FakeBackend` and `CompositeBackend` over three fake leaves both pass all fourteen clauses. The
 composite failed three of the original clauses when it was first wired in, because it lost the
 handle its leaf issued; task 008 fixed the backend rather than the clauses, which is the point of
 holding every backend to the same functions.
@@ -17,7 +17,13 @@ holding every backend to the same functions.
 Every clause reads the backend's complete account, and a snapshot that fails is a contract
 failure. Each account check compares the whole snapshot with what the clause expects: the standing
 objects, an issued record for each standing grant and none for an applied or planted object, and
-no unfinished effect. Two defects hold the clauses to that. `SnapshotOmitsIssuedRecords` reports
+the unfinished effects it expects. Only `failed_grants_stay_incomplete_until_exact_withdrawal`
+expects any; every other clause expects none. A check that a backend holds nothing reads all three
+collections. Each such check has its own defective backend, which leaves only an unfinished effect
+there, with no standing object and no record: `RevokeLeavesAnUnfinishedEffect`,
+`RecoversUnfinishedEffectsFromItsOwnLog` at two checks, and `ApplyRemovalLeavesAnUnfinishedEffectOf`
+after a planted and after a granted removal. So a check that read only the objects and the records
+would pass them. Two defects hold the clauses to the records. `SnapshotOmitsIssuedRecords` reports
 its objects with no records, and `snapshot_never_invents_objects` must reject it.
 `SnapshotReconstructsGrantsFromObjects` rebuilds a record for every standing object, and
 `apply_and_removal_reach_the_universe` must reject it. One per-step check is narrower: after each
@@ -100,6 +106,22 @@ one of them turns its witness red, and so does moving the neighbour or the other
 across the forced withdrawal in either order. `repeated_grants_are_independently_removable`
 removes a granted holding through `apply_removal` under both policies and checks that its handle
 is retired, and each policy has its own defective backend.
+
+`failed_grants_stay_incomplete_until_exact_withdrawal` needs a backend whose grants fail after
+their first effect. Its factory must make every valid grant or apply owned by
+`conformance::doomed_owner()`, at an address that holds nothing, have its first effect and then
+return `IncompleteEffect`; the fake factories arm this with
+`FakeBackend::fail_after_effect_for_owner`. A future real factory must arrange the same failure
+with real resources. For each sample capability, drain and entry point, the clause checks that
+an invalid doomed operation is refused before any effect; that the unfinished operation is
+reported exactly, with no standing object and no record; that a retry through either entry point
+returns `IncompleteEffect` again; that another owner's grant or apply, a plant, a revoke, and a
+removal naming another owner or capability are refused and change nothing; and that, of two equal
+unfinished effects, each exact removal clears its own and nothing else. It removes them in grant
+order and in reverse, and each order has its own defective backend. It compares an
+`IncompleteEffect` by class and address, never by its detail. Each step has its own defective
+backend. A withdrawal that fails after its release has no clause, because no reserved owner arms
+it: `FakeBackend`'s tests, the ledger's detach test and `tests/attach_detach_residue.rs` cover it.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012
@@ -241,7 +263,7 @@ refuse.
 | Module | Holds |
 | --- | --- |
 | `builders` | `PlasmidManifest`, capabilities, prepared grants (`GrantClosure`, `PreparedGrant`), `Effect`s and `DesiredState` — a test states only what it is about |
-| `conformance` | Thirteen clauses of the backend contract, each generic over `EnforcementBackend` |
+| `conformance` | Fourteen clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
 | `differential` | Spec 027 §6's probe manifest for the membrane differential, its refusals, and `judge`, which compares the lanes' runs and gives the verdict |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
