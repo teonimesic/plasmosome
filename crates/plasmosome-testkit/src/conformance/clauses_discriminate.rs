@@ -3372,11 +3372,11 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
         ),
         (
             Defect::RetryContinuesCreation(Call::Grant),
-            "a retry through grant must return IncompleteEffect again",
+            "a retry through a grant must return IncompleteEffect again",
         ),
         (
             Defect::RetryContinuesCreation(Call::Apply),
-            "a retry through apply must return IncompleteEffect again",
+            "a retry through an apply must return IncompleteEffect again",
         ),
         (
             Defect::PlantOverwritesIncomplete,
@@ -3408,11 +3408,11 @@ fn the_incomplete_clause_rejects_each_mishandled_step() {
         ),
         (
             Defect::DoomedOwnerValidatesAfterTheEffect(Call::Grant),
-            "a refused invalid doomed operation changed the account through grant",
+            "a refused invalid doomed operation changed the account through a grant",
         ),
         (
             Defect::DoomedOwnerValidatesAfterTheEffect(Call::Apply),
-            "a refused invalid doomed operation changed the account through apply",
+            "a refused invalid doomed operation changed the account through an apply",
         ),
         (
             Defect::CleanupKeepsTheMarkerUnder(RevokePolicy::Graceful),

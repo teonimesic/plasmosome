@@ -1285,7 +1285,7 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                         observe(&mut backend),
                         first,
                         "a refused invalid doomed operation changed the account through {}",
-                        call.name()
+                        call.with_article()
                     );
                 }
                 let op = op_for(GrantId::new(), doomed_owner(), capability.clone());
@@ -1311,13 +1311,13 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                     contract_assert!(
                         incomplete_at(&again, &op),
                         "a retry through {} must return IncompleteEffect again, not {again:?}",
-                        retry.name()
+                        retry.with_article()
                     );
                     contract_assert_eq!(
                         observe(&mut backend),
                         failed,
                         "a retry through {} changed the account",
-                        retry.name()
+                        retry.with_article()
                     );
                 }
                 let conflict = BackendError::IdentityConflict {
@@ -1414,14 +1414,6 @@ enum Entry {
 }
 
 impl Entry {
-    fn name(self) -> &'static str {
-        match self {
-            Entry::Grant => "grant",
-            Entry::Apply => "apply",
-            Entry::Plant => "plant",
-        }
-    }
-
     fn with_article(self) -> &'static str {
         match self {
             Entry::Grant => "a grant",
