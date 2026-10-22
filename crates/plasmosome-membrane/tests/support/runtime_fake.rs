@@ -4,30 +4,36 @@ use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+mod target_cache {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/target_cache.rs"
+    ));
+}
+
+use target_cache::{Fixture, cache_root, declared_target};
 
 const FAKE_COMPILER_ARGUMENTS: [&str; 4] = ["-std=c11", "-Wall", "-Wextra", "-Werror"];
 
 const FAKE_MODES: [&str; 1] = ["record"];
 
-static FAKE_DIRECTORY: LazyLock<PathBuf> = LazyLock::new(|| {
+static FAKE_DIRECTORY: Fixture = Fixture::new(build_runtime_fake);
+
+fn build_runtime_fake() -> PathBuf {
     let executable = std::env::current_exe()
         .and_then(fs::canonicalize)
         .expect("the running test executable has a canonical path");
-    let root = executable
-        .ancestors()
-        .skip(1)
-        .find(|directory| directory.join("CACHEDIR.TAG").is_file())
-        .unwrap_or_else(|| {
-            panic!(
-                "the test executable {} is not inside a Cargo target directory tagged with CACHEDIR.TAG, so the runtime fake has no cache there",
-                executable.display()
-            )
-        })
-        .join("plasmosome-runtime-fake");
+    let root = cache_root(
+        &executable,
+        "plasmosome-runtime-fake",
+        "the runtime fake",
+        declared_target().as_deref(),
+    )
+    .unwrap_or_else(|message| panic!("{message}"));
     compile_runtime_fake(&root)
-});
+}
 
 /// Takes the name of a mode of `tests/support/runtime_fake.c` and returns the
 /// path of the runtime fake under that name, since the fake picks its mode
@@ -38,14 +44,15 @@ static FAKE_DIRECTORY: LazyLock<PathBuf> = LazyLock::new(|| {
 /// directory, as `supervision_fixture` is, and each mode is a hard link to
 /// it. Each test process runs it once with no mode before the first path is
 /// returned, so macOS spends the first-exec cost of a freshly linked binary
-/// where no test deadline is running. Panics on a mode the fake lacks.
+/// where no test deadline is running. Panics on a mode the fake lacks, and,
+/// when setup fails, on every call with the first failure's message.
 /// Callers must not remove or replace the returned file.
 pub fn runtime_fake(mode: &str) -> PathBuf {
     assert!(
         FAKE_MODES.contains(&mode),
         "{mode} is a mode of runtime_fake.c"
     );
-    FAKE_DIRECTORY.join(mode)
+    FAKE_DIRECTORY.path().join(mode)
 }
 
 fn compile_runtime_fake(root: &Path) -> PathBuf {
