@@ -714,7 +714,10 @@ mod tests {
         // SAFETY: sockaddr_un is a plain C struct, for which all zeroes is a valid value.
         let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         let bytes = path.as_os_str().as_encoded_bytes();
-        assert!(bytes.len() < address.sun_path.len(), "{path:?} fits");
+        assert!(
+            bytes.len() < address.sun_path.len(),
+            "the socket path fits sun_path"
+        );
         address.sun_family = libc::AF_UNIX as libc::sa_family_t;
         for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
             *slot = *byte as libc::c_char;
