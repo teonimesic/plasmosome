@@ -85,7 +85,7 @@ Spec 028 requires one injected clock for every lifetime decision, with three rea
 set independently: the wall clock, a continuous clock with its boot session, and the clock waits
 use. That clock is `Clock` in `plasmosome-backend::clock`. `SystemClock` in
 `plasmosome-core::clock` is the production clock, for production code to pass once a caller
-exists, and tests pass `ManualClock`. Four earlier decisions read elapsed time
+exists, and tests pass `ManualClock`. Five decisions read elapsed time
 outside it, and stay that way until a task moves them. Durations are passed in as arguments.
 `VmmChild::wait_terminal` spends a fixed child-termination allowance with no seam. Two serve one
 shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the set-level `ProbeBudget`
@@ -95,7 +95,13 @@ inject a fake at each. The fourth is the capture deadline of a paged observation
 `CaptureSlot` in `plasmosome-backend::paging` decides it in `capture`, `page` and `expire`:
 `capture` takes an injected clock and reads it before and after collection, and `page` and `expire`
 take the current instant. Each server that pages a result passes its clock in and counts no decision
-of its own. One test fixture outside the kernel also reads elapsed time: `run_lane` in
+of its own. The fifth is the budget of the runtime handshake (spec001 §4.2), which uses the
+readiness probe's `ProbeBudget` type. `runtime::handshake` in `plasmosome-membrane` checks it
+before every wait and after every step, and `handshake_with` takes an injected clock and waiter
+in the shape of `readiness::probe_with`: production supplies `Instant::now` and the real wait, and
+its tests inject a fake clock that moves only when the test moves it. Amended on 2026-10-21: this
+read "Four earlier decisions read elapsed time", before the handshake landed.
+One test fixture outside the kernel also reads elapsed time: `run_lane` in
 `plasmosome-lanes` kills a lane at a timeout passed in. It reads `Instant` itself, not `Clock`,
 because it makes no lifetime decision and its test needs no fake clock: a launcher that never exits
 times out whatever the clock reads. The command line's deadline is not a lifetime decision either.
