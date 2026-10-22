@@ -1526,7 +1526,7 @@ mod tests {
         assert_eq!(tools, expected);
     }
 
-    fn blank_tool_keys() -> [(String, String); 5] {
+    fn blank_tool_keys() -> [(String, String); 6] {
         [
             ("\"\"".to_string(), String::new()),
             ("\" \"".to_string(), " ".to_string()),
@@ -1542,6 +1542,15 @@ mod tests {
                     concat!("\\", "u0085")
                 ),
                 [0xA0, 0x85, 0x2028].map(raw).iter().collect(),
+            ),
+            (
+                format!(
+                    "\"{}{}{}\"",
+                    concat!("\\", "u1680"),
+                    concat!("\\", "u2029"),
+                    concat!("\\", "u205F")
+                ),
+                [0x1680, 0x2029, 0x205F].map(raw).iter().collect(),
             ),
         ]
     }
@@ -1650,6 +1659,26 @@ mod tests {
                 let (_, field, fix) = field_refusal(&declaration);
                 let repaired = PlasmidManifest::parse(&with_fix(&declaration, &field, &fix));
                 assert_eq!(repaired.unwrap().provides_tools, expected, "{list}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_blank_name_after_the_first_in_a_tools_list_goes_with_the_lists_fix() {
+        for (quoted, _) in blank_tool_keys() {
+            for list in [
+                format!("[\"a.read\", {quoted}]"),
+                format!("[\"a.read\", {quoted}, \"b.read\"]"),
+            ] {
+                let declaration = format!("{PROVIDER}[provides.\"a:tools\"]\ntools = {list}\n");
+                let (plasmid, field, fix) = field_refusal(&declaration);
+                assert_eq!(plasmid.as_deref(), Some("github-pr"), "{list}");
+                let (keys, index) = field_keys(&field);
+                assert_eq!(keys, ["provides", "a:tools", "tools"], "{list}");
+                assert_eq!(index, None, "{list}");
+                let repair: toml::Table = fix.parse().unwrap();
+                let tools = repair["provides"]["a:tools"]["tools"].as_table().unwrap();
+                assert_eq!(tools.keys().collect::<Vec<_>>(), ["a.read"], "{list}");
             }
         }
     }
@@ -3374,6 +3403,16 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             ),
             REMOVAL.to_string(),
         ));
+        for name in [concat!("\\", "u0085"), LINE_SEPARATOR] {
+            rows.push((
+                declared(&format!(
+                    "impl.wasm = \"pr.wasm\"\n[provides.\"a:tools\".tools]\n\"{name}\" = \"Read b.\""
+                )),
+                github,
+                format!("provides.\"a:tools\".tools.\"{name}\""),
+                REMOVAL.to_string(),
+            ));
+        }
         for (_, quoted, program) in COMMAND_KEYS {
             let command = format!("[commands.commands.{quoted}]\nexec = [\"git\"]\n");
             let path = format!("commands.commands.{quoted}");
