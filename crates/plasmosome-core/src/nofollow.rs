@@ -188,14 +188,6 @@ impl Walk {
     /// missing name `Missing`, a component that is not a directory `NotDirectory`, and a
     /// directory the effective UID cannot search `Io`. It shows which directories a path passes;
     /// never trust what it reaches.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "plasmosome-0xy2's resolution is the first caller; Rust 1.96 counts the \
-                      expect on operator::sources as a use, so an expect here is unfulfilled there"
-        )
-    )]
     pub(crate) fn identities(&self) -> Result<Vec<DirIdentity>, WalkRefusal> {
         let mut at = self.start_path.clone();
         let mut chain = vec![stat_fd(&self.start, &at)?.identity()];

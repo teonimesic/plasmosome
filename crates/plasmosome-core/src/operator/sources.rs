@@ -7,7 +7,10 @@ use crate::nofollow::{DirIdentity, Walk, WalkRefusal};
 use crate::operator::trusted::{TrustCheck, TrustRefusal, TrustedFile};
 
 /// Who has a Mount source: a cell of this instance that holds it or has a pending operation for
-/// it, or the operator file, which declares it.
+/// it, or the operator file, which declares it. Label every source a cell holds or has pending
+/// `Cell`, even when the operator file also declares it. A `Declared` source that does not open
+/// never refuses, so a held source labelled `Declared` stops refusing once it is renamed away, and
+/// nothing signals it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Holder {
     Cell(CellId),
@@ -112,52 +115,97 @@ impl Probes {
         }
     }
 
-    /// Refuses `file` with `inside_mount_source` when its directory is, or lies below, a source
-    /// that opened, whoever has it; when a source the cell `resolving_for` holds did not open; and
-    /// when the file is reached through the data volume or the data volume did not open. Pass the
-    /// request's cell, or `None` for a new cell. A declared source that did not open never
-    /// refuses.
+    /// Refuses `file` with `inside_mount_source` when a source that opened, whoever has it, is the
+    /// file's directory or a directory above it. On macOS a firmlink gives a directory a second
+    /// parent, so both chains count: the one from "/" the file was opened through, and the one
+    /// through the data volume, found by opening `/System/Volumes/Data` followed by the
+    /// directory's path. So `/System`, `/System/Volumes`, `/System/Volumes/Data` and
+    /// `/System/Volumes/Data/usr` each hold a file under `/usr/local`. It also refuses when a
+    /// source the cell `resolving_for` holds did not open; when the file is reached through the
+    /// data volume; and when the data volume, or the directory's spelling through it, does not
+    /// open for any reason but a missing name. A declared source that did not open never refuses.
+    ///
+    /// Pass the cell the request resolves for, or `None` only for a request that makes a new
+    /// cell. `None` for an existing cell skips the sources that cell holds and that no longer
+    /// open, and nothing signals it.
     pub(crate) fn check(
         &self,
         file: &TrustedFile,
         resolving_for: Option<&CellId>,
     ) -> Result<(), TrustRefusal> {
-        let shown = file.path().display();
-        let refuse = |reason: String| {
-            Err(TrustRefusal {
+        self.check_at(file.path(), file.chain(), resolving_for)
+            .map_err(|reason| TrustRefusal {
                 path: file.path().to_path_buf(),
                 check: TrustCheck::InsideMountSource,
                 reason,
             })
-        };
-        match &self.data_volume {
-            Err(refusal) => return refuse(unopened_volume(refusal)),
-            Ok(Some(volume)) if file.chain().contains(&volume.identity) => {
+    }
+
+    fn check_at(
+        &self,
+        path: &Path,
+        chain: &[DirIdentity],
+        resolving_for: Option<&CellId>,
+    ) -> Result<(), String> {
+        let shown = path.display();
+        let second = match &self.data_volume {
+            Err(refusal) => return Err(unopened_volume(refusal)),
+            Ok(Some(volume)) if chain.contains(&volume.identity) => {
                 let volume = volume.path.display();
-                return refuse(format!(
+                return Err(format!(
                     "{shown} is reached through the data volume {volume}, {FIRMLINK}"
                 ));
             }
-            Ok(_) => {}
-        }
+            Ok(Some(volume)) => data_side(volume, path, chain)?,
+            Ok(None) => Vec::new(),
+        };
         for (source, found) in &self.probed {
-            let (path, holder) = (source.path.display(), &source.holder);
+            let (spelled, holder) = (source.path.display(), &source.holder);
             match found {
-                Ok(chain) if chain.last().is_some_and(|dir| file.chain().contains(dir)) => {
-                    return refuse(format!(
-                        "{shown} lies inside mount source {path}, which {holder}"
+                Ok(dirs)
+                    if dirs
+                        .last()
+                        .is_some_and(|dir| chain.contains(dir) || second.contains(dir)) =>
+                {
+                    return Err(format!(
+                        "{shown} lies inside mount source {spelled}, which {holder}"
                     ));
                 }
                 Err(refusal) if matches!(holder, Holder::Cell(cell) if Some(cell) == resolving_for) =>
                 {
-                    return refuse(format!(
-                        "mount source {path}, which {holder}, does not open: {refusal}"
+                    return Err(format!(
+                        "mount source {spelled}, which {holder}, does not open: {refusal}"
                     ));
                 }
                 _ => {}
             }
         }
         Ok(())
+    }
+}
+
+/// The second chain a firmlink gives the directory holding `path`: every identity a walk from "/"
+/// passes to the data volume followed by the directory's path, when that spelling opens the
+/// directory whose identity ends `chain`. It is empty when that spelling is missing or opens
+/// another directory, so the directory has no second parent. Any other refusal is `Err`, because
+/// a firmlink cannot then be ruled out.
+fn data_side(
+    volume: &DataVolume,
+    path: &Path,
+    chain: &[DirIdentity],
+) -> Result<Vec<DirIdentity>, String> {
+    let dir = path.parent().unwrap_or(path);
+    let mut spelled = volume.path.clone();
+    spelled.extend(dir.iter().skip(1));
+    match Walk::from_root(&spelled).and_then(|walk| walk.identities()) {
+        Ok(found) if found.last() == chain.last() => Ok(found),
+        Ok(_) | Err(WalkRefusal::Missing { .. }) => Ok(Vec::new()),
+        Err(refusal) => Err(format!(
+            "the data-side spelling {} of {} does not open, so a firmlink cannot be ruled out: \
+             {refusal}",
+            spelled.display(),
+            dir.display()
+        )),
     }
 }
 
