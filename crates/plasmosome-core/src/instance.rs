@@ -2575,7 +2575,7 @@ mod tests {
 
     #[test]
     fn a_root_is_refused_exactly_where_its_cell_socket_would_be() {
-        let mut rows: Vec<Row> = vec![
+        let rows: Vec<Row> = vec![
             ("parent 0777", |base| under_parent(base, 0o777)),
             ("parent 0770", |base| under_parent(base, 0o770)),
             ("parent 0707", |base| under_parent(base, 0o707)),
@@ -2591,25 +2591,28 @@ mod tests {
             ("a file", a_file),
         ];
         #[cfg(target_os = "macos")]
-        rows.extend::<[Row; 6]>([
-            ("add_subdirectory on the parent", |base| {
-                under_parent_with_acl(base, "everyone allow add_subdirectory")
-            }),
-            ("delete_child on the parent", |base| {
-                under_parent_with_acl(base, "everyone allow delete_child")
-            }),
-            ("add_file for staff on the parent", |base| {
-                under_parent_with_acl(base, "staff allow add_file")
-            }),
-            ("inherit-only add_subdirectory on the parent", |base| {
-                under_parent_with_acl(
-                    base,
-                    "everyone allow add_subdirectory,directory_inherit,only_inherit",
-                )
-            }),
-            ("add_subdirectory on the root", root_with_acl),
-            ("a foreign owner above", under_a_foreign_owner),
-        ]);
+        let rows: Vec<Row> = rows
+            .into_iter()
+            .chain::<[Row; 6]>([
+                ("add_subdirectory on the parent", |base| {
+                    under_parent_with_acl(base, "everyone allow add_subdirectory")
+                }),
+                ("delete_child on the parent", |base| {
+                    under_parent_with_acl(base, "everyone allow delete_child")
+                }),
+                ("add_file for staff on the parent", |base| {
+                    under_parent_with_acl(base, "staff allow add_file")
+                }),
+                ("inherit-only add_subdirectory on the parent", |base| {
+                    under_parent_with_acl(
+                        base,
+                        "everyone allow add_subdirectory,directory_inherit,only_inherit",
+                    )
+                }),
+                ("add_subdirectory on the root", root_with_acl),
+                ("a foreign owner above", under_a_foreign_owner),
+            ])
+            .collect();
         let mut failed: Vec<&str> = rows
             .into_iter()
             .filter(|(row, setup)| {
