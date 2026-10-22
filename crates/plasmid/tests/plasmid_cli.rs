@@ -531,11 +531,18 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn terminal_controls() -> Vec<char> {
-    [0x01..=0x1f, 0x7f..=0x9f, 0x202a..=0x202e, 0x2066..=0x2069]
-        .into_iter()
-        .flatten()
-        .map(|code| char::from_u32(code).expect("a character"))
-        .collect()
+    [
+        0x01..=0x1f,
+        0x7f..=0x9f,
+        0x061c..=0x061c,
+        0x200e..=0x200f,
+        0x202a..=0x202e,
+        0x2066..=0x2069,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|code| char::from_u32(code).expect("a character"))
+    .collect()
 }
 
 fn assert_no_raw_control(stderr: &[u8], lines: usize) {
@@ -559,10 +566,11 @@ fn assert_no_raw_control(stderr: &[u8], lines: usize) {
 #[test]
 fn a_refused_argument_round_trips_and_never_prints_a_control() {
     let controls = terminal_controls();
-    assert_eq!(controls.len(), 73);
+    assert_eq!(controls.len(), 76);
     let backslash = char::from(0x5c_u8);
     let neighbours: String = [
-        0x20, 0x7e, 0xa0, 0x2028, 0x2029, 0x202f, 0x2065, 0x206a, 0xfeff,
+        0x20, 0x7e, 0xa0, 0x061b, 0x061d, 0x200d, 0x2010, 0x2028, 0x2029, 0x202f, 0x2065, 0x206a,
+        0xfeff,
     ]
     .into_iter()
     .map(|code| char::from_u32(code).expect("a character"))
