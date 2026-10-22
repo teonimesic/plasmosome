@@ -367,6 +367,16 @@ pub enum BackendError {
         id: GrantId,
         error: RecipeError,
     },
+    /// The operation at this address had its first effect and did not finish, or a withdrawal
+    /// failed after it released something. Its unfinished effect is in the snapshot's
+    /// `incomplete` until an exact removal clears it. A retry returns this error again with the
+    /// same `class` and `id` and the latest failure's `detail`, so a caller compares class and id.
+    /// `detail` is diagnostic, never a selector.
+    IncompleteEffect {
+        class: &'static str,
+        id: GrantId,
+        detail: String,
+    },
     Fault(String),
     Unimplemented(&'static str),
 }
@@ -401,6 +411,9 @@ impl fmt::Display for BackendError {
             BackendError::InvalidOperation { class, id, error } => {
                 write!(f, "invalid {class} operation {id}: {error}")
             }
+            BackendError::IncompleteEffect { class, id, detail } => {
+                write!(f, "{class} operation {id} is incomplete: {detail}")
+            }
             BackendError::Fault(cause) => write!(f, "backend fault: {cause}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented in this track: {what}"),
         }
@@ -417,12 +430,23 @@ pub trait EnforcementBackend {
     /// standing issued operation and kind returns the original entry and changes nothing.
     /// Another owner, capability or kind at an issued address, or a grant at the address of an
     /// object that was applied or planted rather than granted, returns `IdentityConflict` and
-    /// changes nothing: a grant never promotes an object into an issued record.
+    /// changes nothing: a grant never promotes an object into an issued record. A grant that
+    /// fails after its first effect returns `IncompleteEffect`, issues no record and leaves the
+    /// operation in the snapshot's `incomplete`. While it is there, a grant or apply of that
+    /// operation returns `IncompleteEffect` with the same class and id and the latest failure's
+    /// detail, and creates nothing, and another operation at that address returns
+    /// `IdentityConflict`. So a changed kind returns `IdentityConflict` while the issued holding
+    /// stands, and after a withdrawal of that holding fails, the same call returns
+    /// `IncompleteEffect`.
     fn grant(
         &mut self,
         operation: UniverseOp,
         kind: GrantKind,
     ) -> Result<LedgerEntry, BackendError>;
+    /// Withdraws the holding of a live issued handle as `apply_removal` would with the entry's
+    /// owner, and on success returns the original entry and retires the handle. That includes a
+    /// holding whose earlier withdrawal failed after release. An unknown or spent handle, and the
+    /// address of an operation that failed before it issued a record, return `UnknownHandle`.
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError>;
     /// Observes the backend's complete account: its standing holdings, the original issued
     /// records whose withdrawal authority remains, and its unfinished effects. An observation that
@@ -431,7 +455,8 @@ pub trait EnforcementBackend {
     /// observation with what it was asked to do.
     fn snapshot_os_state(&mut self) -> Result<EnforcementSnapshot, BackendError>;
     /// Records `op` under the identity and owner it names. An operation whose `validate` fails
-    /// returns `InvalidOperation` before any change.
+    /// returns `InvalidOperation` before any change. An apply that fails after its first effect
+    /// follows the same incomplete rules as `grant`.
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError>;
     /// Withdraws only the holding at the removal's exact address whose full capability and
     /// cell-qualified owner match. It resolves that holding before draining: a mismatch returns
@@ -439,7 +464,11 @@ pub trait EnforcementBackend {
     /// deadline returns `DrainTimedOut` naming the exact address and keeps the holding, its
     /// issued record and every peer; `RevokePolicy::Force` then withdraws only that holding. A
     /// successful removal of a granted holding, under either policy, also retires its issued
-    /// record, so a later `revoke` of its handle returns `UnknownHandle`.
+    /// record, so a later `revoke` of its handle returns `UnknownHandle`. It also takes an
+    /// unfinished effect at that address whose operation has this owner and removal. A withdrawal
+    /// that fails after it released something returns `IncompleteEffect`: the holding moves to
+    /// `incomplete`, with its issued record if it was granted, or the unfinished effect stays,
+    /// until a later exact removal succeeds.
     fn apply_removal(
         &mut self,
         removal: UniverseRemoval,
@@ -447,7 +476,8 @@ pub trait EnforcementBackend {
         drain: DrainSpec,
     ) -> Result<(), BackendError>;
     /// Records an observed object, such as residue, under its own identity. An object whose
-    /// capability fails `validate` returns `InvalidOperation` before any change.
+    /// capability fails `validate` returns `InvalidOperation` before any change. An address that
+    /// holds an unfinished effect returns `IdentityConflict`: a plant never overwrites one.
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError>;
 }
 
