@@ -31,7 +31,7 @@ one.
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
 | `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, the crate-private `sources::Probes` refuses one inside a Mount source under rule 5, and `sources::Guard` refuses a Mount source over a guarded directory under §6 |
-| `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell |
+| `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell. Its file judge is public, so `plasmosome-membrane` judges with the same code: `check_file` applies the rule to the file a walk reaches, and `verify_file` also hashes it |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
@@ -76,34 +76,71 @@ or a string such as `"443, 8080"` is removed, not unwrapped. The parser itself n
 wraps an entry.
 
 Every other refusal of what a declaration says takes the same form, naming the plasmid: a network
-section that is not a table; a top-level `[network]` that names no host (a command's own network
-section with no host still parses); `hosts`, `pin_cidrs` or `[mock]` `hosts` that are not lists
-of strings; a declaration with no capability and no implementation, or whose only capability is
-an empty commands table; `[commands]`, its commands table or a command that is not a table, or
-`[commands]` with no commands table; a command whose `exec` is missing, is not a list or names no
-program; and a `[mock]` with no `[network]`, or naming a host `[network]` does not declare. In
-`hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is named by its index.
-Its fix is `remove this entry`, except in a pin list with no string entry, where it is the
-example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned. A `[provides]`
-binding whose key is empty or only whitespace is refused at its own path, such as `provides.""`,
-before anything inside it is checked. Its fix is `remove this entry`: no key is guessed, so
-following the fix deletes the binding and its tools. A key is blank when every character in it is
-Unicode White_Space, the characters `str::trim` removes. A key made only of U+3000 or U+00A0 is
-blank. A key such as `" a"` is not, and neither is one made only of U+FEFF, U+200B or U+180E, which
-are not White_Space. A tool name blank in the same sense is refused at its own path, such as
-`provides."a:tools".tools.""`, before its description is checked. Its fix is `remove this entry`:
-no name is guessed, so following the fix deletes the tool. A names list is refused as a whole, and
-its entries have no descriptions. If its first entry is blank, the refusal is at that entry,
-`provides."a:tools".tools[0]`, with fix `remove this entry`. A blank entry after the first is not
-refused at its own index: the list's fix writes at most the first entry, so it drops the blank one.
+section that is not a table; a top-level `[network]` that declares a port and names no host (a
+command's own network section with no host still parses); `hosts`, `pin_cidrs` or `[mock]`
+`hosts` that are not lists of strings; a declaration with no capability and no implementation, or
+whose only capability is an empty commands table; `[commands]`, its commands table or a command
+that is not a table, or `[commands]` with no commands table; a command whose `exec` is missing, is
+not a list or names no program; and a `[mock]` with no `[network]`, or naming a host `[network]`
+does not declare. In `hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is
+named by its index. Its fix is `remove this entry`, except in a pin list with no string entry,
+where it is the example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned.
+A `[provides]` binding whose key is empty or only whitespace is refused at its own path, such as
+`provides.""`, before anything inside it is checked. Its fix is `remove this entry`: no key is
+guessed, so following the fix deletes the binding and its tools. A key is blank when every
+character in it is Unicode White_Space, the characters `str::trim` removes. A key made only of
+U+3000 or U+00A0 is blank. A key such as `" a"` is not, and neither is one made only of U+FEFF,
+U+200B or U+180E, which are not White_Space. A tool name blank in the same sense is refused at its
+own path, such as `provides."a:tools".tools.""`, before its description is checked. Its fix is
+`remove this entry`: no name is guessed, so following the fix deletes the tool. A names list is
+refused as a whole, and its entries have no descriptions. If its first entry is blank, the refusal
+is at that entry, `provides."a:tools".tools[0]`, with fix `remove this entry`. A blank entry after
+the first is not refused at its own index: the list's fix writes at most the first entry, so it
+drops the blank one.
 
 For a network section that is not a table, or a `hosts` that is not a list, the fix uses the
 string the author wrote there. For the top-level `[network]`, it then uses the `[mock]` hosts.
-The `[mock]` check also runs before the no-host check, so an empty top-level `hosts` is offered
-the `[mock]` hosts. Only after those does a fix name the example `api.example.com`. A `[mock]`
-`hosts` with no string in it, and a `[mock]` with no host and no `[network]`, get
-`remove this entry`. A command fix runs the program the author wrote, else the command's key,
-else `command-name`.
+The `[mock]` check also runs before the no-host check, so an empty top-level `hosts` beside a
+declared port is offered the `[mock]` hosts. Only after those does a fix name the example
+`api.example.com`. A `[mock]` `hosts` with no string in it gets `remove this entry`. So does a
+`[mock]` with no `[network]`, refused at `mock`, and a `[mock]` naming a host that a `[network]`
+with no port does not declare: declaring that host would give hosts with no port, which the rules
+below remove. With a port declared, a mock host that `[network]` does not declare and that
+`is_proxy_host` refuses is refused at its entry, such as `mock.hosts[1]`. Its fix is the host in
+lower case when that is a DNS name `[mock]` does not already hold, else `remove this entry`. A
+command fix runs the program the author wrote, else the command's key, else `command-name`.
+
+The top-level `[network]` and `[workspace]` must also hold exact values (spec 022 §6). The network
+checks run after the ones above, in this order:
+
+1. No host and no port: refused at `network` with `remove this entry`. With a port and no host,
+   the no-host refusal above stands.
+2. Hosts with no port, or with `ports = []`: refused at `network.hosts[0]` with
+   `remove this entry`. No port is guessed, so following the fixes removes the hosts one at a time
+   and then the section.
+3. A port written twice: refused at the later entry, such as `network.ports[1]`, with
+   `remove this entry`.
+4. A host that `is_proxy_host` refuses, such as one with an upper-case letter, an IP literal, a
+   trailing dot or a last label that is a number: refused at its entry. Its fix is the host in
+   lower case when that is a DNS name not already declared, else `remove this entry`.
+5. A host written twice: refused at the later entry with `remove this entry`.
+6. A pin with host bits set, such as `192.0.2.1/24`: refused at its entry with the network it
+   masks to, `"192.0.2.0/24"`.
+7. A pin that is not a `Cidr`: refused at its entry with `remove this entry` when another pin in
+   the list is one, else with the example pin `"192.0.2.0/24"`.
+
+So following a pin fix never unpins the section, and a masked pin keeps the addresses the author
+wrote. A command's own network section keeps its values as written, as a `CommandNetwork`.
+
+A `[workspace]` table with no `mount` is refused at `workspace.mount` with
+`mount = { dst = "/workspace" }`, before the check for a declaration with no capability. A `dst`
+that is not a string is refused at `workspace.mount.dst` with `dst = "/workspace"`. So is a `dst`
+that `plasmosome_backend::canonical_path` refuses: relative, `/`, with a trailing `/`, with an
+empty, `.` or `..` component, or with a NUL. Its fix adds a leading `/` to a relative value and
+removes trailing `/`s when that gives a canonical path, such as `dst = "/srv/work"` for
+`srv/work//`, and is `dst = "/workspace"` otherwise. Any other `dst`, such as `/srv/work.d`, is
+kept exactly as written. A `workspace` or `mount` that is not a table is read as before: no
+workspace, or the default `/workspace`.
 
 A fix built from a list the author wrote names each entry once, keeping the first:
 `commands = ["gh", "gh"]` gets one `[commands.commands.gh]` section, since TOML refuses a
@@ -142,7 +179,11 @@ tree is 17 deep.
 without parsing `detail`. A refusal of an `id` that is missing, not a string or empty names no
 plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three members.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
-description.
+description. `PlasmidManifest::provides` lists the `[provides]` binding keys, such as
+`github:tools`, as written. A binding with its own `[provides."<key>"]` header is listed where
+that header is, and any other binding where its key first appears, so
+`[provides."z:k".tools]`, then `[provides."a:k".tools]`, then `[provides."z:k"]` lists `a:k`
+first. `provides_tools` keeps the keys' byte order.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
 mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` that declare
@@ -833,11 +874,11 @@ it carries no ACL allow entry that grants a right to replace its entries, whoeve
 names, and is on no volume mounted with ownership ignored. The file must be a regular file owned
 by root or the effective UID, with no write bit at all, no set-user-ID or set-group-ID bit, no
 ACL allow entry that grants write, and `uchg` or `schg` set. Off macOS, a file that passes every
-earlier rule is then refused as `ImmutabilityUnverifiable`, so no Artifact passes there. Spec 023
-§1 has the membrane repeat these file rules at launch. A FIFO is refused at once. Only then is the
-file hashed, through the descriptor that was checked, so a file that breaks a rule is refused even
-when its digest matches. An `ArtifactRefusal` names the path and the broken rule, and its `wire`
-is the 108 `cell.new` answers, with that path and a message that names an untrusted artifact.
+earlier rule is then refused as `ImmutabilityUnverifiable`, so no Artifact passes there. A FIFO
+is refused at once. Only then is the file hashed, through the descriptor that was checked, so a
+file that breaks a rule is refused even when its digest matches. An `ArtifactRefusal` names the
+path and the broken rule, and its `wire` is the 108 `cell.new` answers, with that path and a
+message that names an untrusted artifact.
 
 The read stops one byte past the size `fstat` reported at the check, so it ends even if the file
 grows. That bound is the apparent size: a huge sparse file is read, zeros included, for as long
@@ -854,10 +895,22 @@ through a descriptor opened before the file was locked: the mode and `uchg` refu
 It cannot catch every change. A `MAP_SHARED` mapping made before the file was locked, from a
 descriptor opened for writing, can change the bytes whatever protection it had when the file was
 locked, because `mprotect` can add write later. Such a write moves the times only at `msync` or
-`munmap`, if at all, so neither this check nor the membrane's sees it.
+`munmap`, if at all, so neither this check nor the membrane's `reconfirm` sees it.
 
 `CellRuntime::artifacts` lists what to verify: `membraned`, then the template's Artifacts in
 recipe order, read from the recipe the startup check completed. Unlike `TrustedFile`, the file and
 its own directory may be root's as well as the effective UID's, there is no link-count rule, and
-there is no size cap: a root image can be large. Spec 001 §4.2 also has `membraned` check the
-files it launches. That check belongs to `plasmosome-membrane` and is separate from this one.
+there is no size cap: a root image can be large.
+
+Spec 001 §4.2 also has `membraned` check the files it launches, and spec 023 §1 needs that check
+to admit every file this one admits. So the membrane does not repeat the rule: it calls the same
+judge. `check_file` opens the file a `Walk` reaches and applies the file rule without the hash. It
+returns a `CheckedFile`, which holds the open descriptor, the `Facts` of what it opened and its
+`Stamp`, the size, modification time and change time at the check. Only this module makes a
+`CheckedFile`, so holding one means the file passed. `verify_file` runs `check_file` and then the
+hash, reading through `Positioned`, a reader that uses `pread` and so never moves the
+descriptor's offset. `verify_artifact` is `Walk::from_root` and then `verify_file`. The membrane
+calls `verify_file` at launch and keeps the walk, the descriptor and the stamp; its `reconfirm`
+calls `check_file` again and compares the device, inode and stamp. Two equal stamps are the one
+meaning of "unchanged". A `Stamp` proves nothing by itself: `Stamp::of` makes one from any
+`fstat`.

@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
@@ -715,30 +715,29 @@ fn no_handler_of_the_controller_runs_in_a_child() {
     );
     let root = Root::new();
     let caught = Caught::install(&root.path.join("handler.pids"));
-    let cell = Cell::create(&root.path, "cell-108");
+    let cell = Cell::open_unsynced(&root.path, "cell-108");
     let missing =
         RecipePath::parse(&format!("{}/missing", root.path.display())).expect("a canonical path");
+    let mut lock = cell.unsynced_lock();
     let storm = Storm::start();
     for start in 0..40 {
-        let lock = cell.lock();
         let outcome = cell.start(&missing, lock, cell.log(), cell.record());
         assert_eq!(
             caught.pids_other_than_this(),
             Vec::<libc::pid_t>::new(),
             "by start {start} the controller's SIGUSR1 handler ran only in the controller; the start gave {outcome:?}"
         );
-        match outcome {
+        lock = match outcome {
             Err(StartError::Exec {
                 lock,
                 step: StartStep::Exec,
                 errno: libc::ENOENT,
-            }) => drop(lock),
+            }) => lock,
             other => panic!(
                 "start {start} of a missing membraned under a group signal storm fails at its exec with ENOENT, not {other:?}"
             ),
-        }
+        };
         assert_no_child_left();
-        std::fs::remove_file(cell.path.join("supervisor.lock")).expect("the lock is removed");
     }
     let sent = storm.stop();
     assert!(sent > 100, "the storm sent {sent} signals");
@@ -1002,7 +1001,7 @@ impl Root {
 
 struct Cell {
     _root: InstanceRoot,
-    _writer: WriterLock,
+    _writer: Option<WriterLock>,
     dir: CellDir,
     id: CellId,
     instance: PathBuf,
@@ -1021,7 +1020,28 @@ impl Cell {
         let path = root.join("cells").join(id.as_str());
         Cell {
             _root: instance,
-            _writer: writer,
+            _writer: Some(writer),
+            dir,
+            id,
+            instance: root.to_path_buf(),
+            path,
+            standin_expected: std::cell::Cell::new(false),
+        }
+    }
+
+    fn open_unsynced(root: &Path, id: &str) -> Cell {
+        let path = root.join("cells").join(id);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)
+            .expect("the cell directory is made");
+        let instance = InstanceRoot::open(root).expect("the instance root opens");
+        let id = CellId::from(id);
+        let dir = instance.cell_dir(&id).expect("the cell directory opens");
+        Cell {
+            _root: instance,
+            _writer: None,
             dir,
             id,
             instance: root.to_path_buf(),
@@ -1034,6 +1054,19 @@ impl Cell {
         self.dir
             .create_supervisor_lock()
             .expect("the supervisor lock is created")
+    }
+
+    fn unsynced_lock(&self) -> SupervisorLock {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.path.join("supervisor.lock"))
+            .expect("supervisor.lock is made");
+        match self.dir.probe_supervisor_lock() {
+            Ok(LockProbe::Free(lock)) => lock,
+            other => panic!("a new supervisor.lock probes free, not {other:?}"),
+        }
     }
 
     fn log(&self) -> File {

@@ -3,12 +3,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, GrantId, LedgerEntry,
-    MockMode, PluginId, ResidueReport,
+    BackendError, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, GrantId,
+    LedgerEntry, MockMode, PluginId, ResidueReport,
 };
 use plasmosome_core::ToolRegistry;
 use plasmosome_core::manifest::PlasmidManifest;
-use plasmosome_ledger::{Closure, Ledger};
+use plasmosome_ledger::{Closure, DetachError, Ledger};
 use plasmosome_testkit::builders::{
     DesiredStateBuilder, GrantClosure, ManifestBuilder, PreparedGrant, mount, proxy_map, uds_socket,
 };
@@ -200,4 +200,50 @@ impl.wasm = "github-pr.wasm"
         registry.lookup("pr.read"),
         Err(plasmosome_core::LookupError::UnknownTool("pr.read".into()))
     );
+}
+
+#[test]
+fn a_detach_stopped_by_a_failed_withdrawal_leaves_no_standing_residue_but_an_unfinished_account() {
+    let cell = CellId::from("cell-1");
+    let plugin = PluginId::from("github-pr");
+    let directory = tempfile::tempdir().unwrap();
+    let mut backend = FakeBackend::new();
+    let before = backend.snapshot_os_state().unwrap();
+    let prepared = github_pr_closure(&cell, &plugin, "api.github.com").prepare();
+    let first = prepared[0].handle();
+    let ledger = prepare_then_grant(
+        &mut backend,
+        &directory.path().join("github-pr.ledger"),
+        &plugin,
+        prepared,
+    );
+    backend.fail_next_withdrawal(first, "unmount busy");
+    let Closure::ExternalFree(mut sealed) = ledger.close() else {
+        panic!("a ledger of exact inverses closes without an operator assertion");
+    };
+    let drain = DrainSpec::graceful(Duration::from_millis(50));
+    let stopped = sealed
+        .detach(&mut backend, &cell, drain)
+        .expect_err("the withdrawal replayed last fails after its release");
+    assert!(
+        matches!(
+            &stopped,
+            DetachError::Backend(BackendError::IncompleteEffect { class, id, .. })
+                if *class == first.class.as_str() && *id == first.id
+        ),
+        "{stopped}"
+    );
+    let after = backend.snapshot_os_state().unwrap();
+    let residue =
+        ResidueReport::from_diff(Diff::between(before.state(), after.state()), Vec::new());
+    assert_eq!(residue, ResidueReport::Empty, "{residue}");
+    assert!(
+        !after.is_empty(),
+        "the unfinished holding and its issued record must remain in the account"
+    );
+    let resumed = sealed
+        .detach(&mut backend, &cell, drain)
+        .expect("a retried detach finishes the exact cleanup");
+    assert_eq!(resumed.replayed.len(), 1);
+    assert!(backend.snapshot_os_state().unwrap().is_empty());
 }
