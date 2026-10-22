@@ -1,6 +1,7 @@
 mod comparison;
 mod manifest;
 mod normalization;
+mod results;
 mod runs;
 
 use serde_json::{Map, Value, json};

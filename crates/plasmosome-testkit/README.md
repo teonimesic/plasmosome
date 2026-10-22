@@ -152,8 +152,8 @@ untrusted file before it allocates anything. One function, `as_core`, turns the 
 into core's. A row the two callers disagree on is a defect in one of them, not in the table.
 
 The third is the **membrane differential** of spec 027 §6, a test fixture that no product path
-uses. It holds the probe manifest and the comparator. `differential::load` reads the manifest
-from JSON and refuses it, naming what is wrong, before anything is compared:
+uses. It holds the probe manifest, the comparator and the results writer. `differential::load`
+reads the manifest from JSON and refuses it, naming what is wrong, before anything is compared:
 
 - a channel of spec 027 §5 with fewer than three probes, or a reach kind with fewer than three
   reach probes, none included;
@@ -258,6 +258,35 @@ differ.
 belongs with the code that runs the lanes, and spec 027 §6 says which numbers that reader must
 refuse.
 
+`differential::write_results` writes §6's dated results file, `<date>-<name>.md`, into the
+directory it is given, such as `docs/benchmarks/`, and never overwrites one. It takes an
+`Outcome`: a manifest `load` refused, so no lane ran; a reader's refusal of a lane's output, so
+no run was read; or the runs as read. It judges the runs itself, so the file cannot claim a
+verdict the runs do not support, and it writes every refusal of the runs, by `load`, a reader or
+`judge`, as a failed run with its reason. The file states how many probes the manifest declares.
+A manifest with none is one `judge` refuses, so it reads `fail` with 0 probes, and no probes
+never reads as no differences. The file holds each lane's configuration; the SHA-256 of the
+image, kernel, libkrun, fixtures, harness, session, probe suite and manifest; the manifest's
+rules as run; and every probe's status and observation, and the transcript and its status, in
+every run of every lane, as run and not normalized. Every name and value from the manifest, the
+runs, a reader or a configuration goes inside a JSON or text block, and the date, the name and
+the digests outside them are checked first, so none can break the file apart. The text goes to a
+temporary name in the same directory, and is linked to its name only once it is whole and
+synced, so a write that fails leaves no file at the name, and a retry can write it. Three edges
+fail closed, with nothing left at the name: on a filesystem without hard links every write
+fails; the temporary name is about 15 bytes longer than the final name, so a name near the
+255-byte limit is refused; and a writer killed mid-write can leave a hidden `.tmp` file, which
+`.gitignore` does not cover. A write whose temporary cannot be removed leaves one too, beside
+the whole file it linked to the name.
+
+It writes nothing, and names what is wrong, for a date that is not a calendar date written
+`YYYY-MM-DD`, a name other than lowercase letters, digits and hyphens, a lane with runs or a
+refused read but no configuration, two configurations for one lane, a configuration with no
+settings, a digest that is not 64 lowercase hex digits, or no harness or session digest when a
+run carries a transcript or a reader refused one. A lane with no runs needs no configuration, and
+runs with no transcript need no harness or session digest, so the reference lanes can be written
+before a cell boots or a harness runs.
+
 ## What's inside
 
 | Module | Holds |
@@ -265,7 +294,7 @@ refuse.
 | `builders` | `PlasmidManifest`, capabilities, prepared grants (`GrantClosure`, `PreparedGrant`), `Effect`s and `DesiredState` — a test states only what it is about |
 | `conformance` | Fourteen clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
-| `differential` | Spec 027 §6's probe manifest for the membrane differential, its refusals, and `judge`, which compares the lanes' runs and gives the verdict |
+| `differential` | Spec 027 §6's probe manifest for the membrane differential, its refusals, `judge`, which compares the lanes' runs and gives the verdict, and `write_results`, which writes the dated results file |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
 Nothing here ships: the crate is `publish = false`, and a guard keeps it out of every other

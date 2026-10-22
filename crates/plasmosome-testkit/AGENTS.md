@@ -4,8 +4,8 @@
 
 Shared test support: builders for the noisy kernel types, the backend conformance suite every
 `EnforcementBackend` implementation must pass, the cross-crate scenarios, and the membrane
-differential's manifest and comparator (spec 027 §6). It is where the rules that span crates
-live; each crate's own `AGENTS.md` stays authoritative for that crate.
+differential's manifest, comparator and results writer (spec 027 §6). It is where the rules that
+span crates live; each crate's own `AGENTS.md` stays authoritative for that crate.
 
 Nothing here ships. The crate is `publish = false`, and the guard `testkit_is_dev_only` in
 `plasmosome-guards` fails the build if another workspace crate names it outside
@@ -37,6 +37,7 @@ Every place the kernel touches the world outside the process, and the seam that 
 | Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |
 | Directory syncs that can fail (instance root) | the private `SyncDirectory` function that `InstanceRoot` and `CellDir` carry (`plasmosome-core::instance`) | `recording_sync` in core's unit tests |
 | Directory reads that can fail (cell discovery, the trusted-directory listing) | the private name iterator that `collect_names` (`plasmosome-core::instance`) and `listed_from` (`plasmosome-core::private_socket`) take | a `Vec` of names and read errors in core's unit tests |
+| File writes that can fail (the differential's results file) | the write function that the private `write_with` takes (`plasmosome-testkit::differential::results`); `write_results` passes `File::write_all` | a write that writes 512 bytes and then fails, and one that writes the whole text and then hands back `/dev/null`, whose sync fails; both in the differential's results tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 | Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`; writers that refuse every write, fail only on flush, or fail only their first write; one that records the largest piece; all in plasmosome-cli's tests |
 | Time (lifetime bounds, the fence, expiry scheduling) | `Clock` (`plasmosome-backend::clock`), `SystemClock` in `plasmosome-core::clock` | `ManualClock` |
@@ -98,7 +99,7 @@ never calls the OS inline and mocks it in the test.
 ## Testing
 
 `cargo test -p plasmosome-testkit`. That runs the conformance suite against `FakeBackend` and
-`CompositeBackend`, plus the cross-crate scenarios and the differential's manifest and comparator
+`CompositeBackend`, plus the cross-crate scenarios and the membrane differential's
 tests. A new backend proves itself by calling the same `conformance::` functions with its own
 constructor, in its own `tests/` file. The differential's tests alone run with
 `cargo test -p plasmosome-testkit --lib differential`.
