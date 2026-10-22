@@ -13,3 +13,4 @@ pub(crate) use plasmosome_core::runtime::strict_json;
 pub use plasmosome_core::runtime::{path, recipe};
 #[cfg(test)]
 pub(crate) mod test_fixtures;
+pub mod vmm_helper;

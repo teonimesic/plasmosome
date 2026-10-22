@@ -214,18 +214,17 @@ impl PlatformLimits {
     /// `u32::MAX`, and the `sun_path` capacity less one byte.
     ///
     /// Refuses with `UnknownArchitecture` on an architecture a recipe cannot
-    /// name, and with `HostLimitUnavailable` when the system will not report
-    /// its parallelism or memory.
-    pub fn host() -> Result<PlatformLimits, RecipeRefusal> {
+    /// name, and with `Unavailable` when the system will not report its
+    /// parallelism or memory.
+    pub fn host() -> Result<PlatformLimits, HostLimitsError> {
         let architecture =
-            Architecture::host().ok_or_else(|| RecipeRefusal::UnknownArchitecture {
+            Architecture::host().ok_or_else(|| HostLimitsError::UnknownArchitecture {
                 found: std::env::consts::ARCH.to_owned(),
             })?;
-        let parallelism = std::thread::available_parallelism().map_err(|_| {
-            RecipeRefusal::HostLimitUnavailable {
+        let parallelism =
+            std::thread::available_parallelism().map_err(|_| HostLimitsError::Unavailable {
                 limit: "available parallelism",
-            }
-        })?;
+            })?;
         Ok(PlatformLimits {
             architecture,
             max_vcpus: capped_vcpus(parallelism.get()),
@@ -237,16 +236,16 @@ impl PlatformLimits {
 }
 
 #[allow(unsafe_code)]
-fn physical_memory_mib() -> Result<u32, RecipeRefusal> {
+fn physical_memory_mib() -> Result<u32, HostLimitsError> {
     let positive = |value: libc::c_long| u64::try_from(value).ok().filter(|value| *value > 0);
     // SAFETY: sysconf takes no pointer and has no memory precondition. A result of -1 or 0 is
-    // refused below as HostLimitUnavailable.
+    // refused below as Unavailable.
     let pages = positive(unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) });
     // SAFETY: sysconf takes no pointer and has no memory precondition. A result of -1 or 0 is
-    // refused below as HostLimitUnavailable.
+    // refused below as Unavailable.
     let page_bytes = positive(unsafe { libc::sysconf(libc::_SC_PAGESIZE) });
     let (Some(pages), Some(page_bytes)) = (pages, page_bytes) else {
-        return Err(RecipeRefusal::HostLimitUnavailable {
+        return Err(HostLimitsError::Unavailable {
             limit: "physical memory",
         });
     };
@@ -354,8 +353,7 @@ pub enum RecipeRefusal {
     BadPath { field: String, fault: PathError },
     /// `kernel_format` is not one of the six known spellings.
     UnknownKernelFormat { found: String },
-    /// `architecture` is not `aarch64` or `x86_64`; from
-    /// [`PlatformLimits::host`], the host's own architecture.
+    /// `architecture` is not `aarch64` or `x86_64`.
     UnknownArchitecture { found: String },
     /// `vcpus` is zero.
     ZeroVcpus,
@@ -386,8 +384,15 @@ pub enum RecipeRefusal {
     /// One spelling fills two path roles; `first` comes before `second` in
     /// field order. Paths spelled differently may still name one file.
     PathReused { first: PathRole, second: PathRole },
+}
+
+/// Why [`PlatformLimits::host`] could not read this machine's limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostLimitsError {
+    /// The host's own architecture, `found`, is neither `aarch64` nor `x86_64`.
+    UnknownArchitecture { found: String },
     /// The host would not report `limit`.
-    HostLimitUnavailable { limit: &'static str },
+    Unavailable { limit: &'static str },
 }
 
 impl RuntimeRecipe {
@@ -984,14 +989,27 @@ impl std::fmt::Display for RecipeRefusal {
             RecipeRefusal::PathReused { first, second } => {
                 write!(f, "`{first}` and `{second}` are the same path")
             }
-            RecipeRefusal::HostLimitUnavailable { limit } => {
+        }
+    }
+}
+
+impl std::error::Error for RecipeRefusal {}
+
+impl std::fmt::Display for HostLimitsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostLimitsError::UnknownArchitecture { found } => write!(
+                f,
+                "this host's architecture {found:?} is neither aarch64 nor x86_64"
+            ),
+            HostLimitsError::Unavailable { limit } => {
                 write!(f, "this host did not report its {limit}")
             }
         }
     }
 }
 
-impl std::error::Error for RecipeRefusal {}
+impl std::error::Error for HostLimitsError {}
 
 impl std::fmt::Display for TemplateRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1187,11 +1205,7 @@ mod tests {
                 format!("this host is {}", host.as_str()),
             ],
             SocketPathsEqual => vec!["`control_path`".to_owned(), "`data_path`".to_owned()],
-            TooLarge { .. }
-            | NotOneLine
-            | NotUtf8
-            | NotJson { .. }
-            | HostLimitUnavailable { .. } => Vec::new(),
+            TooLarge { .. } | NotOneLine | NotUtf8 | NotJson { .. } => Vec::new(),
         }
     }
 
@@ -1931,6 +1945,23 @@ mod tests {
     }
 
     #[test]
+    fn host_limit_errors_say_what_the_host_did_not_report() {
+        let unknown = HostLimitsError::UnknownArchitecture {
+            found: "riscv64".to_owned(),
+        };
+        let unavailable = HostLimitsError::Unavailable {
+            limit: "physical memory",
+        };
+        assert_eq!(
+            [unknown.to_string(), unavailable.to_string()],
+            [
+                "this host's architecture \"riscv64\" is neither aarch64 nor x86_64",
+                "this host did not report its physical memory",
+            ]
+        );
+    }
+
+    #[test]
     fn limits_report_what_they_were_built_with() {
         let limits = PlatformLimits::new(Architecture::X86_64, 3, 5, 7);
         assert_eq!(limits.architecture(), Architecture::X86_64);
@@ -1963,12 +1994,6 @@ mod tests {
                     max: 103,
                 },
                 "`control_path` is 104 bytes; a socket path on this host holds at most 103",
-            ),
-            (
-                HostLimitUnavailable {
-                    limit: "physical memory",
-                },
-                "this host did not report its physical memory",
             ),
             (
                 ArchitectureMismatch {
