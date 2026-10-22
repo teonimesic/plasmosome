@@ -821,4 +821,97 @@ mod tests {
             )))
         );
     }
+
+    #[test]
+    fn an_incomplete_effect_routes_to_the_leaf_of_its_class_and_joins_the_union() {
+        let doomed = cell_owner("doomed");
+        let armed = || -> Box<dyn EnforcementBackend> {
+            let mut leaf = FakeBackend::new();
+            leaf.fail_after_effect_for_owner(doomed.clone(), "leaf readiness failed");
+            Box::new(leaf)
+        };
+        for (capability, leaf) in [
+            (proxy_map("api.github.com", "splice"), Leaf::Network),
+            (uds_socket("/run/ak/egressd.uds"), Leaf::Network),
+            (session_file("/skills/pr.md"), Leaf::Filesystem),
+            (mount("/code", "/workspace"), Leaf::Filesystem),
+            (broker("egressd"), Leaf::Broker),
+        ] {
+            let mut backend = CompositeBackend::new(armed(), armed(), armed()).unwrap();
+            let op = fixtures::op(GrantId::new(), doomed.clone(), capability);
+            let failed = BackendError::IncompleteEffect {
+                class: op.class().as_str(),
+                id: op.id(),
+                detail: "leaf readiness failed".to_string(),
+            };
+            assert_eq!(
+                backend.grant(op.clone(), GrantKind::Hot),
+                Err(failed.clone())
+            );
+            assert_eq!(backend.apply(op.clone()), Err(failed));
+            for other in LEAVES {
+                let observed = backend.leaf_snapshot(other).unwrap();
+                if other == leaf {
+                    assert_eq!(observed.incomplete(), [unfinished(&op)], "{leaf:?}");
+                } else {
+                    assert!(observed.is_empty(), "{other:?} holds {leaf:?}'s effect");
+                }
+            }
+            assert_eq!(
+                backend.snapshot_os_state(),
+                Ok(
+                    EnforcementSnapshot::new(OsState::new(), Vec::new(), vec![unfinished(&op)])
+                        .unwrap()
+                )
+            );
+            assert_eq!(
+                backend.plant(op.object()),
+                Err(BackendError::IdentityConflict {
+                    class: op.class().as_str(),
+                    id: op.id(),
+                })
+            );
+            backend
+                .apply_removal(op.removal(), &doomed, DrainSpec::forcing())
+                .unwrap();
+            assert!(backend.snapshot_os_state().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_withdrawal_that_fails_in_a_leaf_keeps_its_record_until_a_revoke_through_the_composite() {
+        let mut network = FakeBackend::new();
+        let entry = network
+            .grant(
+                prepared("network", uds_socket("/run/ak/egressd.uds")),
+                GrantKind::Hot,
+            )
+            .unwrap();
+        network.fail_next_withdrawal(entry.handle, "relay end still open");
+        let mut backend =
+            CompositeBackend::new(Box::new(network), fake(), fake()).expect("valid leaves");
+        assert_eq!(
+            backend.revoke(entry.handle, DrainSpec::forcing()),
+            Err(BackendError::IncompleteEffect {
+                class: "uds-path",
+                id: entry.handle.id,
+                detail: "relay end still open".to_string(),
+            })
+        );
+        let effect = IncompleteEffect {
+            operation: entry.object().operation(),
+        };
+        assert_eq!(
+            backend.snapshot_os_state(),
+            Ok(
+                EnforcementSnapshot::new(OsState::new(), vec![entry.clone()], vec![effect])
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            backend.revoke(entry.handle, DrainSpec::forcing()),
+            Ok(entry)
+        );
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
+    }
 }
