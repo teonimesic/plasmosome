@@ -3929,6 +3929,11 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 REMOVAL,
             ),
             (
+                "[network]\nhosts = [\"API.github.com\", \"api.github.com\"]\nports = [443]",
+                "network.hosts[0]",
+                REMOVAL,
+            ),
+            (
                 "[network]\nhosts = [\"API.GITHUB.COM.\"]\nports = [443]",
                 "network.hosts[0]",
                 REMOVAL,
@@ -4054,6 +4059,11 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             (
                 "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"uploads.github.com\"]",
                 "mock",
+                REMOVAL,
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"api.github.com\"]",
+                "network.hosts[0]",
                 REMOVAL,
             ),
             (
