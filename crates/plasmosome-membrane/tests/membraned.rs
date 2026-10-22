@@ -541,6 +541,36 @@ fn trickling_broker(
     received
 }
 
+fn trickling_until_released(
+    socket: PathBuf,
+    drip: Duration,
+) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let listener = UnixListener::bind(&socket).expect("the test broker binds its control socket");
+    let (rendezvous, received) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let Ok(reading) = stream.try_clone() else {
+            return;
+        };
+        let mut line = String::new();
+        let _ = BufReader::new(reading).read_line(&mut line);
+        if line.is_empty() {
+            return;
+        }
+        let _ = rendezvous.send(());
+        while matches!(released.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+            thread::sleep(drip);
+            if stream.write_all(b" ").is_err() {
+                return;
+            }
+        }
+    });
+    (received, release)
+}
+
 #[test]
 fn membraned_times_out_a_trickling_broker_instead_of_accepting_a_late_ready() {
     let dir = tempfile::tempdir().unwrap();
@@ -637,17 +667,13 @@ fn membraned_shuts_down_during_an_active_trickling_probe() {
     let broker_socket = dir.path().join("b0.uds");
     let pidfile = dir.path().join("b0.pid");
     let config = dir.path().join("config.json");
-    let trickled = trickling_broker(
-        broker_socket.clone(),
-        400,
-        Duration::from_millis(20),
-        Some(READY),
-    );
+    let (probe_seen, release) =
+        trickling_until_released(broker_socket.clone(), Duration::from_millis(20));
     write_config(
         &config,
         &json!({
             "control_socket": control,
-            "status_deadline_ms": 10_000u64,
+            "status_deadline_ms": 60_000u64,
             "brokers": [{
                 "name": "egressd",
                 "control_socket": broker_socket,
@@ -661,36 +687,42 @@ fn membraned_shuts_down_during_an_active_trickling_probe() {
     let mut writer = client.get_ref().try_clone().expect("clone for writing");
     writeln!(writer, "{STATUS_REQUEST}").expect("the status request reaches membraned");
     writer.flush().expect("the request is flushed");
-    trickled
+    probe_seen
         .recv_timeout(PATIENCE)
         .expect("the broker saw the probe's request, so a probe is in flight");
+    let broker = recorded_pid(&pidfile);
 
     let started = Instant::now();
     daemon.signal(libc::SIGTERM);
-    client
-        .get_ref()
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .expect("the test bounds its own read");
     let mut reply = String::new();
-    let read = client
-        .read_line(&mut reply)
-        .expect("control EOF arrives within the two-second watchdog");
-    assert_eq!(
-        read, 0,
-        "the conversation closes with no fabricated answer, got {reply:?}"
-    );
-    let status = daemon.wait_for_exit(Duration::from_secs(2));
+    match client.read_line(&mut reply) {
+        Ok(0) => {}
+        Ok(_) => panic!("membraned fabricated an answer to a cancelled probe: {reply:?}"),
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            panic!(
+                "membraned did not close the conversation within {PATIENCE:?} of the signal, \
+                 so its shutdown waited on the held probe: {error}"
+            )
+        }
+        Err(error) => panic!("the read after the signal failed: {error}"),
+    }
+    let status = daemon.wait_for_exit(PATIENCE);
     let elapsed = started.elapsed();
     eprintln!("shutdown during probe: exit={status:?} after {elapsed:?}");
     assert_eq!(
         status.code(),
         Some(0),
-        "the daemon exits cleanly without waiting out the 10s allowance"
+        "the daemon exits cleanly while the broker still holds its probe open"
     );
     assert!(
         !control.exists(),
         "teardown began: the control socket path was removed"
     );
+    assert!(
+        is_gone(broker),
+        "the managed broker died with the membrane that owned it"
+    );
+    drop(release);
 }
 
 #[test]
