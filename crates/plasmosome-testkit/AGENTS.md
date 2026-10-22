@@ -4,8 +4,8 @@
 
 Shared test support: builders for the noisy kernel types, the backend conformance suite every
 `EnforcementBackend` implementation must pass, the cross-crate scenarios, and the membrane
-differential's manifest and comparator (spec 027 §6). It is where the rules that span crates
-live; each crate's own `AGENTS.md` stays authoritative for that crate.
+differential's manifest, comparator and results writer (spec 027 §6). It is where the rules that
+span crates live; each crate's own `AGENTS.md` stays authoritative for that crate.
 
 Nothing here ships. The crate is `publish = false`, and the guard `testkit_is_dev_only` in
 `plasmosome-guards` fails the build if another workspace crate names it outside
