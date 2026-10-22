@@ -191,9 +191,9 @@ exit follow `unanswered`'s: `no_reply`, exit 1, or `outcome_unknown`, exit 3.
 `json::write_compact` writes a value on one line with no whitespace outside strings. A quote and
 a backslash take their two-character escapes. Each terminal control is written as JSON's
 six-character escape, a backslash, `u` and four lowercase hex digits, wherever it appears in a
-key or a value. The terminal controls are U+0000 to U+001F, U+007F, U+0080 to U+009F, U+202A to
-U+202E and U+2066 to U+2069. Every other character is written as UTF-8, U+2028 included. The
-output parses back to the same values.
+key or a value. The terminal controls are U+0000 to U+001F, U+007F, U+0080 to U+009F, U+061C,
+U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069. Every other character is written as
+UTF-8, U+2028 included. The output parses back to the same values.
 
 `json::write_human` indents a value for a person, one member or item per line, and shows each
 terminal control as `<U+XXXX>`. Indentation stops growing past 32 levels, so a deep reply cannot
