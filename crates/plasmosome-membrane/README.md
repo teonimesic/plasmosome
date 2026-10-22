@@ -476,12 +476,14 @@ sends one line and then waits, and the reader would drop those bytes.
 Every accepted stream's peer pid must equal the helper's, and the pid is read again after each
 reply. A pid of 0 or below never matches; Linux reports 0 for a peer outside the supervisor's pid
 namespace. A stream from another pid is `ForeignPeer`, and a peer that `accept_ready` refused is
-`PeerRefused`. Either fails the handshake, because nothing but the helper should reach a private
-endpoint. On Linux the pid is the connector's, so the read after a reply adds nothing. On Darwin it
-names the last process to use the peer's socket, as above. A match after a reply shows that the
-helper used the socket last once the reply had arrived, so a reply sent by another process fails,
-unless the helper used the socket after it. Measured on macOS 26.6.2, after the accept the pid
-followed a child that only sent, in 20 of 20 runs.
+`PeerRefused`. So is a lane whose pid cannot be read after its reply: on Darwin a lane that hung up
+right after its reply fails there with `ENOTCONN`, once no other process holds its socket. Each
+fails the handshake, because nothing but the helper should reach a private endpoint. On Linux the
+pid is the connector's, so the read after a reply adds nothing. On Darwin it names the last process
+to use the peer's socket, as above. A match after a reply shows that the helper used the socket
+last once the reply had arrived, so a reply sent by another process fails, unless the helper used
+the socket after it. Measured on macOS 26.6.2, after the accept the pid followed a child that only
+sent, in 20 of 20 runs.
 
 The `Association` stands for both hellos and the data association. Spec 001 §4.2 also asks for
 the workload namespaces and the workload control group before readiness, and this handshake does
