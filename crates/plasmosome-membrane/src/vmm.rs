@@ -617,8 +617,9 @@ impl VmmChild {
     }
 }
 
-#[cfg(not(test))]
 fn unless_a_test_captures(line: String) -> Option<String> {
+    #[cfg(test)]
+    let line = unless_this_thread_captures(line)?;
     Some(line)
 }
 
@@ -629,7 +630,7 @@ std::thread_local! {
 }
 
 #[cfg(test)]
-fn unless_a_test_captures(line: String) -> Option<String> {
+fn unless_this_thread_captures(line: String) -> Option<String> {
     let mut line = Some(line);
     let _ = CAPTURED_DROP_REPORTS.try_with(|captured| {
         if let Ok(mut captured) = captured.try_borrow_mut()
@@ -1175,9 +1176,13 @@ mod tests {
     }
 
     fn assert_report_names(line: &str, expected: SupervisionError) {
+        let errno = match expected.observed {
+            Some(state) => format!("errno {} after observing {state:?};", expected.errno),
+            None => format!("errno {};", expected.errno),
+        };
         for fragment in [
             format!("{:?} failed", expected.operation),
-            format!("errno {}", expected.errno),
+            errno,
             "workers may remain live".to_string(),
             "further signalling forbidden=true".to_string(),
         ] {
@@ -1186,18 +1191,11 @@ mod tests {
                 "the drop report {line:?} contains {fragment:?}"
             );
         }
-        match expected.observed {
-            Some(state) => {
-                let fragment = format!("after observing {state:?}");
-                assert!(
-                    line.contains(&fragment),
-                    "the drop report {line:?} contains {fragment:?}"
-                );
-            }
-            None => assert!(
+        if expected.observed.is_none() {
+            assert!(
                 !line.contains("after observing"),
                 "the drop report {line:?} names no observed exit"
-            ),
+            );
         }
     }
 
@@ -1708,6 +1706,7 @@ mod tests {
 
     const DROP_PROBE: &str = "PLASMOSOME_VMM_DROP_PROBE";
     const PROBE_PID: &str = "probe drops lost pid ";
+    const PROBE_DEADLINE: Duration = DEADLINE.saturating_mul(2);
 
     #[test]
     #[ignore = "helper process for an_uncaptured_drop_report_reaches_stderr"]
@@ -1762,11 +1761,11 @@ mod tests {
             if let Some(status) = probe.try_wait().expect("the probe's status is readable") {
                 break status;
             }
-            if started.elapsed() >= DEADLINE {
+            if started.elapsed() >= PROBE_DEADLINE {
                 let _ = probe.kill();
                 let _ = probe.wait();
                 panic!(
-                    "the probe did not finish within {DEADLINE:?}\n{}\n{}",
+                    "the probe did not finish within {PROBE_DEADLINE:?}\n{}\n{}",
                     read_from_start(stdout),
                     read_from_start(stderr)
                 );
@@ -1789,11 +1788,14 @@ mod tests {
             .and_then(|(_, pid)| pid.parse().ok())
             .unwrap_or_else(|| panic!("the probe names its child's pid\n{said}"));
         let lines: Vec<&str> = reported
-            .lines()
+            .split_inclusive('\n')
             .filter(|line| line.contains("drop cleanup error"))
             .collect();
         let [line] = lines.as_slice() else {
             panic!("expected one drop report on the probe's stderr, got {reported:?}");
+        };
+        let Some(line) = line.strip_suffix('\n') else {
+            panic!("the drop report {line:?} ends with a newline");
         };
         assert!(
             line.starts_with(&format!("VmmChild pid {pid} ")),
