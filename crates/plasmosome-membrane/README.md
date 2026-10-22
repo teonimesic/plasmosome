@@ -306,22 +306,25 @@ master's. The kernel never stops at `TRAILER!!!`: there it only frees its hard-l
 384-387), and its unpack loop reads any later `0` at a 4-byte boundary as the start of another
 entry (519-525, 544-550). So the rule that only zero bytes follow the trailer is the one that keeps
 a second archive from being unpacked over the first. The kernel reads an entry's name only when
-the entry is a regular file or has no body (305, 317). A directory with a body is skipped unread,
-so nothing under it is made, and the audit refuses it. The audit also refuses a trailer with a
-body, which only fails closed: the kernel skips that body to the same next header the audit would
-read. A `TRAILER!!!` with a symlink mode takes the symlink branch before its name is compared
-(296, 308), so the kernel tries to make a link and never sees a trailer; the audit refuses it as a
-symlink. The kernel also skips an entry whose name is over 4,096 bytes (294, 306), and it keeps the
-last of two entries with one name. It skips zero bytes between entries; the audit refuses them, and
-the qualified archive has none. 6.12.91 parses a header field with `simple_strtoul` and master with
-`hex2bin`; the audit takes exactly 8 hexadecimal digits, which both read the same way.
+the entry is a symlink (296-304, 308-316), a regular file, or has no body (305, 317). A directory
+with a body is skipped unread, so nothing under it is made, and the audit refuses it. The audit
+also refuses a trailer with a body, which only fails closed: the kernel skips that body to the
+same next header the audit would read. A `TRAILER!!!` with a symlink mode takes the symlink branch
+before its name is compared, so the kernel tries to make a link and never sees a trailer; the
+audit refuses it as a symlink. The kernel keeps a mode in a 16-bit `umode_t` (181, 191), and the
+audit reads the type from the same low 16 bits. The kernel also skips an entry whose name is over
+4,096 bytes (294, 306), and it keeps the last of two entries with one name. It skips zero bytes between entries; the
+audit refuses them, and the qualified archive has none. 6.12.91 parses a header field with
+`simple_strtoul` and master with `hex2bin`; the audit takes exactly 8 hexadecimal digits, which
+both read the same way.
 
 It reads the bytes the descriptor holds now and does not hash them again, so the limit stated for
 `reconfirm()` above holds here too: a write through a shared writable mapping made before the file
 was locked can change them unseen. Bytes appended after verification are read and refused as data
 after the trailer. The cell, plasmosome-7em, which is not built yet, must call `reconfirm()` after
 this check, just before the launch that opens the initramfs by path. Off macOS no artifact
-verifies, so there only the archive audit runs, in tests.
+verifies, so `verify_initramfs` runs only in tests, on artifacts that
+`artifacts::verified_for_test` builds.
 
 ## Launching the VMM helper
 
