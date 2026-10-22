@@ -1937,6 +1937,30 @@ mod tests {
     }
 
     #[test]
+    fn publish_reports_io_and_leaves_the_temporary_when_it_cannot_inspect_it_after_the_chmod() {
+        let (_root, cell, dir) = private_cell();
+        let outcome = publish_drawing(dir, "sock", effective_uid(), &[DRAWN], |step| {
+            if step == Step::Restricted {
+                set_mode(&cell, 0o600);
+            }
+        });
+        set_mode(&cell, 0o700);
+        if effective_uid() == 0 {
+            assert!(outcome.is_ok(), "root ignores the mode");
+            return;
+        }
+        assert_eq!(
+            refusal_of(outcome),
+            PrivateSocketError::Io {
+                op: "fstatat",
+                path: cell.join(DRAWN),
+                errno: libc::EACCES
+            }
+        );
+        assert_eq!(entries(&cell), vec![cell.join(DRAWN)]);
+    }
+
+    #[test]
     fn publish_leaves_a_socket_it_did_not_bind_when_the_recheck_fails() {
         let (_root, cell, dir) = private_cell();
         let temporary = cell.join(DRAWN);
