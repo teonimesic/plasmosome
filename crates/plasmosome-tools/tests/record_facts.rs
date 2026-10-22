@@ -651,6 +651,21 @@ fn metadata_that_cannot_be_read_or_is_not_what_cargo_writes_is_refused() {
             changed(&|v| v["packages"][1]["targets"] = json!(null)),
             "\"targets\" is not a list",
         ),
+        (
+            changed(&|v| v["packages"][1]["links"] = json!(5)),
+            "\"links\" is not a string",
+        ),
+        (
+            changed(&|v| {
+                v["resolve"]["nodes"][1]["deps"] =
+                    json!([{"pkg": "ghost", "dep_kinds": [{"kind": null}]}]);
+                v["resolve"]["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id": "ghost", "deps": []}));
+            }),
+            "no package has the id ghost",
+        ),
     ] {
         std::fs::write(&all, &text).unwrap();
         std::fs::write(&hosts, &text).unwrap();
