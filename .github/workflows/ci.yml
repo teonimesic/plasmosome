@@ -1,9 +1,10 @@
 # Every gate is its own step: a `run: |` block reports only its last command's exit status,
-# so a multi-command step can pass while a gate inside it failed. One command per step.
-# The exception is a captured test step: one pipeline, `cargo test ... 2>&1 | tee -a FILE`, under
+# so a multi-command step can pass while a gate inside it failed. One command per step, with two
+# exceptions. A captured test step is one pipeline, `cargo test ... 2>&1 | tee -a FILE`, under
 # `shell: bash`. GitHub runs that as `bash --noprofile --norc -eo pipefail`, so the step fails when
 # any command in the pipeline fails. The default shell has no pipefail, and the step would pass
-# because tee succeeded.
+# because tee succeeded. A summary step, which prints a report and gates nothing, may run several
+# commands under `set -eu` with no pipe, so any failed command, or an unset variable, fails it.
 name: ci
 
 on:
@@ -48,33 +49,7 @@ jobs:
         run: cargo bench --locked --workspace -- --quick
 
       - name: publish benchmark medians
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          root = Path("target/criterion")
-          benchmarks = (
-              "attach_detach",
-              "ledger_replay/10",
-              "ledger_replay/100",
-              "ledger_replay/1000",
-              "manifest_parse",
-              "reconciler_step",
-              "session_log_append",
-              "session_log_read",
-          )
-          lines = ["## Kernel benchmark medians", "", "FakeBackend timings exclude OS enforcement.", ""]
-          for name in benchmarks:
-              estimates = json.loads((root / name / "new/estimates.json").read_text())
-              median_ns = estimates["median"]["point_estimate"]
-              lines.append(f"- `{name}` {median_ns:.6f} ns")
-          summary = "\n".join(lines) + "\n"
-          print(summary, end="")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write(summary)
-          PY
+        run: cargo run --locked --release -q -p plasmosome-tools --bin bench-medians -- target/criterion
 
   gates:
     runs-on: ubuntu-latest
@@ -333,40 +308,30 @@ jobs:
       - name: measured run
         run: cargo llvm-cov --locked --workspace --exclude plasmosome-guards --no-report
 
+      # This step only runs one command and prints its table, so it stays shell. `set -eu` and no
+      # pipe make it fail when the report fails or GITHUB_STEP_SUMMARY is unset. The backticks in
+      # single quotes are Markdown, printed as they are, so SC2016 does not apply.
       - name: coverage summary
         run: |
-          python3 - <<'PY'
-          import os
-          import subprocess
-
-          table = subprocess.run(
-              ["cargo", "llvm-cov", "report", "--locked", "--summary-only"],
-              check=True,
-              stdout=subprocess.PIPE,
-              text=True,
-          ).stdout
-          runner = " ".join(os.environ.get(name, f"{name} unset") for name in ("RUNNER_OS", "RUNNER_ARCH"))
-          image = " ".join(os.environ.get(name, f"{name} unset") for name in ("ImageOS", "ImageVersion"))
-          lines = [
-              "## Coverage of the workspace tests",
-              "",
-              f"Measured on {runner}, runner image {image}.",
-              "",
-              "`plasmosome-guards` is excluded: its tests read the repository and drive nested cargo builds.",
-              "",
-              'Code compiled only for macOS, under `cfg(target_os = "macos")` or `cfg(not(target_os = "linux"))`, is not compiled on Linux, so it is absent from the count.',
-              "",
-              "Doctests are not measured: the run is `cargo test --tests`, which skips them.",
-              "",
-              "```",
-              table.rstrip("\n"),
-              "```",
-          ]
-          summary = "\n".join(lines) + "\n"
-          print(summary, end="")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write(summary)
-          PY
+          set -eu
+          table=$(cargo llvm-cov report --locked --summary-only)
+          # shellcheck disable=SC2016
+          summary=$(printf '%s\n' \
+            '## Coverage of the workspace tests' \
+            '' \
+            "Measured on ${RUNNER_OS-RUNNER_OS unset} ${RUNNER_ARCH-RUNNER_ARCH unset}, runner image ${ImageOS-ImageOS unset} ${ImageVersion-ImageVersion unset}." \
+            '' \
+            '`plasmosome-guards` is excluded: its tests read the repository and drive nested cargo builds.' \
+            '' \
+            'Code compiled only for macOS, under `cfg(target_os = "macos")` or `cfg(not(target_os = "linux"))`, is not compiled on Linux, so it is absent from the count.' \
+            '' \
+            'Doctests are not measured: the run is `cargo test --tests`, which skips them.' \
+            '' \
+            '```' \
+            "$table" \
+            '```')
+          printf '%s\n' "$summary"
+          printf '%s\n' "$summary" >> "$GITHUB_STEP_SUMMARY"
 
       - name: lcov report
         run: cargo llvm-cov report --locked --lcov --output-path lcov.info
