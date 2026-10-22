@@ -46,8 +46,9 @@ fn read_corpus(dir: &Path) -> Vec<(String, Vec<u8>)> {
         .unwrap_or_else(|error| panic!("the corpus {} cannot be listed: {error}", dir.display()));
     let mut paths: Vec<PathBuf> = Vec::new();
     for entry in listing {
-        let entry = entry
-            .unwrap_or_else(|error| panic!("the corpus {} cannot be listed: {error}", dir.display()));
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("the corpus {} cannot be listed: {error}", dir.display())
+        });
         let kind = entry
             .file_type()
             .unwrap_or_else(|error| panic!("{} cannot be read: {error}", entry.path().display()));
@@ -56,7 +57,11 @@ fn read_corpus(dir: &Path) -> Vec<(String, Vec<u8>)> {
         }
     }
     paths.sort();
-    assert!(!paths.is_empty(), "the corpus {} holds no input", dir.display());
+    assert!(
+        !paths.is_empty(),
+        "the corpus {} holds no input",
+        dir.display()
+    );
     let mut total = 0;
     let mut inputs = Vec::new();
     for path in paths {
