@@ -313,13 +313,17 @@ fn a_failed_verdict_writes_each_finding_in_words() {
     set(&mut runs, Lane::Open, "refusal-host-3", "outcome", open);
     let opt = json!({"source": "plasmosome", "fstype": "virtiofs", "options": "ro"});
     set(&mut runs, Lane::Cell, "hint-mounts", "/opt", opt);
+    let workspace =
+        json!({"source": "workspace", "fstype": "fuse", "options": "rw", "subtype": "x"});
     set(
         &mut runs,
         Lane::Absent,
-        "hint-cgroup",
-        "path",
-        json!("/other"),
+        "hint-mounts",
+        "/workspace",
+        workspace,
     );
+    let cgroup = json!("/other");
+    set(&mut runs, Lane::Absent, "hint-cgroup", "path", cgroup);
     let noisy = observation(&mut runs, Lane::Open, 1, "hint-env");
     noisy.fields.insert("HOME".to_string(), json!("/root"));
     for run in runs.iter_mut().filter(|run| run.lane == Lane::Cell) {
@@ -333,10 +337,14 @@ fn a_failed_verdict_writes_each_finding_in_words() {
         format!("the cell lane differs from the absent lane in field \"{field}\", {ADMITS}")
     };
     let source = "the cell lane does not show the neutral source of the mount at \"/opt\"";
+    let subtype =
+        "the absent lane does not show the neutral subtype of the mount at \"/workspace\"";
     let lines = [
         "probe \"refusal-host-3\": no discrimination: an open run and an absent run are equal",
         &format!("probe \"hint-mounts\": {source}"),
+        &format!("probe \"hint-mounts\": {subtype}"),
         &format!("probe \"hint-mounts\": {}", differs("/opt")),
+        &format!("probe \"hint-mounts\": {}", differs("/workspace")),
         "probe \"hint-cgroup\": the absent lane does not show the neutral cgroup path",
         &format!("probe \"hint-cgroup\": {}", differs("path")),
         "probe \"hint-env\": noise: the open lane's two runs differ in field \"HOME\"",
