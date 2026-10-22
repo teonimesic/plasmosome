@@ -934,10 +934,9 @@ ran with effective uid 0, which is what that observation looks at. On macOS a ne
 the group of the directory it is made in, so the group M1's plain run shows is that of the folder
 the lane was made in, not one the share chose.
 
-Owner gate O-6 was open while these ran: a library planted in `/opt/homebrew/opt/llvm/lib` or
-`/usr/local/lib` would load before `lane-vmm` checks any image. Nothing was planted there, and
-neither directory was changed. Nothing here needed root on the host or a second host uid (owner
-gate O-8).
+Owner gate O-6 was open while these ran: a library planted in `/opt/homebrew/opt/llvm/lib` would
+load before `lane-vmm` checks any image. Nothing was planted there, and that directory was not
+changed. Nothing here needed root on the host or a second host uid (owner gate O-8).
 
 - Host: {host}.
 - Test commit: `{commit}`.

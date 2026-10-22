@@ -48,11 +48,22 @@ running until the guest powers off.
 
 1. Parse the configuration from stdin. Exit 64 if it is refused.
 2. Refuse what would change which libraries load. Exit 69 if any `DYLD_` variable is set, or if
-   anything named `libkrunfw.5.dylib`, a dangling symlink included, exists where dyld looks for
-   libkrun's leaf-name load of it: the working directory, the libkrun's `LC_RPATH`
-   `/opt/homebrew/opt/llvm/lib`, `/usr/local/lib` and `/usr/lib`. Nothing from the bundle has
-   loaded yet. A `DYLD_` variable can already have run code, though: dyld acts on it before
-   `main` (see Limits).
+   anything named `libkrunfw.5.dylib`, a dangling symlink included, exists at one of the five
+   paths dyld tries for libkrun's leaf-name load of it, in this order:
+   - `libkrunfw.5.dylib` in the working directory;
+   - `/System/Volumes/Preboot/Cryptexes/OSlibkrunfw.5.dylib`, the OS cryptex prefix followed by
+     the leaf name with no `/` between them;
+   - `/opt/homebrew/opt/llvm/lib/libkrunfw.5.dylib`, from the libkrun's `LC_RPATH`;
+   - `/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/opt/llvm/lib/libkrunfw.5.dylib`, its
+     cryptex copy;
+   - `/usr/lib/libkrunfw.5.dylib`.
+
+   These were measured on macOS 26.6.2 (25G83) with `DYLD_PRINT_SEARCHING`, and a macOS test in
+   `tests/dyld.rs` compares the rule with the list the running dyld reports for a name that
+   exists nowhere. dlopen(3) also names `/usr/local/lib`. dyld(1) gives that fallback only to
+   binaries built before fall 2023, and the measured search never tries it. Nothing from the
+   bundle has loaded yet. A `DYLD_` variable can already have run code, though: dyld acts on it
+   before `main` (see Limits).
 3. Exit 64 if `root_image` resolves to a file inside the bundle. The root disk is writable, as
    the cell's is, so each lane gives its own copy of the image.
 4. Check the bundle with `verify_bundle`. The directory's name must be the first 16 hex digits
@@ -239,9 +250,11 @@ the bundle's `base/rootfs.raw` as its writable root image.
   and `krun_create_ctx` calls `dlopen("libkrunfw.5.dylib")` by leaf name, which searches it. The
   lanes load the library as shipped. This is owner gate O-6. Step 2 refuses the run when that
   name exists anywhere dyld would look, before libkrun loads. On this Mac,
-  `/opt/homebrew/opt/llvm/lib` and `/usr/local/lib` are owned by the user who installed
-  Homebrew, the same user who runs the lanes. So a process running as that user can still place
-  the file after step 2 and before `krun_create_ctx`. Step 6 then refuses the run, but the
+  `/opt/homebrew/opt/llvm/lib` is owned by the user who installed Homebrew, the same user who
+  runs the lanes. `/System/Volumes/Preboot/Cryptexes`, where the cryptex copy of the leaf name
+  would go, is mode 0777, root-owned, with no file flags. Whether a process of that user can
+  create a file there was not measured. So a process running as that user can still place the
+  file in the Homebrew directory after step 2 and before `krun_create_ctx`. Step 6 then refuses the run, but the
   library's initializers have already run. That window belongs to owner gate O-4, the same-UID
   limit.
   Step 6's call in `lane-vmm` has no test, because no test can plant a library in that window
