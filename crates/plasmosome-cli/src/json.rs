@@ -761,6 +761,39 @@ fn write_control(out: &mut impl Sink, control: char, style: Style) {
 pub(crate) fn is_terminal_control(character: char) -> bool {
     matches!(
         u32::from(character),
-        0x00..=0x1f | 0x7f..=0x9f | 0x202a..=0x202e | 0x2066..=0x2069
+        0x00..=0x1f | 0x7f..=0x9f | 0x061c | 0x200e..=0x200f | 0x202a..=0x202e | 0x2066..=0x2069
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_terminal_control, show};
+
+    #[test]
+    fn show_writes_each_terminal_control_by_its_code_point_and_every_other_character_raw() {
+        let every: String = (0..=0x10ffff).filter_map(char::from_u32).collect();
+        let mut shown = String::new();
+        show(&mut shown, &every);
+        let mut rest = shown.as_str();
+        for character in every.chars() {
+            let point = u32::from(character);
+            let listed = is_terminal_control(character);
+            let after = if listed {
+                rest.strip_prefix(format!("<U+{point:04X}>").as_str())
+            } else {
+                rest.strip_prefix(character)
+            };
+            rest = after.unwrap_or_else(|| {
+                let found: String = rest.chars().take(8).collect();
+                if listed {
+                    panic!("U+{point:04X} is a terminal control, so show writes its code point, not {found:?}")
+                }
+                panic!("U+{point:04X} is not a terminal control, so show writes it raw, not as {found:?}")
+            });
+        }
+        assert!(
+            rest.is_empty(),
+            "show writes {rest:?} after the last character"
+        );
+    }
 }

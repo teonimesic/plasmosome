@@ -786,6 +786,8 @@ fn terminal_controls() -> Vec<char> {
     [
         (0x00, 0x1f),
         (0x7f, 0x9f),
+        (0x061c, 0x061c),
+        (0x200e, 0x200f),
         (0x202a, 0x202e),
         (0x2066, 0x2069),
     ]
@@ -811,8 +813,8 @@ fn every_control_is_escaped_or_shown_on_every_output_path() {
     let controls = terminal_controls();
     assert_eq!(
         controls.len(),
-        74,
-        "spec 025 section 3 names 74 code points"
+        77,
+        "spec 025 section 3 names 77 code points"
     );
     for control in controls {
         let point = u32::from(control);
