@@ -1559,6 +1559,35 @@ mod tests {
     }
 
     #[test]
+    fn the_leader_signal_stand_in_clears_when_its_holder_panics() {
+        let unwound = std::panic::catch_unwind(|| {
+            let _stand_in = LeaderSignalStandIn::failing(4000, libc::ESRCH);
+            panic!("an assertion fails while the stand-in is installed");
+        });
+        assert!(unwound.is_err(), "the holder panicked");
+        assert_eq!(
+            leader_signal_stand_in(4000),
+            None,
+            "the unwind left the stand-in installed"
+        );
+    }
+
+    #[test]
+    fn the_reap_record_keeps_only_waits_that_consume() {
+        let mut child = VmmChild::spawn(ExitWith(5)).expect("fork succeeds");
+        let pid = child.pid();
+        reset_reap_record();
+        witness_unconsumed_exit(pid, VmmState::Exited { code: 5 });
+        assert_eq!(child.observe(), Ok(VmmState::Exited { code: 5 }));
+        assert!(
+            !reaped_by_a_handle(pid),
+            "a WNOWAIT observation consumed nothing, so it is not a reap"
+        );
+        assert_eq!(child.state(), Ok(VmmState::Exited { code: 5 }));
+        assert_reaped_by_handle(pid);
+    }
+
+    #[test]
     #[allow(unsafe_code)]
     fn immediate_teardown_while_child_is_pre_setsid_reaps_exact_child() {
         let (gate_read, gate_write) = pipe();

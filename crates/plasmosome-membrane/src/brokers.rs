@@ -915,6 +915,7 @@ mod tests {
 
     #[test]
     fn a_fork_failure_reaps_what_was_already_spawned() {
+        crate::vmm::reset_reap_record();
         let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
         let specs = vec![
             spec(dir.path(), "egressd"),

@@ -759,6 +759,7 @@ mod tests {
 
     #[test]
     fn a_spawn_refusal_reaps_the_spawned_and_removes_the_socket() {
+        crate::vmm::reset_reap_record();
         let dir = tempfile::tempdir().unwrap();
         let control = dir.path().join("c.uds");
         let shared = dir.path().join("shared.uds");
