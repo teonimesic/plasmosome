@@ -252,7 +252,7 @@ pub(crate) fn resolve(
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn climbs_named_directory(rest: &str) -> bool {
+pub(crate) fn climbs_named_directory(rest: &str) -> bool {
     rest.split('/')
         .filter(|part| !matches!(*part, "" | "."))
         .skip_while(|part| *part == "..")
@@ -260,7 +260,7 @@ fn climbs_named_directory(rest: &str) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn join(directory: &str, rest: &str) -> String {
+pub(crate) fn join(directory: &str, rest: &str) -> String {
     let mut parts = Vec::new();
     for part in directory.split('/').chain(rest.split('/')) {
         match part {
@@ -275,7 +275,7 @@ fn join(directory: &str, rest: &str) -> String {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn directory(path: &RecipePath) -> &str {
+pub(crate) fn directory(path: &RecipePath) -> &str {
     match path.as_str().rsplit_once('/') {
         Some((directory, _)) if !directory.is_empty() => directory,
         _ => "/",
