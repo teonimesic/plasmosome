@@ -234,17 +234,29 @@ mod live {
 
     #[test]
     fn each_probe_name_holds_128_random_bits() {
-        let (first, second) = (unguessable_probe(), unguessable_probe());
-        let bits = first
-            .strip_prefix("libplasmosome-probe-")
-            .and_then(|rest| rest.strip_suffix("-absent.dylib"))
-            .expect("the probe name's shape");
+        let names: Vec<String> = (0..8).map(|_| unguessable_probe()).collect();
+        let bits: Vec<&str> = names
+            .iter()
+            .map(|name| {
+                name.strip_prefix("libplasmosome-probe-")
+                    .and_then(|rest| rest.strip_suffix("-absent.dylib"))
+                    .expect("the probe name's shape")
+            })
+            .collect();
 
-        assert_ne!(first, second);
-        assert!(
-            bits.len() == 32 && bits.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "{first}"
-        );
+        for hex in &bits {
+            assert!(
+                hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{hex}"
+            );
+        }
+        for byte in 0..16 {
+            let at = |hex: &str| hex[2 * byte..2 * byte + 2].to_owned();
+            assert!(
+                bits.iter().any(|hex| at(hex) != at(bits[0])),
+                "byte {byte} is the same in all eight names: {names:?}"
+            );
+        }
     }
 
     #[test]
