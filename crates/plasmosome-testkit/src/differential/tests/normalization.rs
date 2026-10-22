@@ -618,13 +618,18 @@ fn peer_group_placeholders_name_their_kind_and_keep_first_appearance() {
         probe: "hint-env".to_string(),
         completed: true,
         failed_before_step: false,
-        fields: object(json!({"masters": [9, 7, 9], "shared": [7], "mounts": [9]})),
+        fields: object(json!({"masters": [9, 7, 8, 9], "shared": [8, 7], "mounts": [7]})),
     };
     assert_eq!(
         normalize(&manifest, Lane::Cell, &observation),
         Ok(object(json!({
-            "masters": ["<peer_group:1>", "<peer_group:2>", "<peer_group:1>"],
-            "shared": ["<peer_group:2>"],
+            "masters": [
+                "<peer_group:1>",
+                "<peer_group:2>",
+                "<peer_group:3>",
+                "<peer_group:1>"
+            ],
+            "shared": ["<peer_group:3>", "<peer_group:2>"],
             "mounts": ["<mount_id:1>"]
         })))
     );
@@ -691,14 +696,15 @@ fn every_kind_but_durations_keeps_equality_in_a_field_and_only_system_times_keep
             RuleKind::SystemTime => fail(),
             _ => Verdict::Pass,
         };
-        for (cell, wanted) in [
-            ([0, 1, 0], Verdict::Pass),
-            ([0, 1, 1], fail()),
-            ([0, 1, 2], fail()),
-            ([1, 0, 1], reordered),
+        for (others, cell, wanted) in [
+            ([0, 1, 0], [0, 1, 0], Verdict::Pass),
+            ([0, 1, 0], [0, 1, 1], fail()),
+            ([0, 1, 0], [0, 1, 2], fail()),
+            ([0, 1, 0], [1, 0, 1], reordered),
+            ([0, 1, 2], [0, 1, 1], fail()),
         ] {
             let mut runs = runs();
-            let base = ruled_list(kind, [0, 1, 0]);
+            let base = ruled_list(kind, others);
             let shown = ruled_list(kind, cell);
             each_run(&mut runs, "hint-env", "ruled", |lane, run| match lane {
                 Lane::Cell => shown(lane, run),
@@ -707,7 +713,7 @@ fn every_kind_but_durations_keeps_equality_in_a_field_and_only_system_times_keep
             assert_eq!(
                 verdict(&manifest, &runs),
                 wanted,
-                "{} cell {cell:?}",
+                "{} cell {cell:?}, others {others:?}",
                 kind.name()
             );
         }
