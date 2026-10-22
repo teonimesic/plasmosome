@@ -1,4 +1,4 @@
-use crate::brokers::{BrokerSet, BrokerSpec, SpawnFailed};
+use crate::brokers::{BrokerSet, BrokerSpec, Probe, SpawnFailed};
 use crate::control;
 use crate::control::ListenerFailed;
 use crate::exec::{ExecCommand, ExecError};
@@ -10,7 +10,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEFAULT_STATUS_DEADLINE: Duration = Duration::from_millis(500);
 
@@ -351,13 +351,21 @@ impl Drop for BoundSocket {
 /// two threads of one process, as the tests run them, can leak one's connection into the other's
 /// broker.
 pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonError> {
-    run_with(config, shutdown, VmmChild::spawn)
+    run_with(
+        config,
+        shutdown,
+        VmmChild::spawn,
+        ControlSocketProbe,
+        Instant::now,
+    )
 }
 
-fn run_with(
+fn run_with<P: Probe>(
     config: DaemonConfig,
     shutdown: &AtomicBool,
     mut spawn: impl FnMut(ExecCommand) -> Result<VmmChild, SpawnError>,
+    prober: P,
+    now: impl Fn() -> Instant,
 ) -> Result<(), DaemonError> {
     let listener =
         UnixListener::bind(&config.control_socket).map_err(|source| DaemonError::Bind {
@@ -395,32 +403,32 @@ fn run_with(
                 spec.name
             )))),
         },
-        ControlSocketProbe,
+        prober,
     )
     .map_err(DaemonError::Spawn)?;
 
-    control::serve(listener, shutdown, || set.status(deadline, shutdown))
-        .map_err(DaemonError::Listener)?;
+    control::serve(listener, shutdown, || {
+        set.status_with(deadline, shutdown, &now)
+    })
+    .map_err(DaemonError::Listener)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::readiness::{Cancelled, NotReady, ProbeBudget, Readiness};
     use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::path::Path;
-    use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Instant;
 
     const STATUS_REQUEST: &str = r#"{"id":1,"method":"membrane.status","params":{}}"#;
     const PATIENCE: Duration = Duration::from_secs(10);
-    const READY: &str = r#"{"id":0,"result":{"ready":true,"state":"serving"}}"#;
-    const STARTING: &str = r#"{"id":0,"result":{"ready":false,"state":"starting"}}"#;
 
     fn sleeping_broker(pidfile: &Path) -> Vec<String> {
         vec![
@@ -430,22 +438,30 @@ mod tests {
         ]
     }
 
-    fn scripted_broker(socket: PathBuf, answers: Vec<&'static str>) {
-        let listener = UnixListener::bind(&socket).expect("the test broker binds its socket");
-        thread::spawn(move || {
-            for answer in answers {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                let Ok(reading) = stream.try_clone() else {
-                    return;
-                };
-                let mut line = String::new();
-                let _ = BufReader::new(reading).read_line(&mut line);
-                let _ = writeln!(stream, "{answer}");
-                let _ = stream.flush();
+    type Asks = Arc<Mutex<Vec<(PathBuf, Option<Duration>)>>>;
+
+    struct AnswersInTurn {
+        fixed: Instant,
+        asks: Asks,
+    }
+
+    impl Probe for AnswersInTurn {
+        fn probe(&self, socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            let turn = {
+                let mut asks = self.asks.lock().expect("the asks are recorded");
+                asks.push((socket.to_path_buf(), budget.remaining_at(self.fixed).ok()));
+                asks.len()
+            };
+            match turn {
+                1 => Ok(Readiness::Ready {
+                    state: "serving".to_string(),
+                }),
+                2 => Ok(Readiness::NotReady(NotReady::Reported {
+                    state: "starting".to_string(),
+                })),
+                _ => panic!("the test probe answers two asks, and this is ask {turn}"),
             }
-        });
+        }
     }
 
     struct Running {
@@ -478,11 +494,19 @@ mod tests {
     }
 
     fn start(config: DaemonConfig) -> Running {
+        start_with(config, ControlSocketProbe, Instant::now)
+    }
+
+    fn start_with(
+        config: DaemonConfig,
+        prober: impl Probe + Send + 'static,
+        now: impl Fn() -> Instant + Send + 'static,
+    ) -> Running {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let (done, finished) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let outcome = run(config, &flag);
+            let outcome = run_with(config, &flag, VmmChild::spawn, prober, now);
             let reaped = crate::vmm::take_reap_record();
             let _ = done.send(());
             outcome.map(|()| reaped)
@@ -624,17 +648,26 @@ mod tests {
         let control = dir.path().join("c.uds");
         let broker_socket = dir.path().join("b0.uds");
         let pidfile = dir.path().join("b0.pid");
-        scripted_broker(broker_socket.clone(), vec![READY, STARTING]);
+        let deadline = Duration::from_millis(250);
+        let fixed = Instant::now() + Duration::from_secs(3600);
+        let asks = Asks::default();
 
-        let daemon = start(DaemonConfig {
-            control_socket: control.clone(),
-            status_deadline: Duration::from_millis(500),
-            brokers: vec![BrokerConfig {
-                name: "egressd".to_string(),
-                control_socket: broker_socket,
-                command: sleeping_broker(&pidfile),
-            }],
-        });
+        let daemon = start_with(
+            DaemonConfig {
+                control_socket: control.clone(),
+                status_deadline: deadline,
+                brokers: vec![BrokerConfig {
+                    name: "egressd".to_string(),
+                    control_socket: broker_socket.clone(),
+                    command: sleeping_broker(&pidfile),
+                }],
+            },
+            AnswersInTurn {
+                fixed,
+                asks: Arc::clone(&asks),
+            },
+            move || fixed,
+        );
 
         let mut client = addressable(&control);
         assert_eq!(
@@ -663,6 +696,14 @@ mod tests {
         assert!(
             !control.exists(),
             "the control socket path is removed on shutdown"
+        );
+        assert_eq!(
+            *asks.lock().expect("the asks are recorded"),
+            vec![
+                (broker_socket.clone(), Some(deadline)),
+                (broker_socket, Some(deadline)),
+            ],
+            "each status call asks the configured broker socket once, with the configured deadline"
         );
     }
 
@@ -710,6 +751,8 @@ mod tests {
                 forked.push(child.pid());
                 Ok(child)
             },
+            ControlSocketProbe,
+            Instant::now,
         )
         .expect_err("an occupied control socket path refuses the start");
 
@@ -789,6 +832,8 @@ mod tests {
                 forked.push(child.pid());
                 Ok(child)
             },
+            ControlSocketProbe,
+            Instant::now,
         )
         .expect_err("two brokers may not share one control socket");
 
