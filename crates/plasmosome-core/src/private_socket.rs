@@ -1629,6 +1629,32 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_that_fails_for_another_reason_is_io_naming_the_temporary() {
+        let (_root, cell, dir) = private_cell();
+        let temporary = cell.join(DRAWN);
+        let refusal = refusal_of(publish_drawing(
+            dir,
+            "sock",
+            effective_uid(),
+            &[DRAWN],
+            |step| {
+                if step == Step::Listening {
+                    fs::remove_file(&temporary).expect("unlink");
+                }
+            },
+        ));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::Io {
+                op: RENAME_OP,
+                path: temporary,
+                errno: libc::ENOENT
+            }
+        );
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
     fn a_failure_before_the_rename_removes_only_the_temporary_it_created() {
         let (_root, cell, dir) = private_cell();
         let sock = cell.join("sock");
