@@ -36,6 +36,10 @@ names.
 `cargo test -p plasmid`. The verbs are exercised by running the built binary through
 `CARGO_BIN_EXE_plasmid` and reading its exit status, because the exit status is the contract.
 
+One unit test, in `src/envelope.rs`, reads spec 025 section 3's list of terminal controls and
+checks both writers against it for every Unicode scalar value. The binary cannot be given every
+character in one argument.
+
 The tests read the envelopes with `serde_json`, which is a dev-dependency only, through the
 helpers in `tests/support/mod.rs`. They parse what `plasmid new` writes with `plasmosome-core`'s
 parser, so a printed section that drifts from the refusals the parser gives fails a test.
