@@ -1184,6 +1184,126 @@ mod tests {
         drop(connection);
     }
 
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn until_every_holder_of_the_peer_closed(lane: RawFd) {
+        // SAFETY: `lane` is the stream the handshake is waiting on, which it keeps open until the
+        // wait returns, and the borrow ends before this function does.
+        let lane = unsafe { std::os::fd::BorrowedFd::borrow_raw(lane) };
+        let copy = UnixStream::from(lane.try_clone_to_owned().expect("the lane is copied"));
+        let deadline = Instant::now() + PATIENCE;
+        while peer_pid(&copy).is_ok() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_lane_that_hangs_up_right_after_its_reply_is_refused_on_darwin_and_judged_on_linux() {
+        let endpoints = Endpoints::new();
+        let (go, gone) = mpsc::channel::<()>();
+        let (hung_up, heard) = mpsc::channel::<()>();
+        let shim = spawn_shim(&endpoints, move |shim| {
+            let normal = shim.control();
+            shim.request(normal);
+            gone.recv_timeout(PATIENCE).expect("the reply is awaited");
+            shim.send(normal, &reply(ControlLane::Normal, BOOT, &policy()));
+            drop(shim.opened.remove(normal));
+            hung_up.send(()).expect("the test listens");
+        });
+        let (clock, flag) = (FakeClock::new(), AtomicBool::new(false));
+        let advance = clock.clone();
+        let listeners = endpoints.listeners();
+        let replied = Cell::new(false);
+        let result = faked(
+            &endpoints,
+            &clock.budget(&flag),
+            running,
+            clock.now(),
+            |fd, interest, _| {
+                if !listeners.contains(&fd) {
+                    go.send(()).expect("the shim is waiting");
+                    heard
+                        .recv_timeout(PATIENCE)
+                        .expect("the shim replies and hangs up");
+                    #[cfg(target_os = "macos")]
+                    until_every_holder_of_the_peer_closed(fd);
+                    replied.set(true);
+                    return Ok(true);
+                }
+                if replied.get() {
+                    advance.set(ALLOWANCE);
+                    return Ok(false);
+                }
+                let ready = wait_fd(fd, interest, PATIENCE)?;
+                if !ready {
+                    advance.set(ALLOWANCE);
+                }
+                Ok(ready)
+            },
+        );
+        let expected = if cfg!(target_os = "macos") {
+            HandshakeFailure::PeerRefused {
+                stage: Stage::NormalReply,
+                refusal: PrivateSocketError::PeerCredentials {
+                    errno: libc::ENOTCONN,
+                },
+            }
+        } else {
+            HandshakeFailure::TimedOut {
+                stage: Stage::WithdrawalAccept,
+            }
+        };
+        assert_eq!(result.err(), Some(expected));
+        shim.join().expect("the shim thread ends");
+    }
+
+    #[test]
+    fn a_failed_wait_is_an_io_failure_and_a_broken_or_reset_lane_is_closed() {
+        let endpoints = Endpoints::new();
+        let shim = spawn_shim(&endpoints, |shim| {
+            let normal = shim.control();
+            shim.request(normal);
+        });
+        let flag = AtomicBool::new(false);
+        let listeners = endpoints.listeners();
+        let result = faked(
+            &endpoints,
+            &ProbeBudget::new(PATIENCE, &flag),
+            running,
+            Instant::now,
+            |fd, interest, limit| {
+                if listeners.contains(&fd) {
+                    wait_fd(fd, interest, limit)
+                } else {
+                    Err(std::io::Error::from_raw_os_error(libc::EBADF))
+                }
+            },
+        );
+        assert_eq!(
+            result.err(),
+            Some(HandshakeFailure::Io {
+                stage: Stage::NormalReply,
+                errno: libc::EBADF
+            })
+        );
+        assert!(closed(shim), "the normal lane is closed");
+        let stage = Stage::WithdrawalReply;
+        for errno in [libc::EPIPE, libc::ECONNRESET] {
+            assert_eq!(
+                io_failure(stage, &std::io::Error::from_raw_os_error(errno)),
+                HandshakeFailure::Closed { stage },
+                "errno {errno}"
+            );
+        }
+        assert_eq!(
+            io_failure(stage, &std::io::Error::other("no errno")),
+            HandshakeFailure::Io {
+                stage,
+                errno: libc::EIO
+            }
+        );
+    }
+
     #[test]
     fn a_reply_at_the_bound_is_judged_and_one_byte_more_is_refused_before_parsing() {
         let padded = |length: usize| {
