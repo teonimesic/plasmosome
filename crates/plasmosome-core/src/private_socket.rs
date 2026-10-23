@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::instance::{DirectoryStream, rename_no_replace};
-#[cfg(target_os = "macos")]
-use crate::nofollow::darwin_acl;
+use crate::nofollow::acl_present;
 pub use crate::nofollow::{DirIdentity, effective_uid};
 use crate::nofollow::{
     Facts, Kind, Opened, Walk, WalkRefusal, absolute_components, errno_of, last_errno, refuse_if,
@@ -1041,34 +1040,9 @@ fn unix_socket() -> io::Result<OwnedFd> {
 }
 
 fn refuse_acl(dir: &OwnedFd, path: &Path) -> Result<(), PrivateSocketError> {
-    refuse_if(acl_present(dir), path, |path| {
+    refuse_if(acl_present(dir.as_fd()), path, |path| {
         PrivateSocketError::AclPresent { path }
     })
-}
-
-#[cfg(target_os = "macos")]
-fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
-    darwin_acl::has_entries(dir.as_fd())
-}
-
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
-    for attribute in [c"system.posix_acl_access", c"system.posix_acl_default"] {
-        // SAFETY: `attribute` is a static NUL-terminated name, and `dir` keeps its descriptor open.
-        // A null buffer of size 0 asks only for the size, so nothing is written.
-        let size = unsafe {
-            libc::fgetxattr(dir.as_raw_fd(), attribute.as_ptr(), std::ptr::null_mut(), 0)
-        };
-        if size >= 0 {
-            return Ok(true);
-        }
-        let errno = last_errno();
-        if errno != libc::ENODATA && errno != libc::ENOTSUP {
-            return Err(("fgetxattr", errno));
-        }
-    }
-    Ok(false)
 }
 
 fn no_socket_or_io(errno: i32, path: &Path) -> PrivateSocketError {
