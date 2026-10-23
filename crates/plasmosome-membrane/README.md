@@ -22,7 +22,87 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), which re-exports `ControlLane`, `BootToken` and `BootTokenError` from `plasmosome-backend`'s `guest_protocol`, the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts with core's file judge and keeps each one open; see "Verifying the pinned artifacts" below. `cell_directory` checks a cell's private directory with core's `PrivateDir` and makes the writable root copy in it; see "The cell directory and the writable root" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. `handshake` runs the host side of the shim's two hellos and its data association; see "The shim's handshake" below. `vmm_helper` holds the decisions the VMM helper of spec 001 §4.2 makes: its exit codes, the judges of its argv and environment, descriptors, recipe, host limits (`judge_host_limits`), own path (`judge_self`), writable root, host policy, denial probes and loaded images, and its 14 libkrun calls with a runner that stops at the first failure. On macOS it also holds the helper's observers of itself: its open descriptors, its writable root's facts and their reconfirmation by device and inode, the host policy applied with `sandbox_init` and the two denial probes, and its loaded images. The helper binary that uses them is not built yet. Nothing here boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), which re-exports `ControlLane`, `BootToken` and `BootTokenError` from `plasmosome-backend`'s `guest_protocol`, the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts with core's file judge and keeps each one open; see "Verifying the pinned artifacts" below. `cell_directory` checks a cell's private directory with core's `PrivateDir` and makes the writable root copy in it; see "The cell directory and the writable root" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. `handshake` runs the host side of the shim's two hellos and its data association; see "The shim's handshake" below. `vmm_helper` holds the decisions the VMM helper of spec 001 §4.2 makes: its exit codes, the judges of its argv and environment, descriptors, recipe, host limits (`judge_host_limits`), own path (`judge_self`), writable root, host policy, denial probes and loaded images, and its 14 libkrun calls with a runner that stops at the first failure. On macOS it also holds the helper's observers of itself: its open descriptors, its writable root's facts and their reconfirmation by device and inode, the host policy applied with `sandbox_init` and the two denial probes, and its loaded images. The `vmm-helper` feature builds their caller, `plasmosome-vmm`; see "The VMM helper" below. Nothing here boots a cell yet |
+
+## The VMM helper
+
+`plasmosome-vmm` is the macOS helper of spec 001 §4.2. It is built only with
+`vmm-helper`; default builds, including `membraned`, do not link libkrun.
+Build it against the pinned library in a reviewed runtime bundle:
+
+```shell
+PLASMOSOME_LIBKRUN_DIR=<bundle>/lib cargo build --locked -p plasmosome-membrane --features vmm-helper --bin plasmosome-vmm
+```
+
+Install it as `bin/plasmosome-vmm` beside `lib/libkrun.1.19.4.dylib`. Its link has
+no rpath. The shipped pinned dylib still has an rpath, so the supervisor's
+pre-exec closure audit refuses today's bundle. The successor bundle belongs to
+native task `plasmosome-jab`. The helper is not connected to cell startup yet.
+
+The feature tests need only the same build-time library directory, even with an
+empty Cargo target directory:
+
+```shell
+PLASMOSOME_LIBKRUN_DIR=<bundle>/lib cargo test --locked -j 4 -p plasmosome-membrane --features vmm-helper
+```
+
+The binary has no unit-test executable. An integration test includes its pure
+modules without the native FFI. Process tests copy their own temporary runtime
+layout and refuse before native calls. Recording adapters check reconfirmation,
+the late loader refusal, inventory and native dispatch in order. Separate process
+witnesses check timeout reaping and the warm-up's descriptor-refusal diagnostics.
+
+The supervisor supplies exactly `--runtime-fd=3`, an empty environment, `/dev/null`
+on 0 and 1, diagnostics on pipe 2 and one recipe followed by EOF on pipe 3.
+The environment check reads the kernel-supplied vector following argv on the
+initial stack, after checking argv's terminator. It inspects only envp[0] and
+names only the first variable on refusal. It never exempts or deletes a variable.
+CoreFoundation can add `__CF_USER_TEXT_ENCODING` to the live environment before
+main even when exec received an empty vector, so the live environment cannot
+establish what the parent passed.
+The helper checks those descriptors before opening anything, then checks argv,
+environment and the leaf-name loader inputs. It accepts at most 1,048,577 recipe
+bytes including the newline and closes 3. It checks its own path, verifies every
+pinned artifact again and retains the open files. It checks the writable root,
+applies the verified host policy and requires both denial probes to return EPERM.
+It reconfirms artifacts and root identity, repeats the leaf-search refusal,
+checks its loaded images and makes the 14 pinned calls. A second inventory after
+`krun_create_ctx` refuses before any setter if an unlisted image appeared.
+
+Diagnostics on fd 2 name completed stages and each `calling krun_` operation.
+Each helper line is at most 1 KiB including its newline. Refusals are
+`plasmosome-vmm: refused <stage> exit=<code>: <detail>`; fd 1 is unused.
+
+| Exit | Refusal |
+| --- | --- |
+| 64 | argv or environment (`invocation`) |
+| 65 | recipe read, close or parse (`recipe`) |
+| 66 | helper path, artifacts or writable root (`verify`) |
+| 67 | host policy or denial probes (`host-policy`) |
+| 68 | loaded images or planted loader input (`inventory`) |
+| 69 | libkrun call failure, including any return from start (`krun`) |
+| 70 | inherited descriptors (`descriptors`); also VmmChild's panic exit |
+| 72 | unsupported host (`unsupported-host`); non-macOS refuses without reading 3 |
+| 86 | x86_64 with raw kernel (`boot-pair`) |
+
+The `refused descriptors` line distinguishes 70 from the spawn child's panic.
+71 is reserved for VmmChild's setsid failure. After `calling krun_start_enter`,
+the exit is the workload's, rather than a helper refusal; libkrun's header names
+125 to 127 for init failures. Setup and exec failures can also be 125 and 127.
+
+This does not close O-2 (the broad host policy), O-3 (independent binding of the
+installed policy), O-5 (independent inventory) or the loader's O-6. The helper's
+own inventory is diagnostic evidence. Its private five-path leaf search follows
+the measured list in `plasmosome-lanes/src/dyld.rs`: the working directory, the
+cryptex prefix of the leaf, the pinned libkrun rpath and its cryptex copy, and
+`/usr/lib`. Any object, including a dangling symlink, or an unreadable candidate
+refuses before a native call. Checking an absent path does not lock it absent.
+As the lanes README's Limits records, a same-UID writer can plant in the
+Homebrew rpath between check and create (O-4). If the cryptex parent accepts
+creation (unmeasured), any local user can plant its leaf candidate (O-6, outside
+O-4). In that window foreign initializers run with the helper's whole authority
+before the second inventory can refuse. The post-create inventory's safety
+argument has that proviso. Closing both windows belongs to `plasmosome-jab`.
 
 ## Use
 

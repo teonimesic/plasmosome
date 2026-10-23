@@ -481,10 +481,9 @@ impl RuntimeRecipe {
     ///
     /// The layout is fixed so that a test runtime may find keys by fixed
     /// search; the pinned VMM helper parses the line as JSON in any key
-    /// order. That helper counts the newline against its 1,048,576-byte
-    /// bound, so it refuses a line whose body is exactly 1,048,576 bytes,
-    /// which [`RuntimeRecipe::parse`] accepts. A launcher must refuse a line
-    /// longer than 1,048,576 bytes, newline included, before it starts the
+    /// order. The in-repository helper accepts at most 1,048,577 bytes,
+    /// including the newline, matching [`RuntimeRecipe::parse`]'s frame.
+    /// A launcher must refuse a line longer than that before it starts the
     /// helper.
     pub fn to_ndjson(&self) -> Vec<u8> {
         let libraries: Vec<String> = self.libraries.iter().map(artifact_json).collect();
