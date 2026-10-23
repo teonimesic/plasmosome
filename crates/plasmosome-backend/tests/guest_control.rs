@@ -521,6 +521,29 @@ fn remove_preserves_force_on_both_lanes() {
 }
 
 #[test]
+fn install_preserves_the_assigned_proxy_address() {
+    let operation = operations()
+        .into_iter()
+        .find(|op| matches!(op, UniverseOp::SetProxyMap { .. }))
+        .unwrap();
+    for ip in [
+        ProxyAddress::FIRST,
+        Ipv4Addr::new(198, 18, 0, 2),
+        ProxyAddress::LAST,
+    ] {
+        let call = ControlCall::Install(InstallParams {
+            operation: operation.clone(),
+            address: Some(ProxyAddress::new(ip).unwrap()),
+            deadline_ms: NonZeroU64::new(5).unwrap(),
+        });
+        let encoded = encode_control_request(1, &call).unwrap();
+        let body: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(body["params"]["address"], json!(ip.to_string()));
+        assert_eq!(decode_control_request(NORMAL, &encoded).unwrap().call, call);
+    }
+}
+
+#[test]
 fn encoding_keeps_strings_and_propagates_operation_errors() {
     let mut operation = operations().remove(0);
     let UniverseOp::WriteSessionFile { owner, path, .. } = &mut operation else {
