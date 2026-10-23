@@ -154,6 +154,33 @@ fn listing_ids_are_compared_without_trimming_or_changing_case() {
 }
 
 #[test]
+fn different_declaration_spelling_is_a_mismatch() {
+    for (listed_id, found_id) in [
+        (" github-pr ", "github-pr"),
+        ("github-pr", " github-pr "),
+        ("GITHUB-PR", "github-pr"),
+        ("github-pr", "GITHUB-PR"),
+    ] {
+        let root = TestRoot::walkable_from_root();
+        let path = declare(root.path(), found_id, &[], &[]);
+        let file = operator(root.path(), &[(listed_id, Some(&path))]);
+        let (open, paths) = counting(&TrustedFile::open);
+        let SelectRefusal::IdMismatch {
+            path: actual,
+            listed,
+            found,
+        } = select_named(&file, listed_id, &open).unwrap_err()
+        else {
+            panic!("a differently spelled declaration id was not refused");
+        };
+        assert_eq!(actual, path);
+        assert_eq!(listed, listed_id);
+        assert_eq!(found, found_id);
+        assert_eq!(*paths.borrow(), [path]);
+    }
+}
+
+#[test]
 fn a_group_writable_declaration_is_untrusted_after_one_open() {
     let root = TestRoot::walkable_from_root();
     let path = declare(root.path(), "github-pr", &[], &[]);
