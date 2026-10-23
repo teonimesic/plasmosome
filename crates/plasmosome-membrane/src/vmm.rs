@@ -1032,7 +1032,14 @@ mod tests {
         kept: [OwnedFd; 2],
     }
 
-    impl Launch for KeepAcrossExec {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch calls fcntl(F_SETFD, 0) on its two kept descriptors, the child's
+    // own copies of ready_write and control_read, and _exit(77) if either call fails. Then it runs
+    // ExecCommand's launch: execve with the program, argv and envp laid out in the parent, and
+    // _exit(127) if execve returns. fcntl, execve and _exit are async-signal-safe. The loop reads a
+    // two-element array in place, so nothing allocates, and the child never drops the command or
+    // the kept descriptors, so nothing is freed and nothing can panic.
+    unsafe impl Launch for KeepAcrossExec {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             for kept in &self.kept {
