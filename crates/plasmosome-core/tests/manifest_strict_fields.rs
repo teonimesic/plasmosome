@@ -185,6 +185,11 @@ fn provenance_is_a_comment_and_unknown_fixes_keep_the_original_text() {
     let source = format!("{BASE}note = '{}'", "é".repeat(3000));
     let fix = refusal(&source, "note");
     assert_eq!(fix, format!("# note = '{}'", "é".repeat(3000)));
+    let source = format!("{BASE}note = '\u{202e}'");
+    assert_eq!(refusal(&source, "note"), "# note = '\u{202e}'");
+    let shown = PlasmidManifest::parse(&source).unwrap_err().to_string();
+    assert!(!shown.contains('\u{202e}'));
+    assert!(shown.contains("\\u202E"));
 }
 
 #[test]

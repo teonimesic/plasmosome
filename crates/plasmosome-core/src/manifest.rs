@@ -330,7 +330,7 @@ impl std::fmt::Display for ManifestError {
                         fix.len()
                     )
                 } else {
-                    write!(text, "{field}: {detail}; write {fix}")
+                    write!(text, "{field}: {detail}; write {}", visible_lines(fix))
                 }
             }
             ManifestError::TooLarge { limit } => {
