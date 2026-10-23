@@ -16,7 +16,8 @@
 # falls back to on a machine with no `user.email`. A malformed address, such as `<probe@>` or one
 # holding a space, counts as no address. So does a value a reader may see as more than one line:
 # one holding a line break other than a line feed, or one git unfolded from a trailer that goes on
-# over more than one line of the message. A value with no address is refused whatever its name,
+# over more than one line of the message. A value that is not valid UTF-8 also counts as no
+# address. A value with no address is refused whatever its name,
 # and only a whole vendor word in its name makes the refusal say it credits a model. It reads
 # trailers only, not a commit's author or committer (spec 029 section 4).
 #
@@ -114,6 +115,19 @@ malformed_address="^@[^@]*\$|@\.?\$|@\.[^@]+\$|\.\.\$|\.\.[^@]+\$|$blank_bytes"
 # rule 2), as a malformed address does.
 line_break="["$'\r\v\f'"]|"$'\xc2\x85'"|"$'\xe2\x80'"["$'\xa8\xa9'"]"
 
+# Canonical UTF-8, matched as bytes in the C locale. The lead byte fixes the continuation count;
+# the restricted second bytes exclude overlong forms, surrogates and points above U+10FFFF.
+# Bash cannot hold a NUL byte. Every other ASCII byte is valid here.
+continuation=$'[\x80-\xbf]'
+utf8="^("$'[\x01-\x7f]'
+utf8+="|"$'[\xc2-\xdf]'"${continuation}"
+utf8+="|"$'\xe0[\xa0-\xbf]'"${continuation}"
+utf8+="|"$'[\xe1-\xec\xee-\xef]'"${continuation}{2}"
+utf8+="|"$'\xed[\x80-\x9f]'"${continuation}"
+utf8+="|"$'\xf0[\x90-\xbf]'"${continuation}{2}"
+utf8+="|"$'[\xf1-\xf3]'"${continuation}{3}"
+utf8+="|"$'\xf4[\x80-\x8f]'"${continuation}{2})*$"
+
 # Nominates text worth parsing. Deliberately unanchored: it may only ever over-nominate, because
 # a paragraph it skips is a paragraph nothing else looks at.
 nominate='(co-authored-by|signed-off-by)[[:space:]]*:'
@@ -187,7 +201,7 @@ judge_trailer() {
     address=${closed[0]}
     read -r name <<<"${value:0:${#value}-${#last}}"
   fi
-  if [ -n "$unfolded" ] || matches "$line_break" "$value" ||
+  if [ -n "$unfolded" ] || ! matches "$utf8" "$value" || matches "$line_break" "$value" ||
     ! matches '@' "$address" || matches "$malformed_address" "$address"; then
     if matches "$vendor_word" "$name"; then
       offence "$position" "$value" model
@@ -238,11 +252,11 @@ record_offending_trailers() {
   local paragraph=$1 parsed written line position value trailer=0 unfolded
   unfolded=()
   matches "$nominate" "$paragraph" || return 0
-  if ! parsed=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --parse 2>&1); then
+  if ! parsed=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --parse --no-divider 2>&1); then
     cannot_parse "$parsed"
   fi
   if matches '^[[:space:]]' "$paragraph"; then
-    if ! written=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --only-trailers --only-input 2>&1); then
+    if ! written=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --only-trailers --only-input --no-divider 2>&1); then
       cannot_parse "$written"
     fi
     while IFS= read -r line; do
