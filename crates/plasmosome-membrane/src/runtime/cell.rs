@@ -243,7 +243,14 @@ pub fn launch(
     readiness: Duration,
     shutdown: &AtomicBool,
 ) -> Result<ReadyCell, LaunchFailure> {
-    launch_with(recipe, runtime_dir, readiness, shutdown, |_, _| {})
+    launch_with(
+        recipe,
+        runtime_dir,
+        readiness,
+        shutdown,
+        platform,
+        |_, _| {},
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -258,9 +265,10 @@ fn launch_with(
     runtime_dir: BorrowedFd<'_>,
     readiness: Duration,
     shutdown: &AtomicBool,
+    host: impl FnOnce() -> Result<(), PlatformRefusal>,
     mut checkpoint: impl FnMut(Checkpoint, &mut Attempt),
 ) -> Result<ReadyCell, LaunchFailure> {
-    platform().map_err(LaunchFailure::Platform)?;
+    host().map_err(LaunchFailure::Platform)?;
     let artifacts = verify_recipe_artifacts(&recipe).map_err(LaunchFailure::Artifact)?;
     let initramfs = verify_initramfs(&artifacts.initramfs, &artifacts.guest_policy)
         .map_err(LaunchFailure::Initramfs)?;

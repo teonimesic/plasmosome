@@ -15,12 +15,61 @@ fn directory(bundle: &FixtureBundle) -> File {
     File::open(bundle.path().join("cell")).unwrap()
 }
 fn start(bundle: &FixtureBundle) -> Result<ReadyCell, LaunchFailure> {
-    launch(
+    fixture_launch(
         bundle.recipe(),
         directory(bundle).as_fd(),
         Duration::from_secs(10),
         &AtomicBool::new(false),
     )
+}
+
+fn fixture_launch(
+    recipe: RuntimeRecipe,
+    runtime: BorrowedFd<'_>,
+    readiness: Duration,
+    shutdown: &AtomicBool,
+) -> Result<ReadyCell, LaunchFailure> {
+    launch_with(recipe, runtime, readiness, shutdown, || Ok(()), |_, _| {})
+}
+
+#[test]
+fn platform_refusal_precedes_artifacts_directories_and_checkpoints() {
+    let value = crate::runtime::test_fixtures::recipe_value("/missing/helper");
+    let recipe = parse_recipe(&value);
+    let runtime = File::open("/dev/null").unwrap();
+    let failure = launch_with(
+        recipe,
+        runtime.as_fd(),
+        Duration::ZERO,
+        &AtomicBool::new(false),
+        || Err(PlatformRefusal::NoHypervisor),
+        |_, _| panic!("platform refusal reached an effect"),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        failure,
+        LaunchFailure::Platform(PlatformRefusal::NoHypervisor)
+    ));
+}
+
+#[test]
+fn public_launch_keeps_the_real_platform_gate() {
+    let recipe = parse_recipe(&crate::runtime::test_fixtures::recipe_value(
+        "/missing/helper",
+    ));
+    let runtime = File::open("/dev/null").unwrap();
+    let expected = platform();
+    let result = launch(
+        recipe,
+        runtime.as_fd(),
+        Duration::ZERO,
+        &AtomicBool::new(false),
+    );
+    match (expected, result) {
+        (Err(expected), Err(LaunchFailure::Platform(found))) => assert_eq!(found, expected),
+        (Ok(()), Err(LaunchFailure::Artifact(_))) => {}
+        other => panic!("real platform gate changed: {other:?}"),
+    }
 }
 
 fn clean(report: &TeardownReport) {
@@ -176,7 +225,7 @@ fn k4_unconfined_is_not_ready() {
 fn k5_dead_helper_refuses_without_spending_the_budget() {
     let bundle = FixtureBundle::build("exit-early");
     let started = Instant::now();
-    let failure = launch(
+    let failure = fixture_launch(
         bundle.recipe(),
         directory(&bundle).as_fd(),
         Duration::from_secs(30),
@@ -200,7 +249,7 @@ fn k5_dead_helper_refuses_without_spending_the_budget() {
 #[test]
 fn k6_silent_helper_spends_only_its_handshake_budget() {
     let bundle = FixtureBundle::build("silent");
-    match launch(
+    match fixture_launch(
         bundle.recipe(),
         directory(&bundle).as_fd(),
         Duration::from_millis(500),
@@ -279,7 +328,7 @@ fn k10_shutdown_cancels_the_handshake_and_releases_everything() {
             std::thread::sleep(Duration::from_millis(100));
             shutdown.store(true, Ordering::Relaxed);
         });
-        match launch(
+        match fixture_launch(
             bundle.recipe(),
             directory(&bundle).as_fd(),
             Duration::from_secs(10),
@@ -324,7 +373,7 @@ fn replacement_of_the_created_directory_refuses_before_effects() {
     )
     .unwrap();
     assert!(matches!(
-        launch(
+        fixture_launch(
             bundle.recipe(),
             original.as_fd(),
             Duration::from_secs(10),
@@ -347,7 +396,7 @@ fn every_output_parent_must_match_the_created_directory() {
             serde_json::from_slice(&bundle.recipe().to_ndjson()).unwrap();
         value[field] = serde_json::json!(bundle.path().join("markers/elsewhere"));
         assert!(matches!(
-            launch(
+            fixture_launch(
                 parse_recipe(&value),
                 directory(&bundle).as_fd(),
                 Duration::from_secs(10),
@@ -396,6 +445,7 @@ fn a_helper_ended_after_the_handshake_fails_the_final_check() {
         directory(&bundle).as_fd(),
         Duration::from_secs(10),
         &AtomicBool::new(false),
+        || Ok(()),
         |stage, resources| {
             if matches!(stage, Checkpoint::Observed) {
                 resources.child.as_mut().unwrap().kill().unwrap();
@@ -429,6 +479,7 @@ fn a_directory_swapped_after_bind_refuses_before_prepare() {
         dir.as_fd(),
         Duration::from_secs(10),
         &AtomicBool::new(false),
+        || Ok(()),
         |stage, _| match stage {
             Checkpoint::Bound => {
                 fs::rename(&path, &held).unwrap();
@@ -461,6 +512,7 @@ fn replacement_of_the_copy_immediately_before_spawn_is_refused() {
         directory(&bundle).as_fd(),
         Duration::from_secs(10),
         &AtomicBool::new(false),
+        || Ok(()),
         |stage, _| {
             if matches!(stage, Checkpoint::Prepared) {
                 fs::rename(

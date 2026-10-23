@@ -49,6 +49,9 @@ The caller must leave SIGCHLD waitable and make this handle the sole consuming w
 
 This library has no control verb, daemon wiring, relaunch or Linux launch. It needs no
 `vmm-helper` feature. Tests execute only fixture shims and boot no VM.
+The private composition takes a host-availability function, so fixture tests can run on a
+hosted Mac without nested virtualization. The public launch always uses the real host check;
+separate tests retain that refusal and its order before artifacts or output directories.
 
 ## The VMM helper
 
