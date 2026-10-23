@@ -2,7 +2,14 @@ use super::recipe::{PlatformLimits, RuntimeRecipe};
 use serde_json::{Value, json};
 
 pub(crate) mod fake {
-    include!("../../tests/support/runtime_fake.rs");
+    mod compiled {
+        include!("../../tests/support/runtime_fake.rs");
+    }
+
+    pub(crate) fn runtime_fake(mode: &str) -> std::path::PathBuf {
+        let _held = crate::spawn_lock::hold_fork_side();
+        compiled::runtime_fake(mode)
+    }
 }
 
 #[cfg(target_os = "macos")]
