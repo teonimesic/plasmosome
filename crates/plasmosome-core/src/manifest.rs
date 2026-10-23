@@ -1209,15 +1209,15 @@ fn validate_secret_ref(
                 ),
             ));
         }
-        if *mode == DeliveryMode::Inject || delivery_omitted {
-            if (*mode == DeliveryMode::Inject && paths.is_empty()) || relative {
-                return Err(field_error(
-                    id,
-                    field("scope.path_scope"),
-                    "scope = { path_scope = [\"/required/path/\"] }".into(),
-                    "path-scope entries must be absolute; inject also requires a nonempty scope",
-                ));
-            }
+        if (*mode == DeliveryMode::Inject || delivery_omitted)
+            && ((*mode == DeliveryMode::Inject && paths.is_empty()) || relative)
+        {
+            return Err(field_error(
+                id,
+                field("scope.path_scope"),
+                "scope = { path_scope = [\"/required/path/\"] }".into(),
+                "path-scope entries must be absolute; inject also requires a nonempty scope",
+            ));
         }
     }
     Ok(())
