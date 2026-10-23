@@ -596,13 +596,13 @@ the typed `recovery` refusal in §4.1" with:
 > whenever the refusal concerns a created cell (spec 023); private recovery methods additionally
 > carry the typed `recovery` refusal in §4.1
 
-**Spec 001 §3.3 (`001:243-247`).** After "Quarantine alone can coexist with a serving controller
+**Spec 001 §3.3 (`001:367-368`).** After "Quarantine alone can coexist with a serving controller
 when all live observations are complete; readiness remains false.", add:
 
 > A cell that spec 023's supervisor check sets aside is handled the same way: it is not an
 > incomplete observation, it coexists with a serving controller, and readiness remains false.
 
-**Spec 001 §3.3a, `plasmosome.recovery` (`001:254-255`).** Replace "`{name, ledger_generation,
+**Spec 001 §3.3a, `plasmosome.recovery` (`001:320-321`).** Replace "`{name, ledger_generation,
 desired, tombstones, observed_cells, expected, drift, unmatched, incomplete, pending,
 quarantined}`" with "`{name, ledger_generation, desired, tombstones, observed_cells, expected,
 drift, unmatched, incomplete, pending, quarantined, set_aside}`", and after that sentence add:

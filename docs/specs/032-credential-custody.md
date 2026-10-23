@@ -390,7 +390,7 @@ attaches a binding's value to a request only when all of these hold.
    as use for the holding's idle limit.
 2. The request reaches the relay through that holding: a component's request at the holding's
    target, or a workload flow whose selected grant is that holding. Spec 001 §4.2 serves each flow
-   from the "smallest currently eligible GrantId among the holdings at that target" (`001:1426`).
+   from the "smallest currently eligible GrantId among the holdings at that target" (`001:1483`).
    A flow through another attachment's grant gets no value.
 3. The holding is at `passthrough`. At `simulate` or `capture` nothing is attached.
 4. The relay itself sends the request to the holding's recorded destination, resolved as spec 017
@@ -790,37 +790,37 @@ that commit.
 **Spec 001** (words read at main `54f24f8b`).
 
 - §3.6: after "Each object in `plasmids` carries `lifetime`, always present, as spec 028 section 9
-  defines it." (`001:494`), add "- Each object in `plasmids` also carries credentials, always
+  defines it." (`001:556`), add "- Each object in `plasmids` also carries credentials, always
   present, as spec 032 §2 defines them: each binding's reference, target, mode and, for `inject`,
   its surrogate; never a value or a source path."
-- §3.9: replace "Each object carries `lifetime`, as in §3.6." (`001:583-584`) with "Each object
+- §3.9: replace "Each object carries `lifetime`, as in §3.6." (`001:645-646`) with "Each object
   carries `lifetime` and `credentials`, as in §3.6."
 - §3.10: replace "Until credential custody exists, a reference that passes this validation still
-  refuses the attach with 103 `unsupported:credential:<ref>` (spec 022)." (`001:627-628`) with "A
+  refuses the attach with 103 `unsupported:credential:<ref>` (spec 022)." (`001:689-690`) with "A
   reference that passes this validation resolves under spec 032 §3: it becomes a credential
   binding of the attachment when an operator entry covers it and its mode is realized, and
   otherwise refuses the attach with 103 `entry:credential:<ref>` or
   `unsupported:credential:<ref>`."
 - §4: replace "The credential vsock proxy remains RESERVED: port4041 terminates at the membrane
-  and proxies to the controller; custody state stays kernel-core." (`001:834-835`) with "No guest
+  and proxies to the controller; custody state stays kernel-core." (`001:903-904`) with "No guest
   port carries a credential or a request for one (spec 032), and port 4041 stays unused. Custody
   state stays kernel-core: the journal records each credential binding, and only the cell's
   `membraned` reads a value, at apply."
 - §4.1, the configuration: after "in which `stop_deadline_ms` is optional. Recovery never reads
-  it." (`001:868-869`), add "The same configuration admits optional `credential_authority:
+  it." (`001:938`), add "The same configuration admits optional `credential_authority:
   {certificate: Artifact, key, roots}`, spec 032's instance authority, in which `key` is a
   canonical absolute path and `roots` an Artifact or null. Recovery never reads the key."
-- §4.1, `membrane.cell.observe`: in "Its assembled logical result is" (`001:918`), add
+- §4.1, `membrane.cell.observe`: in "Its assembled logical result is" (`001:987-988`), add
   `credentials` after `gates`. After "its idle deadline and whether its gate has fenced (spec
-  028)." (`001:923`), add "`credentials` lists each spec 032 binding the supervisor holds, by
+  028)." (`001:992`), add "`credentials` lists each spec 032 binding the supervisor holds, by
   reference, `GrantId`, mode and surrogate, never a value or a source path. Like `gates`, it is
   read fresh at each call."
-- §4.1: in "`membrane.effect.apply` params are" (`001:953`), add `credentials` after `lifetime`
-  in the params object. After "work at the bound plus D (spec 028 section 4)." (`001:957`), add
+- §4.1: in "`membrane.effect.apply` params are" (`001:1022`), add `credentials` after `lifetime`
+  in the params object. After "work at the bound plus D (spec 028 section 4)." (`001:1026`), add
   "`credentials` lists the spec 032 bindings the operation's holding serves, each with its
   reference, mode, header, scheme, path scope, source and surrogate, and never a value. It is `[]`
   for a holding that serves none."
-- §4.2: after "Workload edits of resolver configuration grant no bypass." (`001:1428-1429`), add
+- §4.2: after "Workload edits of resolver configuration grant no bypass." (`001:1507-1508`), add
   "On a flow whose selected grant is the holding of a spec 032 `inject` binding, the host relay
   terminates the flow's TLS and attaches the value as spec 032 §5 says; every other flow stays a
   relayed stream."
