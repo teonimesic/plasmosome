@@ -1018,10 +1018,11 @@ fn matrix_structure_lines(workflow: &str) -> Vec<&str> {
         if text.starts_with('#') {
             continue;
         }
-        let value = text
-            .split_once(':')
+        let header = text.split_once(" #").map_or(text, |(header, _)| header);
+        let field = header.split_once(':');
+        let value = field
             .map(|(_, value)| value.trim_start())
-            .unwrap_or_else(|| text.strip_prefix("- ").unwrap_or(text));
+            .unwrap_or_else(|| header.strip_prefix("- ").unwrap_or(header));
         let indicator = value
             .split_whitespace()
             .find(|word| !word.starts_with(['&', '!']))
@@ -1032,7 +1033,7 @@ fn matrix_structure_lines(workflow: &str) -> Vec<&str> {
                 .all(|byte| matches!(byte, b'+' | b'-' | b'1'..=b'9'))
         {
             scalar_indent =
-                Some(indent + usize::from(text.starts_with("- ") && text.contains(':')) * 2);
+                Some(indent + usize::from(text.starts_with("- ") && field.is_some()) * 2);
         }
         lines.push(line);
     }
@@ -1352,12 +1353,11 @@ fn matrix_reader_accepts_names_comments_and_an_eof_list() {
 
 #[test]
 fn matrix_reader_refuses_an_empty_matrix() {
-    for (workflow, expected) in [(
+    let (workflow, expected) = (
         "jobs:\n  crate:\n    strategy:\n      matrix:\n".to_string(),
         "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `<end of matrix>` (expected the crate axis before its entries). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
-    )] {
-        assert_eq!(crate_matrix_entries(&workflow), Err(expected.to_string()));
-    }
+    );
+    assert_eq!(crate_matrix_entries(&workflow), Err(expected.to_string()));
 }
 
 #[test]
@@ -1473,14 +1473,14 @@ fn matrix_reader_skips_block_scalars_at_every_mapping_level() {
 
 #[test]
 fn matrix_structure_skips_sequence_scalars_and_keeps_the_next_key() {
-    let workflow = "steps:\n  - name: |2-\n      matrix:\n        crate:\n          - x\n    run: echo ok\n  - >+\n    strategy:\n      matrix:\nnext: value\n";
+    let workflow = "steps:\n  - name: |2-\n      matrix:\n        crate:\n          - x\n    run: echo ok\n  - >+ # display: value\n    strategy:\n      matrix:\nnext: value\n";
     assert_eq!(
         matrix_structure_lines(workflow),
         [
             "steps:",
             "  - name: |2-",
             "    run: echo ok",
-            "  - >+",
+            "  - >+ # display: value",
             "next: value"
         ]
     );
@@ -1504,11 +1504,10 @@ fn matrix_structure_skips_scalars_with_properties_and_comments() {
 
 #[test]
 fn matrix_reader_refuses_the_review_fragment() {
-    for (workflow, expected) in [
-        ("jobs:\n  crate:\n    name: |\n      matrix:\n        crate:\n          - a\n          - b\n    strategy:\n      matrix: { crate: [a] }\n".to_string(), "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: { crate: [a] }` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it."),
-    ] {
-        assert_eq!(crate_matrix_entries(&workflow), Err(expected.to_string()));
-    }
+    let (workflow, expected) =
+        ("jobs:\n  crate:\n    name: |\n      matrix:\n        crate:\n          - a\n          - b\n    strategy:\n      matrix: { crate: [a] }\n".to_string(), "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: { crate: [a] }` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.")
+    ;
+    assert_eq!(crate_matrix_entries(&workflow), Err(expected.to_string()));
 }
 
 const BLOCK_SCALAR_WORKFLOW: &str = r#"name: matrix scalar regression
