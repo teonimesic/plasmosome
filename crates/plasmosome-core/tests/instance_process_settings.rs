@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use plasmosome_backend::{BootSession, CellId};
 use plasmosome_core::{DiscoveryError, InstanceRoot};
 
+#[path = "support/private_root.rs"]
+mod private_root;
+
 const ROOT_VARIABLE: &str = "PLASMOSOME_INSTANCE_CHILD_ROOT";
 const HEADROOM_VARIABLE: &str = "PLASMOSOME_INSTANCE_CHILD_HEADROOM";
 const UMASK_VARIABLE: &str = "PLASMOSOME_INSTANCE_CHILD_UMASK";
@@ -21,8 +24,8 @@ struct Finished {
     stderr: String,
 }
 
-fn temp_root() -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().expect("a temporary directory");
+fn temp_root() -> (private_root::TestRoot, PathBuf) {
+    let dir = private_root::private_root();
     let root = dir
         .path()
         .canonicalize()
