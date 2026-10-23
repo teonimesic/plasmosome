@@ -31,7 +31,7 @@ one.
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
-| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, the crate-private `file::OperatorFile` reads the operator file's content under rule 6 and §4, the crate-private `sources::Probes` refuses one inside a Mount source under rule 5, and `sources::Guard` refuses a Mount source over a guarded directory under §6 |
+| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4, the crate-private `file::OperatorFile` reads the operator file's content under rule 6 and §4, `select` selects the named local plasmid only through its listing, the crate-private `sources::Probes` refuses one inside a Mount source under rule 5, and `sources::Guard` refuses a Mount source over a guarded directory under §6 |
 | `artifact` | `verify_artifact`, the controller's check of one spec 001 §4.2 Artifact under spec 023 §1's rule, before `cell.new` allocates a cell. Its file judge is public, so `plasmosome-membrane` judges with the same code: `check_file` applies the rule to the file a walk reaches, and `verify_file` also hashes it |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`), one cell's spec 023 §3 paths (`cell_paths`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
@@ -850,6 +850,21 @@ joins `at` and the reason. `Display` writes each control, line-break or bidi cha
 
 Spec 028's optional `lifetime` key is not read yet. plasmosome-ltb4 adds it; until then a plasmid
 entry that names it is refused as an unknown key.
+
+## Selecting a named local plasmid
+
+The crate-private `operator::select::select_named` finds a requested plasmid only through its
+`OperatorFile` entry's `declaration`. No entry or no declaration returns `Unlisted`, for a 101
+with target `plasmid <id>`, without opening anything. It searches no project directory or registry.
+`refuse_local_genome` returns the same refusal with target `genome <name>` and takes no opener.
+
+`open_listing`, shared with the future provider scan, opens the listed path exactly once through
+the supplied opener. That opener must apply spec 022 §3 rules 1 to 5. Selection parses the checked
+bytes with `PlasmidManifest::parse`, preserving its refusals, and requires the manifest ID to equal
+the listing key. Every manifest refusal names the listed declaration. Unit H will map trust and
+ID refusals to 108 and pass parser refusals through `WireError::manifest_refusal`, keeping their
+field, fix and optional plasmid ID. Provider selection and control-verb wiring remain separate;
+nothing calls this selector from a control verb yet.
 
 ## Resolving one member
 
