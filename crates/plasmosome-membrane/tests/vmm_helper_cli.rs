@@ -9,7 +9,7 @@ use std::os::unix::fs::symlink;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::LazyLock;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 struct Layout {
@@ -17,19 +17,37 @@ struct Layout {
     _dir: tempfile::TempDir,
 }
 
-static LAYOUT: LazyLock<Layout> = LazyLock::new(|| {
-    let dir = tempfile::tempdir().unwrap();
+static LAYOUT: Mutex<Weak<Layout>> = Mutex::new(Weak::new());
+
+fn layout() -> Arc<Layout> {
+    layout_from(&LAYOUT)
+}
+
+fn layout_from(cache: &Mutex<Weak<Layout>>) -> Arc<Layout> {
+    let mut cached = cache.lock().unwrap();
+    if let Some(layout) = cached.upgrade() {
+        return layout;
+    }
+    let layout = Arc::new(build_layout());
+    *cached = Arc::downgrade(&layout);
+    layout
+}
+
+fn build_layout() -> Layout {
+    let dir = tempfile::Builder::new()
+        .prefix("plasmosome-vmm-")
+        .tempdir()
+        .unwrap();
     let bin = dir.path().join("bin");
     let lib = dir.path().join("lib");
     fs::create_dir(&bin).unwrap();
     fs::create_dir(&lib).unwrap();
     let binary = fs::canonicalize(bin).unwrap().join("plasmosome-vmm");
     fs::copy(env!("CARGO_BIN_EXE_plasmosome-vmm"), &binary).unwrap();
-    fs::copy(
-        Path::new(env!("PLASMOSOME_LIBKRUN_DIR_AT_BUILD")).join("libkrun.1.19.4.dylib"),
-        lib.join("libkrun.1.19.4.dylib"),
-    )
-    .unwrap();
+    let library =
+        fs::read(Path::new(env!("PLASMOSOME_LIBKRUN_DIR_AT_BUILD")).join("libkrun.1.19.4.dylib"))
+            .unwrap();
+    fs::write(lib.join("libkrun.1.19.4.dylib"), library).unwrap();
     let mut child = Command::new(&binary)
         .env_clear()
         .current_dir(dir.path())
@@ -40,7 +58,7 @@ static LAYOUT: LazyLock<Layout> = LazyLock::new(|| {
         .unwrap();
     assert_eq!(wait(&mut child, Duration::from_secs(60)).code(), Some(70));
     Layout { binary, _dir: dir }
-});
+}
 
 fn wait(child: &mut Child, budget: Duration) -> std::process::ExitStatus {
     let deadline = Instant::now() + budget;
@@ -83,7 +101,11 @@ fn refusal(
     code: i32,
     stage: &str,
 ) -> String {
-    let binary = &LAYOUT.binary;
+    let layout = layout();
+    let binary = &layout.binary;
+    // SAFETY: getdtablesize takes no arguments. This test process never lowers its fd limit.
+    let close_limit = unsafe { libc::getdtablesize() };
+    assert!(close_limit > 4);
     let program = CString::new(binary.as_os_str().as_bytes()).unwrap();
     let argv: Vec<_> = std::iter::once(program.clone())
         .chain(args.iter().map(|arg| CString::new(*arg).unwrap()))
@@ -128,6 +150,14 @@ fn refusal(
             }
             if matches!(descriptors, Descriptors::Extra) && libc::dup2(3, 4) < 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            let first_closed = if matches!(descriptors, Descriptors::Extra) {
+                5
+            } else {
+                4
+            };
+            for fd in first_closed..close_limit {
+                libc::close(fd);
             }
             let mut pointers = [std::ptr::null(); 5];
             for (index, arg) in argv.iter().enumerate() {
@@ -196,6 +226,7 @@ fn recipe(helper: &Path) -> serde_json::Value {
 
 #[test]
 fn argv_and_any_environment_refuse_before_native_calls() {
+    let _layout = layout();
     let dir = tempfile::tempdir().unwrap();
     for args in [
         vec![],
@@ -233,6 +264,7 @@ fn argv_and_any_environment_refuse_before_native_calls() {
 
 #[test]
 fn every_descriptor_rule_is_checked_in_the_real_process() {
+    let _layout = layout();
     let dir = tempfile::tempdir().unwrap();
     for descriptors in [
         Descriptors::Extra,
@@ -256,6 +288,7 @@ fn every_descriptor_rule_is_checked_in_the_real_process() {
 
 #[test]
 fn malformed_multiple_and_unbounded_recipes_refuse() {
+    let layout = layout();
     let dir = tempfile::tempdir().unwrap();
     for bytes in [b"{\n".to_vec(), b"{}\n{}\n".to_vec(), vec![b' '; 1_048_578]] {
         refusal(
@@ -268,7 +301,7 @@ fn malformed_multiple_and_unbounded_recipes_refuse() {
             "recipe",
         );
     }
-    let mut value = recipe(&LAYOUT.binary);
+    let mut value = recipe(&layout.binary);
     value["architecture"] = "x86_64".into();
     value["kernel_format"] = "raw".into();
     refusal(
@@ -284,8 +317,9 @@ fn malformed_multiple_and_unbounded_recipes_refuse() {
 
 #[test]
 fn another_helper_and_unverified_artifacts_refuse() {
+    let layout = layout();
     let dir = tempfile::tempdir().unwrap();
-    for path in [Path::new("/nonexistent/helper"), &LAYOUT.binary] {
+    for path in [Path::new("/nonexistent/helper"), &layout.binary] {
         let text = refusal(
             format!("{}\n", recipe(path)).into_bytes(),
             &["--runtime-fd=3"],
@@ -295,7 +329,7 @@ fn another_helper_and_unverified_artifacts_refuse() {
             66,
             "verify",
         );
-        assert!(text.contains(if path == LAYOUT.binary {
+        assert!(text.contains(if path == layout.binary {
             "kernel"
         } else {
             "this process runs"
@@ -305,6 +339,7 @@ fn another_helper_and_unverified_artifacts_refuse() {
 
 #[test]
 fn planted_file_and_dangling_link_refuse_without_loading_them() {
+    let _layout = layout();
     for dangling in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let planted = dir.path().join("libkrunfw.5.dylib");
@@ -328,8 +363,9 @@ fn planted_file_and_dangling_link_refuse_without_loading_them() {
 
 #[test]
 fn a_long_refusal_is_one_line_within_one_kib() {
+    let layout = layout();
     let dir = tempfile::tempdir().unwrap();
-    let mut value = recipe(&LAYOUT.binary);
+    let mut value = recipe(&layout.binary);
     let key = format!("{}\nsecond-line", "é".repeat(1100));
     value[key] = serde_json::Value::Null;
     refusal(
@@ -341,4 +377,22 @@ fn a_long_refusal_is_one_line_within_one_kib() {
         65,
         "recipe",
     );
+}
+
+#[test]
+fn the_last_layout_owner_removes_the_copied_binary_and_library() {
+    let cache = Mutex::new(Weak::new());
+    let first = layout_from(&cache);
+    let root = first._dir.path().to_path_buf();
+    let second = layout_from(&cache);
+    assert!(Arc::ptr_eq(&first, &second));
+    drop(first);
+    assert!(root.exists());
+    drop(second);
+    let removed = !root.exists();
+    if !removed {
+        fs::remove_dir_all(&root).unwrap();
+    }
+    assert!(removed, "the copied layout outlived its last owner");
+    assert!(cache.lock().unwrap().upgrade().is_none());
 }
