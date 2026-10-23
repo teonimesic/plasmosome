@@ -535,7 +535,7 @@ fn raw_recipe(bundle: &FixtureBundle, bytes: &[u8]) -> i32 {
             }
         });
     }
-    let mut child = command.spawn().unwrap();
+    let mut child = crate::spawn_lock::spawn_guarded(&mut command).unwrap();
     fake::owned_wait::exit_within(&mut child, fake::owned_wait::SETUP_BOUND)
         .unwrap()
         .expect("the raw recipe child exits within the setup bound")

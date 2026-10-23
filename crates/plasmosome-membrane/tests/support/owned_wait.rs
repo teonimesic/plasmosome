@@ -34,10 +34,7 @@ pub fn exit_within(child: &mut Child, bound: Duration) -> io::Result<Option<Exit
 #[allow(unsafe_code)]
 fn hanging_setup_is_bounded_killed_and_reaped() {
     use std::os::unix::process::ExitStatusExt;
-    let mut child = std::process::Command::new("sleep")
-        .arg("1")
-        .spawn()
-        .unwrap();
+    let mut child = super::spawn_guarded(std::process::Command::new("sleep").arg("1")).unwrap();
     let started = Instant::now();
     let outcome = exit_within(&mut child, Duration::from_millis(50));
     let mut raw = 0;
