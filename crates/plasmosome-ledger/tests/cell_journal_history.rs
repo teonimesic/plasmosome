@@ -385,3 +385,180 @@ fn identity_rules_allow_and_commit_publishes_while_abort_preserves() {
         1
     );
 }
+
+fn assert_identity_change_is_refused(
+    label: &str,
+    original: RecordedEffect,
+    changed: RecordedEffect,
+) {
+    use plasmosome_ledger::cell_journal::{encode_record, parse_record, read_cell_journal_from};
+    assert_ne!(original, changed, "{label}");
+    assert_eq!(original.address(), changed.address(), "{label}");
+    let prefix = [
+        prepare(1, vec![attach("p", vec![original])]),
+        record(1, Event::Commit),
+        record(1, Event::Finish),
+    ];
+    let bad = prepare(2, vec![attach("p", vec![exact_uds("c", "p"), changed])]);
+    for r in prefix.iter().chain([&bad]) {
+        parse_record(&CellId::from("c"), &encode_record(r).unwrap()).unwrap();
+    }
+    let mut history = empty();
+    for r in &prefix {
+        history.admit(r).unwrap();
+    }
+    let before = history.clone();
+    assert_eq!(
+        history.check(&bad).unwrap_err().kind,
+        Kind::InvalidEffect,
+        "{label}"
+    );
+    assert_eq!(
+        history.admit(&bad).unwrap_err().kind,
+        Kind::InvalidEffect,
+        "{label}"
+    );
+    assert_eq!(history, before, "{label}");
+    let bytes: Vec<_> = prefix
+        .iter()
+        .chain([&bad])
+        .flat_map(|r| encode_record(r).unwrap())
+        .collect();
+    let fault = read_cell_journal_from(
+        &bytes[..],
+        std::path::Path::new("diagnostic-only"),
+        &CellId::from("c"),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (fault.kind, fault.line, fault.lines_parsed),
+        (Kind::InvalidEffect, Some(4), 3),
+        "{label}"
+    );
+}
+
+#[test]
+fn retained_identity_compares_inverse_description_and_kind() {
+    use plasmosome_ledger::Reversibility;
+    let original = exact_uds("c", "p");
+    let mut changed = original.clone();
+    let Reversibility::Exact(inverse) = &mut changed.effect.reversibility else {
+        unreachable!()
+    };
+    inverse.description.push_str(" changed");
+    assert_identity_change_is_refused("inverse description", original.clone(), changed);
+    let changed = RecordedEffect {
+        effect: Effect::compensating(
+            original.effect.description.clone(),
+            original.operation.as_ref().unwrap().removal(),
+        ),
+        operation: original.operation.clone(),
+    };
+    assert_identity_change_is_refused(
+        "exact becomes compensating",
+        original.clone(),
+        changed.clone(),
+    );
+    assert_identity_change_is_refused("compensating becomes exact", changed, original);
+}
+
+#[test]
+fn retained_identity_compares_every_capability_field() {
+    use plasmosome_backend::UniverseOp;
+    use serde_json::{Value, json};
+    type FieldChange = (&'static str, Value);
+    type CapabilityCase = (&'static str, Value, Vec<FieldChange>);
+    let owner = json!({"cell":"c", "plugin":"p"});
+    let cases: Vec<CapabilityCase> = vec![
+        (
+            "WriteSessionFile",
+            json!({"path":"/run/file","recipe":{"contents":[1],"mode":"read_only","guest_path":"/run/file"},"owner":owner}),
+            vec![
+                ("/path", json!("/run/other-file")),
+                ("/recipe/contents", json!([2])),
+                ("/recipe/mode", json!("read_write")),
+                ("/recipe/guest_path", json!("/run/other-guest-file")),
+            ],
+        ),
+        (
+            "BindUds",
+            json!({"path":"/run/socket","recipe":{"upstream":"/run/upstream","guest_path":"/run/socket"},"owner":owner}),
+            vec![
+                ("/path", json!("/run/other-socket")),
+                ("/recipe/upstream", json!("/run/other-upstream")),
+                ("/recipe/guest_path", json!("/run/other-guest-socket")),
+            ],
+        ),
+        (
+            "SetProxyMap",
+            json!({"host":"example.test","route":"route","recipe":{"transport":"tcp","destination":"example.test","port":443,"allow_private":false},"owner":owner}),
+            vec![
+                ("/host", json!("other.test")),
+                ("/route", json!("other-route")),
+                ("/recipe/transport", json!("udp")),
+                ("/recipe/destination", json!("other.test")),
+                ("/recipe/port", json!(8443)),
+                ("/recipe/allow_private", json!(true)),
+            ],
+        ),
+        (
+            "SpawnBroker",
+            json!({"name":"broker","launch":{"command":["/bin/cat"],"control_socket":"/run/control","data_socket":"/run/data"},"owner":owner}),
+            vec![
+                ("/name", json!("other-broker")),
+                ("/launch/command", json!(["/bin/cat", "argument"])),
+                ("/launch/control_socket", json!("/run/other-control")),
+                ("/launch/data_socket", json!("/run/other-data")),
+            ],
+        ),
+        (
+            "AddMount",
+            json!({"source":"/source","target":"/target","recipe":{"access":"read_only"},"owner":owner}),
+            vec![
+                ("/source", json!("/other-source")),
+                ("/target", json!("/other-target")),
+                ("/recipe/access", json!("read_write")),
+            ],
+        ),
+    ];
+    for (variant, mut payload, fields) in cases {
+        payload["id"] = serde_json::to_value(GrantId::new()).unwrap();
+        let original_op: UniverseOp = serde_json::from_value(json!({variant: payload})).unwrap();
+        let original = RecordedEffect {
+            effect: Effect::exact("holding", InverseVia::Universe(original_op.removal())),
+            operation: Some(original_op),
+        };
+        for (field, value) in fields {
+            let mut changed_payload = payload.clone();
+            *changed_payload.pointer_mut(field).unwrap() = value;
+            let op: UniverseOp = serde_json::from_value(json!({variant: changed_payload})).unwrap();
+            let changed = RecordedEffect {
+                effect: Effect::exact("holding", InverseVia::Universe(op.removal())),
+                operation: Some(op),
+            };
+            assert_identity_change_is_refused(
+                &format!("{variant}{field}"),
+                original.clone(),
+                changed,
+            );
+        }
+    }
+}
+
+#[test]
+fn backend_and_universe_forms_cannot_share_a_standing_address() {
+    let original = exact_uds("c", "p");
+    let changed = RecordedEffect {
+        effect: Effect::exact(
+            original.effect.description.clone(),
+            InverseVia::Backend(original.address().unwrap()),
+        ),
+        operation: None,
+    };
+    assert_identity_change_is_refused(
+        "universe becomes backend",
+        original.clone(),
+        changed.clone(),
+    );
+    assert_identity_change_is_refused("backend becomes universe", changed, original);
+}
