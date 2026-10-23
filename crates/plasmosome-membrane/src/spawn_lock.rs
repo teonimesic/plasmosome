@@ -145,9 +145,10 @@ pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // SAFETY: This function's doc binds every caller to do only async-signal-safe work in
     // Forked::Child and never return or unwind there. Its one caller, VmmChild::spawn, calls only
     // setsid and _exit itself, and its ExitOnUnwind guard exits the child if `launch` panics, after
-    // the panic hook has run. That `launch` does only async-signal-safe work rests on Launch's
-    // documented contract, which safe code can break, as the test launcher PanicOnLaunch does.
-    // fork_holding holds the read side of the spawn lock, so no descriptor made inside
+    // the panic hook has run. That `launch` does only async-signal-safe work is the Safety contract
+    // of Launch, an unsafe trait, so each implementation is an unsafe impl whose SAFETY comment
+    // says why it keeps it. The test launcher PanicOnLaunch breaks it on purpose. fork_holding
+    // holds the read side of the spawn lock, so no descriptor made inside
     // with_descriptors_held or with_each_descriptor_held is mid-creation. The lock does not cover a
     // descriptor made in two calls anywhere else, such as a socket or connection std makes on
     // macOS, which has no SOCK_CLOEXEC or accept4. daemon::run's doc gives the order that keeps the
@@ -252,7 +253,9 @@ mod tests {
 
     struct ExitAtOnce;
 
-    impl Launch for ExitAtOnce {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch only calls _exit, which is async-signal-safe.
+    unsafe impl Launch for ExitAtOnce {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             // SAFETY: _exit takes no pointer and is async-signal-safe, which is all this forked
@@ -263,7 +266,12 @@ mod tests {
 
     struct ReportsInheritedReadSide;
 
-    impl Launch for ReportsInheritedReadSide {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch tries the write side of its copy of the spawn lock once and
+    // calls _exit. try_write changes the lock's state only with atomic operations, and neither it
+    // nor its poison check waits, makes a system call or allocates. A guard it gets is forgotten,
+    // so nothing unlocks or drops in the child.
+    unsafe impl Launch for ReportsInheritedReadSide {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let code = match SPAWN_LOCK.try_write() {

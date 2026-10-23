@@ -69,17 +69,23 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
         .drain_ms(750)
         .build();
     let plugin = PluginId::from(manifest.id.as_str());
+    let cell_id = CellId::from("cell-1");
+    let owner = CellOwner {
+        cell: cell_id.clone(),
+        plugin: plugin.clone(),
+    };
 
     let registry = ToolRegistry::new();
-    registry.register(&plugin, &manifest.provides_tools);
-    assert_eq!(registry.list(), vec!["pr.comment", "pr.read"]);
-    assert_eq!(registry.lookup("pr.read").unwrap().plugin, plugin);
+    registry
+        .register(&owner, &manifest.provides_tools)
+        .expect("no other plasmid holds these names in cell-1");
+    assert_eq!(registry.list(&cell_id), vec!["pr.comment", "pr.read"]);
+    assert_eq!(registry.lookup(&cell_id, "pr.read").unwrap().owner, owner);
 
     let desired = DesiredStateBuilder::at_generation(1)
         .cell("cell-1", "researcher")
         .plasmid_in("cell-1", &manifest.id, MockMode::Simulate)
         .build();
-    let cell_id = CellId::from("cell-1");
     let cell = desired
         .cells
         .get(&cell_id)
@@ -132,7 +138,7 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
     assert!(report.forced.is_none());
 
     assert_eq!(
-        registry.withdraw_plugin(&plugin),
+        registry.withdraw(&owner),
         vec!["pr.comment".to_string(), "pr.read".to_string()]
     );
     assert!(registry.is_empty());
@@ -185,20 +191,29 @@ impl.wasm = "github-pr.wasm"
 "#;
     let manifest = PlasmidManifest::parse(source).unwrap();
     let registry = ToolRegistry::new();
-    let plugin = PluginId::from(manifest.id.as_str());
-    registry.register(&plugin, &manifest.provides_tools);
+    let cell = CellId::from("cell-1");
+    let owner = CellOwner {
+        cell: cell.clone(),
+        plugin: PluginId::from(manifest.id.as_str()),
+    };
+    registry
+        .register(&owner, &manifest.provides_tools)
+        .expect("no other plasmid holds these names in cell-1");
     assert_eq!(
-        registry.lookup("pr.read").unwrap().description,
+        registry.lookup(&cell, "pr.read").unwrap().description,
         " Read the title and review state. "
     );
     assert_eq!(
-        registry.lookup("pr.comment").unwrap().description,
+        registry.lookup(&cell, "pr.comment").unwrap().description,
         "Post a comment on a pull request."
     );
-    registry.withdraw_plugin(&plugin);
+    registry.withdraw(&owner);
     assert_eq!(
-        registry.lookup("pr.read"),
-        Err(plasmosome_core::LookupError::UnknownTool("pr.read".into()))
+        registry.lookup(&cell, "pr.read"),
+        Err(plasmosome_core::LookupError::UnknownTool {
+            cell,
+            tool: "pr.read".into()
+        })
     );
 }
 
