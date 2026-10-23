@@ -300,48 +300,48 @@ of this spec as its text, that section's sentences are the text, and the section
 are this spec's.
 
 - **Spec 001.**
-  - §3.3 (`001:204-205`): replace "is false while the account contains drift, quarantine,
+  - §3.3 (`001:296-297`): replace "is false while the account contains drift, quarantine,
     unmatched effects or any incomplete effect." with "is false while the account contains drift,
     quarantine, unmatched effects or any incomplete effect, or while a spec 028 expiry is
     unfinished past its H."
-  - §3.5 (`001:289`): after "- `genome` is optional; without it the cell starts empty (plasmids
+  - §3.5 (`001:480`): after "- `genome` is optional; without it the cell starts empty (plasmids
     attach later).", add "- With a genome, optional `lease_ms` and `idle_ms` only shorten the
     lifetime of each attachment the request creates (spec 028). `exec_id` is `-32602`."
-  - §3.6 (`001:333-334`): after "- `subjects` are the E13 child-domain subjects: per-tool netns,
+  - §3.6 (`001:554-555`): after "- `subjects` are the E13 child-domain subjects: per-tool netns,
     address from the frozen `10.29.0.0/24` compiler constant, per-subject attach state.", add
     "- Each object in `plasmids` carries `lifetime`, always present, as spec 028 section 9 defines
     it."
-  - §3.9 (`001:387`): after "Absent declarations mean `passthrough`.", add "Each object carries
+  - §3.9 (`001:645`): after "Absent declarations mean `passthrough`.", add "Each object carries
     `lifetime`, as in §3.6."
-  - §3.10 (`001:429-434`): after the bullet that begins "Optional `artifact:
+  - §3.10 (`001:691-692`): after the bullet that begins "Optional `artifact:
     {registry_id,release:ReleaseRef}` selects an already imported spec020 plasmid", whose last
     sentence spec 022 replaces, add "- Optional `lease_ms`, `idle_ms` and `exec_id` only shorten the
     lifetime of every attachment the request creates, providers it pulls in included (spec 028). An
     `exec_id` whose exec is not `running` is `105` `{from: <state>, to: "running"}`, and an unknown
     one `101` `exec <id>`; neither prepares anything."
-  - §3 (`001:472`): after §3.12's last sentence, "Missing/corrupt imported bytes use101/108 before
+  - §3 (`001:753`): after §3.12's last sentence, "Missing/corrupt imported bytes use101/108 before
     effects and leave the old attachment intact.", add a section `### 3.13 plasmid.renew` whose text
     is section 8's first two paragraphs. It adds no error code: a renewal past a provider's bound is
     the existing `103`.
-  - §4.1, observe (`001:640`, `001:643`): replace "`{cell, state, supervisor, generation, desired}`"
+  - §4.1, observe (`001:987-988`, `001:991`): replace "`{cell, state, supervisor, generation, desired}`"
     with "`{cell, state, supervisor, generation, desired, gates}`", and after "with `generation ==
     desired.generation`.", add "`gates` lists, for each grant, its `GrantId`, both readings of its
     bound, its idle deadline and whether its gate has fenced (spec 028). It is host-gate state the
     supervisor observes itself, never a `GuestObservation` or `GuestBinding` field. It is read fresh
     at each call, not retained."
-  - §4.1, apply (`001:670`): replace "`membrane.effect.apply` params are `{cell, generation,
+  - §4.1, apply (`001:1022`): replace "`membrane.effect.apply` params are `{cell, generation,
     operation, deadline_ms}`." with "`membrane.effect.apply` params are `{cell, generation,
     operation, lifetime, deadline_ms}`, where `lifetime` is the attachment's bound, in both
     readings, and its idle limit, which the operation's host gate enforces from activation (spec
     028)."
-  - §4.1, lowering (`001:689`): after "Neither PID backfill nor adoption of a matching process name
+  - §4.1, lowering (`001:1045`): after "Neither PID backfill nor adoption of a matching process name
     is an alternative implementation.", add "- `membrane.lifetime.lower` params are `{cell, plugin,
     bound, deadline_ms}`. The supervisor takes `bound` for every grant of that attachment only when
     it is earlier than the bound it holds, and fences at once when it has passed; the controller
     sends only a bound that has passed, since the journal does not record a lowered bound; the
     supervisor takes a later bound only from a published DesiredCell. Result is `{cell, plugin,
     bound}`, with the bound now held (spec 028)."
-  - §4.2 (`001:1000`): after "Guest drain and host drain share the one remaining budget.", add, as
+  - §4.2 (`001:1385`): after "Guest drain and host drain share the one remaining budget.", add, as
     a paragraph headed **Lifetime fence (spec 028)**, section 4's first two paragraphs and the
     first three sentences of its third.
 - **Spec 008.** Format 1 has no writer yet, so these land before its first writer ships.
@@ -496,12 +496,12 @@ Each has the default this spec uses until the owner answers.
    and both readings of its bound; it authorizes Force only for holdings whose drain timed out." In
    spec 017 (`017:292-293`), "Spec008 requires its durable operator assertion before forced cell
    cleanup" gains "or, for a holding whose drain timed out after its lifetime's bound, the recorded
-   expiry authority (spec 028)". In spec 001 §4.2 (`001:1366`), after "Force authority is
+   expiry authority (spec 028)". In spec 001 §4.2 (`001:1423`), after "Force authority is
    checked/durably recorded by the host under spec008.", add "It accepts an expiry authority only
    for a grant whose gate holds a lifetime fence and whose drain timed out (spec 028)." (b) As (a),
    and a bound also discharges external assertions: also add "or, at a lifetime's bound, the
    recorded expiry authority (spec 028)" after spec 001 §3.11's "force requires the operator/reason
-   pair exactly as `plasmosome.stop`" (`001:682`) and spec 011's "force requires the operator/reason
+   pair exactly as `plasmosome.stop`" (`001:724`) and spec 011's "force requires the operator/reason
    pair" (`011:483`), and "and its external assertions" to (a)'s 017 sentence. Amended on
    2026-10-21: this item's five line cites gave the lines from when this spec was accepted, and the
    quoted words had since moved.

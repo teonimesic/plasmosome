@@ -453,14 +453,14 @@ relies on it. The mock-mode amendments to 011 and 001 assume the default of owne
 
 **Spec 001.**
 
-- §1, the 104 row (`001:99`). Replace "per D2b rule 3" with "per D2b rule 3, or per spec 022 when
+- §1, the 104 row (`001:104`). Replace "per D2b rule 3" with "per D2b rule 3, or per spec 022 when
   a mutation would change an attached plasmid's mode or serve one host, port and transport at two
   modes in a cell; spec 022's cases name one plasmid as `node` and offer only
   `remove_plasmid`".
-- §2 (`001:139-141`). After "`.plasmosome/genomes/<name>.toml`; the share/export form is
+- §2 (`001:224`). After "`.plasmosome/genomes/<name>.toml`; the share/export form is
   `*.genome.toml`.", add "That file is not yet a selection source: until a local genome grammar
   exists, `cell.new` selects a genome only by `artifact` (spec 022)."
-- §2 (`001:144`). After "The server resolves; the client never guesses.", add "The results of
+- §2 (`001:236`). After "The server resolves; the client never guesses.", add "The results of
   `plasmid.list`, `plasmid.add`, `plasmid.remove` and `plasmid.reload` each carry `cell`, the cell
   the verb acted on, whether the request named it or the server resolved it." Spec 025 serves the
   plasmid commands only once they do.
@@ -496,7 +496,7 @@ relies on it. The mock-mode amendments to 011 and 001 assume the default of owne
   ["remove_plasmid"]` (spec 022)." Replace "An explicit-vs-explicit conflict on the same node at
   different modes" with "An explicit-vs-explicit conflict at different modes on a node not yet
   attached".
-- §3.10, credentials (`001:423-428`). After "never a silent downgrade.", add "Until credential
+- §3.10, credentials (`001:688-689`). After "never a silent downgrade.", add "Until credential
   custody exists, a reference that passes this validation still refuses the attach with 103
   `unsupported:credential:<ref>` (spec 022)."
 - §3.10, artifact. Replace "Without artifact, existing local selection remains unchanged." with:

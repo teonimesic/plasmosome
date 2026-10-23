@@ -149,6 +149,16 @@ An unknown key is not one of them. Every other refusal an author can cause carri
 `fix`. A 108 the author did not cause carries no `fix` either: a file that cannot be read, or a
 fault in the file rather than in what it declares, such as spec 022's trust checks.
 
+When the parser refused the declaration, the 108's `detail` is at most 4,096 bytes, and its
+`message` is the sentence naming `path`, followed by that same text. A longer refusal keeps its
+first 2,046 bytes and its last 2,047, each cut at a character boundary, joined by `…` (U+2026).
+A `fix` over 1,024 bytes is left out of `detail`, which gives its length in bytes instead.
+`field`, `fix` and `plasmid` are never cut, because a cut fix is not TOML the author can write.
+A `fix` can be several times the declaration's size, since it writes each control character as
+a six-byte escape: the largest 108 measured for a 1 MiB declaration is 8,485,465 bytes (8.49 MB),
+under the 16,777,216 bytes spec 025's client reads. Amended on 2026-10-23: `detail` and `message`
+had no bound.
+
 **Control-socket lifecycle, as delivered (both daemons).** Each daemon binds the control socket
 named by its config and never unlinks a path it did not create. A start whose path already
 exists — live socket, stale socket, regular file, directory or symlink — is refused without

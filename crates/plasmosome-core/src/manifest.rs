@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::Hash;
@@ -14,6 +15,9 @@ use crate::toml_depth;
 /// declaration. `load` and `parse` refuse a longer one with
 /// `ManifestError::TooLarge`.
 pub const MAX_MANIFEST_BYTES: usize = 1 << 20;
+
+pub(crate) const MAX_REFUSAL_BYTES: usize = 4096;
+pub(crate) const MAX_SHOWN_FIX_BYTES: usize = 1024;
 
 /// The deepest a declaration may nest. The root table is level 1. Each array
 /// and each inline table adds a level, and so does each dot in a key, for the
@@ -270,6 +274,11 @@ pub struct CommandsSpec {
     pub commands: Vec<CommandDecl>,
 }
 
+/// A declaration refusal. Its text is at most 4,096 bytes, keeping the first 2,046 and last
+/// 2,047 around U+2026, cut at character boundaries. A fix over 1,024 bytes is given by its
+/// length in that text; the fields themselves remain whole. Formatting first builds the full
+/// text, using time and memory linear in the declaration (about 10 MB for a 1 MiB declaration).
+/// `Debug` is unbounded and can include the complete declaration in a TOML parser error.
 #[derive(Debug)]
 pub enum ManifestError {
     Io(std::io::Error),
@@ -290,10 +299,16 @@ pub enum ManifestError {
 
 impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut text = String::new();
+        use std::fmt::Write;
         match self {
-            ManifestError::Io(e) => write!(f, "manifest io error: {e}"),
+            ManifestError::Io(e) => write!(text, "manifest io error: {e}"),
             ManifestError::Parse(e) => {
-                write!(f, "manifest toml error: {}", visible_lines(&e.to_string()))
+                write!(
+                    text,
+                    "manifest toml error: {}",
+                    visible_lines(&e.to_string())
+                )
             }
             ManifestError::Field {
                 plasmid,
@@ -302,25 +317,41 @@ impl std::fmt::Display for ManifestError {
                 detail,
             } => {
                 if let Some(id) = plasmid {
-                    write!(f, "plasmid {}: ", diagnostic_key(id))?;
+                    write!(text, "plasmid {}: ", diagnostic_key(id))?;
                 }
                 if fix == REMOVE_ENTRY {
-                    write!(f, "{field}: {detail}; {fix}")
+                    write!(text, "{field}: {detail}; {fix}")
+                } else if fix.len() > MAX_SHOWN_FIX_BYTES {
+                    write!(
+                        text,
+                        "{field}: {detail}; its fix is {} bytes, too long to show here",
+                        fix.len()
+                    )
                 } else {
-                    write!(f, "{field}: {detail}; write {fix}")
+                    write!(text, "{field}: {detail}; write {fix}")
                 }
             }
             ManifestError::TooLarge { limit } => {
-                write!(f, "manifest exceeds the {limit}-byte limit")
+                write!(text, "manifest exceeds the {limit}-byte limit")
             }
             ManifestError::TooDeep { limit } => {
                 write!(
-                    f,
+                    text,
                     "manifest nesting counts more than the {limit}-level limit"
                 )
             }
-        }
+        }?;
+        f.write_str(&bounded(&text))
     }
+}
+
+fn bounded(text: &str) -> Cow<'_, str> {
+    if text.len() <= MAX_REFUSAL_BYTES {
+        return Cow::Borrowed(text);
+    }
+    let head = text.floor_char_boundary(2046);
+    let tail = text.ceil_char_boundary(text.len() - 2047);
+    Cow::Owned(format!("{}\u{2026}{}", &text[..head], &text[tail..]))
 }
 
 impl std::error::Error for ManifestError {}
@@ -331,7 +362,7 @@ impl PlasmidManifest {
     /// that delivers more than that is refused with `TooLarge` at the bound,
     /// and nothing past it is parsed. Time is not bounded: a FIFO with no
     /// writer blocks this call while it opens the FIFO, and a FIFO whose
-    /// writer stops short of the bound and never closes blocks it while it
+    /// writer delivers at most `MAX_MANIFEST_BYTES` and never closes blocks it while it
     /// reads. A file that is not UTF-8 is an `Io` error of kind `InvalidData`.
     /// What was read goes to `parse`, which refuses a declaration nested
     /// deeper than `MAX_MANIFEST_DEPTH` with `TooDeep`.
@@ -5468,6 +5499,178 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             );
             assert!(text.contains(escaped), "{code:#x}: {text:?}");
             assert!(text.contains('\n'), "{code:#x} keeps its layout: {text:?}");
+        }
+    }
+
+    #[test]
+    fn bounded_text_is_unchanged_up_to_4096_bytes_and_cut_past_them() {
+        assert_eq!(bounded(""), "");
+        let exact = "x".repeat(4096);
+        assert_eq!(bounded(&exact), exact);
+        let over = format!("{}{}", "h".repeat(2048), "t".repeat(2049));
+        let cut = bounded(&over);
+        assert_eq!(cut.len(), 4096);
+        assert_eq!(
+            cut,
+            format!("{}\u{2026}{}", "h".repeat(2046), "t".repeat(2047))
+        );
+        for text in [
+            "\u{e9}".repeat(3000),
+            "\u{20ac}".repeat(2000),
+            "\u{1f600}".repeat(1500),
+        ] {
+            let cut = bounded(&text);
+            assert!(cut.len() <= 4096);
+            let (head, tail) = cut.split_once('\u{2026}').unwrap();
+            assert!(text.starts_with(head));
+            assert!(text.ends_with(tail));
+        }
+        let text = format!("a{}z", "\u{1f600}".repeat(1500));
+        let cut = bounded(&text);
+        let (head, tail) = cut.split_once('\u{2026}').unwrap();
+        assert!(text.starts_with(head));
+        assert!(text.ends_with(tail));
+        assert!(cut.len() <= 4096);
+    }
+
+    #[test]
+    fn a_refusal_propagates_an_io_errors_formatting_failure() {
+        #[derive(Debug)]
+        struct Unformattable;
+
+        impl fmt::Display for Unformattable {
+            fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+
+        impl std::error::Error for Unformattable {}
+
+        let error = ManifestError::Io(std::io::Error::other(Unformattable));
+        let mut text = String::new();
+        assert!(fmt::write(&mut text, format_args!("{error}")).is_err());
+    }
+
+    #[test]
+    fn a_parse_refusal_of_a_mebibyte_of_nul_writes_at_most_4096_bytes() {
+        let error = PlasmidManifest::parse(&"\0".repeat(MAX_MANIFEST_BYTES)).unwrap_err();
+        let ManifestError::Parse(parser) = &error else {
+            panic!("a syntax refusal");
+        };
+        let parser_text = visible_lines(&parser.to_string());
+        let text = error.to_string();
+        assert!(text.len() <= 4096, "{} bytes", text.len());
+        assert_eq!(text.matches('\u{2026}').count(), 1);
+        assert!(text.starts_with(&format!(
+            "manifest toml error: {}",
+            parser_text.lines().next().unwrap()
+        )));
+        let last_line = parser_text
+            .lines()
+            .rev()
+            .find(|line| !line.is_empty())
+            .unwrap();
+        let ending = &parser_text[parser_text.rfind(last_line).unwrap()..];
+        assert!(text.ends_with(ending));
+    }
+
+    #[test]
+    fn a_cut_refusal_writes_no_raw_control_character() {
+        let commands: Vec<String> = (0..2000)
+            .map(|n| {
+                let name: String = (0..4)
+                    .map(|k| char::from_u32(0x80 + ((n >> (k * 5)) & 31)).unwrap())
+                    .collect();
+                format!("\"{name}\"")
+            })
+            .collect();
+        for declaration in [
+            "\0".repeat(MAX_MANIFEST_BYTES),
+            declared(&format!("commands = [{}]", commands.join(","))),
+        ] {
+            let text = PlasmidManifest::parse(&declaration)
+                .unwrap_err()
+                .to_string();
+            assert!(text.len() <= 4096);
+            assert!(text.contains('\u{2026}'));
+            assert!(!text.chars().any(|c| c != '\n' && acted_on(c)));
+        }
+    }
+
+    #[test]
+    fn a_fix_of_1024_bytes_is_shown_and_a_longer_one_is_given_by_its_length() {
+        for (fix, ending) in [
+            ("x".repeat(1024), format!("write {}", "x".repeat(1024))),
+            (
+                "x".repeat(1025),
+                "its fix is 1025 bytes, too long to show here".to_string(),
+            ),
+            (REMOVE_ENTRY.to_string(), REMOVE_ENTRY.to_string()),
+        ] {
+            let error = ManifestError::Field {
+                plasmid: Some("p".into()),
+                field: "network".into(),
+                detail: "d".into(),
+                fix,
+            };
+            assert_eq!(
+                error.to_string(),
+                format!("plasmid p: network: d; {ending}")
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_of_130000_hosts_names_its_field_and_gives_its_fix_by_length() {
+        let hosts: Vec<String> = (0..130_000)
+            .map(|mut index| {
+                (0..4)
+                    .map(|_| {
+                        let letter = char::from(b'a' + (index % 26) as u8);
+                        index /= 26;
+                        letter
+                    })
+                    .collect()
+            })
+            .collect();
+        let entries = hosts
+            .iter()
+            .map(|host| toml_string(host))
+            .collect::<Vec<_>>()
+            .join(",");
+        let error =
+            PlasmidManifest::parse(&declared(&format!("network = [{entries}]"))).unwrap_err();
+        let ManifestError::Field { fix, .. } = &error else {
+            panic!("a field refusal");
+        };
+        assert_eq!(
+            fix,
+            &format!("[network]\n{}", strings_line("hosts", &hosts))
+        );
+        let text = error.to_string();
+        assert!(text.len() <= 4096);
+        assert!(text.starts_with("plasmid github-pr: network: ["));
+        assert!(text.ends_with(&format!(
+            "; its fix is {} bytes, too long to show here",
+            fix.len()
+        )));
+    }
+
+    #[test]
+    fn every_author_refusal_is_written_whole() {
+        for (declaration, ..) in author_refusals() {
+            let error = PlasmidManifest::parse(&declaration).unwrap_err();
+            let ManifestError::Field { fix, .. } = &error else {
+                panic!("a field refusal");
+            };
+            let text = error.to_string();
+            assert!(text.len() <= 4096, "{declaration}");
+            assert!(!text.contains('\u{2026}'), "{declaration}");
+            assert!(text.ends_with(&if fix == REMOVE_ENTRY {
+                fix.clone()
+            } else {
+                format!("write {fix}")
+            }));
         }
     }
 
