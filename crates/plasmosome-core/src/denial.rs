@@ -1,7 +1,7 @@
 use crate::manifest::{is_proxy_host, toml_string};
 use plasmosome_backend::{CellId, PluginId, WallMs};
-use serde::{Deserialize, Deserializer, Serialize, de};
-use std::{collections::VecDeque, fmt, marker::PhantomData};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::{collections::VecDeque, sync::Arc};
 use uuid::Uuid;
 
 /// The session log kind for the payload returned by [`log_event`].
@@ -59,22 +59,6 @@ pub struct Report {
     pub fix: String,
 }
 
-fn object_only<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
-    deserializer: D,
-) -> Result<T, D::Error> {
-    struct Object<T>(PhantomData<T>);
-    impl<'de, T: Deserialize<'de>> de::Visitor<'de> for Object<T> {
-        type Value = T;
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a denial record object")
-        }
-        fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
-            T::deserialize(de::value::MapAccessDeserializer::new(map))
-        }
-    }
-    deserializer.deserialize_map(Object(PhantomData))
-}
-
 fn present_plasmid<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<PluginId>, D::Error> {
@@ -95,7 +79,7 @@ macro_rules! wire_record {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Fields { $($(#[$attr])* $field: $ty),* }
-                let fields: Fields = object_only(deserializer)?;
+                let fields = Fields::deserialize(plasmosome_backend::ObjectOnly::new(deserializer))?;
                 Ok(Self { $($field: fields.$field),* })
             }
         }
@@ -195,28 +179,44 @@ impl DenialLimits {
 }
 
 struct Entry {
-    plasmid: Option<PluginId>,
+    plasmid: Option<Arc<PluginId>>,
     reach: Reach,
     count: u64,
     lines: u32,
 }
 
+struct PendingLine {
+    line: DenialLine,
+    plasmid: Option<Arc<PluginId>>,
+}
+
+impl PendingLine {
+    fn wire(&self) -> DenialLine {
+        let mut line = self.line.clone();
+        line.plasmid = self.plasmid.as_deref().cloned();
+        line
+    }
+}
+
 /// One cell's denial state, without IO or a clock. Attribution is the caller's responsibility.
 /// Keep one book for the membrane's life and pass the boundary's time to each record.
 pub struct DenialBook {
+    cell: CellId,
     id: Uuid,
     limits: DenialLimits,
     entries: Vec<Entry>,
-    waiting: VecDeque<DenialLine>,
+    waiting: VecDeque<PendingLine>,
     issued: u32,
     last_seq: u64,
     unlogged: u64,
 }
 
 impl DenialBook {
-    /// Creates an empty book. The membrane supplies a fresh UUID at start.
-    pub fn new(book: Uuid, limits: DenialLimits) -> DenialBook {
+    /// Creates an empty book for `cell`. The membrane supplies a fresh UUID at start.
+    /// Lines are limited to 1,024 bytes in this cell's encoded log payload.
+    pub fn new(cell: CellId, book: Uuid, limits: DenialLimits) -> DenialBook {
         Self {
+            cell,
             id: book,
             limits,
             entries: Vec::new(),
@@ -225,6 +225,11 @@ impl DenialBook {
             last_seq: 0,
             unlogged: 0,
         }
+    }
+
+    /// Returns the cell whose identity is included when measuring each log payload.
+    pub fn cell(&self) -> &CellId {
+        &self.cell
     }
 
     /// Returns the identity that scopes acknowledgments to this membrane's life.
@@ -238,14 +243,14 @@ impl DenialBook {
         let index = self
             .entries
             .iter()
-            .position(|entry| entry.plasmid == plasmid && entry.reach == reach);
+            .position(|entry| entry.plasmid.as_deref() == plasmid.as_ref() && entry.reach == reach);
         let index = match index {
             Some(index) => index,
             None => {
                 let same = self
                     .entries
                     .iter()
-                    .filter(|entry| entry.plasmid == plasmid)
+                    .filter(|entry| entry.plasmid.as_deref() == plasmid.as_ref())
                     .count();
                 let named = self
                     .entries
@@ -262,7 +267,7 @@ impl DenialBook {
                     return;
                 }
                 self.entries.push(Entry {
-                    plasmid: plasmid.clone(),
+                    plasmid: plasmid.map(Arc::new),
                     reach,
                     count: 0,
                     lines: 0,
@@ -281,38 +286,51 @@ impl DenialBook {
             return;
         }
         let report = entry.reach.report();
-        self.last_seq += 1;
-        entry.lines += 1;
-        self.issued += 1;
-        self.waiting.push_back(DenialLine {
-            seq: self.last_seq,
-            plasmid,
+        let mut line = DenialLine {
+            seq: self.last_seq + 1,
+            plasmid: entry.plasmid.as_deref().cloned(),
             denied: report.denied,
             field: report.field.into(),
             fix: report.fix,
             count: entry.count,
             at_ms: at.unix_ms(),
             unlogged: self.unlogged,
+        };
+        if serde_json::to_vec(&log_event(&self.cell, &line))
+            .expect("a JSON value serializes")
+            .len()
+            > 1024
+        {
+            self.unlogged = self.unlogged.saturating_add(1);
+            return;
+        }
+        self.last_seq += 1;
+        entry.lines += 1;
+        self.issued += 1;
+        line.plasmid = None;
+        self.waiting.push_back(PendingLine {
+            line,
+            plasmid: entry.plasmid.clone(),
         });
         self.unlogged = 0;
     }
 
     /// Acknowledges `after` only for this book's id, then returns the oldest waiting lines
     /// without consuming them. No book or another book answers from the first waiting line.
-    pub fn page(&mut self, cell: &CellId, book: Option<Uuid>, after: u64) -> DenialPage {
+    pub fn page(&mut self, book: Option<Uuid>, after: u64) -> DenialPage {
         if book == Some(self.id) {
-            self.waiting.retain(|line| line.seq > after);
+            self.waiting.retain(|pending| pending.line.seq > after);
         }
         let mut entries: Vec<PlasmidDenials> = Vec::new();
         for entry in &self.entries {
             let Some(plasmid) = &entry.plasmid else {
                 continue;
             };
-            let group = match entries.iter().position(|group| group.plasmid == *plasmid) {
+            let group = match entries.iter().position(|group| group.plasmid == **plasmid) {
                 Some(index) => index,
                 None => {
                     entries.push(PlasmidDenials {
-                        plasmid: plasmid.clone(),
+                        plasmid: plasmid.as_ref().clone(),
                         denials: Vec::new(),
                     });
                     entries.len() - 1
@@ -327,13 +345,13 @@ impl DenialBook {
             });
         }
         DenialPage {
-            cell: cell.clone(),
+            cell: self.cell.clone(),
             book: self.id,
             lines: self
                 .waiting
                 .iter()
                 .take(self.limits.page)
-                .cloned()
+                .map(PendingLine::wire)
                 .collect(),
             entries,
         }
@@ -342,7 +360,7 @@ impl DenialBook {
     /// Frees this plasmid's entry room, preserving its historical waiting lines and cell budget.
     pub fn forget(&mut self, plasmid: &PluginId) {
         self.entries
-            .retain(|entry| entry.plasmid.as_ref() != Some(plasmid));
+            .retain(|entry| entry.plasmid.as_deref() != Some(plasmid));
     }
 }
 
@@ -364,9 +382,14 @@ pub fn log_event(cell: &CellId, line: &DenialLine) -> serde_json::Value {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    use std::fmt;
 
     fn book() -> DenialBook {
-        DenialBook::new(Uuid::from_u128(1), DenialLimits::DEFAULT)
+        DenialBook::new(
+            CellId::from("cell-1"),
+            Uuid::from_u128(1),
+            DenialLimits::DEFAULT,
+        )
     }
     fn host(n: usize) -> Reach {
         Reach::host(&format!("h{n}.example.test")).unwrap()
@@ -379,10 +402,33 @@ mod tests {
         );
     }
     fn page(book: &mut DenialBook) -> DenialPage {
-        book.page(&CellId::from("cell-1"), None, 0)
+        book.page(None, 0)
     }
     fn ack(book: &mut DenialBook, after: u64) -> DenialPage {
-        book.page(&CellId::from("cell-1"), Some(book.id()), after)
+        book.page(Some(book.id()), after)
+    }
+    fn parsed_id(id: &str) -> PluginId {
+        let declaration = format!(
+            "id = {}\ndescription = \"Test a denial.\"\n[network]\nhosts = [\"a.test\"]\nports = [443]\n",
+            toml_string(id)
+        );
+        let parsed = crate::manifest::PlasmidManifest::parse(&declaration).unwrap();
+        assert_eq!(parsed.id, id);
+        PluginId::from(parsed.id)
+    }
+    fn payload_bytes(page: &DenialPage) -> usize {
+        page.lines
+            .iter()
+            .map(|line| {
+                let log = serde_json::to_vec(&log_event(&page.cell, line))
+                    .unwrap()
+                    .len();
+                let wire = serde_json::to_vec(line).unwrap().len();
+                assert!(wire <= log);
+                assert!(log <= 1024, "{log}");
+                log
+            })
+            .sum()
     }
 
     #[test]
@@ -512,6 +558,78 @@ ports = [443, 8443]
     }
 
     #[test]
+    fn different_ports_on_one_host_are_distinct_denials() {
+        let mut book = book();
+        for port in [8080, 8081, 8080] {
+            record(
+                &mut book,
+                Some("p"),
+                Reach::port("api.example.test", port).unwrap(),
+            );
+        }
+        let page = page(&mut book);
+        assert_eq!(page.entries[0].denials.len(), 2);
+        assert_eq!(
+            page.entries[0]
+                .denials
+                .iter()
+                .map(|d| (d.denied.as_str(), d.fix.as_str(), d.count))
+                .collect::<Vec<_>>(),
+            vec![
+                ("api.example.test:8080", "8080", 2),
+                ("api.example.test:8081", "8081", 1)
+            ]
+        );
+        assert_eq!(
+            page.lines
+                .iter()
+                .map(|l| (l.denied.as_str(), l.fix.as_str(), l.count))
+                .collect::<Vec<_>>(),
+            vec![
+                ("api.example.test:8080", "8080", 1),
+                ("api.example.test:8081", "8081", 1),
+                ("api.example.test:8080", "8080", 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn host_and_port_on_one_host_are_distinct_denials() {
+        let mut book = book();
+        record(
+            &mut book,
+            Some("p"),
+            Reach::host("api.example.test").unwrap(),
+        );
+        record(
+            &mut book,
+            Some("p"),
+            Reach::port("api.example.test", 8080).unwrap(),
+        );
+        let page = page(&mut book);
+        assert_eq!(page.entries[0].denials.len(), 2);
+        assert_eq!(
+            page.entries[0]
+                .denials
+                .iter()
+                .map(|d| (d.denied.as_str(), d.field.as_str(), d.fix.as_str(), d.count))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "api.example.test",
+                    "network.hosts",
+                    "\"api.example.test\"",
+                    1
+                ),
+                ("api.example.test:8080", "network.ports", "8080", 1)
+            ]
+        );
+        assert_eq!(page.lines.len(), 2);
+        assert_eq!(page.lines[0].field, "network.hosts");
+        assert_eq!(page.lines[1].field, "network.ports");
+    }
+
+    #[test]
     fn entries_are_grouped_by_plasmid_in_first_seen_order() {
         let mut book = book();
         record(&mut book, Some("z"), host(1));
@@ -584,7 +702,7 @@ ports = [443, 8443]
         );
         assert_eq!(book.waiting.len(), 64);
         record(&mut book, Some("p0"), host(0));
-        assert_eq!(book.waiting.back().unwrap().unlogged, 16);
+        assert_eq!(book.waiting.back().unwrap().line.unlogged, 16);
     }
 
     #[test]
@@ -601,7 +719,7 @@ ports = [443, 8443]
             }
         }
         assert_eq!(book.entries.len(), 96);
-        assert_eq!(book.waiting[32].unlogged, 1);
+        assert_eq!(book.waiting[32].line.unlogged, 1);
         assert_eq!(page(&mut book).entries.len(), 4);
     }
 
@@ -614,12 +732,208 @@ ports = [443, 8443]
         assert_eq!(page(&mut book).lines.len(), 64);
         assert_eq!(page(&mut book).entries[0].denials[0].count, 65);
         record(&mut book, Some("p"), host(2));
-        assert_eq!(book.waiting.back().unwrap().unlogged, 1);
+        assert_eq!(book.waiting.back().unwrap().line.unlogged, 1);
+    }
+
+    #[test]
+    fn acknowledgment_does_not_reset_a_denials_line_budget() {
+        let mut book = book();
+        for _ in 0..64 {
+            record(&mut book, Some("p"), host(1));
+        }
+        assert_eq!(page(&mut book).lines.len(), 64);
+        assert!(ack(&mut book, 64).lines.is_empty());
+        record(&mut book, Some("p"), host(1));
+        let page = page(&mut book);
+        assert!(page.lines.is_empty());
+        assert_eq!(page.entries[0].denials[0].count, 65);
+        record(&mut book, Some("q"), host(1));
+        assert_eq!(book.waiting.back().unwrap().line.unlogged, 1);
+    }
+
+    #[test]
+    fn a_1024_byte_payload_is_written_and_a_1025_byte_payload_is_unlogged() {
+        for cell in [
+            CellId::from("cell-1"),
+            CellId::from("cell-9999999999"),
+            CellId::from("cell-\"é"),
+        ] {
+            for prefix in [String::new(), "\"\\\n".repeat(50), "é".repeat(100)] {
+                for size in [1024, 1025] {
+                    let mut candidate = DenialLine {
+                        seq: 1,
+                        plasmid: Some(parsed_id(&(prefix.clone() + "p"))),
+                        denied: "a.test:8080".into(),
+                        field: "network.ports".into(),
+                        fix: "8080".into(),
+                        count: 1,
+                        at_ms: 123,
+                        unlogged: 0,
+                    };
+                    let baseline = serde_json::to_vec(&log_event(&cell, &candidate))
+                        .unwrap()
+                        .len();
+                    let id = parsed_id(&(prefix.clone() + &"p".repeat(1 + size - baseline)));
+                    candidate.plasmid = Some(id.clone());
+                    assert_eq!(
+                        serde_json::to_vec(&log_event(&cell, &candidate))
+                            .unwrap()
+                            .len(),
+                        size
+                    );
+                    let mut book =
+                        DenialBook::new(cell.clone(), Uuid::from_u128(1), DenialLimits::DEFAULT);
+                    assert_eq!(book.cell(), &cell);
+                    book.record(
+                        Some(id.clone()),
+                        Reach::port("a.test", 8080).unwrap(),
+                        WallMs::from_unix_ms(123),
+                    );
+                    let first = page(&mut book);
+                    assert_eq!(first.entries[0].plasmid, id);
+                    assert_eq!(first.entries[0].denials[0].count, 1);
+                    if size == 1024 {
+                        assert_eq!(first.lines, vec![candidate]);
+                        assert_eq!(payload_bytes(&first), 1024);
+                    } else {
+                        assert!(first.lines.is_empty());
+                        assert_eq!(book.issued, 0);
+                        assert_eq!(book.entries[0].lines, 0);
+                        assert_eq!(book.last_seq, 0);
+                    }
+                    book.record(Some(parsed_id("q")), host(1), WallMs::from_unix_ms(123));
+                    let next = page(&mut book);
+                    assert_eq!(next.lines.last().unwrap().unlogged, u64::from(size == 1025));
+                    payload_bytes(&next);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_lines_share_the_entry_id_and_keep_it_after_forget() {
+        let id = parsed_id(&"p".repeat(500));
+        let mut book = book();
+        for _ in 0..3 {
+            book.record(Some(id.clone()), host(1), WallMs::from_unix_ms(123));
+        }
+        let retained = book.entries[0].plasmid.as_ref().unwrap();
+        for pending in &book.waiting {
+            assert!(pending.line.plasmid.is_none());
+            assert!(Arc::ptr_eq(retained, pending.plasmid.as_ref().unwrap()));
+        }
+        assert_eq!(Arc::strong_count(retained), 4);
+        book.forget(&id);
+        let page = page(&mut book);
+        assert!(page.entries.is_empty());
+        assert_eq!(page.lines.len(), 3);
+        assert!(
+            page.lines
+                .iter()
+                .all(|line| line.plasmid.as_ref() == Some(&id))
+        );
+        payload_bytes(&page);
+    }
+
+    #[test]
+    fn the_full_lifetime_line_budget_fits_four_mib_of_payload() {
+        let mut book = book();
+        let mut bytes = 0;
+        let mut count = 0;
+        let mut after = 0;
+        for p in 0..4 {
+            let id = parsed_id(&format!("p{p}"));
+            for port in 8080..8096 {
+                for _ in 0..64 {
+                    book.record(
+                        Some(id.clone()),
+                        Reach::port("a.test", port).unwrap(),
+                        WallMs::from_unix_ms(123),
+                    );
+                }
+                let page = ack(&mut book, after);
+                bytes += payload_bytes(&page);
+                count += page.lines.len();
+                after = page.lines.last().unwrap().seq;
+            }
+        }
+        assert_eq!(count, 4096);
+        assert!(bytes <= 4_194_304);
+        assert!(ack(&mut book, after).lines.is_empty());
+        book.forget(&parsed_id("p0"));
+        book.record(Some(parsed_id("q")), host(1), WallMs::from_unix_ms(123));
+        assert!(page(&mut book).lines.is_empty());
+        assert_eq!(book.unlogged, 1);
+    }
+
+    #[test]
+    fn a_valid_2000_character_id_keeps_every_count_without_a_line() {
+        let id = parsed_id(&"p".repeat(2000));
+        let mut book = book();
+        for _ in 0..3 {
+            book.record(
+                Some(id.clone()),
+                Reach::port("a.test", 8080).unwrap(),
+                WallMs::from_unix_ms(123),
+            );
+        }
+        let first = page(&mut book);
+        assert_eq!(first.entries[0].plasmid, id);
+        assert_eq!(first.entries[0].denials[0].count, 3);
+        assert!(first.lines.is_empty());
+        book.record(Some(parsed_id("q")), host(1), WallMs::from_unix_ms(123));
+        let next = page(&mut book);
+        assert_eq!(next.lines.len(), 1);
+        assert_eq!(next.lines[0].unlogged, 3);
+        assert_eq!(next.lines[0].seq, 1);
+        payload_bytes(&next);
+    }
+
+    #[test]
+    fn four_large_ids_cannot_expand_the_lifetime_log() {
+        let ids = (0..4)
+            .map(|n| parsed_id(&format!("{n}{}", "p".repeat(65535))))
+            .collect::<Vec<_>>();
+        let mut book = book();
+        let mut bytes = 0;
+        let mut after = 0;
+        for id in &ids {
+            for port in 8080..8096 {
+                for _ in 0..64 {
+                    book.record(
+                        Some(id.clone()),
+                        Reach::port("a.test", port).unwrap(),
+                        WallMs::from_unix_ms(123),
+                    );
+                }
+                let page = ack(&mut book, after);
+                bytes += payload_bytes(&page);
+                if let Some(line) = page.lines.last() {
+                    after = line.seq;
+                }
+            }
+        }
+        let first = ack(&mut book, after);
+        assert_eq!(first.entries.len(), 4);
+        for (entry, id) in first.entries.iter().zip(&ids) {
+            assert_eq!(&entry.plasmid, id);
+            assert_eq!(entry.denials.len(), 16);
+            assert!(entry.denials.iter().all(|denial| denial.count == 64));
+        }
+        assert!(first.lines.is_empty());
+        assert_eq!(bytes, 0);
+        assert_eq!(book.issued, 0);
+        record(&mut book, None, host(1));
+        let next = page(&mut book);
+        assert_eq!(next.lines[0].unlogged, 4096);
+        bytes += payload_bytes(&next);
+        assert!(bytes <= 4_194_304);
     }
 
     #[test]
     fn a_cell_issues_at_most_its_line_budget() {
         let mut book = DenialBook::new(
+            CellId::from("cell-1"),
             Uuid::nil(),
             DenialLimits {
                 lines_per_cell: 5,
@@ -629,7 +943,9 @@ ports = [443, 8443]
         for n in 0..5 {
             record(&mut book, Some("p"), host(n));
         }
-        assert_eq!(page(&mut book).lines.len(), 5);
+        let issued = page(&mut book);
+        assert_eq!(issued.lines.len(), 5);
+        assert!(payload_bytes(&issued) <= 4_194_304);
         ack(&mut book, 5);
         book.forget(&"p".into());
         record(&mut book, Some("p"), host(6));
@@ -641,6 +957,7 @@ ports = [443, 8443]
     #[test]
     fn at_most_the_waiting_limit_waits() {
         let mut book = DenialBook::new(
+            CellId::from("cell-1"),
             Uuid::nil(),
             DenialLimits {
                 waiting: 3,
@@ -668,6 +985,7 @@ ports = [443, 8443]
     #[test]
     fn a_page_drops_only_what_after_acknowledges() {
         let mut book = DenialBook::new(
+            CellId::from("cell-1"),
             Uuid::nil(),
             DenialLimits {
                 page: 2,
@@ -702,9 +1020,9 @@ ports = [443, 8443]
             record(&mut book, Some("p"), host(n));
         }
         for id in [None, Some(Uuid::from_u128(2))] {
-            let page = book.page(&CellId::from("cell-7"), id, 5);
+            let page = book.page(id, 5);
             assert_eq!(page.book, book.id());
-            assert_eq!(page.cell, CellId::from("cell-7"));
+            assert_eq!(&page.cell, book.cell());
             assert_eq!(
                 page.lines.iter().map(|l| l.seq).collect::<Vec<_>>(),
                 vec![1, 2, 3]
@@ -734,7 +1052,6 @@ ports = [443, 8443]
         assert_eq!(book.issued, 33);
     }
 
-    /// Spec 011 Contract Bounds (467-472 at 30f8cbed) and spec 001 membrane.cell.denials (856-867).
     #[test]
     fn the_default_limits_are_the_specs() {
         assert_eq!(
@@ -891,7 +1208,7 @@ ports = [443, 8443]
             record(&mut book, Some("p"), host(1));
         }
         assert_eq!(page(&mut book).entries[0].denials[0].count, u64::MAX);
-        assert_eq!(book.waiting.back().unwrap().count, u64::MAX);
+        assert_eq!(book.waiting.back().unwrap().line.count, u64::MAX);
     }
 
     #[test]
@@ -900,7 +1217,7 @@ ports = [443, 8443]
         record(&mut book, None, host(1));
         book.last_seq = u64::MAX - 1;
         record(&mut book, None, host(1));
-        assert_eq!(book.waiting.back().unwrap().seq, u64::MAX);
+        assert_eq!(book.waiting.back().unwrap().line.seq, u64::MAX);
         book.unlogged = u64::MAX;
         record(&mut book, None, host(1));
         assert_eq!(book.waiting.len(), 2);
