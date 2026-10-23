@@ -22,10 +22,6 @@ const REPLACEMENT: &str = "/event/prepare/changes/0/replacement";
 const MOCK: &str = "/event/prepare/changes/0/replacement/mock";
 const SOURCE: &str = "/event/prepare/changes/0/replacement/source";
 const MEMBER: &str = "/event/prepare/changes/0/replacement/source/member";
-const SPEC_008: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/specs/008-cell-recovery-contract.md"
-);
 
 fn cell() -> CellId {
     CellId::from("cell-1")
@@ -204,6 +200,7 @@ fn every_record_shape_round_trips_on_one_line() {
     }
     let text = |index: usize| String::from_utf8(encode_record(&records[index]).unwrap()).unwrap();
     let full = text(0);
+    assert!(full.contains(&serde_json::to_string(&registry()).unwrap()));
     #[rustfmt::skip]
     let written = [r#""replacement":null"#, r#""operation":null"#, r#""kind":"local""#];
     for written in written {
@@ -213,6 +210,10 @@ fn every_record_shape_round_trips_on_one_line() {
     assert!(text(1).ends_with("\"force\":null}}}\n"));
     let abort = concat!(r#"{"format":1,"generation":2,"event":{"abort":{}}}"#, "\n");
     assert_eq!(text(3), abort);
+    let commit = concat!(r#"{"format":1,"generation":1,"event":{"commit":{}}}"#, "\n");
+    let finish = concat!(r#"{"format":1,"generation":3,"event":{"finish":{}}}"#, "\n");
+    assert_eq!(text(2), commit);
+    assert_eq!(text(4), finish);
 }
 
 #[test]
@@ -225,12 +226,15 @@ fn fault_kinds_are_spec_008s_closed_list() {
         Io | Unparseable | UnsupportedFormat | GenerationZero | GenerationOrder | EventOrder
         | InvalidEffect | InvalidSource | InvalidClosure | InvalidLifetime => kind,
     };
-    let spec = std::fs::read_to_string(SPEC_008).expect("spec 008 is readable beside the crate");
-    let words = spec.split_whitespace().collect::<Vec<_>>().join(" ");
-    let (_, list) = words.split_once("`lines_parsed: u64`, and kind `").unwrap();
-    let (list, _) = list.split_once('`').unwrap();
-    let named: Vec<String> = kinds.map(|kind| format!("{:?}", every(kind))).to_vec();
-    assert_eq!(named, list.split(" | ").collect::<Vec<_>>());
+    plasmosome_guards::check_workspace(|root| {
+        let spec = std::fs::read_to_string(root.join("docs/specs/008-cell-recovery-contract.md"))
+            .expect("spec 008 is readable in the invoking workspace");
+        let words = spec.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (_, list) = words.split_once("`lines_parsed: u64`, and kind `").unwrap();
+        let (list, _) = list.split_once('`').unwrap();
+        let named: Vec<String> = kinds.map(|kind| format!("{:?}", every(kind))).to_vec();
+        assert_eq!(named, list.split(" | ").collect::<Vec<_>>());
+    });
 }
 
 #[test]
@@ -256,6 +260,11 @@ fn unparseable_records_refuse() {
         ("generation as text", set(r, "/generation", json!("1"))),
         ("a negative generation", set(r, "/generation", json!(-1))),
         ("a fractional generation", set(r, "/generation", json!(1.5))),
+        ("a leading-zero generation", replaced(c, "\"generation\":1", "\"generation\":01")),
+        ("an exponent generation", replaced(c, "\"generation\":1", "\"generation\":1e0")),
+        ("an integral fractional generation", replaced(c, "\"generation\":1", "\"generation\":1.0")),
+        ("a negative-zero generation", replaced(c, "\"generation\":1", "\"generation\":-0")),
+        ("a generation beyond u64", replaced(c, "\"generation\":1", "\"generation\":18446744073709551616")),
         ("an unknown event", set(c, "/event", json!({"rollback": {}}))),
         ("a terminal event as text", set(c, "/event", json!("commit"))),
         ("a terminal event with a field", set(c, "/event/commit", json!({"x": 1}))),
@@ -425,8 +434,14 @@ fn each_effect_names_its_address() {
     let addresses: Vec<Option<Handle>> = effects.iter().map(RecordedEffect::address).collect();
     let handle = |index: usize| effects[index].operation.as_ref().map(UniverseOp::handle);
     assert_eq!(&addresses[..2], &[handle(0), handle(1)]);
-    let class = addresses[2].map(|handle| handle.class);
-    assert_eq!(class, Some(UniverseClass::UdsPath));
+    let expected = match &effects[2].effect.reversibility {
+        plasmosome_ledger::Reversibility::Exact(plasmosome_ledger::Inverse {
+            via: InverseVia::Backend(handle),
+            ..
+        }) => *handle,
+        _ => panic!("the fixture is a backend-handle effect"),
+    };
+    assert_eq!(addresses[2], Some(expected));
     assert_eq!(&addresses[3..], &[None, None, None]);
 }
 
