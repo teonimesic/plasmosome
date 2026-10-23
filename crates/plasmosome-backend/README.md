@@ -1,10 +1,10 @@
 # plasmosome-backend
 
 The enforcement seam. One interface between *deciding* a capability and *making it real*. The
-crate also holds vocabulary that guest, membrane and controller share: the SHA-256 `Digest`, spec
-001's observation pages and spec 027's pinned software trees, in the `digest`, `paging` and
-`software` modules, and spec 028's lifetime values and the clock they are read on, in `lifetime`
-and `clock`.
+crate also holds vocabulary that guest, membrane and controller share: the SHA-256 `Digest`
+(`digest`), spec 001's observation pages (`paging`) and guest bridge records (`guest_protocol`),
+spec 027's pinned software trees (`software`), and spec 028's lifetime values and the clock they
+are read on (`lifetime` and `clock`).
 
 The controller says "this cell may reach api.example.com". Something must then edit a proxy's
 allowlist, mount a directory, or install a credential — and that something differs by platform
@@ -228,5 +228,6 @@ lives here, beside `DrainSpec`, because it reads only the drain's deadline and p
 | `clock` | The `Clock` seam every lifetime decision reads time through: wall, continuous and wait readings, taken together. `ManualClock` lets a test move each one alone. The production clock is `SystemClock` in `plasmosome-core` |
 | `paging` | Spec 001's observation pages, shared by guest, membrane and controller. On the responding side, a server keeps one `CaptureSlot` per connection. The slot holds the compact JSON account that the server's `collect` froze with `FrozenAccount::freeze`, and serves it in pages of 1 to 65,536 bytes until its deadline. On the requesting side, a caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Both sides pass the clock and own the IO |
 | `software` | Spec 027's software tree before attach: `pin` checks a directory against the verified package's paths, sizes and digests, and `check_names` decides the 102 name conflicts. Nothing is placed here |
+| `guest_protocol` | What crosses spec 001 §4.2's 4090 control lanes, shared by the guest and the host so neither accepts a line the other refuses. `ControlLane` is exactly `"normal"` or `"withdrawal"` in JSON, and `BootToken` exactly 64 lowercase hexadecimal digits; the membrane's `runtime::hello` re-exports both, with `BootTokenError`. The envelope: `encode_request`, `encode_success` and `encode_failure` write compact lines with no newline, echoing a `RequestId`'s JSON text unchanged. `split_request` reads one request line as exactly `{id, method, params}` with params an object, and refuses anything else with -32700 or -32600 as spec 001 §1 says, under a `null` id when the line's id cannot be trusted. A refusal's message keeps at most 1,024 bytes. The reader bounds the line. The seven control records are not here yet |
 
 Tests: `cargo test -p plasmosome-backend`

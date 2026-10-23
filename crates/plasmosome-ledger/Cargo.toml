@@ -14,6 +14,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+plasmosome-guards = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
