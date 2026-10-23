@@ -35,6 +35,7 @@ pub(crate) enum MemberRefusal {
 /// `None`. The entry must come from `OperatorFile::parse`, including its UTF-8 source paths.
 /// Returns complete capabilities with fresh IDs, or one refusal and no partial result. Reads
 /// no files or cell state; callers check source safety and closure conflicts before prepare.
+/// Commands refuse with the first by name, in the parsed table's byte order.
 pub(crate) fn resolve_member(
     manifest: &PlasmidManifest,
     entry: Option<&OperatorEntry>,
@@ -521,8 +522,8 @@ mod tests {
     fn unsupported_needs_name_the_first_command_then_secret_then_model() {
         let cases = [
             (
-                "[commands.commands.first]\nexec = [\"first\"]\n[commands.commands.second]\nexec = [\"second\"]",
-                "unsupported:commands:first",
+                "[commands.commands.z-first]\nexec = [\"first\"]\n[commands.commands.a-second]\nexec = [\"second\"]",
+                "unsupported:commands:a-second",
             ),
             (
                 "[secrets]\nrefs = [{ id = \"z/key\", consumer = \"wasm\" }, { id = \"a/key\", consumer = \"wasm\" }]",

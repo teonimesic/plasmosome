@@ -864,7 +864,7 @@ author 108. A workspace picks the Mount whose target equals its `dst`, including
 default `/workspace`, and copies its source and access.
 
 An uncovered pair or workspace is `Uncovered`, with `entry:network:<host>:<port>` or
-`entry:workspace:<dst>`. Commands refuse with `unsupported:commands:<id>` for the first;
+`entry:workspace:<dst>`. Commands refuse with `unsupported:commands:<id>` for the first by name;
 secrets, then model credentials, refuse with `unsupported:credential:<ref>`. These become 103
 and carry no fix. Capabilities pass `Capability::validate` before return; an `Invalid` result
 becomes an operator-file 108 (`content`). A member with no needs yields no capabilities.
