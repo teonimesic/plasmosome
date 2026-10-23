@@ -595,6 +595,12 @@ true only when every holder of the write end has closed it.
 
 ## The shim's handshake
 
+The macOS unit tests use an immutable temporary bundle and a C helper with shim, unconfined,
+worker, bad-policy, early-exit and silent modes. They run the real artifact, initramfs, closure,
+launch, handshake and confinement checks. The fake loads one fixture library and applies the
+qualified host policy with a test-owned write directory. It never loads libkrun or uses HVF:
+these tests prove model behavior and the host mechanisms they exercise, not guest isolation.
+
 Spec 001 §4.2 says a cell is guest-ready only on the trusted shim's actual handshake, not on a
 fork, a socket file or a recorded pid. `runtime::handshake::handshake` is the host side of it. Pass
 it the control and data listeners the cell bound before the launch, the helper's pid, the expected
