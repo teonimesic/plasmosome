@@ -72,8 +72,10 @@ type Identity = (u64, u64);
 /// `CellDir::create_runtime_dir` then report a directory that exists as `Missing`, and
 /// `retire` reports `Io` with `ENOENT`.
 ///
-/// Private modes do not show inherited ACL access. Every open checks its own descriptor,
-/// including after creation and before setting its mode. A held directory is not checked again.
+/// Private modes do not show inherited ACL access. Every successful open checks its own
+/// descriptor, including after creation and before setting its mode through that descriptor.
+/// The directory-open retry described above may first set mode 0700 by name.
+/// A held directory is not checked again.
 /// A refused object stays in place, except for the existing temporary-file cleanup paths; the
 /// operator must clear its ACL. Nothing here removes an ACL. On Linux the same checks refuse
 /// POSIX access and default ACLs; on macOS they refuse any entry, including inherit-only entries.
@@ -100,6 +102,8 @@ impl InstanceRoot {
         let opened = Walk::from_root(path)
             .and_then(|walk| walk.open_trusted_directory())
             .map_err(|refusal| root_refusal(path, refusal))?;
+        #[cfg(all(test, target_os = "macos"))]
+        tests::after_root_walk();
         if carries_acl(opened.fd.as_fd()).map_err(|source| InstanceRootError::Open {
             path: path.to_path_buf(),
             source,
@@ -5860,6 +5864,18 @@ mod tests {
 
     type LockHook = Box<dyn FnOnce(BorrowedFd<'_>)>;
 
+    #[cfg(target_os = "macos")]
+    thread_local! {
+        static AFTER_ROOT_WALK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn after_root_walk() {
+        if let Some(work) = AFTER_ROOT_WALK.with(|slot| slot.borrow_mut().take()) {
+            work();
+        }
+    }
+
     thread_local! {
         static BETWEEN_LISTINGS: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static BEFORE_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
@@ -7527,6 +7543,19 @@ mod tests {
         }
 
         #[test]
+        fn a_deny_only_entry_on_the_root_or_lock_is_refused() {
+            let base = TestRoot::walkable_from_root();
+            planted(base.path(), "everyone deny delete");
+            expect_match!(InstanceRoot::open(base.path()), Err(InstanceRootError::Acl { path }) => assert_eq!(path, base.path()));
+            clear(base.path());
+            let instance = open_root(base.path());
+            drop(instance.lock().unwrap());
+            let path = base.join(LOCK_FILE);
+            planted(&path, "everyone deny delete");
+            expect_match!(instance.lock(), Err(LockError::Acl { path: named }) => assert_eq!(named, path));
+        }
+
+        #[test]
         fn t3_a_lock_inheriting_an_entry_is_left_in_place_and_refused_again() {
             let base = TestRoot::walkable_from_root();
             let root = base.path();
@@ -7539,6 +7568,40 @@ mod tests {
             clear(root);
             expect_match!(open_root(root).lock(), Err(LockError::Acl { path: named }) => assert_eq!(named, path));
             inherited(&path);
+        }
+
+        #[test]
+        fn an_owner_only_entry_on_the_root_is_refused_until_cleared() {
+            let base = TestRoot::walkable_from_root();
+            let owner = Command::new("/usr/bin/id").arg("-un").output().unwrap();
+            assert!(owner.status.success());
+            let owner = String::from_utf8(owner.stdout).unwrap();
+            planted(base.path(), &format!("user:{} allow read", owner.trim()));
+            expect_match!(InstanceRoot::open(base.path()), Err(InstanceRootError::Acl { path }) => assert_eq!(path, base.path()));
+            clear(base.path());
+            assert_eq!(open_root(base.path()).path(), base.path());
+        }
+
+        #[test]
+        fn a_renamed_walked_root_is_checked_instead_of_its_clean_replacement() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.join("instance");
+            let moved = base.join("moved");
+            make_dir(&root, 0o700);
+            planted(&root, "everyone allow read");
+            let original = identity_at(&root);
+            let old_path = root.clone();
+            let new_path = moved.clone();
+            AFTER_ROOT_WALK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    fs::rename(&old_path, &new_path).unwrap();
+                    make_dir(&old_path, 0o700);
+                }));
+            });
+            expect_match!(InstanceRoot::open(&root), Err(InstanceRootError::Acl { path }) => assert_eq!(path, root));
+            assert_eq!(identity_at(&moved), original);
+            assert_ne!(identity_at(&root), original);
+            assert_eq!(open_root(&root).path(), root);
         }
 
         #[test]

@@ -266,8 +266,9 @@ non-ASCII ID on HFS+ at creation.
 ## Cell markers and retirement
 
 The instance root and every object `InstanceRoot` or `CellDir` opens or creates under it must
-carry no ACL entry. Each check reads the opened descriptor, before a file is read, locked or
-written, and before the object's mode is set. This includes an inherited or inherit-only entry:
+carry no ACL entry. Each check reads the opened descriptor before a file is read, locked or
+written, and before its mode is set through that descriptor. After EACCES, the directory-open
+retry may first set mode 0700 by name. Inherited and inherit-only entries are also refused:
 0700 and 0600 modes alone do not restrict ACL access. macOS uses the same ACL reader as
 `PrivateDir`; Linux checks POSIX access and default ACLs through that shared helper.
 
