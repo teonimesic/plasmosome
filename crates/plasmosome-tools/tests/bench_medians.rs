@@ -180,6 +180,18 @@ fn a_repeated_key_is_read_at_its_last_value() {
     }
 }
 
+#[test]
+fn a_key_with_an_escape_is_read() {
+    let criterion = criterion();
+    write_estimates(
+        criterion.path(),
+        "manifest_parse",
+        "{\"note\\/1\":1,\"median\":{\"point_estimate\":2.5}}",
+    );
+
+    assert_eq!(printed_of(criterion.path()), "2.500000");
+}
+
 /// What the tool prints as `manifest_parse`'s median when its `estimates.json` holds `median`.
 fn printed_for(median: &str) -> String {
     let criterion = criterion();
@@ -257,6 +269,7 @@ fn a_file_that_is_not_json_is_named() {
         "{\"median\":{\"point_estimate\":NaN}}".to_string(),
         estimates("Infinity"),
         estimates("1e400"),
+        format!("\x0c{}", estimates("7.5")),
         format!(
             "{{\"median\":{{\"point_estimate\":1.5,\"deep\":{}{}}}}}",
             "[".repeat(129),

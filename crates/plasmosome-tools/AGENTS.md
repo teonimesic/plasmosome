@@ -2,8 +2,8 @@
 
 ## What this crate is
 
-The repository's CI and maintainer tools, one module and one binary per tool. Read `README.md` for
-what each tool does and how it runs.
+The repository's CI and maintainer tools, one module and one binary per tool, and modules the tools
+share, such as `bounded`. Read `README.md` for what each tool does and how it runs.
 
 ## Hard rules
 

@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+libc = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
@@ -20,6 +21,11 @@ bench = false
 [[bin]]
 name = "bench-medians"
 path = "src/bin/bench_medians.rs"
+bench = false
+
+[[bin]]
+name = "record-facts"
+path = "src/bin/record_facts.rs"
 bench = false
 
 [lints]
