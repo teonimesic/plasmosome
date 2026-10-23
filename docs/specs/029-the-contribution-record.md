@@ -201,7 +201,8 @@ Each identity it reads, in all four positions alike (author, committer, `Co-auth
    cleared too. Amended again on 2026-10-21: a trailer value that holds a carriage return, a
    vertical tab, a form feed, U+0085, U+2028 or U+2029, or that git unfolds from a trailer going
    on over more than one line of the message, is no address either, because a reader may see it
-   as more than one line.
+   as more than one line. Amended on 2026-10-23 (Main, delegated): a trailer value that is not
+   valid UTF-8 is no address and is refused whatever its name, because the guard cannot read it.
 3. **Tool identities.** An address is a model's when, compared whole and ignoring ASCII case, it
    equals a listed tool address. It is also a model's when it is a GitHub noreply address,
    `<login>@users.noreply.github.com` with or without an `<id>+` prefix, whose login equals a

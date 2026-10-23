@@ -25,6 +25,10 @@ fn isolated_from_the_callers_git(command: &mut Command, repository: &Path) {
 }
 
 fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
+    git_bytes(repository, arguments, stdin.map(str::as_bytes))
+}
+
+fn git_bytes(repository: &Path, arguments: &[&str], stdin: Option<&[u8]>) -> Output {
     let mut command = Command::new("git");
     isolated_from_the_callers_git(&mut command, repository);
     command
@@ -45,7 +49,7 @@ fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
             .stdin
             .as_mut()
             .expect("the spawned git has a stdin pipe")
-            .write_all(text.as_bytes())
+            .write_all(text)
             .expect("the commit message is written to git");
         return child.wait_with_output().expect("git finishes");
     }
@@ -1104,9 +1108,9 @@ fn identities() -> Vec<(String, Verdict)> {
 
 const PROBES_PER_REPOSITORY: usize = 8;
 
-struct Probe {
+struct Probe<Message = String> {
     label: String,
-    message: String,
+    message: Message,
     refusal: Option<String>,
 }
 
@@ -1116,21 +1120,28 @@ struct ProbeRun {
     refused: bool,
 }
 
-fn probe_repository(messages: &[&str]) -> (TempDir, Vec<String>) {
+fn probe_repository(messages: &[&[u8]]) -> (TempDir, Vec<String>) {
     let directory = tempfile::tempdir().expect("a scratch directory is created");
     let path = directory.path();
     git_succeeds(path, &["init", "--quiet"], None);
-    let mut stream = String::new();
+    let mut stream = Vec::new();
     for (index, message) in messages.iter().enumerate() {
-        stream.push_str(&format!(
-            "commit refs/heads/probe\nmark :{}\ncommitter A Person <person@corp.locale.io> 1700000000 +0000\ndata {}\n{message}\n",
+        stream.extend(format!(
+            "commit refs/heads/probe\nmark :{}\ncommitter A Person <person@corp.locale.io> 1700000000 +0000\ndata {}\n",
             index + 1,
             message.len()
-        ));
+        ).bytes());
+        stream.extend(message.iter().copied());
+        stream.push(b'\n');
     }
     let marks = path.join("probe-marks");
     let export = format!("--export-marks={}", marks.display());
-    git_succeeds(path, &["fast-import", "--quiet", &export], Some(&stream));
+    let imported = git_bytes(path, &["fast-import", "--quiet", &export], Some(&stream));
+    assert!(
+        imported.status.success(),
+        "setup: fast-import failed: {}",
+        said(&imported)
+    );
     let marks = std::fs::read_to_string(&marks).expect("setup: fast-import wrote its marks");
     let mut shas = vec![String::new(); messages.len()];
     for line in marks.lines() {
@@ -1146,8 +1157,8 @@ fn probe_repository(messages: &[&str]) -> (TempDir, Vec<String>) {
     (directory, shas)
 }
 
-fn run_guard_over_probes(root: &Path, probes: &[Probe]) -> ProbeRun {
-    let messages: Vec<&str> = probes.iter().map(|probe| probe.message.as_str()).collect();
+fn run_guard_over_probes<Message: AsRef<[u8]>>(root: &Path, probes: &[Probe<Message>]) -> ProbeRun {
+    let messages: Vec<&[u8]> = probes.iter().map(|probe| probe.message.as_ref()).collect();
     let (repository, shas) = probe_repository(&messages);
     let output = guard_command(root, repository.path())
         .env_remove("LC_ALL")
@@ -1163,7 +1174,11 @@ fn run_guard_over_probes(root: &Path, probes: &[Probe]) -> ProbeRun {
     }
 }
 
-fn assert_each_probe_judged(root: &Path, what: &str, probes: &[Probe]) {
+fn assert_each_probe_judged<Message: AsRef<[u8]> + Sync>(
+    root: &Path,
+    what: &str,
+    probes: &[Probe<Message>],
+) {
     let runs: Vec<ProbeRun> = std::thread::scope(|scope| {
         let handles: Vec<_> = probes
             .chunks(PROBES_PER_REPOSITORY)
@@ -1476,6 +1491,284 @@ fn judges_each_folded_trailer_as_a_co_author() {
 #[test]
 fn judges_each_folded_trailer_as_a_sign_off() {
     check_workspace(|root| assert_each_folded_trailer_judged_in(root, Position::SignedOffBy));
+}
+
+const DIVIDER_TRAILERS: &[(&str, &str, &str, Verdict)] = &[
+    (
+        "a divider before a model",
+        "---\nSigned-off-by: Claude <noreply@anthropic.com>\n",
+        "Claude <noreply@anthropic.com>",
+        Verdict::Model,
+    ),
+    (
+        "a person's sign-off, a divider, then a model",
+        "Signed-off-by: Jane Doe <jane@corp.locale.io>\n---\nKEY: Claude <noreply@anthropic.com>\n",
+        "Claude <noreply@anthropic.com>",
+        Verdict::Model,
+    ),
+    (
+        "a person's trailer, a divider, then a model's sign-off",
+        "KEY: Jane Doe <jane@corp.locale.io>\n---\nSigned-off-by: Claude <noreply@anthropic.com>\n",
+        "Claude <noreply@anthropic.com>",
+        Verdict::Model,
+    ),
+    (
+        "a divider before a person",
+        "---\nKEY: Jane Doe <jane@corp.locale.io>\n",
+        "",
+        Verdict::Cleared,
+    ),
+    (
+        "a divider before a model's folded trailer",
+        "Signed-off-by: A Colleague <colleague@corp.locale.io>\n---\nKEY: Claude <noreply@anthropic.com>\n <jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a divider before a person's folded trailer",
+        "Signed-off-by: A Colleague <colleague@corp.locale.io>\n---\nKEY: Jane Doe <jane@corp.locale.io>\n (pair session)\n",
+        "Jane Doe <jane@corp.locale.io> (pair session)",
+        Verdict::Untraceable,
+    ),
+];
+
+fn assert_each_divider_trailer_judged_in(root: &Path, position: Position) {
+    let probes: Vec<Probe> = DIVIDER_TRAILERS
+        .iter()
+        .enumerate()
+        .map(|(index, &(label, block, value, verdict))| {
+            let printed = if index == 0 || index == 2 {
+                Position::SignedOffBy
+            } else {
+                position
+            };
+            Probe {
+                label: label.to_owned(),
+                message: format!(
+                    "probe {index}\n\n{}",
+                    block.replace("KEY", position.as_printed())
+                ),
+                refusal: verdict
+                    .refusal(printed)
+                    .map(|refusal| format!("{} \"{value}\" {refusal}", printed.as_printed())),
+            }
+        })
+        .collect();
+    let messages: Vec<&[u8]> = probes
+        .iter()
+        .map(|probe| probe.message.as_bytes())
+        .collect();
+    let (repository, shas) = probe_repository(&messages);
+    for (probe, sha) in probes.iter().zip(shas) {
+        let listed = git(
+            repository.path(),
+            &["log", "-1", "--format=%(trailers:unfold)", &sha],
+            None,
+        );
+        assert!(
+            listed.status.success(),
+            "setup: git lists trailers: {}",
+            said(&listed)
+        );
+        let listing = String::from_utf8(listed.stdout).expect("the divider rows are ASCII");
+        if probe
+            .message
+            .ends_with("---\nCo-authored-by: Jane Doe <jane@corp.locale.io>\n")
+        {
+            assert_eq!(listing, "\n", "git lists no trailer in this block");
+            continue;
+        }
+        for line in probe.message.lines().filter(|line| line.contains("-by:")) {
+            assert!(
+                listing.contains(line),
+                "{}: git's own listing must include {line:?}: {listing:?}",
+                probe.label
+            );
+        }
+    }
+    assert_each_probe_judged(root, "a divider does not hide a trailer git lists", &probes);
+}
+
+#[test]
+fn judges_each_divider_trailer_as_a_co_author() {
+    check_workspace(|root| assert_each_divider_trailer_judged_in(root, Position::CoAuthoredBy));
+}
+
+#[test]
+fn judges_each_divider_trailer_as_a_sign_off() {
+    check_workspace(|root| assert_each_divider_trailer_judged_in(root, Position::SignedOffBy));
+}
+
+const INVALID_UTF8: &[(&str, &[u8])] = &[
+    ("raw NEL byte", &[0x85]),
+    ("three-byte overlong NEL", &[0xe0, 0x82, 0x85]),
+    ("four-byte overlong NEL", &[0xf0, 0x80, 0x82, 0x85]),
+    ("overlong line separator", &[0xf0, 0x82, 0x80, 0xa8]),
+    ("overlong paragraph separator", &[0xf0, 0x82, 0x80, 0xa9]),
+    ("lone two-byte lead", &[0xc2]),
+    ("truncated three-byte sequence", &[0xe2, 0x80]),
+    ("encoded surrogate", &[0xed, 0xa0, 0x85]),
+    ("two-byte overlong form", &[0xc0, 0xaf]),
+    ("code point above U+10FFFF", &[0xf4, 0x90, 0x80, 0x80]),
+    ("five-byte sequence", &[0xf8, 0x88, 0x80, 0x80, 0x80]),
+    ("invalid lead byte", &[0xff]),
+];
+
+fn utf8_probes(position: Position) -> Vec<Probe<Vec<u8>>> {
+    let mut probes = Vec::new();
+    for &(label, bytes) in INVALID_UTF8 {
+        assert!(
+            std::str::from_utf8(bytes).is_err(),
+            "setup: {label} must be invalid UTF-8"
+        );
+        for (prefix, suffix, verdict) in [
+            (
+                "Claude <noreply@anthropic.com>",
+                "<jane@corp.locale.io>",
+                Verdict::Model,
+            ),
+            ("Jane ", " Doe <jane@corp.locale.io>", Verdict::Untraceable),
+        ] {
+            let value: Vec<u8> = prefix
+                .bytes()
+                .chain(bytes.iter().copied())
+                .chain(suffix.bytes())
+                .collect();
+            let mut message = format!(
+                "probe\n\n{}: A Colleague <colleague@corp.locale.io>\n{}: ",
+                position.as_written(),
+                position.as_written()
+            )
+            .into_bytes();
+            message.extend(value.iter().copied());
+            message.push(b'\n');
+            probes.push(Probe {
+                label: format!("{label} in {prefix:?} after an ordinary trailer"),
+                message,
+                refusal: verdict.refusal(position).map(|refusal| {
+                    format!(
+                        "{} \"{}\" {refusal}",
+                        position.as_printed(),
+                        String::from_utf8_lossy(&value)
+                    )
+                }),
+            });
+        }
+    }
+    for point in [
+        0x105, 0xe9, 0xf1, 0x674e, 0x1f600, 0x80, 0x7ff, 0x800, 0xd7ff, 0xe000, 0xffff, 0x10000,
+        0x10ffff, 0x2068,
+    ] {
+        let letter = char::from_u32(point).expect("setup: a Unicode scalar value");
+        probes.push(Probe {
+            label: format!("valid U+{point:04X} in a person's name"),
+            message: format!(
+                "probe\n\n{}: Jane {letter} Doe <jane@corp.locale.io>\n",
+                position.as_written()
+            )
+            .into_bytes(),
+            refusal: None,
+        });
+    }
+    probes.push(Probe {
+        label: "U+2068 FIRST STRONG ISOLATE between two addresses".to_owned(),
+        message: format!(
+            "probe\n\n{}: Claude <noreply@anthropic.com>\u{2068}<jane@corp.locale.io>\n",
+            position.as_written()
+        )
+        .into_bytes(),
+        refusal: None,
+    });
+    probes
+}
+
+#[test]
+fn judges_utf8_values_as_co_authors() {
+    check_workspace(|root| {
+        assert_each_probe_judged(
+            root,
+            "a value must be valid UTF-8",
+            &utf8_probes(Position::CoAuthoredBy),
+        )
+    });
+}
+
+#[test]
+fn judges_utf8_values_as_sign_offs() {
+    check_workspace(|root| {
+        assert_each_probe_judged(
+            root,
+            "a value must be valid UTF-8",
+            &utf8_probes(Position::SignedOffBy),
+        )
+    });
+}
+
+#[test]
+fn judges_values_after_git_reencodes_the_commit() {
+    check_workspace(|root| {
+        for position in [Position::CoAuthoredBy, Position::SignedOffBy] {
+            for (encoding, character, verdict) in [
+                ("ISO-8859-1", '\u{85}', Verdict::Model),
+                ("windows-1252", '\u{2026}', Verdict::Cleared),
+            ] {
+                let repository = repository_with_commit("probe\n");
+                let tree = git(repository.path(), &["rev-parse", "HEAD^{tree}"], None);
+                assert!(tree.status.success(), "setup: the tree exists");
+                let mut object = format!("tree {}\nauthor A Person <person@corp.locale.io> 1700000000 +0000\ncommitter A Person <person@corp.locale.io> 1700000000 +0000\nencoding {encoding}\n\nprobe\n\n{}: Claude <noreply@anthropic.com>", String::from_utf8_lossy(&tree.stdout).trim(), position.as_written()).into_bytes();
+                object.push(0x85);
+                object.extend(b"<jane@corp.locale.io>\n");
+                let written = git_bytes(
+                    repository.path(),
+                    &["hash-object", "-t", "commit", "-w", "--stdin"],
+                    Some(&object),
+                );
+                assert!(
+                    written.status.success(),
+                    "setup: the raw commit is written: {}",
+                    said(&written)
+                );
+                let sha = String::from_utf8(written.stdout).expect("git prints an ASCII SHA");
+                let sha = sha.trim();
+                let decoded = git(repository.path(), &["show", "-s", "--format=%B", sha], None);
+                let value =
+                    format!("Claude <noreply@anthropic.com>{character}<jane@corp.locale.io>");
+                assert!(
+                    decoded.status.success()
+                        && String::from_utf8_lossy(&decoded.stdout).contains(&value),
+                    "setup: git must re-encode {encoding}: {}",
+                    said(&decoded)
+                );
+                let output = run_guard_in(root, repository.path(), sha);
+                if let Some(refusal) = verdict.refusal(position) {
+                    assert_refused_saying(
+                        &output,
+                        &format!("{} \"{value}\" {refusal}", position.as_printed()),
+                        encoding,
+                    );
+                } else {
+                    assert!(
+                        output.status.success(),
+                        "{encoding} must clear: {}",
+                        said(&output)
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn judges_utf8_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_judging(
+            root,
+            "probe\n\nCo-authored-by: Jane Doe <jane@corp.locale.io>\n",
+            ("Jane Doe <jane@corp.locale.io>", "is untraceable"),
+            r#"  *'{3}'*) [ "$input" = 'Jane Doe <jane@corp.locale.io>' ] && exit 2 ;;"#,
+            "the UTF-8 check, whose four-byte alternatives hold three continuation bytes",
+        );
+    });
 }
 
 #[test]
