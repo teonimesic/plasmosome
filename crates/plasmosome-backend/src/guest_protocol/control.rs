@@ -4,9 +4,9 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
-    BootToken, BridgeError, ControlLane, EncodeError, InboundRequest, ProtocolCode, ReplyFault,
-    RequestId, RequestRefusal, Yes, cut, encode_request, encode_success, split_reply,
-    split_request,
+    BootToken, BridgeError, ControlLane, EncodeError, ExecId, ExecState, ExecStatus,
+    InboundRequest, ProtocolCode, ReplyFault, RequestId, RequestKey, RequestRefusal, Stream, Yes,
+    cut, encode_request, encode_success, split_reply, split_request,
 };
 use crate::universe::{CellOwner, GrantId, UniverseOp, UniverseRemoval};
 use crate::wire::{ObjectOnly, object_serde};
@@ -73,7 +73,7 @@ impl<'de> Deserialize<'de> for ProxyAddress {
     }
 }
 
-/// The seven control methods; workload methods are defined by a separate codec.
+/// The control methods offered by the guest, including the four workload verbs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlMethod {
     Hello,
@@ -83,10 +83,14 @@ pub enum ControlMethod {
     Drain,
     Remove,
     Shutdown,
+    Exec,
+    ExecStatus,
+    ExecOutput,
+    WorkloadStop,
 }
 
 impl ControlMethod {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 11] = [
         Self::Hello,
         Self::Observe,
         Self::Install,
@@ -94,6 +98,10 @@ impl ControlMethod {
         Self::Drain,
         Self::Remove,
         Self::Shutdown,
+        Self::Exec,
+        Self::ExecStatus,
+        Self::ExecOutput,
+        Self::WorkloadStop,
     ];
 
     pub fn name(self) -> &'static str {
@@ -105,6 +113,10 @@ impl ControlMethod {
             Self::Drain => "drain",
             Self::Remove => "remove",
             Self::Shutdown => "shutdown",
+            Self::Exec => "exec",
+            Self::ExecStatus => "exec_status",
+            Self::ExecOutput => "exec_output",
+            Self::WorkloadStop => "workload_stop",
         }
     }
 
@@ -201,6 +213,72 @@ where
     Option::deserialize(deserializer)
 }
 
+/// Starts or retries a process. PID1 calls check_argv after decoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct ExecParams {
+    pub argv: Vec<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub request_key: Option<RequestKey>,
+    pub deadline_ms: NonZeroU64,
+}
+
+/// Queries one retained process; wait uses only this request budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct ExecStatusParams {
+    pub exec_id: ExecId,
+    pub wait: bool,
+    pub deadline_ms: NonZeroU64,
+}
+
+/// Queries both retained output streams of one process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct ExecOutputParams {
+    pub exec_id: ExecId,
+    pub deadline_ms: NonZeroU64,
+}
+
+/// Stops the workload within a positive remaining budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct WorkloadStopParams {
+    pub deadline_ms: NonZeroU64,
+}
+
+/// A new process or the current state of a retained keyed request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct ExecResult {
+    pub boot: BootToken,
+    pub exec_id: ExecId,
+    pub state: ExecState,
+}
+
+/// Both streams of a process; their EOF flags are independent of its status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct ExecOutputResult {
+    pub boot: BootToken,
+    pub exec_id: ExecId,
+    pub stdout: Stream,
+    pub stderr: Stream,
+}
+
+/// Acknowledges that this boot stopped the workload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct WorkloadStopResult {
+    pub boot: BootToken,
+    pub stopped: Yes,
+}
+
+object_serde!(ExecParams through ExecParams, ExecStatusParams through ExecStatusParams,
+    ExecOutputParams through ExecOutputParams, WorkloadStopParams through WorkloadStopParams,
+    ExecResult through ExecResult, ExecOutputResult through ExecOutputResult,
+    WorkloadStopResult through WorkloadStopResult);
+
 impl Serialize for InstallParams {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         InstallParams::serialize(self, serializer)
@@ -229,6 +307,10 @@ pub enum ControlCall {
     Drain(GrantParams),
     Remove(RemoveParams),
     Shutdown(ShutdownParams),
+    Exec(ExecParams),
+    ExecStatus(ExecStatusParams),
+    ExecOutput(ExecOutputParams),
+    WorkloadStop(WorkloadStopParams),
 }
 
 impl ControlCall {
@@ -241,10 +323,14 @@ impl ControlCall {
             Self::Drain(_) => ControlMethod::Drain,
             Self::Remove(_) => ControlMethod::Remove,
             Self::Shutdown(_) => ControlMethod::Shutdown,
+            Self::Exec(_) => ControlMethod::Exec,
+            Self::ExecStatus(_) => ControlMethod::ExecStatus,
+            Self::ExecOutput(_) => ControlMethod::ExecOutput,
+            Self::WorkloadStop(_) => ControlMethod::WorkloadStop,
         }
     }
 
-    /// The selected grant, or none for hello, observe and shutdown.
+    /// The selected grant, or none for a call that does not select a grant.
     pub fn grant(&self) -> Option<GrantId> {
         match self {
             Self::Install(params) => Some(params.operation.id()),
@@ -298,6 +384,10 @@ pub fn decode_control_request(
         ControlMethod::Drain => serde_json::from_str(text).map(ControlCall::Drain),
         ControlMethod::Remove => serde_json::from_str(text).map(ControlCall::Remove),
         ControlMethod::Shutdown => serde_json::from_str(text).map(ControlCall::Shutdown),
+        ControlMethod::Exec => serde_json::from_str(text).map(ControlCall::Exec),
+        ControlMethod::ExecStatus => serde_json::from_str(text).map(ControlCall::ExecStatus),
+        ControlMethod::ExecOutput => serde_json::from_str(text).map(ControlCall::ExecOutput),
+        ControlMethod::WorkloadStop => serde_json::from_str(text).map(ControlCall::WorkloadStop),
     }
     .map_err(|error| refuse(ProtocolCode::InvalidParams, &error.to_string()))?;
     if let (LaneState::Assigned(lane), ControlCall::Hello(hello)) = (state, &call)
@@ -324,6 +414,10 @@ pub fn encode_control_request(id: u64, call: &ControlCall) -> Result<Vec<u8>, En
         }
         ControlCall::Remove(params) => encode_request(id, method, params),
         ControlCall::Shutdown(params) => encode_request(id, method, params),
+        ControlCall::Exec(params) => encode_request(id, method, params),
+        ControlCall::ExecStatus(params) => encode_request(id, method, params),
+        ControlCall::ExecOutput(params) => encode_request(id, method, params),
+        ControlCall::WorkloadStop(params) => encode_request(id, method, params),
     }
 }
 
@@ -394,6 +488,10 @@ pub enum ControlResult {
     Drained(DrainedResult),
     Removed(RemovedResult),
     Shutdown(ShutdownResult),
+    Exec(ExecResult),
+    ExecStatus(ExecStatus),
+    ExecOutput(ExecOutputResult),
+    WorkloadStop(WorkloadStopResult),
 }
 
 /// Encodes the method's result as a compact success reply with no newline.
@@ -410,6 +508,10 @@ pub fn encode_control_result(
         ControlResult::Drained(result) => encode_success(id, result),
         ControlResult::Removed(result) => encode_success(id, result),
         ControlResult::Shutdown(result) => encode_success(id, result),
+        ControlResult::Exec(result) => encode_success(id, result),
+        ControlResult::ExecStatus(result) => encode_success(id, result),
+        ControlResult::ExecOutput(result) => encode_success(id, result),
+        ControlResult::WorkloadStop(result) => encode_success(id, result),
     }
 }
 
@@ -432,6 +534,10 @@ pub fn decode_control_reply(
         ControlCall::Drain(_) => serde_json::from_str(text).map(ControlResult::Drained),
         ControlCall::Remove(_) => serde_json::from_str(text).map(ControlResult::Removed),
         ControlCall::Shutdown(_) => serde_json::from_str(text).map(ControlResult::Shutdown),
+        ControlCall::Exec(_) => serde_json::from_str(text).map(ControlResult::Exec),
+        ControlCall::ExecStatus(_) => serde_json::from_str(text).map(ControlResult::ExecStatus),
+        ControlCall::ExecOutput(_) => serde_json::from_str(text).map(ControlResult::ExecOutput),
+        ControlCall::WorkloadStop(_) => serde_json::from_str(text).map(ControlResult::WorkloadStop),
     }
     .map_err(|error| ReplyFault::Result {
         detail: cut(&error.to_string()),
@@ -444,6 +550,10 @@ pub fn decode_control_reply(
         ControlResult::Drained(r) => (r.boot, Some(r.grant)),
         ControlResult::Removed(r) => (r.boot, Some(r.grant)),
         ControlResult::Shutdown(r) => (r.boot, None),
+        ControlResult::Exec(r) => (r.boot, None),
+        ControlResult::ExecStatus(r) => (r.boot(), None),
+        ControlResult::ExecOutput(r) => (r.boot, None),
+        ControlResult::WorkloadStop(r) => (r.boot, None),
     };
     if let Some(expected) = boot
         && *expected != found_boot
@@ -459,6 +569,24 @@ pub fn decode_control_reply(
         return Err(ReplyFault::GrantMismatch {
             expected,
             found: found_grant.expect("grant result"),
+        });
+    }
+    let expected_exec = match call {
+        ControlCall::ExecStatus(p) => Some(p.exec_id),
+        ControlCall::ExecOutput(p) => Some(p.exec_id),
+        _ => None,
+    };
+    let found_exec = match &result {
+        ControlResult::ExecStatus(r) => Some(r.exec_id()),
+        ControlResult::ExecOutput(r) => Some(r.exec_id),
+        _ => None,
+    };
+    if let Some(expected) = expected_exec
+        && Some(expected) != found_exec
+    {
+        return Err(ReplyFault::ExecMismatch {
+            expected,
+            found: found_exec.expect("exec result"),
         });
     }
     Ok(result)

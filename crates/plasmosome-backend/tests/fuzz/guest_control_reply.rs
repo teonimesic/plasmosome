@@ -52,6 +52,16 @@ fn calls() -> impl Iterator<Item = ControlCall> {
             json!({"inverse":inverse,"owner":owner,"force":true,"deadline_ms":17}),
         ),
         ("shutdown", json!({"deadline_ms":17})),
+        (
+            "exec",
+            json!({"argv":["true"],"request_key":null,"deadline_ms":17}),
+        ),
+        (
+            "exec_status",
+            json!({"exec_id":"e-11","wait":true,"deadline_ms":17}),
+        ),
+        ("exec_output", json!({"exec_id":"e-11","deadline_ms":17})),
+        ("workload_stop", json!({"deadline_ms":17})),
     ]
     .into_iter()
     .map(|(method, params)| {
@@ -78,9 +88,12 @@ fn bounded(fault: &ReplyFault) {
                 text(message);
                 text(reason);
             }
+            BridgeError::Refused { message, .. } => text(message),
         },
-        ReplyFault::NotUtf8 | ReplyFault::BootChanged { .. } | ReplyFault::GrantMismatch { .. } => {
-        }
+        ReplyFault::NotUtf8
+        | ReplyFault::BootChanged { .. }
+        | ReplyFault::GrantMismatch { .. }
+        | ReplyFault::ExecMismatch { .. } => {}
     }
 }
 
@@ -103,6 +116,7 @@ mod tests {
             Err(ReplyFault::Result { .. }) => "Result",
             Err(ReplyFault::BootChanged { .. }) => "BootChanged",
             Err(ReplyFault::GrantMismatch { .. }) => "GrantMismatch",
+            Err(ReplyFault::ExecMismatch { .. }) => "ExecMismatch",
         }
     }
 
@@ -190,7 +204,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fuzz/corpus/guest_control_reply"
         ));
-        let seeds = replay::read_corpus(dir);
+        let seeds: Vec<_> = replay::read_corpus(dir)
+            .into_iter()
+            .filter(|(name, _)| !name.starts_with("workload-"))
+            .collect();
         assert_eq!(
             seeds
                 .iter()
@@ -202,7 +219,7 @@ mod tests {
         let mut reached = BTreeSet::new();
         for ((name, bytes), (_, expected)) in seeds.iter().zip(rows) {
             check(bytes);
-            let calls: Vec<_> = calls().collect();
+            let calls: Vec<_> = calls().take(7).collect();
             assert_eq!(calls.len(), expected.len());
             for (call, expected) in calls.iter().zip(expected) {
                 let found = outcome(decode_control_reply(call, 17, Some(&boot), bytes));
@@ -236,5 +253,57 @@ mod tests {
                 "GrantMismatch"
             ])
         );
+    }
+
+    #[test]
+    fn workload_seeds_reach_each_typed_result_and_correlation_fault() {
+        let rows = [
+            (
+                "workload-boot",
+                ["BootChanged", "BootChanged", "Result", "Result"],
+            ),
+            ("workload-exec", ["Success", "Success", "Result", "Result"]),
+            ("workload-exited", ["Result", "Success", "Result", "Result"]),
+            (
+                "workload-mismatch",
+                ["Success", "ExecMismatch", "Result", "Result"],
+            ),
+            ("workload-not-retained", ["Refused"; 4]),
+            ("workload-output", ["Result", "Result", "Success", "Result"]),
+            (
+                "workload-signaled",
+                ["Result", "Success", "Result", "Result"],
+            ),
+            ("workload-stop", ["Result", "Result", "Result", "Success"]),
+        ];
+        let dir = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fuzz/corpus/guest_control_reply"
+        ));
+        let seeds: Vec<_> = replay::read_corpus(dir)
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("workload-"))
+            .collect();
+        assert_eq!(
+            seeds
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            rows.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+        );
+        let boot = BootToken::from_bytes(BOOT_BYTES);
+        for ((name, bytes), (_, expected)) in seeds.iter().zip(rows) {
+            check(bytes);
+            let calls: Vec<_> = calls().skip(7).collect();
+            assert_eq!(calls.len(), expected.len());
+            for (call, expected) in calls.iter().zip(expected) {
+                assert_eq!(
+                    outcome(decode_control_reply(call, 17, Some(&boot), bytes)),
+                    expected,
+                    "{name} for {:?}",
+                    call.method()
+                );
+            }
+        }
     }
 }

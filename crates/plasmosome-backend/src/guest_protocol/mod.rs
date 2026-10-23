@@ -8,12 +8,20 @@ use crate::digest::{Digest, DigestError};
 pub(crate) mod control;
 mod envelope;
 pub mod observation;
+mod workload;
+
+pub use workload::{
+    ArgvFault, ExecId, ExecIdFault, ExecState, ExecStatus, NotRetainedWhat, RequestKey,
+    RequestKeyFault, Signal, Stream, StreamFault, check_argv,
+};
 
 pub use control::{
     ActiveResult, AddressFault, ControlCall, ControlMethod, ControlResult, DrainedResult,
-    GrantParams, HelloParams, HelloResult, InstallParams, InstalledResult, LaneState,
-    ObserveParams, ProxyAddress, RemoveParams, RemovedResult, ShutdownParams, ShutdownResult,
-    decode_control_reply, decode_control_request, encode_control_request, encode_control_result,
+    ExecOutputParams, ExecOutputResult, ExecParams, ExecResult, ExecStatusParams, GrantParams,
+    HelloParams, HelloResult, InstallParams, InstalledResult, LaneState, ObserveParams,
+    ProxyAddress, RemoveParams, RemovedResult, ShutdownParams, ShutdownResult, WorkloadStopParams,
+    WorkloadStopResult, decode_control_reply, decode_control_request, encode_control_request,
+    encode_control_result,
 };
 
 pub use observation::{
