@@ -125,6 +125,8 @@ to carry one. `ToolRegistry` keys a tool name to one `PluginId` with no cell, so
 attaching one plasmid share a single entry and the first detach empties the registry for the
 second — a live-capability consequence, not only an attribution one. `withdraw_plugin` filters by
 plasmid alone for the same reason. Left alone only because nothing wires it into a controller yet.
+On 2026-10-22 plasmosome-00yd fixed this before anything wired it: `ToolRegistry` now keys each
+entry by cell and tool name, and its `withdraw` takes the `CellOwner` in place of `withdraw_plugin`.
 
 Spec 008 is unblocked by this. The follow-up: `found` and the union behind `expected` restated in
 terms of the decided identity, acceptance cases for two cells sharing a plasmid, and its `Blocked

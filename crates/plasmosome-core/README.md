@@ -17,7 +17,7 @@ one.
 | --- | --- |
 | `manifest` | The plasmid declaration grammar: purpose, tool descriptions, capabilities, scopes, credential delivery, mock mode |
 | `denial` | One cell's bounded denial book, declaration-entry repairs, strict wire records and session log payloads, without IO; callers decide attribution |
-| `registry` | Tool names, their registered owners and author-written descriptions |
+| `registry` | Each cell's tool names, the plasmid in that cell holding each one, and its author-written description. A name has one holder per cell: `register` refuses a second plasmid with `RegisterError::ToolHeld` and registers none of its tools. `lookup`, `list` and `withdraw` name the cell, so detaching a plasmid from one cell leaves its tools in another |
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
 | `kill_budget` | `cell.kill`'s deadlines under spec 023 §7, with no IO. The lock reserve is a tenth of the kill's deadline D, from 1 ms to 3 s, fixed for the request and not rounded. Each step's share is measured from what is left of D past that reserve when the step starts: the workload stop, which is `Skipped` with `now`, the withdrawal with its drain, effect and publication parts, and the guest stop's `DrainSpec` and answer wait. Each share is whole milliseconds and at least 1 ms, or `NoBudget`. `Incomplete` is the reply's closed set, and a reply is a retirement exactly when it lacks `teardown`. With `now` it records only `teardown` |
@@ -44,7 +44,7 @@ including surrounding whitespace. For example:
 ```rust
 use plasmosome_core::manifest::PlasmidManifest;
 use plasmosome_core::ToolRegistry;
-use plasmosome_backend::PluginId;
+use plasmosome_backend::{CellId, CellOwner, PluginId};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source = r#"
@@ -56,9 +56,14 @@ impl.wasm = "github-pr.wasm"
 "pr.read" = "Read a pull request's title and review state."
 "#;
     let manifest = PlasmidManifest::parse(source)?;
+    let cell = CellId::from("cell-1");
+    let owner = CellOwner {
+        cell: cell.clone(),
+        plugin: PluginId::from(manifest.id.as_str()),
+    };
     let registry = ToolRegistry::new();
-    registry.register(&PluginId::from(manifest.id.as_str()), &manifest.provides_tools);
-    println!("{}", registry.lookup("pr.read")?.description);
+    registry.register(&owner, &manifest.provides_tools)?;
+    println!("{}", registry.lookup(&cell, "pr.read")?.description);
     Ok(())
 }
 ```
@@ -154,9 +159,9 @@ gets `scope = { path_scope = [...] }`, written in place of `scope`, not of the f
 
 Paths, the plasmid ID, refused values and fixes are written as TOML: a key that is not bare, and
 every string, is a basic string on one line. Every control character is escaped, and so are the
-line and paragraph separators U+2028 and U+2029 and the bidi controls U+200E, U+200F, U+202A to
-U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A command's
-refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
+line and paragraph separators U+2028 and U+2029 and the bidi controls U+061C, U+200E, U+200F,
+U+202A to U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A
+command's refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
 could not be read), `ManifestError::Parse` (the text is not TOML), `ManifestError::TooLarge`
 (the declaration is over 1 MiB) and `ManifestError::TooDeep` (the declaration nests more than 32
 levels deep) carry no field. For `Parse`, the TOML parser reports a position,

@@ -72,7 +72,7 @@ pub use private_socket::{
 };
 pub use protocol::{ErrorCode, Request, Response, StatusResult, WireError};
 pub use reconciler::{DesiredState, ObservedState, ReconcilePlan, Reconciler};
-pub use registry::{LookupError, RegistryEntry, ToolRegistry};
+pub use registry::{LookupError, RegisterError, RegistryEntry, ToolRegistry};
 pub use session_log::{
     LogFault, LogFile, LogStep, LogStore, OsLogStore, SessionLog, SessionLogError, read_events,
 };
