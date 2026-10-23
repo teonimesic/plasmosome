@@ -50,8 +50,10 @@ The caller must leave SIGCHLD waitable and make this handle the sole consuming w
 This library has no control verb, daemon wiring, relaunch or Linux launch. It needs no
 `vmm-helper` feature. Tests execute only fixture shims and boot no VM.
 The private composition takes a host-availability function, so fixture tests can run on a
-hosted Mac without nested virtualization. The public launch always uses the real host check;
-separate tests retain that refusal and its order before artifacts or output directories.
+hosted Mac without nested virtualization. The public launch always uses the real host check.
+Its pure judge checks the value, size and errno of one `kern.hv_support` reading. A thread-local
+override exists only in test builds; public-launch tests feed rejected readings before artifacts
+or output directories and an accepted reading that reaches artifact verification.
 
 ## The VMM helper
 
@@ -219,8 +221,8 @@ out the allowance.
 Spec 001 §4.2 asks the supervisor to check the helper's host confinement itself before readiness,
 not to take the helper's or the guest's word for it. On Darwin, `runtime::confinement::observe(pid)`
 asks the kernel through `sandbox_check`, from outside the helper. Off Darwin the result is always
-`UnsupportedPlatform`. Nothing calls it yet; the cell composition in native task `plasmosome-7em`
-will.
+`UnsupportedPlatform`. `runtime::cell::launch` calls it after the handshake and accepts only
+`Confined` before its final readiness checks.
 
 Pass the pid of a child this process has not reaped, such as the helper it spawned and still
 holds. Until it is reaped, its pid cannot name another process. `observe` also reads the kernel's
@@ -425,9 +427,9 @@ hexadecimal digits, which both read the same way.
 It reads the bytes the descriptor holds now and does not hash them again, so the limit stated for
 `reconfirm()` above holds here too: a write through a shared writable mapping made before the file
 was locked can change them unseen. Non-zero bytes appended after verification are read and refused
-as data after the trailer; appended zero bytes pass, as the kernel skips them. The cell,
-plasmosome-7em, which is not built yet, must call `reconfirm()` after this check, just before the
-launch that opens the initramfs by path. Off macOS no artifact verifies, so `verify_initramfs`
+as data after the trailer; appended zero bytes pass, as the kernel skips them.
+`runtime::cell::launch` calls `reconfirm()` after this check and again before spawn and readiness.
+Off macOS no artifact verifies, so `verify_initramfs`
 runs only in tests, on artifacts that `artifacts::verified_for_test` builds.
 
 ## The cell directory and the writable root
@@ -460,8 +462,8 @@ are two steps. As spec 001 §1 says of sockets, this is ownership-correct cleanu
 from another writer with authority over the directory, the same uid included.
 
 Spec 023 §5 step 9 keeps `root.img` when `membraned` stops on SIGTERM, but a dropped
-`WritableRoot` always removes its copy. The cell, plasmosome-7em, will need a way to give the copy
-up without removing it. Nothing calls this module yet.
+`WritableRoot` always removes its copy. The later cell-mode caller must add a way to release
+the disk without unlinking it. `runtime::cell` uses this module for destructive teardown.
 
 ## Launching the VMM helper
 
@@ -498,8 +500,8 @@ with the machine lightly loaded and up to about 680 ms under heavy load.
 An empty environment and the working directory `/` mean no `DYLD_*` or `LD_*` variable and no
 relative path can add to where the helper's loader looks for libraries. They do not remove a search
 path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
-names in the qualified libkrun. The launch checks no artifact either: the cell, plasmosome-7em,
-which is not built yet, must verify the helper and its libraries with `runtime::artifacts` before it
+names in the qualified libkrun. `HelperExec::prepare` checks no artifact itself;
+`runtime::cell::launch` verifies the helper and its libraries with `runtime::artifacts` before it
 prepares the launch. That checks only the files the recipe lists. `runtime::closure` audits the
 names the helper and those libraries load; see the next section.
 
@@ -603,8 +605,8 @@ lock's write side, because on Darwin core makes the socket close-on-exec in a se
 the listener closes it, then removes the socket file only while the entry at that name in the held
 directory is still that socket, and says what it found as a `RemoveOutcome`. Dropping it does the
 same. A child that another thread is spawning holds a copy of the listener until its exec, so the
-socket can take connections until then. The cell, plasmosome-7em, which is not built yet, is to
-create that private directory.
+socket can take connections until then. `runtime::cell::launch` takes the runtime directory
+descriptor from core's caller and checks that every output parent matches it before binding.
 
 `accept_ready` takes one pending connection without blocking, holding the same write side. Core
 reads the peer's effective uid from the kernel and closes a peer of another uid unread: that is
@@ -648,8 +650,8 @@ fork, a socket file or a recorded pid. `runtime::handshake::handshake` is the ho
 it the control and data listeners the cell bound before the launch, the helper's pid, the expected
 guest policy digest, one `ProbeBudget` and a check of the helper's liveness. It returns an
 `Association` that holds the normal lane, the withdrawal lane and the data connection, and closes
-all three when dropped. Nothing calls it yet; the cell composition in native task `plasmosome-7em`
-will.
+all three when dropped. `runtime::cell::launch` calls it and checks the original helper and all
+three streams again after confinement, before returning readiness.
 
 It accepts the first control connection and checks its peer pid, sends the normal hello and judges
 the reply with `hello::judge_normal`. It accepts the second control connection, checks it, sends

@@ -54,21 +54,56 @@ fn platform_refusal_precedes_artifacts_directories_and_checkpoints() {
 
 #[test]
 fn public_launch_keeps_the_real_platform_gate() {
-    let recipe = parse_recipe(&crate::runtime::test_fixtures::recipe_value(
-        "/missing/helper",
-    ));
     let runtime = File::open("/dev/null").unwrap();
-    let expected = platform();
-    let result = launch(
-        recipe,
-        runtime.as_fd(),
-        Duration::ZERO,
-        &AtomicBool::new(false),
-    );
-    match (expected, result) {
-        (Err(expected), Err(LaunchFailure::Platform(found))) => assert_eq!(found, expected),
-        (Ok(()), Err(LaunchFailure::Artifact(_))) => {}
-        other => panic!("real platform gate changed: {other:?}"),
+    struct RestoreReading(Option<HypervisorReading>);
+    impl Drop for RestoreReading {
+        fn drop(&mut self) {
+            HYPERVISOR_READING.set(self.0);
+        }
+    }
+    for (supported, size, errno, expected) in [
+        (0, 4, None, Some(PlatformRefusal::NoHypervisor)),
+        (2, 4, None, Some(PlatformRefusal::NoHypervisor)),
+        (
+            1,
+            3,
+            None,
+            Some(PlatformRefusal::Sysctl { errno: libc::EIO }),
+        ),
+        (
+            1,
+            8,
+            None,
+            Some(PlatformRefusal::Sysctl { errno: libc::EIO }),
+        ),
+        (
+            1,
+            4,
+            Some(libc::EPERM),
+            Some(PlatformRefusal::Sysctl { errno: libc::EPERM }),
+        ),
+        (1, 4, None, None),
+    ] {
+        let _restore = RestoreReading(HYPERVISOR_READING.replace(Some(HypervisorReading {
+            supported,
+            size,
+            errno,
+        })));
+        let recipe = parse_recipe(&crate::runtime::test_fixtures::recipe_value(
+            "/missing/helper",
+        ));
+        let failure = launch(
+            recipe,
+            runtime.as_fd(),
+            Duration::ZERO,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        match (expected, failure) {
+            (Some(expected), LaunchFailure::Platform(found)) => assert_eq!(found, expected),
+            (None, LaunchFailure::Artifact(_)) => {}
+            other => panic!("real platform gate changed: {other:?}"),
+        }
     }
 }
 
@@ -121,6 +156,10 @@ fn k1_ready_retains_the_original_evidence_and_its_limits() {
     let mut cell = start(&bundle).unwrap();
     let evidence = cell.evidence();
     assert_eq!(evidence.boot.hex().len(), 64);
+    assert_eq!(
+        evidence.boot,
+        cell.resources.association.as_ref().unwrap().boot
+    );
     assert_eq!(
         evidence.guest_policy,
         *bundle.recipe().guest_policy().sha256()
@@ -465,6 +504,97 @@ fn a_helper_ended_after_the_handshake_fails_the_final_check() {
             report,
         } => clean(&report),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_kernel_replaced_after_confinement_refuses_readiness() {
+    let bundle = FixtureBundle::build("shim");
+    let recipe = bundle.recipe();
+    let path = recipe.kernel().path().as_path();
+    let saved = bundle.path().join("boot/saved-kernel");
+    let failure = launch_with(
+        recipe.clone(),
+        directory(&bundle).as_fd(),
+        Duration::from_secs(10),
+        &AtomicBool::new(false),
+        || Ok(()),
+        |stage, _| {
+            if matches!(stage, Checkpoint::Observed) {
+                super::super::test_fixtures::tree::set_flags(path, 0);
+                fs::rename(path, &saved).unwrap();
+                fs::copy(&saved, path).unwrap();
+                super::super::test_fixtures::tree::set_flags(path, libc::UF_IMMUTABLE);
+            }
+        },
+    )
+    .unwrap_err();
+    match failure {
+        LaunchFailure::Reconfirm {
+            detail:
+                ReconfirmFault::Artifact(ArtifactRefusal {
+                    role: ArtifactRole::Kernel,
+                    ..
+                }),
+            report,
+        } => clean(&report),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn each_lane_closed_after_confinement_refuses_readiness() {
+    for lane in 0..3 {
+        let bundle = FixtureBundle::build("shim");
+        let failure = launch_with(
+            bundle.recipe(),
+            directory(&bundle).as_fd(),
+            Duration::from_secs(10),
+            &AtomicBool::new(false),
+            || Ok(()),
+            |stage, resources| {
+                if matches!(stage, Checkpoint::Observed) {
+                    assert_eq!(
+                        resources.child.as_mut().unwrap().state(),
+                        Ok(VmmState::Running)
+                    );
+                    resources
+                        .association
+                        .as_ref()
+                        .unwrap()
+                        .close_lane_for_test(lane);
+                }
+            },
+        )
+        .unwrap_err();
+        match failure {
+            LaunchFailure::Reconfirm {
+                detail: ReconfirmFault::Stream { .. },
+                report,
+            } => clean(&report),
+            other => panic!("closed lane {lane}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_unlisted_dependency_refuses_before_any_checkpoint_or_resource() {
+    let bundle = FixtureBundle::build("shim");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bundle.recipe().to_ndjson()).unwrap();
+    value["libraries"] = serde_json::json!([]);
+    let failure = launch_with(
+        parse_recipe(&value),
+        directory(&bundle).as_fd(),
+        Duration::from_secs(10),
+        &AtomicBool::new(false),
+        || Ok(()),
+        |_, _| panic!("closure refusal reached an effect"),
+    )
+    .unwrap_err();
+    assert!(matches!(failure, LaunchFailure::Closure(_)));
+    for name in ["cell", "markers"] {
+        assert_eq!(fs::read_dir(bundle.path().join(name)).unwrap().count(), 0);
     }
 }
 

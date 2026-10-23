@@ -41,6 +41,13 @@ pub struct Association {
 }
 
 impl Association {
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn close_lane_for_test(&self, lane: usize) {
+        [&self.normal, &self.withdrawal, &self.data][lane]
+            .shutdown(std::net::Shutdown::Read)
+            .unwrap();
+    }
+
     pub(crate) fn check_open(&self) -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         for stream in [&self.normal, &self.withdrawal, &self.data] {

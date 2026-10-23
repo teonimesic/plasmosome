@@ -33,7 +33,7 @@ Every place the kernel touches the world outside the process, and the seam that 
 | --- | --- | --- |
 | OS enforcement (grants, revocation, residue) | `EnforcementBackend` (`plasmosome-backend`) | `FakeBackend`, `CompositeBackend` over fake leaves |
 | Process spawning (the VMM child) | `Launch` (`plasmosome-membrane::vmm`) | test launchers already in the crate's tests |
-| Runtime host availability | the host-availability function passed to private `runtime::cell::launch_with`; public `launch` passes the real platform check | fixture tests pass availability without requiring a hypervisor; refusal-order and public-gate tests retain S0 |
+| Runtime host availability | private `runtime::cell::launch_with` takes host availability; public `launch` uses the real observer and a pure judge of one `kern.hv_support` reading | fixture tests pass availability; a test-only thread-local reading override feeds value, size and errno through public `launch`, pinning S0 refusal before effects and acceptance through artifact verification |
 | Helper self-configuration (host policy, libkrun calls) | policy bytes and the libkrun call function injected as arguments (`plasmosome-membrane::runtime::vmm_helper`) | test policy text in a re-executed test child; a recording call function |
 | Filesystem (session log, state) | paths injected as arguments | `tempfile::TempDir` |
 | Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |

@@ -486,8 +486,44 @@ fn platform() -> Result<(), PlatformRefusal> {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 fn platform() -> Result<(), PlatformRefusal> {
+    judge_hypervisor(read_hypervisor())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct HypervisorReading {
+    supported: i32,
+    size: usize,
+    errno: Option<i32>,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static HYPERVISOR_READING: std::cell::Cell<Option<HypervisorReading>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(target_os = "macos")]
+fn judge_hypervisor(reading: HypervisorReading) -> Result<(), PlatformRefusal> {
+    if let Some(errno) = reading.errno {
+        return Err(PlatformRefusal::Sysctl { errno });
+    }
+    if reading.size != std::mem::size_of::<i32>() {
+        return Err(PlatformRefusal::Sysctl { errno: libc::EIO });
+    }
+    if reading.supported != 1 {
+        return Err(PlatformRefusal::NoHypervisor);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn read_hypervisor() -> HypervisorReading {
+    #[cfg(test)]
+    if let Some(reading) = HYPERVISOR_READING.get() {
+        return reading;
+    }
     let mut supported: i32 = 0;
     let mut size = std::mem::size_of_val(&supported);
     // SAFETY: sysctlbyname writes at most size bytes into the live i32 and retains no pointer;
@@ -501,18 +537,11 @@ fn platform() -> Result<(), PlatformRefusal> {
             0,
         )
     };
-    if result != 0 {
-        return Err(PlatformRefusal::Sysctl {
-            errno: errno(&std::io::Error::last_os_error()),
-        });
+    HypervisorReading {
+        supported,
+        size,
+        errno: (result != 0).then(|| errno(&std::io::Error::last_os_error())),
     }
-    if size != std::mem::size_of_val(&supported) {
-        return Err(PlatformRefusal::Sysctl { errno: libc::EIO });
-    }
-    if supported != 1 {
-        return Err(PlatformRefusal::NoHypervisor);
-    }
-    Ok(())
 }
 
 #[cfg(all(test, target_os = "macos"))]
