@@ -8,7 +8,15 @@ use plasmosome_backend::{
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::manifest::acted_on;
 use crate::runtime::strict_json::{StrictJsonError, parse_value};
+
+#[cfg(test)]
+#[path = "../../tests/fuzz/operator_file.rs"]
+mod operator_file;
+#[cfg(test)]
+#[path = "../../tests/fuzz/replay.rs"]
+mod replay;
 
 const MAX_SHOWN_CHARS: usize = 64;
 
@@ -66,7 +74,9 @@ pub(crate) struct MountEntry {
 /// `content`. `at` is the dotted location of the first fault, such as
 /// `plasmids.github-pr.proxy_maps[1].modes`, and is empty when the whole file is at fault: not
 /// UTF-8, not one JSON value, or not an object. `reason` reads after `at`, so show the refusal
-/// through `Display`, which joins the two, rather than by hand.
+/// through `Display`, which joins the two and writes each control, line-break or bidi character
+/// as a `\uXXXX` escape. `at` and `reason` keep the raw text; a caller that prints `at` alone
+/// passes it through spec 025's output formatter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContentRefusal {
     pub(crate) at: String,
@@ -75,11 +85,19 @@ pub(crate) struct ContentRefusal {
 
 impl fmt::Display for ContentRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.at.is_empty() {
-            f.write_str(&self.reason)
-        } else {
-            write!(f, "{}: {}", self.at, self.reason)
+        for (index, text) in [&self.at, &self.reason].into_iter().enumerate() {
+            if index == 1 && !self.at.is_empty() {
+                f.write_str(": ")?;
+            }
+            for character in text.chars() {
+                if acted_on(character) {
+                    write!(f, "\\u{:04X}", u32::from(character))?;
+                } else {
+                    write!(f, "{character}")?;
+                }
+            }
         }
+        Ok(())
     }
 }
 
@@ -455,6 +473,9 @@ mod tests {
         /plasmids => plasmids
         /plasmids/github-pr/proxy_maps => plasmids.github-pr.proxy_maps
         /plasmids/workspace/mounts => plasmids.workspace.mounts
+        /plasmids/workspace/mounts/0/target => plasmids.workspace.mounts[0].target
+        /plasmids/workspace/mounts/0/source => plasmids.workspace.mounts[0].source
+        /plasmids/workspace/mounts/0/access => plasmids.workspace.mounts[0].access
     ";
 
     const TOP: &str = r#"
@@ -896,5 +917,44 @@ mod tests {
         assert_eq!(whole, "the operator file must be a JSON object");
         let version = refused(&set("/version", json!(2))).to_string();
         assert_eq!(version, "version: must be the integer 1, not 2");
+        let unknown = refused(&with("", "api-key", json!(1))).to_string();
+        assert_eq!(unknown, "api-key: is not a field of the operator file");
+    }
+
+    #[test]
+    fn refusals_escape_controls_in_ids_keys_and_reasons_but_keep_raw_fields() {
+        for character in ['\n', '\u{1B}', '\u{202E}', '\u{85}'] {
+            let raw = format!("a{character}b");
+            let escape = format!("a\\u{:04X}b", u32::from(character));
+            let id = refused(&plasmids(json!({raw.clone(): {}})));
+            let key = refused(&with("", &raw, json!(1)));
+            for (refusal, at, visible) in [
+                (
+                    id,
+                    format!("plasmids.{raw}.proxy_maps"),
+                    format!("plasmids.{escape}.proxy_maps"),
+                ),
+                (key, raw.clone(), escape.clone()),
+            ] {
+                assert_eq!(refusal.at, at);
+                let display = refusal.to_string();
+                assert!(!display.chars().any(acted_on), "{display:?}");
+                assert_eq!(display, format!("{visible}: {}", refusal.reason));
+            }
+            for at in ["", "api-key"] {
+                let refusal = ContentRefusal {
+                    at: at.to_owned(),
+                    reason: raw.clone(),
+                };
+                let prefix = if at.is_empty() { "" } else { "api-key: " };
+                assert_eq!(refusal.to_string(), format!("{prefix}{escape}"));
+                assert_eq!(refusal.reason, raw);
+            }
+        }
+    }
+
+    #[test]
+    fn the_operator_file_corpus_replays() {
+        replay::replay("operator_file", operator_file::check);
     }
 }

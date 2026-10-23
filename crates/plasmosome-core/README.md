@@ -817,7 +817,9 @@ bytes as `size`.
 
 A refusal's `at` is the dotted location of the fault, such as
 `plasmids.github-pr.proxy_maps[1].modes`, or empty when the whole file is at fault. Its `Display`
-joins `at` and the reason. `OperatorFile::empty` stands for an unset `operator_declarations` key.
+joins `at` and the reason. `Display` writes each control, line-break or bidi character as a
+`\uXXXX` escape, and the fields keep the raw text. `OperatorFile::empty` stands for an unset
+`operator_declarations` key.
 `entry` gives one plasmid's entry, `listed` each declaration path for §5's local selection, and
 `mount_sources` each declared Mount source for rule 5.
 
