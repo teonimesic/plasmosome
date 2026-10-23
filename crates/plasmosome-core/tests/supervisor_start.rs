@@ -18,6 +18,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "support/private_root.rs"]
+mod private_root;
+
 const CASE: &str = "PLASMOSOME_SUPERVISOR_START_CASE";
 const CONTROLLER: &str = "PLASMOSOME_SUPERVISOR_START_CONTROLLER";
 const DEADLINE: &str = "PLASMOSOME_SUPERVISOR_START_DEADLINE";
@@ -190,10 +193,7 @@ fn run_every_case(arguments: &[OsString]) -> ExitCode {
 }
 
 fn run_case(name: &str) -> Result<(), String> {
-    let scratch = tempfile::Builder::new()
-        .prefix("supervisor-start-")
-        .tempdir()
-        .map_err(|error| format!("the case's scratch directory is not made: {error}"))?;
+    let scratch = private_root::private_root();
     let pids = scratch.path().join(PIDS);
     std::fs::create_dir(&pids)
         .map_err(|error| format!("the case's pid directory is not made: {error}"))?;

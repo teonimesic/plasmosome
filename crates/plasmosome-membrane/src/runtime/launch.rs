@@ -177,7 +177,14 @@ impl HelperExec {
     }
 }
 
-impl Launch for HelperExec {
+#[allow(unsafe_code)]
+// SAFETY: In the child, launch resets every catchable signal to its default action with sigaction,
+// dup2s its descriptors onto 0 to 3, closes every descriptor above 3, sets umask, calls chdir("/"),
+// empties the signal mask with sigemptyset and sigprocmask, and execs the helper with execve, or
+// calls _exit. Each call is async-signal-safe, and a failed one only reads errno. It walks fixed
+// arrays and integer ranges, so it allocates nothing, and it never drops the HelperExec. Nothing in
+// it can panic.
+unsafe impl Launch for HelperExec {
     #[allow(unsafe_code)]
     fn launch(self) -> ! {
         let ready = default_signal_actions()

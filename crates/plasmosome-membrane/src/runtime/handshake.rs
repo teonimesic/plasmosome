@@ -754,7 +754,11 @@ mod tests {
         then: Then,
     }
 
-    impl Launch for Connects {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch makes a socket and connects it to the address the parent laid
+    // out, then calls _exit, or reads one byte at a time into a local until end of file and calls
+    // _exit. All four calls are async-signal-safe.
+    unsafe impl Launch for Connects {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
@@ -1190,7 +1194,12 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    impl Launch for RepliesWhenTold {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch reads one byte from `told` into a local, writes the reply the
+    // parent made before the fork onto the inherited connection, then calls pause forever, or
+    // _exit. All four calls are async-signal-safe. Each write returns at most what is left, so its
+    // count stays within the length and the arithmetic cannot overflow or panic.
+    unsafe impl Launch for RepliesWhenTold {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let mut byte = [0u8; 1];

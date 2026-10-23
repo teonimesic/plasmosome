@@ -4,17 +4,67 @@ use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// The body of a forked VMM child.
-pub trait Launch {
-    /// Runs inside the forked child and must never return. The parent is
-    /// multi-threaded under the test harness, so an implementation may only
-    /// use async-signal-safe calls: `libc::_exit`, `libc::pause`, raw syscalls.
-    ///
-    /// An implementation must also never panic. Unwinding in the forked child
-    /// of a multi-threaded parent runs the panic hook, which allocates and
-    /// locks stderr; if another thread held that lock at fork time the child
-    /// deadlocks. A panic that escapes is contained by exiting the child with
-    /// code 70 instead.
+/// The body of a forked VMM child. `VmmChild::spawn` forks, starts a new
+/// session and runs `launch` in the child.
+///
+/// # Safety
+///
+/// `launch` runs in the child of a fork, and the parent may have other
+/// threads, as it does in production and under the test harness. Until it ends,
+/// an implementation may only make async-signal-safe calls, such as
+/// `execve`, `_exit`, `pause` and raw system calls. It must not allocate or free
+/// memory, wait for a lock or use Rust's stdio, which all take locks: another thread
+/// may have held one at the fork, and then the child waits forever. Lay out
+/// everything the child needs in the parent, before the fork.
+///
+/// It must not drop anything that owns heap memory or run any other destructor,
+/// including by unwinding. Dropping a `BoundSocket` or a `WritableRoot` in the
+/// child would unlink the daemon's live socket or remove the cell's writable root.
+/// It ends with `execve`, `_exit` or a loop of `pause`, never `std::process::exit`
+/// or `libc::exit`, which run exit handlers and flush stdio.
+///
+/// An implementation must also never panic or unwind. A panic in the forked child
+/// runs the panic hook, which allocates and takes locks to write its
+/// message. A panic that escapes is contained by exiting the child with
+/// code 70, but only after the hook has run.
+///
+/// Each implementation is an `unsafe impl` whose `// SAFETY:` comment says
+/// what its `launch` does in the child and why that is async-signal-safe:
+///
+/// ```
+/// struct ExitsAtOnce;
+///
+/// #[allow(unsafe_code)]
+/// // SAFETY: In the child, launch only calls _exit, which is async-signal-safe.
+/// unsafe impl plasmosome_membrane::vmm::Launch for ExitsAtOnce {
+///     #[allow(unsafe_code)]
+///     fn launch(self) -> ! {
+///         // SAFETY: _exit takes no pointer and is async-signal-safe.
+///         unsafe { libc::_exit(0) }
+///     }
+/// }
+/// ```
+///
+/// A safe implementation does not compile. The compiling twin above adds `unsafe`,
+/// the impl's `#[allow(unsafe_code)]` and its SAFETY comment. Neither extra line
+/// changes whether this safe impl compiles: it needs no allow, and comments have
+/// no effect on compilation. The register package's doctests inherit no unsafe lint.
+///
+/// ```compile_fail,E0200
+/// struct ExitsAtOnce;
+///
+/// impl plasmosome_membrane::vmm::Launch for ExitsAtOnce {
+///     #[allow(unsafe_code)]
+///     fn launch(self) -> ! {
+///         // SAFETY: _exit takes no pointer and is async-signal-safe.
+///         unsafe { libc::_exit(0) }
+///     }
+/// }
+/// ```
+#[allow(unsafe_code)]
+pub unsafe trait Launch {
+    /// Only `VmmChild::spawn` calls this, in the child it forks.
+    /// Callers must never call it themselves.
     fn launch(self) -> !;
 }
 
@@ -844,7 +894,9 @@ mod tests {
 
     struct ExitWith(i32);
 
-    impl Launch for ExitWith {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch only calls _exit with the code, which is async-signal-safe.
+    unsafe impl Launch for ExitWith {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             // SAFETY: _exit takes no pointer and is async-signal-safe, which is all this forked
@@ -855,7 +907,10 @@ mod tests {
 
     struct DieBySignal(i32);
 
-    impl Launch for DieBySignal {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch resets the signal to its default action with signal, raises it
+    // and calls _exit if it survives. All three are async-signal-safe.
+    unsafe impl Launch for DieBySignal {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             // SAFETY: signal, raise and _exit take no pointer and are async-signal-safe, which is
@@ -870,7 +925,9 @@ mod tests {
 
     struct SleepForever;
 
-    impl Launch for SleepForever {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch only calls pause, forever, which is async-signal-safe.
+    unsafe impl Launch for SleepForever {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             loop {
@@ -881,11 +938,18 @@ mod tests {
         }
     }
 
-    struct PanicOnLaunch;
+    struct PanicOnLaunch(Box<dyn std::any::Any + Send>);
 
-    impl Launch for PanicOnLaunch {
+    #[allow(unsafe_code)]
+    // SAFETY: This launcher breaks the no-unwind duty on purpose, as the only witness of exit 70.
+    // The parent builds its payload before the fork. resume_unwind skips the panic hook, so it
+    // cannot stall on a hook lock another thread held at the fork. The child has its own copy of
+    // memory, and ExitOnUnwind exits before any parent fixture's frame unwinds or the payload
+    // drops. If the child stalls, its test fails once DEADLINE runs out and the handle's drop
+    // kills and reaps it.
+    unsafe impl Launch for PanicOnLaunch {
         fn launch(self) -> ! {
-            panic!("a launcher that breaks its no-panic contract")
+            std::panic::resume_unwind(self.0)
         }
     }
 
@@ -1225,8 +1289,12 @@ mod tests {
                 let (control_read, control_write) = pipe();
                 let (ready_read, ready_write) = pipe();
                 let leader = group.pids.first().copied().unwrap_or(0);
-                // SAFETY: The child runs only close, setpgid, write, read and _exit, which are
-                // async-signal-safe, so it cannot deadlock in this threaded test process.
+                // SAFETY: This test process has other threads. The child runs only close, setpgid,
+                // write, read and _exit, which are async-signal-safe, on its own copies of the
+                // descriptors and on locals, so it cannot deadlock here. It never execs, so it
+                // forks without the spawn lock: that lock only keeps a descriptor from crossing an
+                // exec before it is close-on-exec, and this child keeps every descriptor it
+                // inherits until it exits, with the lock or without it.
                 let pid = unsafe { libc::fork() };
                 assert!(pid >= 0, "the certificate fixture fork succeeds");
                 if pid == 0 {
@@ -1579,7 +1647,10 @@ mod tests {
                 },
             ),
             (
-                Box::new(|| VmmChild::spawn(PanicOnLaunch)),
+                Box::new(|| {
+                    let payload = Box::new("a launcher that breaks its no-unwind contract");
+                    VmmChild::spawn(PanicOnLaunch(payload))
+                }),
                 VmmState::Exited { code: 70 },
             ),
         ] {
@@ -1869,8 +1940,12 @@ mod tests {
     #[allow(unsafe_code)]
     fn immediate_teardown_while_child_is_pre_setsid_reaps_exact_child() {
         let (gate_read, gate_write) = pipe();
-        // SAFETY: The child runs only close, read, setsid, pause and _exit, which are
-        // async-signal-safe, so it cannot deadlock in this threaded test process.
+        // SAFETY: This test process has other threads. The child runs only close, read, setsid,
+        // pause and _exit, which are async-signal-safe, on its own copies of the descriptors and on
+        // a local, so it cannot deadlock here. It never execs, so it forks without the spawn lock:
+        // that lock only keeps a descriptor from crossing an exec before it is close-on-exec, and
+        // this child keeps every descriptor it inherits until it dies, with the lock or without
+        // it.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "the instrumented fork succeeds");
         if pid == 0 {
@@ -1973,7 +2048,10 @@ mod signal_pressure {
         write: libc::c_int,
     }
 
-    impl Launch for ExitOnRelease {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch closes its copy of the release pipe's write end, reads one byte
+    // from the read end into a local and calls _exit. All three calls are async-signal-safe.
+    unsafe impl Launch for ExitOnRelease {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let mut byte = 0u8;
