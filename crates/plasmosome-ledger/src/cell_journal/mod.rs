@@ -3,11 +3,15 @@ use plasmosome_backend::{CellOwner, Handle, MockMode, PluginId, UniverseOp, Univ
 use crate::{Compensation, Effect, Inverse, InverseVia, Reversibility};
 
 mod fault;
+mod history;
 mod parse;
+mod read;
 mod source;
 
 pub use fault::{CellJournalFault, CellJournalFaultKind, JournalRuleError};
+pub use history::{Attachment, CellHistory, Decision, OpenTransaction};
 pub use parse::{encode_record, parse_record};
+pub use read::{read_cell_journal, read_cell_journal_from};
 pub use source::AttachmentSource;
 
 /// The only format spec 008's per-cell journal has. Every record carries it as `"format": 1`.
