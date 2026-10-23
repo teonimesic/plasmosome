@@ -194,14 +194,7 @@ where
         return verdict_of(halted);
     }
     match read_frame_within(&mut stream, budget, &now, &mut wait) {
-        Ok(Frame::Line { bytes, .. }) => {
-            let verdict = classify(&bytes);
-            match budget.remaining_at(now()) {
-                Ok(_) => Ok(verdict),
-                Err(ProbeStopped::Cancelled) => Err(Cancelled),
-                Err(ProbeStopped::TimedOut) => Ok(spent()),
-            }
-        }
+        Ok(Frame::Line { bytes, .. }) => Ok(classify(&bytes)),
         Ok(Frame::TooLarge(bytes)) => Ok(Readiness::NotReady(NotReady::Malformed {
             line: diagnostic(&bytes),
         })),
