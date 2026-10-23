@@ -140,11 +140,14 @@ pub(crate) mod tree {
         fn drop(&mut self) {
             open_up(&self.path);
             #[cfg(target_os = "macos")]
-            let _ = std::process::Command::new("/bin/chmod")
-                .args(["-R", "-N"])
-                .arg(&self.path)
-                .stderr(std::process::Stdio::null())
-                .status();
+            {
+                let _held = crate::spawn_lock::hold_fork_side();
+                let _ = std::process::Command::new("/bin/chmod")
+                    .args(["-R", "-N"])
+                    .arg(&self.path)
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
         }
     }
 
@@ -201,6 +204,7 @@ pub(crate) mod tree {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn add_acl(path: &Path, rule: &str) {
+        let _held = crate::spawn_lock::hold_fork_side();
         let status = std::process::Command::new("/bin/chmod")
             .arg("+a")
             .arg(rule)

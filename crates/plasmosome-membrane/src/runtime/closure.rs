@@ -1593,6 +1593,7 @@ mod tests {
         use std::process::Command;
 
         fn cc(args: &[&Path]) {
+            let _held = crate::spawn_lock::hold_fork_side();
             let status = Command::new("cc").args(args).status().expect("cc runs");
             assert!(status.success(), "cc {args:?}: {status}");
         }
@@ -1640,6 +1641,7 @@ mod tests {
         }
 
         fn sysctl(name: &str) -> String {
+            let _held = crate::spawn_lock::hold_fork_side();
             let output = Command::new("/usr/sbin/sysctl")
                 .args(["-n", name])
                 .output()

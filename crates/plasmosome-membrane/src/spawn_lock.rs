@@ -7,6 +7,76 @@ use std::sync::{PoisonError, RwLock};
 
 static SPAWN_LOCK: RwLock<()> = RwLock::new(());
 
+#[cfg(test)]
+static FIXTURE_WRITERS: std::sync::Mutex<Vec<RawFd>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) struct FixtureWriter(Option<OwnedFd>);
+
+#[cfg(test)]
+impl AsRawFd for FixtureWriter {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+            .as_ref()
+            .expect("the fixture writer is open")
+            .as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+impl Drop for FixtureWriter {
+    fn drop(&mut self) {
+        write_held(&SPAWN_LOCK, || {
+            let fd = self.as_raw_fd();
+            FIXTURE_WRITERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|writer| *writer != fd);
+            self.0.take();
+        });
+    }
+}
+
+#[cfg(test)]
+/// Opens and registers a fixture's control writer before a fork can inherit it.
+pub(crate) fn fixture_control_pipe(
+    create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<[OwnedFd; 2]>,
+) -> std::io::Result<(OwnedFd, FixtureWriter)> {
+    write_held(&SPAWN_LOCK, || {
+        let [read, write] = with_each_descriptor_held(create)?;
+        FIXTURE_WRITERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(write.as_raw_fd());
+        Ok((read, FixtureWriter(Some(write))))
+    })
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+fn fork_closing_fixture_writers() -> libc::pid_t {
+    let writers = std::mem::ManuallyDrop::new(
+        FIXTURE_WRITERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone(),
+    );
+    // SAFETY: fork calls this while holding SPAWN_LOCK's read side, so registered descriptors
+    // cannot open, close or be reused between the snapshot and fork. In the child only close
+    // and iteration over prepared storage run here; ManuallyDrop prevents freeing that storage.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        for &fd in writers.iter() {
+            // SAFETY: The read lock protects each inherited descriptor number until fork, and
+            // this child has opened nothing. close is async-signal-safe and keeps no pointer.
+            unsafe { libc::close(fd) };
+        }
+    } else {
+        drop(std::mem::ManuallyDrop::into_inner(writers));
+    }
+    pid
+}
+
 thread_local! {
     static CREATING_DESCRIPTORS: Cell<bool> = const { Cell::new(false) };
 }
@@ -143,9 +213,9 @@ fn close_on_exec_or_closed<T: OwnsDescriptor>(created: T) -> std::io::Result<T> 
 #[allow(unsafe_code)]
 pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // SAFETY: This function's doc binds every caller to do only async-signal-safe work in
-    // Forked::Child and never return or unwind there. Its one caller, VmmChild::spawn, calls only
-    // setsid and _exit itself, and its ExitOnUnwind guard exits the child if `launch` panics, after
-    // the panic hook has run. That `launch` does only async-signal-safe work is the Safety contract
+    // Forked::Child and never return or unwind there. VmmChild::spawn calls only setsid and _exit
+    // itself, and its ExitOnUnwind guard exits the child if `launch` panics, after the panic hook
+    // has run. That `launch` does only async-signal-safe work is the Safety contract
     // of Launch, an unsafe trait, so each implementation is an unsafe impl whose SAFETY comment
     // says why it keeps it. The test launcher PanicOnLaunch breaks it on purpose. fork_holding
     // holds the read side of the spawn lock, so no descriptor made inside
@@ -153,7 +223,11 @@ pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // descriptor made in two calls anywhere else, such as a socket or connection std makes on
     // macOS, which has no SOCK_CLOEXEC or accept4. daemon::run's doc gives the order that keeps the
     // daemon's own sockets out of a fork.
-    fork_holding(&SPAWN_LOCK, || unsafe { libc::fork() })
+    #[cfg(not(test))]
+    let fork = || unsafe { libc::fork() };
+    #[cfg(test)]
+    let fork = fork_closing_fixture_writers;
+    fork_holding(&SPAWN_LOCK, fork)
 }
 
 fn write_held<T>(lock: &RwLock<()>, create: impl FnOnce() -> T) -> T {
@@ -349,6 +423,66 @@ mod tests {
     }
 
     #[test]
+    fn fixture_writer_creation_and_registration_hold_the_write_side() {
+        let (read, writer) = fixture_control_pipe(|_held| {
+            assert!(matches!(
+                SPAWN_LOCK.try_read(),
+                Err(TryLockError::WouldBlock)
+            ));
+            let (read, write) = UnixStream::pair()?;
+            Ok([read.into(), write.into()])
+        })
+        .expect("a fixture control opens");
+        let held = hold_fork_side();
+        assert!(
+            FIXTURE_WRITERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&writer.as_raw_fd())
+        );
+        drop(held);
+        drop(writer);
+        drop(read);
+        let failed = fixture_control_pipe(|_| Err(std::io::Error::from_raw_os_error(libc::EMFILE)));
+        assert!(matches!(failed, Err(error) if error.raw_os_error() == Some(libc::EMFILE)));
+    }
+
+    #[test]
+    fn fixture_writer_removal_and_close_wait_while_a_fork_holds_the_read_side() {
+        let (_read, writer) = fixture_control_pipe(|_| {
+            let (read, write) = UnixStream::pair()?;
+            Ok([read.into(), write.into()])
+        })
+        .expect("a fixture control opens");
+        let held = hold_fork_side();
+        let (finished, after) = mpsc::channel();
+        let dropping = std::thread::spawn(move || {
+            drop(writer);
+            let _ = finished.send(());
+        });
+        let deadline = Instant::now() + PATIENCE;
+        let waited = loop {
+            if waits_for_the_write_side(dropping.thread().id()) {
+                break true;
+            }
+            if after.try_recv().is_ok() {
+                break false;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the writer drop never reached the lock"
+            );
+            std::thread::yield_now();
+        };
+        drop(held);
+        dropping.join().expect("the writer drop completes");
+        assert!(
+            waited,
+            "the writer must stay registered and open until a fork finishes"
+        );
+    }
+
+    #[test]
     fn a_spawned_child_was_forked_holding_the_read_side_of_the_spawn_lock() {
         let mut child = VmmChild::spawn(ReportsInheritedReadSide).expect("the fork succeeds");
         assert_eq!(
@@ -509,9 +643,10 @@ mod tests {
                 let mut forked_while_held = false;
                 let forked = fork_holding(lock, || {
                     forked_while_held = !seen.load(Ordering::SeqCst);
-                    // SAFETY: The forked child only reads one descriptor's flags with fcntl and
-                    // calls _exit, both async-signal-safe.
-                    unsafe { libc::fork() }
+                    match super::fork().expect("the fixture-safe fork succeeds") {
+                        Forked::Parent(pid) => pid,
+                        Forked::Child => 0,
+                    }
                 });
                 let outcome = match forked {
                     Ok(Forked::Child) => {
