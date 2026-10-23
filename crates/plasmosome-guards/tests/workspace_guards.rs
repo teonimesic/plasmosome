@@ -1291,21 +1291,28 @@ fn matrix_grammar_accepts_the_real_workflow() {
     });
 }
 
-const REAL_MATRIX_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+fn real_matrix_workflow() -> String {
+    let mut workflow = String::new();
+    check_workspace(|root| {
+        workflow = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+    });
+    workflow
+}
 
 fn full_workflow_name(name: &str) -> String {
-    REAL_MATRIX_WORKFLOW.replacen("    name: crate (${{ matrix.crate }})", name, 1)
+    real_matrix_workflow().replacen("    name: crate (${{ matrix.crate }})", name, 1)
 }
 
 fn multiline_flow_workflow() -> String {
-    let strategy = REAL_MATRIX_WORKFLOW
+    let workflow = real_matrix_workflow();
+    let strategy = workflow
         .split_once("    strategy:\n")
         .unwrap()
         .1
         .split_once("    steps:\n")
         .unwrap()
         .0;
-    REAL_MATRIX_WORKFLOW.replacen(
+    workflow.replacen(
         strategy,
         "      matrix:\n        include: [\n          {crate: plasmosome}\n        ]\n",
         1,
@@ -1313,7 +1320,8 @@ fn multiline_flow_workflow() -> String {
 }
 
 fn quoted_name_workflow(quote: char) -> String {
-    let matrix = REAL_MATRIX_WORKFLOW
+    let workflow = real_matrix_workflow();
+    let matrix = workflow
         .split_once("    strategy:\n")
         .unwrap()
         .1
@@ -1321,7 +1329,7 @@ fn quoted_name_workflow(quote: char) -> String {
         .unwrap()
         .0;
     let real_strategy = format!("    strategy:\n{matrix}");
-    let workflow = REAL_MATRIX_WORKFLOW.replacen(
+    let workflow = workflow.replacen(
         &real_strategy,
         "    \"strategy\":\n      fail-fast: false\n      matrix:\n        crate:\n          - plasmosome\n",
         1,
@@ -1348,7 +1356,7 @@ fn matrix_grammar_refuses_the_double_quoted_workflow_witness() {
 
 #[test]
 fn matrix_grammar_refuses_a_quoted_structural_key() {
-    let workflow = REAL_MATRIX_WORKFLOW.replacen("    strategy:", "    \"strategy\":", 1);
+    let workflow = real_matrix_workflow().replacen("    strategy:", "    \"strategy\":", 1);
     assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 363 is refused (quoted key): `    \"strategy\":`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
