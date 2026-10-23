@@ -1463,7 +1463,7 @@ fn matrix_grammar_accepts_complete_values_and_block_scalar_bodies() {
     }
     assert_eq!(
         workflow_line_grammar(
-            "\n # comment\nplain_key.0-: # comment\n  - key: value\n    next: other\n  - 'complete'\n"
+            "\n # comment\nplain_key.0-: # comment\n  - key: value\n    next: other\n  - 'complete: value'\n"
         ),
         Ok(())
     );
