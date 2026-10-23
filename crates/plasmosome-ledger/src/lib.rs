@@ -2,6 +2,7 @@
 //! closure that decides whether detach is safe or needs an operator `Force`.
 //! A caller pushes effects onto a `Ledger`, closes it, and detaches the result.
 //! The `artifact` module holds spec 020's registry IDs, release keys and release references.
+//! The `cell_journal` module holds spec 008's per-cell journal records and their strict codec.
 
 #![doc(test(attr(forbid(unsafe_code))))]
 
@@ -795,6 +796,7 @@ impl Ledger {
 }
 
 pub mod artifact;
+pub mod cell_journal;
 
 #[cfg(test)]
 mod tests {
