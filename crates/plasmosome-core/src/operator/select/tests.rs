@@ -223,7 +223,6 @@ fn manifest_refusal(bytes: &[u8]) -> (ManifestError, Value) {
         panic!("expected a manifest refusal");
     };
     assert_eq!(actual, path);
-    assert_eq!(*paths.borrow(), [path.clone()]);
     let bytes = serde_json::to_vec(&WireError::manifest_refusal(
         actual.display().to_string(),
         &error,
@@ -232,6 +231,7 @@ fn manifest_refusal(bytes: &[u8]) -> (ManifestError, Value) {
     let wire: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(wire["code"], 108);
     assert_eq!(wire["path"], path.to_str().unwrap());
+    assert_eq!(*paths.borrow(), [path]);
     (*error, wire)
 }
 
