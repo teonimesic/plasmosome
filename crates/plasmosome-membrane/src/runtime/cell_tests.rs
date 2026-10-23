@@ -53,10 +53,8 @@ fn gone(bundle: &FixtureBundle, pid: i32) {
     }
     let mut status = 0;
     // SAFETY: waitpid observes only this test's already-reaped child, and status is writable.
-    assert_eq!(
-        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
-        -1
-    );
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    assert_eq!(waited, -1);
     assert_eq!(
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::ECHILD)
