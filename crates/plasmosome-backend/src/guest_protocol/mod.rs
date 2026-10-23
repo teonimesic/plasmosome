@@ -10,9 +10,10 @@ mod envelope;
 pub mod observation;
 
 pub use control::{
-    AddressFault, ControlCall, ControlMethod, GrantParams, HelloParams, InstallParams, LaneState,
-    ObserveParams, ProxyAddress, RemoveParams, ShutdownParams, decode_control_request,
-    encode_control_request,
+    ActiveResult, AddressFault, ControlCall, ControlMethod, ControlResult, DrainedResult,
+    GrantParams, HelloParams, HelloResult, InstallParams, InstalledResult, LaneState,
+    ObserveParams, ProxyAddress, RemoveParams, RemovedResult, ShutdownParams, ShutdownResult,
+    decode_control_reply, decode_control_request, encode_control_request, encode_control_result,
 };
 
 pub use observation::{
@@ -22,11 +23,31 @@ pub use observation::{
 };
 
 pub use envelope::{
-    BridgeError, EncodeError, InboundRequest, ProtocolCode, RefusalDetail, RequestId,
-    RequestRefusal, encode_failure, encode_request, encode_success, split_request,
+    BridgeError, EncodeError, InboundRequest, ProtocolCode, RefusalDetail, ReplyFault, RequestId,
+    RequestRefusal, encode_failure, encode_request, encode_success, split_reply, split_request,
 };
 
 const GUEST_TEXT_BYTES: usize = 1024;
+
+/// A success flag that serializes as `true` and refuses every other JSON value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Yes;
+
+impl Serialize for Yes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for Yes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if bool::deserialize(deserializer)? {
+            Ok(Self)
+        } else {
+            Err(D::Error::custom("a success flag must be true"))
+        }
+    }
+}
 
 /// One of the two connections the guest shim opens to the host's 4090
 /// control port. The shim opens the normal lane first and the withdrawal lane
