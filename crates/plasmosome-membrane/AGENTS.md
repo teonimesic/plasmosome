@@ -32,8 +32,11 @@ Runs on the host, one per cell. This is where enforcement lives.
   only currently uses it), and the standard library cannot set close-on-exec on a descriptor
   that is already open. Making the writable root copy inside a held directory, inspecting it
   there and removing it by identity needs `openat`, `fstatat` and `unlinkat`, which the standard
-  library does not offer relative to a directory descriptor. `#[allow(unsafe_code)]` goes on the
-  item that holds the `unsafe`, never on a `mod` or the crate root.
+  library does not offer relative to a directory descriptor. The VMM helper's checks of itself
+  need them as well: `sandbox_init` applies the host policy, and `proc_pidinfo` and dyld's image
+  list name its open descriptors and loaded images, which the standard library cannot list.
+  `#[allow(unsafe_code)]` goes on the item that holds the `unsafe`, never on a `mod` or the crate
+  root.
 
 ## Testing
 
