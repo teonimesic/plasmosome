@@ -1180,6 +1180,12 @@ fn validate_secret_ref(
             "an explicit delivery list must not be empty",
         ));
     }
+    let paths = secret
+        .scope
+        .as_ref()
+        .map(|scope| &scope.path_scope[..])
+        .unwrap_or_default();
+    let relative = paths.iter().any(|path| !path.starts_with('/'));
     for mode in &secret.delivery {
         let consumer_ok = matches!(
             (secret.consumer, mode),
@@ -1204,14 +1210,7 @@ fn validate_secret_ref(
             ));
         }
         if *mode == DeliveryMode::Inject || delivery_omitted {
-            let paths = secret
-                .scope
-                .as_ref()
-                .map(|scope| scope.path_scope.as_slice())
-                .unwrap_or_default();
-            if (*mode == DeliveryMode::Inject && paths.is_empty())
-                || paths.iter().any(|path| !path.starts_with('/'))
-            {
+            if (*mode == DeliveryMode::Inject && paths.is_empty()) || relative {
                 return Err(field_error(
                     id,
                     field("scope.path_scope"),
@@ -1240,18 +1239,19 @@ fn validate_mock(
         };
         return Err(field_error(id, "mock".into(), REMOVE_ENTRY.into(), &detail));
     };
+    let declared: HashSet<&str> = network.hosts.iter().map(String::as_str).collect();
     let Some((index, host)) = mock
         .hosts
         .iter()
         .enumerate()
-        .find(|(_, host)| !network.hosts.contains(host))
+        .find(|(_, host)| !declared.contains(host.as_str()))
     else {
         return Ok(());
     };
     if network.ports.is_empty() {
         let undeclared: Vec<String> = distinct(&mock.hosts)
             .into_iter()
-            .filter(|host| !network.hosts.contains(host))
+            .filter(|host| !declared.contains(host.as_str()))
             .collect();
         return Err(field_error(
             id,
@@ -1362,13 +1362,12 @@ fn evident_strings(value: &toml::Value) -> Vec<String> {
 }
 
 fn distinct(names: &[String]) -> Vec<String> {
-    let mut kept: Vec<String> = Vec::new();
-    for name in names {
-        if !kept.contains(name) {
-            kept.push(name.clone());
-        }
-    }
-    kept
+    let mut seen = HashSet::with_capacity(names.len());
+    names
+        .iter()
+        .filter(|name| seen.insert(name.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn evident_or(value: &toml::Value, fallback: &[String], example: &str) -> Vec<String> {
@@ -4274,6 +4273,230 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "uploads.github.example".to_string()
             ]
         );
+    }
+
+    fn within(seconds: u64, what: &'static str, work: impl FnOnce() + Send + 'static) {
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            work();
+            send.send(()).unwrap();
+        });
+        match receive.recv_timeout(std::time::Duration::from_secs(seconds)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{what} did not finish within {seconds} s: the check is not linear")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{what} panicked")
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_keeps_the_first_of_each_name_in_the_authors_order() {
+        for (names, expected) in [
+            (vec!["b", "a", "b", "c", "a"], vec!["b", "a", "c"]),
+            (vec![], vec![]),
+            (vec!["x", "x", "x"], vec!["x"]),
+        ] {
+            let names: Vec<String> = names.into_iter().map(String::from).collect();
+            assert_eq!(distinct(&names), expected);
+        }
+    }
+
+    #[test]
+    fn distinct_of_half_a_million_names_finishes_within_30_seconds() {
+        within(30, "distinct", || {
+            let expected: Vec<String> = (0..250_000).map(|index| format!("h{index}")).collect();
+            let names = expected
+                .iter()
+                .chain(&expected)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(distinct(&names), expected);
+        });
+    }
+
+    fn large_mock() -> MockSpec {
+        MockSpec {
+            hosts: (0..300_000)
+                .map(|index| format!("h{index}.example"))
+                .collect(),
+            kind: "recorded".into(),
+            api: "example".into(),
+            source: "fixtures/example".into(),
+        }
+    }
+
+    #[test]
+    fn a_mock_check_of_300000_hosts_with_a_port_finishes_within_30_seconds() {
+        within(30, "mock with a port", || {
+            let mock = large_mock();
+            let mut network = CommandNetwork {
+                hosts: mock.hosts.clone(),
+                ports: vec![443],
+                pin_cidrs: vec![],
+            };
+            let last = network.hosts.pop().unwrap();
+            let error = validate_mock("github-pr", &mock, Some(&network)).unwrap_err();
+            let ManifestError::Field {
+                plasmid,
+                field,
+                fix,
+                detail,
+            } = error
+            else {
+                panic!("expected a field refusal");
+            };
+            assert_eq!(plasmid.as_deref(), Some("github-pr"));
+            assert_eq!(field, "network.hosts");
+            assert_eq!(fix, toml_string(&last));
+            assert_eq!(
+                detail,
+                format!(
+                    "[mock] stands in for {}, which [network] does not declare",
+                    toml_string(&last)
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn a_mock_check_of_300000_hosts_without_a_port_finishes_within_30_seconds() {
+        within(30, "mock without a port", || {
+            let mock = large_mock();
+            let mut network = CommandNetwork {
+                hosts: mock.hosts.clone(),
+                ports: vec![],
+                pin_cidrs: vec![],
+            };
+            let last = network.hosts.pop().unwrap();
+            let error = validate_mock("github-pr", &mock, Some(&network)).unwrap_err();
+            let ManifestError::Field {
+                field, fix, detail, ..
+            } = error
+            else {
+                panic!("expected a field refusal");
+            };
+            assert_eq!(field, "mock");
+            assert_eq!(fix, REMOVE_ENTRY);
+            assert_eq!(
+                detail,
+                format!(
+                    "[mock] stands in for {}, which [network] does not declare, and [network] declares no port",
+                    toml_string(&last)
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn a_mock_check_of_300000_hosts_without_a_network_finishes_within_30_seconds() {
+        within(30, "mock without a network", || {
+            let mock = large_mock();
+            let error = validate_mock("github-pr", &mock, None).unwrap_err();
+            let ManifestError::Field {
+                field, fix, detail, ..
+            } = error
+            else {
+                panic!("expected a field refusal");
+            };
+            assert_eq!(field, "mock");
+            assert_eq!(fix, REMOVE_ENTRY);
+            assert_eq!(
+                detail,
+                format!(
+                    "[mock] stands in for {}, and there is no [network]",
+                    hosts_named(&mock.hosts)
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn a_credential_with_300000_modes_and_paths_is_checked_within_30_seconds() {
+        within(30, "credential modes and paths", || {
+            let mut secret = SecretRef {
+                id: "example:token".into(),
+                consumer: SecretConsumer::Http,
+                delivery: vec![DeliveryMode::Inject; 300_000],
+                scope: Some(SecretScope {
+                    path_scope: vec!["/a".into(); 300_000],
+                    ..SecretScope::default()
+                }),
+                ttl: None,
+                subject: None,
+            };
+            validate_secret_ref("github-pr", "secrets", 0, &secret, false).unwrap();
+            *secret
+                .scope
+                .as_mut()
+                .unwrap()
+                .path_scope
+                .last_mut()
+                .unwrap() = "a".into();
+            let error = validate_secret_ref("github-pr", "secrets", 0, &secret, false).unwrap_err();
+            let ManifestError::Field {
+                field, fix, detail, ..
+            } = error
+            else {
+                panic!("expected a field refusal");
+            };
+            assert_eq!(field, "secrets.refs[0].scope.path_scope");
+            assert_eq!(fix, "scope = { path_scope = [\"/required/path/\"] }");
+            assert_eq!(
+                detail,
+                "path-scope entries must be absolute; inject also requires a nonempty scope"
+            );
+        });
+    }
+
+    #[test]
+    fn a_declaration_listing_130000_hosts_is_refused_naming_each_host_once_within_120_seconds() {
+        within(120, "130000-host declaration", || {
+            let hosts: Vec<String> = (0..130_000)
+                .map(|mut index| {
+                    (0..4)
+                        .map(|_| {
+                            let letter = char::from(b'a' + (index % 26) as u8);
+                            index /= 26;
+                            letter
+                        })
+                        .collect()
+                })
+                .collect();
+            let entries = hosts
+                .iter()
+                .chain(hosts.iter().take(1_000))
+                .map(|host| toml_string(host))
+                .collect::<Vec<_>>()
+                .join(",");
+            let declaration = format!("{DECLARED}network = [{entries}]");
+            assert!(declaration.len() <= MAX_MANIFEST_BYTES);
+            let error = PlasmidManifest::parse(&declaration).unwrap_err();
+            let ManifestError::Field {
+                plasmid,
+                field,
+                fix,
+                detail,
+            } = &error
+            else {
+                panic!("expected a field refusal");
+            };
+            assert_eq!(plasmid.as_deref(), Some("github-pr"));
+            assert_eq!(field, "network");
+            assert_eq!(
+                fix,
+                &format!("[network]\n{}", strings_line("hosts", &hosts))
+            );
+            eprintln!(
+                "declaration={} detail={} fix={} display={}",
+                declaration.len(),
+                detail.len(),
+                fix.len(),
+                error.to_string().len()
+            );
+        });
     }
 
     #[test]
