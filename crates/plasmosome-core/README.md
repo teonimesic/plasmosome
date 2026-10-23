@@ -166,11 +166,14 @@ could not be read), `ManifestError::Parse` (the text is not TOML), `ManifestErro
 (the declaration is over 1 MiB) and `ManifestError::TooDeep` (the declaration nests more than 32
 levels deep) carry no field. For `Parse`, the TOML parser reports a position,
 not a field path, and naming one would be a guess. A `Parse` error quotes the source line, and its
-text is written with the same escapes, keeping its line breaks. `TooLarge` is decided before any
+text is written with the same escapes, keeping its line breaks. A refusal's text is at most
+4,096 bytes: a longer one keeps its first 2,046 bytes and its last 2,047 around U+2026, each cut
+at a character boundary, and a fix over 1,024 bytes is given by its length instead. The fix itself
+is never cut. `TooLarge` is decided before any
 TOML is parsed: a declaration over `MAX_MANIFEST_BYTES`, 1 MiB, is refused with no field and no
 fix. `load` reads at most 1 MiB plus one byte, so a file, device or FIFO that delivers more than
 1 MiB, `/dev/zero` among them, is refused at the bound. It does not bound time: a FIFO with no
-writer, or whose writer stops short of the bound and never closes, still blocks it.
+writer, or whose writer delivers at most 1 MiB and never closes, still blocks it.
 `TooDeep` is decided after the size check and before any TOML is parsed, with no field and no fix.
 `parse` counts how deep the text nests and refuses more than `MAX_MANIFEST_DEPTH`, 32 levels. The
 root table is level 1. Each array, each inline table and each dot in a key adds a level, and each
