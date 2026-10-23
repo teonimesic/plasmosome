@@ -5,7 +5,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::digest::{Digest, DigestError};
 
+pub(crate) mod control;
 mod envelope;
+
+pub use control::{
+    AddressFault, ControlCall, ControlMethod, GrantParams, HelloParams, InstallParams, LaneState,
+    ObserveParams, ProxyAddress, RemoveParams, ShutdownParams, decode_control_request,
+    encode_control_request,
+};
 
 pub use envelope::{
     BridgeError, EncodeError, InboundRequest, ProtocolCode, RefusalDetail, RequestId,
