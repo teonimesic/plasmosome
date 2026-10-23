@@ -53,11 +53,9 @@ type Identity = (u64, u64);
 /// UID, writable by neither group nor other with no sticky-bit exception, and on macOS carrying
 /// no ACL allow entry that lets anyone replace its entries and on no volume mounted with
 /// ownership ignored. So a root whose path the socket check's ancestor rule refuses is refused
-/// when it is opened, before anything is made in it. An inheritable ACL entry that replaces
-/// nothing, such as one that allows read, still passes `open`; a cell directory made under it
-/// inherits the entry, and the socket check refuses that directory. Refusing such a root is
-/// plasmosome-zfgs's. Every name beneath the root is opened relative to this descriptor without
-/// following a symlink.
+/// when it is opened, before anything is made in it. After that walk, any ACL entry on the root
+/// is refused. Every name beneath the root is opened relative to this descriptor without
+/// following a symlink, and any ACL entry on an opened or newly created object is refused.
 ///
 /// Private modes (0700 for directories, 0600 for files) are set with `fchmod`, whatever the
 /// umask. A directory this user cannot read, such as one a umask of 0477 left at 0300, is first
@@ -74,10 +72,11 @@ type Identity = (u64, u64);
 /// `CellDir::create_runtime_dir` then report a directory that exists as `Missing`, and
 /// `retire` reports `Io` with `ENOENT`.
 ///
-/// On macOS private modes do not restrict access when the root or `cells` carries an
-/// inheritable ACL: the new entry inherits it and the mode does not show it. `open` refuses an
-/// allow entry on the root or above it that lets anyone replace entries. Other entries, and
-/// entries on what the root contains, are not checked, and nothing here removes an ACL.
+/// Private modes do not show inherited ACL access. Every open checks its own descriptor,
+/// including after creation and before setting its mode. A held directory is not checked again.
+/// A refused object stays in place, except for the existing temporary-file cleanup paths; the
+/// operator must clear its ACL. Nothing here removes an ACL. On Linux the same checks refuse
+/// POSIX access and default ACLs; on macOS they refuse any entry, including inherit-only entries.
 #[derive(Debug)]
 pub struct InstanceRoot {
     dir: OwnedFd,
@@ -91,7 +90,7 @@ impl InstanceRoot {
     /// component and no trailing `/`. A relative path is `NotAbsolute`, never resolved against
     /// the current directory. A path the rule above refuses is `Untrusted`, naming the root and
     /// the component that broke the rule. A component that is missing or cannot be opened is
-    /// `Open`, naming that component. It creates nothing.
+    /// `Open`, naming that component. An ACL entry on the walked root is `Acl`. It creates nothing.
     pub fn open(path: &Path) -> Result<InstanceRoot, InstanceRootError> {
         if !path.is_absolute() {
             return Err(InstanceRootError::NotAbsolute {
@@ -101,6 +100,14 @@ impl InstanceRoot {
         let opened = Walk::from_root(path)
             .and_then(|walk| walk.open_trusted_directory())
             .map_err(|refusal| root_refusal(path, refusal))?;
+        if carries_acl(opened.fd.as_fd()).map_err(|source| InstanceRootError::Open {
+            path: path.to_path_buf(),
+            source,
+        })? {
+            return Err(InstanceRootError::Acl {
+                path: path.to_path_buf(),
+            });
+        }
         Ok(InstanceRoot {
             dir: opened.fd,
             path: path.to_path_buf(),
@@ -120,6 +127,7 @@ impl InstanceRoot {
     /// syncs the root, so a retry after a failed call finishes what the failed call began.
     /// Another holder, in this process or another, makes this `Busy`; it never waits. The file is
     /// never unlinked.
+    /// An ACL entry on the opened or created file is `Acl`, before any lock or mode change.
     ///
     /// Dropping the returned value releases the lock at once: it calls `flock(LOCK_UN)` before its
     /// descriptor closes, so a process that another thread is starting, which holds a copy of
@@ -144,12 +152,16 @@ impl InstanceRoot {
             match file_refusal(self.dir.as_fd(), &name, source) {
                 FileRefusal::Symlink => LockError::Symlink { path: path.clone() },
                 FileRefusal::NotRegular => LockError::NotRegular { path: path.clone() },
+                FileRefusal::Acl => LockError::Acl { path: path.clone() },
                 FileRefusal::Io(source) => io_error(source),
             }
         })?;
         let file = File::from(fd);
         if !file.metadata().map_err(io_error)?.is_file() {
             return Err(LockError::NotRegular { path });
+        }
+        if carries_acl(file.as_fd()).map_err(io_error)? {
+            return Err(LockError::Acl { path });
         }
         match lock_exclusive_nonblocking(file.as_fd()) {
             Err(source) if source.raw_os_error() == Some(libc::EWOULDBLOCK) => {
@@ -184,6 +196,7 @@ impl InstanceRoot {
     /// (`EMFILE`, `ENFILE`) is a fault of the process, not of a cell, and also refuses the whole
     /// discovery. A bad entry or an unopenable cell is reported in its own entry while its
     /// siblings are still classified. Entries come in raw-byte order of their names.
+    /// An ACL on `cells` is `CellsAcl`; one on a cell directory or journal refuses only that cell.
     pub fn discover(&self, lock: &WriterLock) -> Result<Discovery, DiscoveryError> {
         if lock.root != self.identity {
             return Err(DiscoveryError::ForeignLock {
@@ -204,6 +217,9 @@ impl InstanceRoot {
             }
             Err(DirectoryRefusal::NotADirectory) => {
                 return Err(DiscoveryError::CellsNotADirectory { path: cells_path });
+            }
+            Err(DirectoryRefusal::Acl) => {
+                return Err(DiscoveryError::CellsAcl { path: cells_path });
             }
             Err(DirectoryRefusal::Io(source)) if out_of_descriptors(&source) => {
                 return Err(DiscoveryError::OutOfDescriptors {
@@ -245,6 +261,7 @@ impl InstanceRoot {
     /// case or Unicode normalization, another spelling of an existing cell is refused as `Alias`.
     /// The ID must also still name the directory that was opened, so a cell retired or replaced
     /// while it is opened is `Missing`. Opening needs no lock; appending to the journal does.
+    /// An ACL entry on either opened directory is `Acl`, naming that directory.
     pub fn cell_dir(&self, cell: &CellId) -> Result<CellDir, CellDirError> {
         let journal_path = cell_ledger_path(&self.path, cell).map_err(CellDirError::InvalidCell)?;
         let cells_path = self.path.join(CELLS_DIR);
@@ -259,6 +276,9 @@ impl InstanceRoot {
         let dir = open_at(cells.as_fd(), &name, DIRECTORY_FLAGS, 0).map_err(|error| {
             directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path.clone())
         })?;
+        if carries_acl(dir.as_fd()).map_err(cell_dir_io(&cell_path))? {
+            return Err(CellDirError::Acl { path: cell_path });
+        }
         let named =
             naming(cells.as_fd(), &name, dir.as_fd()).map_err(|source| CellDirError::Io {
                 path: cells_path.clone(),
@@ -289,6 +309,7 @@ impl InstanceRoot {
     /// failed call created. A failed sync names the directory that was being synced. An existing
     /// cell directory is `AlreadyExists` and is never adopted. An invalid ID is refused before
     /// anything is created.
+    /// An ACL entry on an opened or created directory is `Acl`, leaving it in place.
     pub fn create_cell_dir(
         &self,
         lock: &WriterLock,
@@ -354,6 +375,7 @@ impl InstanceRoot {
     /// the `mkdir`, it does; but an `Io` error naming `cells` also comes from making or opening
     /// `cells` itself, and then no cell directory was made. A caller that must know opens it
     /// with [`InstanceRoot::cell_dir`]. The new directory has no `supervisor.lock` yet.
+    /// An ACL on a listed directory is `Acl`; creation refusals remain inside `Create`.
     pub fn allocate_cell(&self, lock: &WriterLock) -> Result<CellDir, AllocateError> {
         if lock.root != self.identity {
             return Err(AllocateError::ForeignLock {
@@ -398,6 +420,7 @@ impl InstanceRoot {
     /// synced; if either sync fails, the cell is already under `retired` and the error names the
     /// directory that failed. The identity check and the rename are two steps, so this relies on
     /// the controller being the only writer of `cells`.
+    /// An ACL on an opened `cells` or `retired` is `Acl`, before anything moves.
     pub fn retire(&self, lock: &WriterLock, cell: CellDir) -> Result<(), RetireError> {
         if lock.root != self.identity {
             return Err(RetireError::ForeignLock {
@@ -408,6 +431,9 @@ impl InstanceRoot {
         let cell_path = cells_path.join(cell.cell.as_str());
         let retired_path = self.path.join(name_of(RETIRED_DIR));
         let cells = self.open_cells().map_err(|refusal| match refusal {
+            DirectoryRefusal::Acl => RetireError::Acl {
+                path: cells_path.clone(),
+            },
             DirectoryRefusal::Io(source) => retire_io(&cells_path)(source),
             DirectoryRefusal::Missing
             | DirectoryRefusal::Symlink
@@ -450,6 +476,9 @@ impl InstanceRoot {
                     DirectoryRefusal::Missing => {
                         retire_io(retired_path)(io::Error::from_raw_os_error(libc::ENOENT))
                     }
+                    DirectoryRefusal::Acl => RetireError::Acl {
+                        path: retired_path.to_path_buf(),
+                    },
                     DirectoryRefusal::Io(source) => retire_io(retired_path)(source),
                 },
             )?;
@@ -509,6 +538,7 @@ impl InstanceRoot {
             Err(DirectoryRefusal::NotADirectory) => {
                 return Err(AllocateError::NotADirectory { path });
             }
+            Err(DirectoryRefusal::Acl) => return Err(AllocateError::Acl { path }),
             Err(DirectoryRefusal::Io(source)) => {
                 return Err(AllocateError::Listing { path, source });
             }
@@ -527,8 +557,12 @@ impl InstanceRoot {
 
     fn open_cells(&self) -> Result<OwnedFd, DirectoryRefusal> {
         let name = c_name(CELLS_DIR.as_bytes()).map_err(DirectoryRefusal::Io)?;
-        open_at(self.dir.as_fd(), &name, DIRECTORY_FLAGS, 0)
-            .map_err(|error| directory_refusal(self.dir.as_fd(), &name, error))
+        let dir = open_at(self.dir.as_fd(), &name, DIRECTORY_FLAGS, 0)
+            .map_err(|error| directory_refusal(self.dir.as_fd(), &name, error))?;
+        if carries_acl(dir.as_fd()).map_err(DirectoryRefusal::Io)? {
+            return Err(DirectoryRefusal::Acl);
+        }
+        Ok(dir)
     }
 
     fn classify(
@@ -555,17 +589,24 @@ impl InstanceRoot {
         let class = match self.cell_named(&raw_name) {
             None => not_a_cell(kind_at(cells, &name).map_err(classify_error)?),
             Some((cell, journal_path)) => match open_at(cells, &name, DIRECTORY_FLAGS, 0) {
-                Ok(dir) => match self
-                    .cell_dir_from(dir, cell.clone(), journal_path)
-                    .open_journal()
-                {
-                    JournalOpen::Refused(JournalRefusal::Io(source))
-                        if out_of_descriptors(&source) =>
-                    {
-                        return Err(out_of_descriptors_error(source));
+                Ok(dir) => {
+                    let journal = match carries_acl(dir.as_fd()) {
+                        Ok(true) => JournalOpen::Refused(JournalRefusal::CellDirectoryAcl),
+                        Err(source) => JournalOpen::Refused(JournalRefusal::CellDirectory(source)),
+                        Ok(false) => self
+                            .cell_dir_from(dir, cell.clone(), journal_path)
+                            .open_journal(),
+                    };
+                    match journal {
+                        JournalOpen::Refused(JournalRefusal::Io(source))
+                        | JournalOpen::Refused(JournalRefusal::CellDirectory(source))
+                            if out_of_descriptors(&source) =>
+                        {
+                            return Err(out_of_descriptors_error(source));
+                        }
+                        journal => EntryClass::Cell { cell, journal },
                     }
-                    journal => EntryClass::Cell { cell, journal },
-                },
+                }
                 Err(source) if out_of_descriptors(&source) => {
                     return Err(out_of_descriptors_error(source));
                 }
@@ -670,6 +711,7 @@ impl CellDir {
     /// Opens the journal for reading without following a symlink and without blocking on a
     /// FIFO. A missing journal is `Missing`; anything but a regular file is refused and closed
     /// unread. The returned file is in blocking mode.
+    /// An ACL entry is `Refused(Acl)` and no journal content is read.
     pub fn open_journal(&self) -> JournalOpen {
         match open_journal_at(self.dir.as_fd(), libc::O_RDONLY, 0) {
             Ok(file) => JournalOpen::Regular(file),
@@ -686,6 +728,7 @@ impl CellDir {
     /// `created: false`. A missing one is created exclusively and returns `created: true`. Either
     /// way the journal is set to mode 0600. This call does not sync the journal or its directory.
     /// An existing inode is never replaced.
+    /// An ACL entry is `Acl`, including an inherited entry on a newly created journal.
     pub fn open_journal_for_append(
         &self,
         lock: &WriterLock,
@@ -732,6 +775,7 @@ impl CellDir {
     /// The caller must be the only writer of this cell's `launched`, as `membraned` is while it
     /// holds the cell's `supervisor.lock`; this call does not check it. A second writer can
     /// replace the temporary before the rename, and a reader can then see an empty marker.
+    /// An ACL on the new temporary is `Acl`; the temporary remains for the next call to remove.
     pub fn create_launched(&self, boot_session: BootSession) -> Result<(), CellDirError> {
         if parse_cell_id(self.cell.as_str()).is_none() {
             return Err(CellDirError::InvalidCell(CellPathError::NotACellName(
@@ -767,6 +811,7 @@ impl CellDir {
     /// with a `cell-<n>` cell, a lowercase hyphenated boot session and, if any,
     /// `"stopped": true`, in 4,096 bytes or fewer with its newline, a marker naming another
     /// cell, and any error opening or reading it are `Unreadable`.
+    /// An ACL entry is `Unreadable(Acl)` before any record is read.
     pub fn read_launched(&self) -> MarkerRead {
         let fd = match open_at(
             self.dir.as_fd(),
@@ -781,6 +826,7 @@ impl CellDir {
                     match file_refusal(self.dir.as_fd(), LAUNCHED_FILE, error) {
                         FileRefusal::Symlink => MarkerFault::Symlink,
                         FileRefusal::NotRegular => MarkerFault::NotRegular,
+                        FileRefusal::Acl => MarkerFault::Acl,
                         FileRefusal::Io(error) => MarkerFault::Io(error),
                     },
                 );
@@ -791,6 +837,11 @@ impl CellDir {
             Ok(metadata) if metadata.is_file() => {}
             Ok(_) => return MarkerRead::Unreadable(MarkerFault::NotRegular),
             Err(error) => return MarkerRead::Unreadable(MarkerFault::Io(error)),
+        }
+        match carries_acl(file.as_fd()) {
+            Ok(true) => return MarkerRead::Unreadable(MarkerFault::Acl),
+            Err(error) => return MarkerRead::Unreadable(MarkerFault::Io(error)),
+            Ok(false) => {}
         }
         let mut bytes = Vec::new();
         if let Err(error) = file.take(MARKER_READ_LIMIT).read_to_end(&mut bytes) {
@@ -818,6 +869,7 @@ impl CellDir {
     /// The caller must be the only writer of this cell's `launched`, as `membraned` is while it
     /// holds the cell's `supervisor.lock`; this call does not check it. A second writer can
     /// replace the temporary before the rename, and a reader can then see an empty marker.
+    /// An ACL on the old marker is `MarkerUnreadable`; one on the new temporary is `Acl`.
     pub fn mark_launched_stopped(&self) -> Result<(), CellDirError> {
         let path = self.entry_path(LAUNCHED_FILE);
         let marker = match self.read_launched() {
@@ -854,6 +906,7 @@ impl CellDir {
     /// Any existing entry named `runtime` is `AlreadyExists`: a runtime directory is never
     /// reused. If the sync fails, `runtime/` is already in place with mode 0700 and the error
     /// names this directory; a retry is `AlreadyExists`, and [`CellDir::sync`] completes the sync.
+    /// An inherited ACL is `Acl` and leaves the new directory in place.
     pub fn create_runtime_dir(&self) -> Result<OwnedFd, CellDirError> {
         let path = self.entry_path(RUNTIME_DIR);
         match make_directory_at(self.dir.as_fd(), RUNTIME_DIR) {
@@ -887,6 +940,7 @@ impl CellDir {
     /// created. Any existing entry named `created` is `AlreadyExists`. If either sync fails,
     /// `created` is already in place: [`CellDir::has_created`] reports `true`, and a retry is
     /// `AlreadyExists`.
+    /// An inherited ACL is `Acl` and leaves the empty file in place.
     pub fn create_created(&self, lock: &WriterLock) -> Result<(), CellDirError> {
         if lock.root != self.root {
             return Err(CellDirError::ForeignLock {
@@ -929,6 +983,7 @@ impl CellDir {
     /// A directory at `supervisor.lock.tmp` cannot be unlinked, so every call is then an `Io`
     /// error naming it, while a probe reads `Missing`. Only a writer under the root can plant
     /// one, and such a writer can already plant one at `supervisor.lock`.
+    /// An ACL on the new temporary is `Acl`; the temporary is removed and never locked.
     pub fn create_supervisor_lock(&self) -> Result<SupervisorLock, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOCK_FILE);
         self.remove_if_present(SUPERVISOR_LOCK_TEMPORARY)?;
@@ -1006,6 +1061,7 @@ impl CellDir {
     /// `supervisor.lock` exists; nothing is created. A symlink there is `Symlink`, and anything
     /// but a regular file is `NotARegularFile`; neither is locked. An `flock` that fails for
     /// another reason than another holder is `Io`. The probe never calls `LOCK_UN`.
+    /// An ACL on the opened file is `Acl` before the lock is tested.
     pub fn probe_supervisor_lock(&self) -> Result<LockProbe, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOCK_FILE);
         let Some(file) = self.open_supervisor_lock()? else {
@@ -1044,6 +1100,7 @@ impl CellDir {
     /// it was handed is this cell's lock (spec 023 §5, step 2). It takes no lock. With no entry
     /// there it is `Missing`; a symlink or anything but a regular file is refused as the probe
     /// refuses it.
+    /// An ACL on the opened file is `Acl`, as it is for the probe.
     pub fn supervisor_lock_identity(&self) -> Result<FileIdentity, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOCK_FILE);
         match self.open_supervisor_lock()? {
@@ -1057,6 +1114,7 @@ impl CellDir {
     /// whatever the umask. It is opened without following a symlink and without blocking on a
     /// FIFO, and close-on-exec; the returned file is in blocking mode. A symlink is `Symlink` and
     /// anything but a regular file is `NotARegularFile`; neither is written.
+    /// An ACL on the opened or created log is `Acl`, before any mode change or write.
     pub fn open_supervisor_log(&self) -> Result<File, CellDirError> {
         let path = self.entry_path(SUPERVISOR_LOG_FILE);
         let access = libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT;
@@ -1117,6 +1175,9 @@ impl CellDir {
             }
             created => created.map_err(cell_dir_io(&path))?,
         };
+        if carries_acl(fd.as_fd()).map_err(cell_dir_io(&path))? {
+            return Err(CellDirError::Acl { path });
+        }
         change_mode(fd.as_fd(), PRIVATE_FILE).map_err(cell_dir_io(&path))?;
         Ok(File::from(fd))
     }
@@ -1206,13 +1267,33 @@ pub struct FileIdentity {
 /// ID that [`InstanceRoot::create_cell_dir`] failed to create.
 #[derive(Debug)]
 pub enum AllocateError {
-    ForeignLock { path: PathBuf },
-    Symlink { path: PathBuf },
-    NotADirectory { path: PathBuf },
-    Listing { path: PathBuf, source: io::Error },
-    Exhausted { path: PathBuf },
-    Contended { path: PathBuf },
-    Create { cell: CellId, source: CellDirError },
+    /// A directory being listed carries an ACL entry.
+    Acl {
+        path: PathBuf,
+    },
+    ForeignLock {
+        path: PathBuf,
+    },
+    Symlink {
+        path: PathBuf,
+    },
+    NotADirectory {
+        path: PathBuf,
+    },
+    Listing {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Exhausted {
+        path: PathBuf,
+    },
+    Contended {
+        path: PathBuf,
+    },
+    Create {
+        cell: CellId,
+        source: CellDirError,
+    },
 }
 
 /// Spec 023 §3's `launched` marker: the cell it belongs to and the host boot session its
@@ -1302,22 +1383,41 @@ pub enum MarkerRead {
 /// that names `found` instead.
 #[derive(Debug)]
 pub enum MarkerFault {
+    /// The marker carries an ACL entry and was not read.
+    Acl,
     Symlink,
     NotRegular,
     TooLarge,
     Io(io::Error),
     Malformed(String),
-    WrongCell { found: CellId },
+    WrongCell {
+        found: CellId,
+    },
 }
 
 /// Why a cell was not retired.
 #[derive(Debug)]
 pub enum RetireError {
-    ForeignLock { path: PathBuf },
-    RetiredNotADirectory { path: PathBuf },
-    AlreadyRetired { path: PathBuf },
-    Moved { path: PathBuf },
-    Io { path: PathBuf, source: io::Error },
+    /// A directory opened for retirement carries an ACL entry.
+    Acl {
+        path: PathBuf,
+    },
+    ForeignLock {
+        path: PathBuf,
+    },
+    RetiredNotADirectory {
+        path: PathBuf,
+    },
+    AlreadyRetired {
+        path: PathBuf,
+    },
+    Moved {
+        path: PathBuf,
+    },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 /// A journal opened for reading and appending through one descriptor. `created` is true when
@@ -1345,11 +1445,17 @@ pub enum JournalOpen {
 /// supervisor socket.
 #[derive(Debug)]
 pub enum JournalRefusal {
+    /// The journal carries an ACL entry and was not read or written.
+    Acl,
+    /// The cell directory carries an ACL entry; no path beneath it may be used.
+    CellDirectoryAcl,
     CellDirectory(io::Error),
     Symlink,
     NotRegular,
     Io(io::Error),
-    ForeignLock { path: PathBuf },
+    ForeignLock {
+        path: PathBuf,
+    },
 }
 
 /// Every entry found under `<root>/cells`, in raw-byte order of the names.
@@ -1388,34 +1494,86 @@ pub enum NotACell {
 /// Why discovery could not account for every entry under `<root>/cells`.
 #[derive(Debug)]
 pub enum DiscoveryError {
-    CellsSymlink { path: PathBuf },
-    CellsNotADirectory { path: PathBuf },
-    Open { path: PathBuf, source: io::Error },
-    Listing { path: PathBuf, source: io::Error },
-    Classify { path: PathBuf, source: io::Error },
-    OutOfDescriptors { path: PathBuf, source: io::Error },
-    ForeignLock { path: PathBuf },
+    /// `cells` carries an ACL entry, so no discovery is returned.
+    CellsAcl {
+        path: PathBuf,
+    },
+    CellsSymlink {
+        path: PathBuf,
+    },
+    CellsNotADirectory {
+        path: PathBuf,
+    },
+    Open {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Listing {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Classify {
+        path: PathBuf,
+        source: io::Error,
+    },
+    OutOfDescriptors {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ForeignLock {
+        path: PathBuf,
+    },
 }
 
 /// Why a cell directory could not be opened or created.
 #[derive(Debug)]
 pub enum CellDirError {
+    /// The named object carries an ACL entry and was not adopted.
+    Acl {
+        path: PathBuf,
+    },
     InvalidCell(CellPathError),
-    Missing { path: PathBuf },
-    Alias { path: PathBuf },
-    Symlink { path: PathBuf },
-    NotADirectory { path: PathBuf },
-    AlreadyExists { path: PathBuf },
-    Io { path: PathBuf, source: io::Error },
-    ForeignLock { path: PathBuf },
-    NotARegularFile { path: PathBuf },
-    MarkerUnreadable { path: PathBuf, fault: MarkerFault },
-    LockNotNamed { path: PathBuf },
+    Missing {
+        path: PathBuf,
+    },
+    Alias {
+        path: PathBuf,
+    },
+    Symlink {
+        path: PathBuf,
+    },
+    NotADirectory {
+        path: PathBuf,
+    },
+    AlreadyExists {
+        path: PathBuf,
+    },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ForeignLock {
+        path: PathBuf,
+    },
+    NotARegularFile {
+        path: PathBuf,
+    },
+    MarkerUnreadable {
+        path: PathBuf,
+        fault: MarkerFault,
+    },
+    LockNotNamed {
+        path: PathBuf,
+    },
 }
 
 /// Why an instance root could not be opened.
 #[derive(Debug)]
 pub enum InstanceRootError {
+    /// The walked root carries an ACL entry and nothing was created beneath it.
+    Acl {
+        path: PathBuf,
+    },
     NotAbsolute {
         path: PathBuf,
     },
@@ -1436,14 +1594,33 @@ pub enum InstanceRootError {
 /// Why the writer lock was not taken. `Busy` means another open of the lock file holds it.
 #[derive(Debug)]
 pub enum LockError {
-    Busy { path: PathBuf },
-    Symlink { path: PathBuf },
-    NotRegular { path: PathBuf },
-    Io { path: PathBuf, source: io::Error },
+    /// The lock file carries an ACL entry and was not locked.
+    Acl {
+        path: PathBuf,
+    },
+    Busy {
+        path: PathBuf,
+    },
+    Symlink {
+        path: PathBuf,
+    },
+    NotRegular {
+        path: PathBuf,
+    },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 fn symlink_text(path: &Path) -> String {
     format!("{} is a symlink and was not followed", path.display())
+}
+
+const ACL_RULE: &str = "nothing the instance root creates or opens may have one";
+
+fn acl_text(path: &Path) -> String {
+    format!("{} carries an ACL: {ACL_RULE}", path.display())
 }
 
 fn foreign_lock_text(path: &Path) -> String {
@@ -1456,6 +1633,10 @@ fn foreign_lock_text(path: &Path) -> String {
 impl fmt::Display for JournalRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            JournalRefusal::Acl => write!(f, "the journal carries an ACL: {ACL_RULE}"),
+            JournalRefusal::CellDirectoryAcl => {
+                write!(f, "the cell directory carries an ACL: {ACL_RULE}")
+            }
             JournalRefusal::CellDirectory(source) => {
                 write!(f, "the cell directory could not be opened: {source}")
             }
@@ -1472,6 +1653,8 @@ impl std::error::Error for JournalRefusal {
         match self {
             JournalRefusal::CellDirectory(source) | JournalRefusal::Io(source) => Some(source),
             JournalRefusal::Symlink
+            | JournalRefusal::Acl
+            | JournalRefusal::CellDirectoryAcl
             | JournalRefusal::NotRegular
             | JournalRefusal::ForeignLock { .. } => None,
         }
@@ -1481,6 +1664,7 @@ impl std::error::Error for JournalRefusal {
 impl fmt::Display for DiscoveryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DiscoveryError::CellsAcl { path } => f.write_str(&acl_text(path)),
             DiscoveryError::CellsSymlink { path } => f.write_str(&symlink_text(path)),
             DiscoveryError::CellsNotADirectory { path } => {
                 write!(f, "{} is not a directory", path.display())
@@ -1510,6 +1694,7 @@ impl std::error::Error for DiscoveryError {
             | DiscoveryError::Classify { source, .. }
             | DiscoveryError::OutOfDescriptors { source, .. } => Some(source),
             DiscoveryError::CellsSymlink { .. }
+            | DiscoveryError::CellsAcl { .. }
             | DiscoveryError::CellsNotADirectory { .. }
             | DiscoveryError::ForeignLock { .. } => None,
         }
@@ -1519,6 +1704,7 @@ impl std::error::Error for DiscoveryError {
 impl fmt::Display for CellDirError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            CellDirError::Acl { path } => f.write_str(&acl_text(path)),
             CellDirError::InvalidCell(error) => write!(f, "cannot use this cell ID: {error}"),
             CellDirError::Missing { path } => write!(f, "{} does not exist", path.display()),
             CellDirError::Alias { path } => write!(
@@ -1559,6 +1745,7 @@ impl std::error::Error for CellDirError {
             CellDirError::Io { source, .. } => Some(source),
             CellDirError::MarkerUnreadable { fault, .. } => Some(fault),
             CellDirError::Missing { .. }
+            | CellDirError::Acl { .. }
             | CellDirError::Alias { .. }
             | CellDirError::Symlink { .. }
             | CellDirError::NotADirectory { .. }
@@ -1573,6 +1760,7 @@ impl std::error::Error for CellDirError {
 impl fmt::Display for MarkerFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MarkerFault::Acl => f.write_str("the marker carries an ACL"),
             MarkerFault::Symlink => f.write_str("the marker is a symlink and was not followed"),
             MarkerFault::NotRegular => f.write_str("the marker is not a regular file"),
             MarkerFault::TooLarge => {
@@ -1590,6 +1778,7 @@ impl std::error::Error for MarkerFault {
         match self {
             MarkerFault::Io(source) => Some(source),
             MarkerFault::Symlink
+            | MarkerFault::Acl
             | MarkerFault::NotRegular
             | MarkerFault::TooLarge
             | MarkerFault::Malformed(_)
@@ -1601,6 +1790,7 @@ impl std::error::Error for MarkerFault {
 impl fmt::Display for RetireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            RetireError::Acl { path } => f.write_str(&acl_text(path)),
             RetireError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
             RetireError::RetiredNotADirectory { path } => write!(
                 f,
@@ -1627,6 +1817,7 @@ impl std::error::Error for RetireError {
         match self {
             RetireError::Io { source, .. } => Some(source),
             RetireError::ForeignLock { .. }
+            | RetireError::Acl { .. }
             | RetireError::RetiredNotADirectory { .. }
             | RetireError::AlreadyRetired { .. }
             | RetireError::Moved { .. } => None,
@@ -1637,6 +1828,7 @@ impl std::error::Error for RetireError {
 impl fmt::Display for AllocateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AllocateError::Acl { path } => f.write_str(&acl_text(path)),
             AllocateError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
             AllocateError::Symlink { path } => {
                 write!(f, "{}, so no cell was allocated", symlink_text(path))
@@ -1673,6 +1865,7 @@ impl std::error::Error for AllocateError {
             AllocateError::Listing { source, .. } => Some(source),
             AllocateError::Create { source, .. } => Some(source),
             AllocateError::ForeignLock { .. }
+            | AllocateError::Acl { .. }
             | AllocateError::Symlink { .. }
             | AllocateError::NotADirectory { .. }
             | AllocateError::Exhausted { .. }
@@ -1684,6 +1877,7 @@ impl std::error::Error for AllocateError {
 impl fmt::Display for InstanceRootError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            InstanceRootError::Acl { path } => f.write_str(&acl_text(path)),
             InstanceRootError::NotAbsolute { path } => {
                 write!(f, "{} is not an absolute path", path.display())
             }
@@ -1706,7 +1900,7 @@ impl std::error::Error for InstanceRootError {
         match self {
             InstanceRootError::Untrusted { refusal, .. } => Some(refusal),
             InstanceRootError::Open { source, .. } => Some(source),
-            InstanceRootError::NotAbsolute { .. } => None,
+            InstanceRootError::NotAbsolute { .. } | InstanceRootError::Acl { .. } => None,
         }
     }
 }
@@ -1714,6 +1908,7 @@ impl std::error::Error for InstanceRootError {
 impl fmt::Display for LockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            LockError::Acl { path } => f.write_str(&acl_text(path)),
             LockError::Busy { path } => write!(f, "{} is held by another writer", path.display()),
             LockError::Symlink { path } => f.write_str(&symlink_text(path)),
             LockError::NotRegular { path } => {
@@ -1730,9 +1925,10 @@ impl std::error::Error for LockError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             LockError::Io { source, .. } => Some(source),
-            LockError::Busy { .. } | LockError::Symlink { .. } | LockError::NotRegular { .. } => {
-                None
-            }
+            LockError::Busy { .. }
+            | LockError::Symlink { .. }
+            | LockError::NotRegular { .. }
+            | LockError::Acl { .. } => None,
         }
     }
 }
@@ -1831,6 +2027,10 @@ fn out_of_descriptors(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
 }
 
+fn carries_acl(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    crate::nofollow::acl_present(fd).map_err(|(_, errno)| io::Error::from_raw_os_error(errno))
+}
+
 fn root_refusal(root: &Path, refusal: WalkRefusal) -> InstanceRootError {
     match refusal {
         WalkRefusal::Missing { path } => InstanceRootError::Open {
@@ -1852,6 +2052,7 @@ enum DirectoryRefusal {
     Missing,
     Symlink,
     NotADirectory,
+    Acl,
     Io(io::Error),
 }
 
@@ -1861,6 +2062,7 @@ impl DirectoryRefusal {
             DirectoryRefusal::Symlink => CellDirError::Symlink { path },
             DirectoryRefusal::NotADirectory => CellDirError::NotADirectory { path },
             DirectoryRefusal::Missing => CellDirError::Missing { path },
+            DirectoryRefusal::Acl => CellDirError::Acl { path },
             DirectoryRefusal::Io(source) => CellDirError::Io { path, source },
         }
     }
@@ -1893,6 +2095,9 @@ fn open_private_directory(
         opened => opened,
     };
     let dir = opened.map_err(|error| directory_refusal(parent, name, error))?;
+    if carries_acl(dir.as_fd()).map_err(DirectoryRefusal::Io)? {
+        return Err(DirectoryRefusal::Acl);
+    }
     change_mode(dir.as_fd(), PRIVATE_DIRECTORY).map_err(DirectoryRefusal::Io)?;
     Ok(dir)
 }
@@ -1908,12 +2113,16 @@ fn open_journal_at(
             match file_refusal(cell, &name, error) {
                 FileRefusal::Symlink => JournalRefusal::Symlink,
                 FileRefusal::NotRegular => JournalRefusal::NotRegular,
+                FileRefusal::Acl => JournalRefusal::Acl,
                 FileRefusal::Io(error) => JournalRefusal::Io(error),
             }
         })?;
     let file = File::from(fd);
     if !file.metadata().map_err(JournalRefusal::Io)?.is_file() {
         return Err(JournalRefusal::NotRegular);
+    }
+    if carries_acl(file.as_fd()).map_err(JournalRefusal::Io)? {
+        return Err(JournalRefusal::Acl);
     }
     clear_nonblocking(file.as_fd()).map_err(JournalRefusal::Io)?;
     Ok(file)
@@ -1930,6 +2139,7 @@ enum Kind {
 enum FileRefusal {
     Symlink,
     NotRegular,
+    Acl,
     Io(io::Error),
 }
 
@@ -1938,6 +2148,7 @@ impl FileRefusal {
         match self {
             FileRefusal::Symlink => CellDirError::Symlink { path },
             FileRefusal::NotRegular => CellDirError::NotARegularFile { path },
+            FileRefusal::Acl => CellDirError::Acl { path },
             FileRefusal::Io(source) => CellDirError::Io { path, source },
         }
     }
@@ -1954,6 +2165,9 @@ fn open_regular_at(
     let file = File::from(fd);
     if !file.metadata().map_err(FileRefusal::Io)?.is_file() {
         return Err(FileRefusal::NotRegular);
+    }
+    if carries_acl(file.as_fd()).map_err(FileRefusal::Io)? {
+        return Err(FileRefusal::Acl);
     }
     Ok(file)
 }
@@ -2387,6 +2601,8 @@ mod tests {
             JournalOpen::Missing => "missing",
             JournalOpen::Regular(_) => "regular",
             JournalOpen::Refused(JournalRefusal::CellDirectory(_)) => "refused: cell directory",
+            JournalOpen::Refused(JournalRefusal::CellDirectoryAcl) => "refused: cell directory ACL",
+            JournalOpen::Refused(JournalRefusal::Acl) => "refused: ACL",
             JournalOpen::Refused(JournalRefusal::Symlink) => "refused: symlink",
             JournalOpen::Refused(JournalRefusal::NotRegular) => "refused: not regular",
             JournalOpen::Refused(JournalRefusal::Io(_)) => "refused: io",
@@ -7225,6 +7441,353 @@ mod tests {
                 .is_file()
         );
         assert!(!exists(&lock_temporary_path(&root)));
+    }
+
+    #[cfg(target_os = "macos")]
+    mod acl_tests {
+        use super::*;
+        use std::process::Command;
+
+        fn private(path: &Path) {
+            assert_eq!(mode_of(path) & 0o077, 0, "{}", path.display());
+        }
+
+        fn planted(path: &Path, rule: &str) {
+            add_acl(path, rule);
+            private(path);
+        }
+
+        fn inherited(path: &Path) {
+            private(path);
+            let listing = Command::new("/bin/ls")
+                .arg("-led")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(listing.status.success());
+            let text = String::from_utf8(listing.stdout).unwrap();
+            assert!(text.contains("inherited allow"), "{text}");
+        }
+
+        fn clear(path: &Path) {
+            assert!(
+                Command::new("/bin/chmod")
+                    .arg("-N")
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+
+        fn refused<T: fmt::Debug>(result: Result<T, CellDirError>, path: &Path) {
+            expect_match!(result, Err(CellDirError::Acl { path: named }) => assert_eq!(named, path));
+        }
+
+        fn journal_refused(journal: JournalOpen, directory: bool) {
+            if directory {
+                assert!(
+                    matches!(
+                        journal,
+                        JournalOpen::Refused(JournalRefusal::CellDirectoryAcl)
+                    ),
+                    "{journal:?}"
+                );
+            } else {
+                assert!(
+                    matches!(journal, JournalOpen::Refused(JournalRefusal::Acl)),
+                    "{journal:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn t1_a_root_inheriting_a_read_entry_is_refused_without_creating_anything() {
+            let base = TestRoot::walkable_from_root();
+            planted(
+                base.path(),
+                "everyone allow read,file_inherit,directory_inherit",
+            );
+            let root = base.join("instance");
+            make_dir(&root, 0o700);
+            inherited(&root);
+            expect_match!(InstanceRoot::open(&root), Err(InstanceRootError::Acl { path }) => assert_eq!(path, root));
+            assert!(entries_of(&root).is_empty());
+        }
+
+        #[test]
+        fn t2_an_inherit_only_read_entry_on_the_root_is_refused() {
+            let base = TestRoot::walkable_from_root();
+            planted(
+                base.path(),
+                "everyone allow list,directory_inherit,only_inherit",
+            );
+            expect_match!(InstanceRoot::open(base.path()), Err(InstanceRootError::Acl { path }) => assert_eq!(path, base.path()));
+            assert!(entries_of(base.path()).is_empty());
+        }
+
+        #[test]
+        fn t3_a_lock_inheriting_an_entry_is_left_in_place_and_refused_again() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.path();
+            let instance = open_root(root);
+            planted(root, "everyone allow read,file_inherit");
+            let path = root.join(LOCK_FILE);
+            expect_match!(instance.lock(), Err(LockError::Acl { path: named }) => assert_eq!(named, path));
+            inherited(&path);
+            expect_match!(InstanceRoot::open(root), Err(InstanceRootError::Acl { path }) => assert_eq!(path, root));
+            clear(root);
+            expect_match!(open_root(root).lock(), Err(LockError::Acl { path: named }) => assert_eq!(named, path));
+            inherited(&path);
+        }
+
+        #[test]
+        fn t4_an_existing_lock_with_a_read_entry_is_refused_until_cleared() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.path();
+            drop(open_root(root).lock().unwrap());
+            let path = root.join(LOCK_FILE);
+            planted(&path, "everyone allow read");
+            let before = identity_at(&path);
+            let instance = open_root(root);
+            expect_match!(instance.lock(), Err(LockError::Acl { path: named }) => assert_eq!(named, path));
+            assert_eq!(identity_at(&path), before);
+            clear(&path);
+            drop(instance.lock().unwrap());
+        }
+
+        #[test]
+        fn t5_cells_inheriting_an_entry_refuses_creation_and_every_later_open() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.path();
+            let (instance, lock) = locked(root);
+            planted(root, "everyone allow list,add_file,directory_inherit");
+            let path = root.join(CELLS_DIR);
+            refused(instance.create_cell_dir(&lock, &cell("cell-1")), &path);
+            inherited(&path);
+            assert!(!exists(&path.join("cell-1")));
+            clear(root);
+            drop(lock);
+            let (instance, lock) = locked(root);
+            expect_match!(instance.discover(&lock), Err(DiscoveryError::CellsAcl { path: named }) => assert_eq!(named, path));
+            refused(instance.cell_dir(&cell("cell-1")), &path);
+            refused(instance.create_cell_dir(&lock, &cell("cell-1")), &path);
+            expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Acl { path: named }) => assert_eq!(named, path));
+            inherited(&path);
+            assert!(!exists(&path.join("cell-1")));
+        }
+
+        #[test]
+        fn t6_a_new_cell_inherits_after_its_parent_was_opened_and_only_it_is_quarantined() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.path();
+            let (mut instance, lock) = recording_locked(root);
+            instance.create_cell_dir(&lock, &cell("cell-2")).unwrap();
+            let watched = instance.identity;
+            let cells = root.join(CELLS_DIR);
+            let mut parent = Some(cells.clone());
+            on_every_sync(move |fd| {
+                let stat = stat_of(fd).unwrap();
+                if (stat.st_dev as u64, stat.st_ino) == watched
+                    && let Some(path) = parent.take()
+                {
+                    planted(&path, "everyone allow list,directory_inherit");
+                }
+            });
+            instance.sync = hooked_sync;
+            let path = cells.join("cell-1");
+            refused(instance.create_cell_dir(&lock, &cell("cell-1")), &path);
+            inherited(&path);
+            clear(&cells);
+            let discovered = instance.discover(&lock).unwrap();
+            let mut entries = discovered.entries.into_iter();
+            expect_match!(entries.next().unwrap().class, EntryClass::Cell { journal, .. } => journal_refused(journal, true));
+            expect_match!(entries.next().unwrap().class, EntryClass::Cell { journal, .. } => assert!(matches!(journal, JournalOpen::Missing)));
+            assert!(entries.next().is_none());
+        }
+
+        #[test]
+        fn t7_an_existing_cell_with_a_read_entry_is_quarantined_without_harming_its_sibling() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.path();
+            let (instance, lock) = locked(root);
+            for id in ["cell-1", "cell-2"] {
+                instance.create_cell_dir(&lock, &cell(id)).unwrap();
+            }
+            let path = root.join("cells/cell-1");
+            planted(&path, "everyone allow list");
+            refused(instance.cell_dir(&cell("cell-1")), &path);
+            let discovery = instance.discover(&lock).unwrap();
+            assert_eq!(discovery.entries.len(), 2);
+            let mut entries = discovery.entries.into_iter();
+            expect_match!(entries.next().unwrap().class, EntryClass::Cell { journal, .. } => journal_refused(journal, true));
+            expect_match!(entries.next().unwrap().class, EntryClass::Cell { journal, .. } => assert!(matches!(journal, JournalOpen::Missing)));
+            clear(&path);
+            let dir = instance.cell_dir(&cell("cell-1")).unwrap();
+            let cells = root.join(CELLS_DIR);
+            planted(&cells, "everyone allow list");
+            expect_match!(instance.retire(&lock, dir), Err(RetireError::Acl { path }) => assert_eq!(path, cells));
+        }
+
+        #[test]
+        fn t8a_a_journal_inheriting_a_read_entry_is_left_private_and_refused_again() {
+            let base = TestRoot::walkable_from_root();
+            let (instance, lock) = locked(base.path());
+            let dir = instance.create_cell_dir(&lock, &cell("cell-1")).unwrap();
+            planted(
+                dir.journal_path().parent().unwrap(),
+                "everyone allow read,file_inherit",
+            );
+            assert!(matches!(
+                dir.open_journal_for_append(&lock),
+                Err(JournalRefusal::Acl)
+            ));
+            inherited(dir.journal_path());
+            journal_refused(dir.open_journal(), false);
+            assert_eq!(fs::read(dir.journal_path()).unwrap(), b"");
+        }
+
+        #[test]
+        fn t8b_an_existing_journal_with_a_read_entry_is_not_read_or_changed() {
+            let base = TestRoot::walkable_from_root();
+            let (instance, lock) = locked(base.path());
+            let dir = instance.create_cell_dir(&lock, &cell("cell-1")).unwrap();
+            dir.open_journal_for_append(&lock)
+                .unwrap()
+                .file
+                .write_all(b"one record\n")
+                .unwrap();
+            let sibling = instance.create_cell_dir(&lock, &cell("cell-2")).unwrap();
+            planted(dir.journal_path(), "everyone allow read");
+            journal_refused(dir.open_journal(), false);
+            assert!(matches!(
+                dir.open_journal_for_append(&lock),
+                Err(JournalRefusal::Acl)
+            ));
+            let discovery = instance.discover(&lock).unwrap();
+            let mut entries = discovery.entries.into_iter();
+            expect_match!(entries.next().unwrap().class, EntryClass::Cell { journal, .. } => journal_refused(journal, false));
+            expect_match!(entries.next().unwrap().class, EntryClass::Cell { journal, .. } => assert!(matches!(journal, JournalOpen::Missing)));
+            assert!(matches!(sibling.open_journal(), JournalOpen::Missing));
+            assert_eq!(fs::read(dir.journal_path()).unwrap(), b"one record\n");
+            clear(dir.journal_path());
+            assert!(matches!(dir.open_journal(), JournalOpen::Regular(_)));
+            assert!(!dir.open_journal_for_append(&lock).unwrap().created);
+        }
+
+        #[test]
+        fn t9_retired_inherits_and_is_refused_before_any_cell_moves() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.path();
+            let (instance, lock) = locked(root);
+            let dir = instance.create_cell_dir(&lock, &cell("cell-1")).unwrap();
+            planted(root, "everyone allow list,directory_inherit");
+            let path = root.join("retired");
+            expect_match!(instance.retire(&lock, dir), Err(RetireError::Acl { path: named }) => assert_eq!(named, path));
+            inherited(&path);
+            assert!(exists(&root.join("cells/cell-1")));
+            clear(root);
+            expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Acl { path: named }) => assert_eq!(named, path));
+            let dir = instance.cell_dir(&cell("cell-1")).unwrap();
+            expect_match!(instance.retire(&lock, dir), Err(RetireError::Acl { path: named }) => assert_eq!(named, path));
+            inherited(&path);
+            assert!(entries_of(&path).is_empty());
+        }
+
+        #[test]
+        fn t10_private_files_and_runtime_inherit_and_only_the_lock_temporary_is_removed() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.path();
+            let (instance, lock) = locked(root);
+            let dir = instance.create_cell_dir(&lock, &cell("cell-1")).unwrap();
+            let parent = root.join("cells/cell-1");
+            planted(
+                &parent,
+                "everyone allow read,write,file_inherit,directory_inherit",
+            );
+            refused(dir.create_created(&lock), &parent.join("created"));
+            refused(
+                dir.create_supervisor_lock(),
+                &parent.join("supervisor.lock.tmp"),
+            );
+            refused(dir.open_supervisor_log(), &parent.join("membraned.log"));
+            refused(dir.create_runtime_dir(), &parent.join("runtime"));
+            refused(dir.create_launched(boot()), &parent.join("launched.tmp"));
+            for name in ["created", "membraned.log", "runtime", "launched.tmp"] {
+                inherited(&parent.join(name));
+            }
+            assert!(!exists(&parent.join("supervisor.lock")));
+            assert!(!exists(&parent.join("supervisor.lock.tmp")));
+            assert!(!exists(&parent.join("launched")));
+            refused(
+                dir.create_private_file(SUPERVISOR_LOCK_TEMPORARY),
+                &parent.join("supervisor.lock.tmp"),
+            );
+            inherited(&parent.join("supervisor.lock.tmp"));
+        }
+
+        #[test]
+        fn t11_existing_private_files_with_read_entries_are_refused_without_changes() {
+            let base = TestRoot::walkable_from_root();
+            let root = base.path();
+            let dir = opened(root, "cell-1");
+            drop(dir.create_supervisor_lock().unwrap());
+            dir.create_launched(boot()).unwrap();
+            dir.open_supervisor_log()
+                .unwrap()
+                .write_all(b"kept\n")
+                .unwrap();
+            let parent = root.join("cells/cell-1");
+            for name in ["supervisor.lock", "launched", "membraned.log"] {
+                planted(&parent.join(name), "everyone allow read");
+            }
+            refused(dir.probe_supervisor_lock(), &parent.join("supervisor.lock"));
+            refused(
+                dir.supervisor_lock_identity(),
+                &parent.join("supervisor.lock"),
+            );
+            expect_match!(dir.test_supervisor_lock(), LockTest::Untestable(CellDirError::Acl { path }) => assert_eq!(path, parent.join("supervisor.lock")));
+            assert!(matches!(
+                dir.read_launched(),
+                MarkerRead::Unreadable(MarkerFault::Acl)
+            ));
+            expect_match!(dir.mark_launched_stopped(), Err(CellDirError::MarkerUnreadable { path, fault: MarkerFault::Acl }) => assert_eq!(path, parent.join("launched")));
+            refused(dir.open_supervisor_log(), &parent.join("membraned.log"));
+            assert_eq!(fs::read(parent.join("launched")).unwrap(), running_bytes());
+            assert_eq!(fs::read(parent.join("membraned.log")).unwrap(), b"kept\n");
+        }
+
+        #[test]
+        fn t12_acl_errors_name_the_object_and_have_no_io_source() {
+            let path = PathBuf::from("/inst/object");
+            let errors: Vec<Box<dyn Error>> = vec![
+                Box::new(InstanceRootError::Acl { path: path.clone() }),
+                Box::new(LockError::Acl { path: path.clone() }),
+                Box::new(CellDirError::Acl { path: path.clone() }),
+                Box::new(RetireError::Acl { path: path.clone() }),
+                Box::new(AllocateError::Acl { path: path.clone() }),
+                Box::new(DiscoveryError::CellsAcl { path: path.clone() }),
+            ];
+            for error in errors {
+                assert_eq!(
+                    error.to_string(),
+                    "/inst/object carries an ACL: nothing the instance root creates or opens may have one"
+                );
+                assert!(error.source().is_none());
+            }
+            assert_eq!(
+                JournalRefusal::Acl.to_string(),
+                "the journal carries an ACL: nothing the instance root creates or opens may have one"
+            );
+            assert_eq!(
+                JournalRefusal::CellDirectoryAcl.to_string(),
+                "the cell directory carries an ACL: nothing the instance root creates or opens may have one"
+            );
+            assert_eq!(MarkerFault::Acl.to_string(), "the marker carries an ACL");
+            assert!(JournalRefusal::Acl.source().is_none());
+            assert!(JournalRefusal::CellDirectoryAcl.source().is_none());
+            assert!(MarkerFault::Acl.source().is_none());
+        }
     }
 
     #[test]
