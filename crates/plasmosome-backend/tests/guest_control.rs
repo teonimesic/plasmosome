@@ -484,6 +484,43 @@ fn every_call_round_trips() {
 }
 
 #[test]
+fn observe_preserves_nondefault_paging_on_both_lanes() {
+    for snapshot in [1, u64::MAX] {
+        for offset in [1, u64::MAX] {
+            let call = ControlCall::Observe(ObserveParams {
+                deadline_ms: NonZeroU64::new(5).unwrap(),
+                snapshot,
+                offset,
+            });
+            let encoded = encode_control_request(1, &call).unwrap();
+            let body: Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(body["params"]["snapshot"], json!(snapshot));
+            assert_eq!(body["params"]["offset"], json!(offset));
+            for state in [NORMAL, WITHDRAWAL] {
+                assert_eq!(decode_control_request(state, &encoded).unwrap().call, call);
+            }
+        }
+    }
+}
+
+#[test]
+fn remove_preserves_force_on_both_lanes() {
+    for force in [false, true] {
+        for mut call in calls() {
+            let ControlCall::Remove(remove) = &mut call else {
+                continue;
+            };
+            remove.force = force;
+            assert_eq!(params(&call)["force"], json!(force));
+            let encoded = encode_control_request(1, &call).unwrap();
+            for state in [NORMAL, WITHDRAWAL] {
+                assert_eq!(decode_control_request(state, &encoded).unwrap().call, call);
+            }
+        }
+    }
+}
+
+#[test]
 fn encoding_keeps_strings_and_propagates_operation_errors() {
     let mut operation = operations().remove(0);
     let UniverseOp::WriteSessionFile { owner, path, .. } = &mut operation else {
