@@ -24,6 +24,32 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
 | `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), which re-exports `ControlLane`, `BootToken` and `BootTokenError` from `plasmosome-backend`'s `guest_protocol`, the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts with core's file judge and keeps each one open; see "Verifying the pinned artifacts" below. `cell_directory` checks a cell's private directory with core's `PrivateDir` and makes the writable root copy in it; see "The cell directory and the writable root" below. `closure` audits the Mach-O load names of the verified helper and libraries before exec; see "Auditing the helper's load names" below. `initramfs` checks that the verified initramfs binds the verified guest policy; see "Checking the initramfs binding" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. `handshake` runs the host side of the shim's two hellos and its data association; see "The shim's handshake" below. `vmm_helper` holds the decisions the VMM helper of spec 001 §4.2 makes: its exit codes, the judges of its argv and environment, descriptors, recipe, host limits (`judge_host_limits`), own path (`judge_self`), writable root, host policy, denial probes and loaded images, and its 14 libkrun calls with a runner that stops at the first failure. On macOS it also holds the helper's observers of itself: its open descriptors, its writable root's facts and their reconfirmation by device and inode, the host policy applied with `sandbox_init` and the two denial probes, and its loaded images. The `vmm-helper` feature builds their caller, `plasmosome-vmm`; see "The VMM helper" below. Nothing here boots a cell yet |
 
+## Composing one runtime cell
+
+`runtime::cell::launch` composes artifact and archive verification, the static library audit,
+the private writable copy and listeners, helper exec, both hellos, data association and host
+confinement. Pass the directory descriptor returned by `CellDir::create_runtime_dir` with the
+recipe, readiness allowance and shutdown flag. Every output parent must match that descriptor's
+device and inode before the call creates anything. Directory and artifact checks repeat before
+spawn and before return; the writable copy is checked by identity immediately before spawn.
+
+The returned `ReadyCell` retains the original child, verified files, directories, streams,
+listeners, writable disk, diagnostics and evidence. It checks that the child still runs and
+the three streams are open before returning. That is a local observation; a peer can close
+afterward. Evidence marks workload namespaces and the control group as not observed, runtime
+loads as not audited, loaded images as not independently observed and host policy binding as
+properties observed. It does not complete spec 001's hardware or policy-substitution acceptance.
+
+`teardown` closes the streams, kills the managed process group, reaps its exact child, drains
+diagnostics and closes both listeners and removes the writable disk by identity. Every step
+runs despite earlier failures, and its report names each outcome. Drop does the same as a
+fallback, before releasing retained files. It destroys the disk and is not spec 023's clean
+SIGTERM/SIGINT stop, which keeps `root.img`; the later cell-mode caller must add that operation.
+The caller must leave SIGCHLD waitable and make this handle the sole consuming waiter.
+
+This library has no control verb, daemon wiring, relaunch or Linux launch. It needs no
+`vmm-helper` feature. Tests execute only fixture shims and boot no VM.
+
 ## The VMM helper
 
 `plasmosome-vmm` is the macOS helper of spec 001 §4.2. It is built only with

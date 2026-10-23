@@ -35,24 +35,72 @@ pub struct Association {
     /// The helper's process id, which every stream's peer read matched. It
     /// does not show who writes on the streams after the handshake.
     pub peer: libc::pid_t,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "held so the lane stays open until the drop")
-    )]
     normal: UnixStream,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "held so the lane stays open until the drop")
-    )]
     withdrawal: UnixStream,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "held so the association stays open until the drop"
-        )
-    )]
     data: UnixStream,
+}
+
+impl Association {
+    pub(crate) fn check_open(&self) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        for stream in [&self.normal, &self.withdrawal, &self.data] {
+            stream_open(stream.as_raw_fd())?;
+        }
+        Ok(())
+    }
+}
+
+#[allow(unsafe_code)]
+fn stream_open(fd: RawFd) -> std::io::Result<()> {
+    loop {
+        let mut watch = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: watch is one live pollfd, and poll retains no pointer. A zero timeout only
+        // observes the borrowed descriptor; HUP can reveal closure behind unread bytes.
+        let ready = unsafe { libc::poll(&mut watch, 1, 0) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if watch.revents & libc::POLLNVAL != 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+        }
+        if watch.revents & libc::POLLHUP != 0 {
+            return Err(ErrorKind::UnexpectedEof.into());
+        }
+        if watch.revents & libc::POLLERR != 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+        let mut byte = 0_u8;
+        // SAFETY: fd is borrowed from a live stream; recv writes at most one byte into the
+        // live local and retains no pointer. PEEK never consumes protocol bytes.
+        let got = unsafe {
+            libc::recv(
+                fd,
+                (&raw mut byte).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if got > 0 {
+            return Ok(());
+        }
+        if got == 0 {
+            return Err(ErrorKind::UnexpectedEof.into());
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            ErrorKind::WouldBlock => return Ok(()),
+            ErrorKind::Interrupted => continue,
+            _ => return Err(error),
+        }
+    }
 }
 
 /// Which step of the handshake a failure happened at.
@@ -184,6 +232,73 @@ pub fn handshake(
         Instant::now,
         crate::readiness::wait_fd,
     )
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    fn paired() -> (Association, [UnixStream; 3]) {
+        let (normal, n) = UnixStream::pair().unwrap();
+        let (withdrawal, w) = UnixStream::pair().unwrap();
+        let (data, d) = UnixStream::pair().unwrap();
+        (
+            Association {
+                boot: BootToken::from_bytes([0; 32]),
+                policy: Digest::of(b"policy"),
+                peer: 1,
+                normal,
+                withdrawal,
+                data,
+            },
+            [n, w, d],
+        )
+    }
+
+    #[test]
+    fn open_streams_pass_without_consuming_pending_protocol_bytes() {
+        let (mut association, mut peers) = paired();
+        association.check_open().unwrap();
+        peers[0].write_all(b"P").unwrap();
+        association.check_open().unwrap();
+        let mut byte = [0];
+        association.normal.read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"P");
+    }
+
+    #[test]
+    fn each_closed_stream_refuses_the_association() {
+        for lane in 0..3 {
+            let (association, peers) = paired();
+            peers[lane].shutdown(std::net::Shutdown::Write).unwrap();
+            assert_eq!(
+                association.check_open().unwrap_err().kind(),
+                ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
+    fn a_closed_peer_with_unread_bytes_is_still_refused() {
+        for lane in 0..3 {
+            let (association, mut peers) = paired();
+            peers[lane].write_all(b"pending").unwrap();
+            drop(peers);
+            assert_eq!(
+                association.check_open().unwrap_err().kind(),
+                ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
+    fn an_io_failure_is_preserved() {
+        assert_eq!(
+            stream_open(-2).unwrap_err().raw_os_error(),
+            Some(libc::EBADF)
+        );
+    }
 }
 
 #[derive(Clone, Copy)]
