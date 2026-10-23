@@ -43,6 +43,7 @@ criterion = "0.7"
 
 plasmosome-backend = { path = "crates/plasmosome-backend" }
 plasmosome-ledger = { path = "crates/plasmosome-ledger" }
+plasmosome-guards = { path = "crates/plasmosome-guards" }
 plasmosome-core = { path = "crates/plasmosome-core" }
 plasmosome-membrane = { path = "crates/plasmosome-membrane" }
 plasmosome-cli = { path = "crates/plasmosome-cli" }
