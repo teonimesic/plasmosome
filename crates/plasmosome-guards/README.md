@@ -7,7 +7,8 @@ for: a crate reaching a registry under a name nobody claimed, two packages answe
 binary name, test scaffolding shipping outside `[dev-dependencies]`, a commit crediting a model or
 somebody no reader can trace, the private research corpus reaching a public tree, a commit that
 swaps or wraps what cargo builds through committed Cargo configuration or a toolchain file, a
-locked package no dependency record names, and a skill Claude Code cannot find.
+locked package no dependency record names, a workspace crate left out of CI's per-crate matrix,
+and a skill Claude Code cannot find.
 
 Nothing here pins a design. A guard is worth its cost when the thing it prevents is permanent or
 public, or when [spec 013](../../docs/specs/013-what-earns-a-guard.md)'s operational carve-out
@@ -19,6 +20,7 @@ each crate's `AGENTS.md`, where it can be argued with.
 
 | Guard | What it refuses |
 | --- | --- |
+| `ci_matrix_matches_workspace_members` | A workspace member with no `crate (<member>)` entry in `ci.yml`, or an entry naming no member. A member left out is never built or tested on its own, and nothing else reports it: the run stays green and its checks simply lack that line. Spec 013's operational carve-out admits it, as the PR that added it argues |
 | `only_the_held_names_are_publishable_to_a_registry` | A crate reaching crates.io under a name this project has not claimed — a publish is permanent |
 | `no_binary_target_takes_a_name_another_package_owns` | Two packages offering the same binary, which collides in `target/` and breaks `cargo install` for anyone with both |
 | `testkit_is_dev_only` | A kernel crate depending on `plasmosome-testkit` outside `[dev-dependencies]`, an optional dependency behind a feature included, which ships test scaffolding |

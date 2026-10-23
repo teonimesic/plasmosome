@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -988,4 +988,247 @@ fn a_workspace_where_no_crate_enables_the_test_fixture_is_not_refused() {
         "",
     );
     assert_eq!(test_fixture_refusal(workspace.path()), None);
+}
+
+fn matrix_read_error(line: &str, why: &str) -> String {
+    format!(
+        "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as \
+         `        crate:` followed by `          - <package>` lines, blank lines and comments \
+         allowed, and it met `{line}` ({why}). A reader that guessed could report a list it \
+         did not read. Write the list in that form, or teach this guard the new form in the \
+         same PR, with a test for it."
+    )
+}
+
+fn crate_matrix_entries(workflow: &str) -> Result<Vec<String>, String> {
+    let lines: Vec<_> = workflow.lines().collect();
+    let starts: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == "  crate:")
+        .map(|(index, _)| index + 1)
+        .collect();
+    let start = match starts.as_slice() {
+        [] => return Ok(Vec::new()),
+        [start] => *start,
+        _ => return Err(matrix_read_error("  crate:", "more than one crate job")),
+    };
+    let job: Vec<_> = lines[start..]
+        .iter()
+        .copied()
+        .take_while(|line| {
+            let text = line.trim();
+            text.is_empty() || text.starts_with('#') || line.starts_with("   ")
+        })
+        .collect();
+    let matrices: Vec<_> = job
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == "      matrix:")
+        .map(|(index, _)| index + 1)
+        .collect();
+    let matrix = match matrices.as_slice() {
+        [matrix] => *matrix,
+        [] => return Err(matrix_read_error("  crate:", "no block matrix")),
+        _ => return Err(matrix_read_error("      matrix:", "more than one matrix")),
+    };
+    let mut matrix_lines = job[matrix..]
+        .iter()
+        .copied()
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'));
+    match matrix_lines.next() {
+        Some("        crate:") => {}
+        line => {
+            return Err(matrix_read_error(
+                line.unwrap_or("<end of job>"),
+                "expected the crate axis before its entries",
+            ));
+        }
+    }
+    let mut entries = Vec::new();
+    for line in matrix_lines {
+        if let Some(name) = line.strip_prefix("          - ") {
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return Err(matrix_read_error(line, "expected a bare package name"));
+            }
+            entries.push(name.to_string());
+        } else if line.len() - line.trim_start_matches(' ').len() > 6 {
+            return Err(matrix_read_error(line, "unsupported matrix content"));
+        } else {
+            break;
+        }
+    }
+    Ok(entries)
+}
+
+fn matrix_drift(entries: &[String], members: &[String]) -> (Vec<String>, Vec<String>) {
+    let entries: BTreeSet<_> = entries.iter().cloned().collect();
+    let members: BTreeSet<_> = members.iter().cloned().collect();
+    (
+        members.difference(&entries).cloned().collect(),
+        entries.difference(&members).cloned().collect(),
+    )
+}
+
+fn matrix_fixture(entries: &str) -> String {
+    format!(
+        "jobs:\n  gates:\n    steps:\n      - uses: checkout\n  crate:\n    strategy:\n      matrix:\n        crate:\n{entries}\n    steps:\n      - uses: checkout\n  msrv:\n    steps:\n      - run: check\n"
+    )
+}
+
+fn matrix_names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_string()).collect()
+}
+
+#[test]
+fn matrix_reader_does_not_count_step_entries() {
+    let entries = crate_matrix_entries(&matrix_fixture("          - a\n          - b"))
+        .expect("a block matrix is readable");
+    assert_eq!(entries, matrix_names(&["a", "b"]));
+    assert_eq!(matrix_drift(&entries, &entries), (vec![], vec![]));
+}
+
+#[test]
+fn matrix_comparison_reports_missing_members_in_sorted_order() {
+    assert_eq!(
+        matrix_drift(&matrix_names(&["a"]), &matrix_names(&["c", "a", "b"])),
+        (matrix_names(&["b", "c"]), vec![])
+    );
+}
+
+#[test]
+fn matrix_comparison_reports_non_members_too() {
+    assert_eq!(
+        matrix_drift(&matrix_names(&["z", "a", "y"]), &matrix_names(&["a"])),
+        (vec![], matrix_names(&["y", "z"]))
+    );
+}
+
+#[test]
+fn matrix_reader_skips_comments_without_ending_the_list() {
+    let entries = crate_matrix_entries(&matrix_fixture(
+        "          - a\n          # - b\n          - c",
+    ))
+    .expect("comments are allowed");
+    assert_eq!(
+        matrix_drift(&entries, &matrix_names(&["a", "b", "c"])),
+        (matrix_names(&["b"]), vec![])
+    );
+}
+
+#[test]
+fn matrix_reader_skips_blank_lines_without_ending_the_list() {
+    assert_eq!(
+        crate_matrix_entries(&matrix_fixture("          - a\n\n          - b")),
+        Ok(matrix_names(&["a", "b"]))
+    );
+}
+
+#[test]
+fn matrix_reader_does_not_read_another_jobs_matrix() {
+    let workflow = format!(
+        "{}  other:\n    strategy:\n      matrix:\n        crate:\n          - x\n",
+        matrix_fixture("          - a")
+    );
+    let entries = crate_matrix_entries(&workflow).expect("the crate job is readable");
+    assert_eq!(
+        matrix_drift(&entries, &matrix_names(&["a", "x"])),
+        (matrix_names(&["x"]), vec![])
+    );
+}
+
+#[test]
+fn matrix_reader_refuses_include_and_exclude() {
+    for key in ["include", "exclude"] {
+        let error = crate_matrix_entries(&matrix_fixture(&format!(
+            "          - a\n        {key}:\n          - crate: a"
+        )))
+        .expect_err("additional matrix keys change what runs");
+        assert!(error.contains(key), "{error}");
+    }
+}
+
+#[test]
+fn matrix_reader_refuses_flow_lists_expressions_and_other_axes() {
+    for axis in [
+        "crate: [a, b]",
+        "crate: ${{ fromJSON(inputs.crates) }}",
+        "os:",
+    ] {
+        let workflow = matrix_fixture("          - a").replace("crate:\n          - a", axis);
+        assert!(crate_matrix_entries(&workflow).is_err(), "{axis}");
+    }
+}
+
+#[test]
+fn matrix_reader_refuses_quoted_empty_and_annotated_names() {
+    for name in ["\"a\"", "a # note", "", "a/b", "é", "a "] {
+        let workflow = matrix_fixture(&format!("          - {name}"));
+        assert!(crate_matrix_entries(&workflow).is_err(), "{name:?}");
+    }
+}
+
+#[test]
+fn matrix_reader_reports_all_members_when_the_job_is_absent() {
+    let entries = crate_matrix_entries("jobs:\n  gates:\n    steps: []\n")
+        .expect("a missing job has no entries");
+    assert_eq!(
+        matrix_drift(&entries, &matrix_names(&["b", "a"])),
+        (matrix_names(&["a", "b"]), vec![])
+    );
+}
+
+#[test]
+fn matrix_reader_refuses_a_job_without_a_matrix() {
+    assert!(crate_matrix_entries("jobs:\n  crate:\n    steps: []\n").is_err());
+}
+
+#[test]
+fn matrix_reader_refuses_duplicate_jobs_and_matrices() {
+    let workflow = matrix_fixture("          - a");
+    assert!(crate_matrix_entries(&format!("{workflow}  crate:\n")).is_err());
+    assert!(
+        crate_matrix_entries(&workflow.replace("    steps:", "      matrix:\n    steps:")).is_err()
+    );
+}
+
+#[test]
+fn matrix_reader_accepts_names_comments_and_an_eof_list() {
+    let workflow = "jobs:\n  crate:\n    strategy:\n      matrix:\n        # axis\n\n        crate:\n          - A_0-b\n# end\n";
+    assert_eq!(crate_matrix_entries(workflow), Ok(matrix_names(&["A_0-b"])));
+    assert!(crate_matrix_entries("jobs:\n  crate:\n    strategy:\n      matrix:\n").is_err());
+}
+
+#[test]
+fn ci_matrix_matches_workspace_members() {
+    check_workspace(|root| {
+        let workflow = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+            .expect("CI workflow must be readable or per-crate coverage cannot be checked");
+        let entries = crate_matrix_entries(&workflow).unwrap_or_else(|error| panic!("{error}"));
+        let (missing, extra) = matrix_drift(&entries, &workspace_members(root));
+        let mut failures = Vec::new();
+        if !missing.is_empty() {
+            failures.push(format!(
+                "{missing:?} are workspace members with no entry in the `crate` matrix of \
+                 .github/workflows/ci.yml, so CI never builds or tests them on their own. \
+                 Nothing else reports this: the run stays green, its checks simply have no \
+                 `crate (<member>)` line for them, and the diff that added the member shows no \
+                 line where the entry is missing. Add each as `- <name>`, in Cargo.toml order, \
+                 in the PR that adds the member."
+            ));
+        }
+        if !extra.is_empty() {
+            failures.push(format!(
+                "{extra:?} are entries in the `crate` matrix of .github/workflows/ci.yml that \
+                 name no workspace member, so `cargo build -p` fails in those entries on every \
+                 run, and a crate that was renamed is checked by no entry. Remove or rename \
+                 each in the PR that removes or renames the member."
+            ));
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    });
 }
