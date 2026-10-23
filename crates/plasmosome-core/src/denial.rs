@@ -366,6 +366,7 @@ impl DenialBook {
 
 /// Returns the payload to append under [`DENIAL_EVENT`]. The session log adds kind, time
 /// and its own sequence; the wire sequence is carried here as `membrane_seq`.
+/// Pass the page's cell unchanged. A different cell invalidates the book's 1,024-byte bound.
 pub fn log_event(cell: &CellId, line: &DenialLine) -> serde_json::Value {
     let mut event = serde_json::json!({ "cell": cell, "denied": line.denied, "field": line.field,
         "fix": line.fix, "count": line.count, "at_ms": line.at_ms, "membrane_seq": line.seq });
@@ -420,10 +421,14 @@ mod tests {
         page.lines
             .iter()
             .map(|line| {
-                let log = serde_json::to_vec(&log_event(&page.cell, line))
-                    .unwrap()
-                    .len();
                 let wire = serde_json::to_vec(line).unwrap().len();
+                let log = wire + 17 + serde_json::to_vec(&page.cell).unwrap().len();
+                assert_eq!(
+                    serde_json::to_vec(&log_event(&page.cell, line))
+                        .unwrap()
+                        .len(),
+                    log
+                );
                 assert!(wire <= log);
                 assert!(log <= 1024, "{log}");
                 log
@@ -770,9 +775,18 @@ ports = [443, 8443]
                         at_ms: 123,
                         unlogged: 0,
                     };
-                    let baseline = serde_json::to_vec(&log_event(&cell, &candidate))
-                        .unwrap()
-                        .len();
+                    let baseline = serde_json::to_vec(&json!({
+                        "cell": cell,
+                        "plasmid": prefix.clone() + "p",
+                        "denied": "a.test:8080",
+                        "field": "network.ports",
+                        "fix": "8080",
+                        "count": 1,
+                        "at_ms": 123,
+                        "membrane_seq": 1
+                    }))
+                    .unwrap()
+                    .len();
                     let id = parsed_id(&(prefix.clone() + &"p".repeat(1 + size - baseline)));
                     candidate.plasmid = Some(id.clone());
                     assert_eq!(
