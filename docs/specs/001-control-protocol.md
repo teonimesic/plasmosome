@@ -1604,7 +1604,7 @@ tcp_flows:[GuestProjection], udp_flows:[GuestProjection]}`. All six arrays are r
 empty arrays; coverage of one network kind cannot stand in for another. SoftwareObservation is
 the strict record `{trees:[SoftwareTree], held:[TreeReference]}` (spec 027). SoftwareTree names
 one tree visible in the workload namespace, with its digest and every name placed for it; its
-field names follow spec 027's journal record. TreeReference is `{path:String, pid:u64,
+field names follow spec 027's journal record. Amended on 2026-10-23: while spec 027 reserves that journal record (its Q1), SoftwareTree has no fields, so trees is always empty and any element refuses. TreeReference is `{path:String, pid:u64,
 comm:String, exec_id:String|null}`, one per reference into a detached tree that the guest's scan
 sees. Both arrays are required even when empty. A tree or name with no committed or pending
 journal effect, or a committed effect with no tree or name, fails observation. A `held` row is
