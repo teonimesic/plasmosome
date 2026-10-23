@@ -458,7 +458,7 @@ pub fn split_reply(expected_id: u64, line: &[u8]) -> Result<Box<RawValue>, Reply
                 b'"' => quoted = true,
                 b'[' | b'{' => {
                     depth += 1;
-                    if depth >= 128 {
+                    if depth > 128 {
                         return Err(not_json("recursion limit exceeded"));
                     }
                 }

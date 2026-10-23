@@ -156,6 +156,29 @@ fn every_result_round_trips_without_replacing_values() {
 }
 
 #[test]
+fn observe_preserves_every_page_value() {
+    let (call, _, _) = cases(37).remove(1);
+    let sha256 = Digest::parse_hex(&"5d".repeat(32)).unwrap();
+    for (snapshot, offset, total, complete) in [(43, 7, 11, false), (61, 9, 11, true)] {
+        let result = ControlResult::Observe(ObservationPage {
+            snapshot,
+            offset,
+            total,
+            sha256,
+            bytes: vec![7, 29],
+            complete,
+        });
+        let encoded = encode_control_result(&RequestId::number(17), &result).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encoded).unwrap(),
+            json!({"id":17,"result":{"snapshot":snapshot,"offset":offset,"total":total,
+                "sha256":sha256,"bytes":[7,29],"complete":complete}})
+        );
+        assert_eq!(decode_control_reply(&call, 17, None, &encoded), Ok(result));
+    }
+}
+
+#[test]
 fn reply_results_are_closed() {
     for (call, _, wire) in cases(37) {
         let refuses = |bytes: Vec<u8>| {
@@ -251,26 +274,36 @@ fn reply_checks_echoed_grant_and_boot() {
             continue;
         }
         let boot = BootToken::from_bytes([37; 32]);
-        let other = BootToken::from_bytes([93; 32]);
-        wire["boot"] = json!(other);
-        assert_eq!(
-            decode_control_reply(&call, 17, Some(&boot), &reply(&wire)),
-            Err(ReplyFault::BootChanged {
-                expected: boot,
-                found: other
-            })
-        );
-        assert!(decode_control_reply(&call, 17, None, &reply(&wire)).is_ok());
-        wire["boot"] = json!(boot);
-        if let Some(expected) = call.grant() {
-            wire["grant"] = json!(grant(93));
+        let mut other_boots = vec![BootToken::from_bytes([93; 32])];
+        for position in [0, 16, 31] {
+            let mut bytes = *boot.as_bytes();
+            bytes[position] = 93;
+            other_boots.push(BootToken::from_bytes(bytes));
+        }
+        for other in other_boots {
+            wire["boot"] = json!(other);
             assert_eq!(
                 decode_control_reply(&call, 17, Some(&boot), &reply(&wire)),
-                Err(ReplyFault::GrantMismatch {
-                    expected,
-                    found: grant(93)
+                Err(ReplyFault::BootChanged {
+                    expected: boot,
+                    found: other
                 })
             );
+            assert!(decode_control_reply(&call, 17, None, &reply(&wire)).is_ok());
+        }
+        wire["boot"] = json!(boot);
+        if let Some(expected) = call.grant() {
+            for found in [
+                grant(93),
+                serde_json::from_value(json!("10112233-4455-4677-8899-aabbccddee25")).unwrap(),
+                serde_json::from_value(json!("00112233-4455-4677-8899-aabbccddee26")).unwrap(),
+            ] {
+                wire["grant"] = json!(found);
+                assert_eq!(
+                    decode_control_reply(&call, 17, Some(&boot), &reply(&wire)),
+                    Err(ReplyFault::GrantMismatch { expected, found })
+                );
+            }
         }
     }
 }
@@ -488,13 +521,32 @@ fn reply_faults_cut_guest_text_on_a_character_boundary() {
 
 #[test]
 fn reply_depth_is_bounded_and_the_reader_owns_the_frame_bound() {
-    for depth in [126, 127] {
+    for containers in [127, 128, 129] {
         let line = format!(
             "{{\"id\":17,\"result\":{}0{}}}",
-            "[".repeat(depth),
-            "]".repeat(depth)
+            "[".repeat(containers - 1),
+            "]".repeat(containers - 1)
         );
-        assert_eq!(split_reply(17, line.as_bytes()).is_ok(), depth == 126);
+        let decoded = split_reply(17, line.as_bytes());
+        if containers <= 128 {
+            assert_eq!(
+                decoded,
+                Ok(format!(
+                    "{}0{}",
+                    "[".repeat(containers - 1),
+                    "]".repeat(containers - 1)
+                )),
+                "{containers} containers: {line}"
+            );
+        } else {
+            assert_eq!(
+                decoded,
+                Err(ReplyFault::NotJson {
+                    detail: "recursion limit exceeded".into()
+                }),
+                "{containers} containers: {line}"
+            );
+        }
     }
     let text = "[{}] \\\"".repeat(200);
     assert!(split_reply(17, &reply(&json!(text))).is_ok());
