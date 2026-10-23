@@ -1118,6 +1118,9 @@ fn workflow_line_grammar(workflow: &str) -> Result<(), String> {
         let number = index + 1;
         let indent = line.len() - line.trim_start_matches(' ').len();
         let text = &line[indent..];
+        if line.contains(['\r', '\u{85}', '\u{2028}', '\u{2029}']) {
+            return Err(workflow_line_error(number, line, "unsupported line break"));
+        }
         if line.is_empty() {
             continue;
         }
@@ -1340,6 +1343,52 @@ fn quoted_name_workflow(quote: char) -> String {
         &format!("    name: {quote}display\n    strategy:\n{display_matrix}    {quote}"),
         1,
     )
+}
+
+#[test]
+fn matrix_grammar_refuses_non_lf_line_breaks() {
+    for (separator, expected) in [
+        (
+            "\r",
+            "workflow line 379 is refused (unsupported line break): `        # display\r        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+        (
+            "\u{85}",
+            "workflow line 379 is refused (unsupported line break): `        # display\u{85}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+        (
+            "\u{2028}",
+            "workflow line 379 is refused (unsupported line break): `        # display\u{2028}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+        (
+            "\u{2029}",
+            "workflow line 379 is refused (unsupported line break): `        # display\u{2029}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+    ] {
+        let workflow = real_matrix_workflow().replacen(
+            "          - plasmosome-tools\n",
+            &format!("          - plasmosome-tools\n        # display{separator}        exclude: [{{crate: plasmosome-tools}}]\n"),
+            1,
+        );
+        assert_eq!(crate_matrix_entries(&workflow), Err(expected.to_string()));
+    }
+}
+
+#[test]
+fn matrix_grammar_checks_line_breaks_before_skipping_block_bodies() {
+    assert_eq!(
+        workflow_line_grammar("name: |\n  display\rjobs: {}\n"),
+        Err("workflow line 2 is refused (unsupported line break): `  display\rjobs: {}`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string())
+    );
+}
+
+#[test]
+fn matrix_grammar_accepts_crlf_line_endings() {
+    let workflow = real_matrix_workflow();
+    assert_eq!(
+        crate_matrix_entries(&workflow.replace('\n', "\r\n")),
+        crate_matrix_entries(&workflow)
+    );
 }
 
 #[test]
