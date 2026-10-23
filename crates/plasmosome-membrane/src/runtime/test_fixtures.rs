@@ -13,11 +13,6 @@ pub(crate) mod host_policy {
 pub(crate) mod newc;
 
 #[cfg(target_os = "macos")]
-pub(crate) mod host_policy {
-    include!("../../tests/support/host_policy.rs");
-}
-
-#[cfg(target_os = "macos")]
 pub(crate) mod bundle;
 #[cfg(target_os = "macos")]
 pub(crate) use bundle::FixtureBundle;

@@ -10,6 +10,8 @@ use crate::runtime::initramfs::verify_initramfs;
 use crate::runtime::launch::HelperExec;
 use crate::runtime::test_fixtures::FixtureBundle;
 use crate::vmm::{VmmChild, VmmState};
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::macos::fs::MetadataExt as DarwinMetadataExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::atomic::AtomicBool;
@@ -24,17 +26,75 @@ struct Run {
 
 impl Run {
     fn start(recipe: &RuntimeRecipe) -> Self {
+        Self::start_reading(recipe, false).0
+    }
+
+    #[allow(unsafe_code)]
+    fn start_reading(recipe: &RuntimeRecipe, raw: bool) -> (Self, Option<fs::File>) {
+        let cell = recipe.control_path().as_path().parent().unwrap();
+        let mode = recipe
+            .helper()
+            .path()
+            .as_path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let mut gate = if mode.starts_with("shim") {
+            let path =
+                std::ffi::CString::new(cell.join("hello-gate").as_os_str().as_bytes()).unwrap();
+            // SAFETY: path is a terminated path in this test's private cell directory.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            Some(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(cell.join("hello-gate"))
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
         let control = RuntimeListener::bind(recipe.control_path()).unwrap();
         let data = RuntimeListener::bind(recipe.data_path()).unwrap();
         let prepared = HelperExec::prepare(recipe).unwrap();
-        let transcript = Some(DiagnosticTranscript::start(prepared.diagnostics).unwrap());
+        let (transcript, reader) = if raw {
+            (None, Some(fs::File::from(prepared.diagnostics)))
+        } else {
+            (
+                Some(DiagnosticTranscript::start(prepared.diagnostics).unwrap()),
+                None,
+            )
+        };
         let child = VmmChild::spawn(prepared.exec).unwrap();
-        Self {
+        let run = Self {
             child,
             transcript,
             control,
             data,
+        };
+        if let Some(gate) = &mut gate {
+            let witness = cell.join(format!("before-hello-{}", run.child.pid()));
+            let started = Instant::now();
+            while !witness.exists() && started.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                witness.exists(),
+                "{mode} reached the held before-hello point"
+            );
+            let marker = cell
+                .parent()
+                .unwrap()
+                .join(format!("markers/started-{}", run.child.pid()));
+            assert_eq!(
+                fs::read(marker).expect("the helper's start marker exists before its first hello"),
+                b"",
+                "{mode}"
+            );
+            gate.write_all(b"G").unwrap();
         }
+        (run, reader)
     }
 
     fn associate(
@@ -74,6 +134,13 @@ fn bundle_passes_the_real_artifact_archive_and_listed_library_checks() {
     );
     let bundle = FixtureBundle::build("shim");
     let recipe = bundle.recipe();
+    let expected_work = format!("(subpath \"{}\")", bundle.path().join("cell").display());
+    let expected_host =
+        host_policy::HOST_POLICY.replace(host_policy::WORK_SUBPATH, &expected_work) + "\0";
+    assert_eq!(
+        fs::read(recipe.host_policy().path().as_path()).unwrap(),
+        expected_host.as_bytes()
+    );
     let verified = verify_recipe_artifacts(&recipe).unwrap();
     let binding = verify_initramfs(&verified.initramfs, &verified.guest_policy).unwrap();
     assert_eq!(binding.policy_digest, *recipe.guest_policy().sha256());
@@ -237,15 +304,15 @@ fn bad_policy_is_refused_with_the_expected_and_changed_digests() {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn killing_the_helper_group_closes_the_workers_diagnostic_writer() {
     let bundle = FixtureBundle::build("shim-worker");
     let recipe = bundle.recipe();
-    let mut run = Run::start(&recipe);
+    let (mut run, reader) = Run::start_reading(&recipe, true);
+    let mut reader = reader.unwrap();
     let association = run.associate(&recipe, Duration::from_secs(2)).unwrap();
     assert_eq!(association.peer, run.child.pid());
-    let transcript = run.finish();
-    assert!(transcript.eof, "a worker retained the diagnostic pipe");
-    let text = std::str::from_utf8(&transcript.bytes).unwrap();
+    let text = diagnostic_line(&mut reader);
     let worker: i32 = text
         .strip_prefix("worker=")
         .unwrap()
@@ -253,6 +320,128 @@ fn killing_the_helper_group_closes_the_workers_diagnostic_writer() {
         .parse()
         .unwrap();
     assert!(worker > 0 && worker != run.child.pid());
+    // SAFETY: getpgid only observes the named pid. No signal is sent to that untrusted number.
+    assert_eq!(
+        unsafe { libc::getpgid(worker) },
+        run.child.pid(),
+        "the named worker is alive in the owned helper group"
+    );
+    let original = worker_identity(worker).expect("the original worker is alive");
+    // SAFETY: the unreaped direct child still owns this pid, and the call only signals it.
+    assert_eq!(unsafe { libc::kill(run.child.pid(), libc::SIGTERM) }, 0);
+    stopped_leader_is_retained(run.child.pid());
+    // SAFETY: the terminal leader is retained, not reaped, so this group is still ours.
+    assert_eq!(
+        unsafe { libc::killpg(run.child.pid(), libc::SIGUSR1) },
+        0,
+        "the worker group remains after the leader stops"
+    );
+    assert_eq!(
+        diagnostic_line(&mut reader),
+        format!("writer={worker}\n"),
+        "the live worker itself holds the diagnostic writer after the leader stops"
+    );
+    run.transcript = Some(DiagnosticTranscript::start(reader.into()).unwrap());
+    let transcript = run.finish();
+    assert!(transcript.eof, "a worker retained the diagnostic pipe");
+    let started = Instant::now();
+    while worker_identity(worker) == Some(original)
+        && started.elapsed() < Duration::from_millis(250)
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_ne!(
+        worker_identity(worker),
+        Some(original),
+        "the original worker is gone after group teardown"
+    );
+}
+
+#[allow(unsafe_code)]
+fn diagnostic_line(reader: &mut fs::File) -> String {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut line = Vec::new();
+    while line.last() != Some(&b'\n') {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "the worker writes its diagnostic line within the bound"
+        );
+        let mut poll = libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll points to one initialized entry for the pipe this test retains.
+        let ready = unsafe { libc::poll(&mut poll, 1, left.as_millis().max(1) as i32) };
+        if ready < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        assert!(
+            ready > 0,
+            "the worker writes its diagnostic line within the bound"
+        );
+        let mut byte = [0];
+        assert_eq!(
+            reader.read(&mut byte).unwrap(),
+            1,
+            "the worker holds the diagnostic writer"
+        );
+        line.push(byte[0]);
+        assert!(line.len() < 64, "the worker diagnostic line is bounded");
+    }
+    String::from_utf8(line).unwrap()
+}
+
+#[allow(unsafe_code)]
+fn worker_identity(pid: i32) -> Option<u64> {
+    let mut record = [0_u64; 7];
+    // SAFETY: flavor 17 writes the 56-byte unique-identifier record, whose integer storage is
+    // valid for every bit pattern. The call retains no pointer and only observes the pid.
+    let size = unsafe { libc::proc_pidinfo(pid, 17, 0, record.as_mut_ptr().cast(), 56) };
+    match size {
+        56 => Some(record[2]),
+        0 => {
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+            None
+        }
+        other => panic!("the worker identity record has unexpected size {other}"),
+    }
+}
+
+#[allow(unsafe_code)]
+fn stopped_leader_is_retained(pid: i32) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the leader stops within the existing terminal bound"
+        );
+        // SAFETY: siginfo_t is C integer and pointer storage; zero initializes a valid value.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: pid is our unreaped direct child; WNOWAIT retains its status and group authority.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as u32,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        assert_eq!(result, 0, "the stopped leader remains waitable");
+        if info.si_pid == pid {
+            assert_eq!(info.si_code, libc::CLD_KILLED);
+            assert_eq!(info.si_status, libc::SIGTERM);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]
@@ -348,7 +537,12 @@ fn raw_recipe(bundle: &FixtureBundle, bytes: &[u8]) -> i32 {
             }
         });
     }
-    command.status().unwrap().code().unwrap()
+    let mut child = command.spawn().unwrap();
+    fake::owned_wait::exit_within(&mut child, fake::owned_wait::SETUP_BOUND)
+        .unwrap()
+        .expect("the raw recipe child exits within the setup bound")
+        .code()
+        .unwrap()
 }
 
 #[test]

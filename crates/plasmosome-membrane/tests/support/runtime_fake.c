@@ -344,6 +344,40 @@ static void hello(int fd, int id, const char *lane, const char *boot, const char
     }
 }
 
+static char worker_line[64];
+static size_t worker_line_length;
+
+static void report_worker(int signal) {
+    (void)signal;
+    int saved = errno;
+    size_t used = 0;
+    while (used < worker_line_length) {
+        ssize_t sent = write(STDERR_FILENO, worker_line + used, worker_line_length - used);
+        if (sent < 0 && errno == EINTR) continue;
+        if (sent <= 0) break;
+        used += (size_t)sent;
+    }
+    errno = saved;
+}
+
+static void hold_before_hello(const char *control) {
+    char path[256];
+    strcpy(path, control);
+    char *slash = strrchr(path, '/');
+    if (slash == NULL) _exit(BROKEN);
+    strcpy(slash + 1, "hello-gate");
+    int gate = open(path, O_RDONLY);
+    if (gate < 0 && errno == ENOENT) return;
+    if (gate < 0) _exit(BROKEN);
+    snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "before-hello-%d", getpid());
+    int witness = open(path, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (witness < 0 || close(witness) != 0) _exit(BROKEN);
+    char release;
+    ssize_t got;
+    do { got = read(gate, &release, 1); } while (got < 0 && errno == EINTR);
+    if (got != 1 || release != 'G' || close(gate) != 0) _exit(BROKEN);
+}
+
 static int shim(const char *mode) {
     char *recipe = read_bounded(RECIPE_FD);
     close(RECIPE_FD);
@@ -373,9 +407,30 @@ static int shim(const char *mode) {
         snprintf(boot + index * 2, 3, "%02x", bytes[index]);
     }
     if (strcmp(mode, "shim-worker") == 0) {
+        sigset_t blocked, previous;
+        sigemptyset(&blocked);
+        sigaddset(&blocked, SIGUSR1);
+        if (sigprocmask(SIG_BLOCK, &blocked, &previous) != 0) _exit(BROKEN);
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = report_worker;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGUSR1, &action, NULL) != 0) _exit(BROKEN);
         pid_t worker = fork();
         if (worker < 0) _exit(BROKEN);
-        if (worker == 0) { for (;;) pause(); }
+        if (worker == 0) {
+            const char prefix[] = "writer=";
+            for (size_t index = 0; index < sizeof(prefix) - 1; index++) worker_line[worker_line_length++] = prefix[index];
+            unsigned int pid = (unsigned int)getpid();
+            char digits[16];
+            size_t count = 0;
+            do { digits[count++] = (char)('0' + pid % 10); pid /= 10; } while (pid != 0);
+            while (count != 0) worker_line[worker_line_length++] = digits[--count];
+            worker_line[worker_line_length++] = '\n';
+            if (sigprocmask(SIG_SETMASK, &previous, NULL) != 0) _exit(BROKEN);
+            for (;;) pause();
+        }
+        if (sigprocmask(SIG_SETMASK, &previous, NULL) != 0) _exit(BROKEN);
         dprintf(STDERR_FILENO, "worker=%d\n", worker);
     }
     if (strcmp(mode, "shim-unconfined") != 0) {
@@ -391,6 +446,7 @@ static int shim(const char *mode) {
         free(profile);
     }
     if (strcmp(mode, "shim-bad-policy") == 0) policy[0] = policy[0] == '0' ? '1' : '0';
+    hold_before_hello(control);
     int normal = connect_lane(control);
     hello(normal, 1, "normal", boot, policy);
     int withdrawal = connect_lane(control);
