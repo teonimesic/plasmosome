@@ -4,9 +4,9 @@
 
 The trait between capability decisions and capability enforcement, plus the fake backend that
 makes the kernel testable without a VM. It also holds the SHA-256 `Digest`, spec 001's
-observation paging (`paging`), spec 027's pinned software trees (`software`), and spec 028's
-lifetime values (`lifetime`) with the `Clock` seam (`clock`), which guest, membrane and controller
-share.
+observation paging (`paging`) and guest bridge records (`guest_protocol`), spec 027's pinned
+software trees (`software`), and spec 028's lifetime values (`lifetime`) with the `Clock` seam
+(`clock`), which guest, membrane and controller share.
 
 ## Hard rules
 
