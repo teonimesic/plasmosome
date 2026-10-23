@@ -1244,15 +1244,17 @@ pub fn doomed_owner() -> CellOwner {
 /// Checks, for every sample capability, both revoke policies and both entry points, that a grant
 /// or apply owned by `doomed_owner()` returns `IncompleteEffect` at its own address and leaves
 /// exactly that operation incomplete, with no standing object and no issued record; that while it
-/// is incomplete a retry through either entry point returns `IncompleteEffect` again, another
-/// owner's grant or apply at its address and a plant there return `IdentityConflict`, a revoke of
-/// its handle returns `UnknownHandle`, and a removal naming another owner or capability returns
-/// `UnknownObject`, each changing nothing; that an invalid operation of that owner is refused with
-/// `InvalidOperation` and changes nothing; and that, of two such effects, each exact removal clears
-/// its own effect and nothing else. An error is compared by class and address, never by its
-/// detail. The factory's backend must fail, after its first effect, every valid grant or apply of
-/// the doomed owner at a free address. Each pass removes its two effects in grant order or in
-/// reverse, and every message of that walk names its order.
+/// is incomplete a retry through either entry point returns `IncompleteEffect` again, a plant of
+/// its object returns `IdentityConflict` and a revoke of its handle returns `UnknownHandle`; that
+/// a grant, apply or plant at its address returns `IdentityConflict`, and a removal there returns
+/// `UnknownObject`, when it names another plugin in the doomed owner's cell, the same plugin in
+/// another cell, another plugin in another cell, or another capability; that an invalid
+/// operation of that owner is refused with `InvalidOperation`; that each of these refusals
+/// changes nothing; and that, of two such effects, each exact removal clears its own effect and
+/// nothing else. An error is compared by class and address, never by its detail. The factory's
+/// backend must fail, after its first effect, every valid grant or apply of the doomed owner at a
+/// free address. Each pass removes its two effects in grant order or in reverse, and the message
+/// of a removal that fails names its order.
 pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBackend>(
     make: impl Fn() -> B,
 ) {
@@ -1283,12 +1285,11 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                         observe(&mut backend),
                         first,
                         "a refused invalid doomed operation changed the account through {}",
-                        call.name()
+                        call.with_article()
                     );
                 }
                 let op = op_for(GrantId::new(), doomed_owner(), capability.clone());
                 let twin = op_for(GrantId::new(), doomed_owner(), capability.clone());
-                let removal = op.removal();
                 for doomed in [&op, &twin] {
                     let failure = entry.run(&mut backend, doomed);
                     contract_assert!(
@@ -1310,38 +1311,28 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                     contract_assert!(
                         incomplete_at(&again, &op),
                         "a retry through {} must return IncompleteEffect again, not {again:?}",
-                        retry.name()
+                        retry.with_article()
                     );
                     contract_assert_eq!(
                         observe(&mut backend),
                         failed,
                         "a retry through {} changed the account",
-                        retry.name()
+                        retry.with_article()
                     );
                 }
                 let conflict = BackendError::IdentityConflict {
                     class: op.class().as_str(),
                     id: op.id(),
                 };
-                let another = op_for(op.id(), conformance_owner(), capability.clone());
-                for call in [Entry::Grant, Entry::Apply] {
-                    contract_assert_eq!(
-                        call.run(&mut backend, &another),
-                        Err(conflict.clone()),
-                        "another owner's {} at an unfinished address must conflict",
-                        call.name()
-                    );
-                    contract_assert_eq!(
-                        observe(&mut backend),
-                        failed,
-                        "another owner's {} changed the account",
-                        call.name()
-                    );
-                }
                 contract_assert_eq!(
                     backend.plant(op.object()),
-                    Err(conflict),
+                    Err(conflict.clone()),
                     "a plant at an unfinished address must conflict"
+                );
+                contract_assert_eq!(
+                    observe(&mut backend),
+                    failed,
+                    "a refused plant changed the account"
                 );
                 contract_assert_eq!(
                     backend.revoke(op.handle(), drain),
@@ -1353,29 +1344,39 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
                 contract_assert_eq!(
                     observe(&mut backend),
                     failed,
-                    "a refused plant or revoke changed the account"
+                    "a refused revoke changed the account"
                 );
-                let mut refused = vec![
-                    (removal.clone(), conformance_owner(), "owner"),
-                    (removal.clone(), other_cell(&doomed_owner()), "owner"),
-                ];
-                for changed in changed_capabilities(&capability) {
-                    refused.push((
-                        UniverseRemoval {
-                            id: op.id(),
-                            capability: changed,
-                        },
-                        doomed_owner(),
-                        "capability",
-                    ));
-                }
-                for (wrong, owner, field) in refused {
+                let [another_capability, another_recipe] = changed_capabilities(&capability);
+                let others = [
+                    (conformance_owner(), capability.clone(), "plugin and cell"),
+                    (neighbour_of(&doomed_owner()), capability.clone(), "plugin"),
+                    (other_cell(&doomed_owner()), capability.clone(), "cell"),
+                    (doomed_owner(), another_capability, "capability"),
+                    (doomed_owner(), another_recipe, "recipe"),
+                ]
+                .map(|(owner, sent, field)| (op_for(op.id(), owner, sent), field));
+                for (other, field) in others {
+                    for call in [Entry::Grant, Entry::Apply, Entry::Plant] {
+                        contract_assert_eq!(
+                            call.run(&mut backend, &other),
+                            Err(conflict.clone()),
+                            "{} naming another {field} at an unfinished address must conflict",
+                            call.with_article()
+                        );
+                        contract_assert_eq!(
+                            observe(&mut backend),
+                            failed,
+                            "{} naming another {field} changed the account",
+                            call.with_article()
+                        );
+                    }
+                    let wrong = other.removal();
                     contract_assert_eq!(
-                        backend.apply_removal(wrong.clone(), &owner, drain),
+                        backend.apply_removal(wrong.clone(), other.owner(), drain),
                         Err(BackendError::UnknownObject {
                             class: wrong.class().as_str(),
                             key: wrong.key(),
-                            owner: owner.clone(),
+                            owner: other.owner().clone(),
                             id: wrong.id,
                         }),
                         "a removal naming another {field} must not select an unfinished effect"
@@ -1411,20 +1412,15 @@ pub fn failed_grants_stay_incomplete_until_exact_withdrawal<B: EnforcementBacken
 enum Entry {
     Grant,
     Apply,
+    Plant,
 }
 
 impl Entry {
-    fn name(self) -> &'static str {
-        match self {
-            Entry::Grant => "grant",
-            Entry::Apply => "apply",
-        }
-    }
-
     fn with_article(self) -> &'static str {
         match self {
             Entry::Grant => "a grant",
             Entry::Apply => "an apply",
+            Entry::Plant => "a plant",
         }
     }
 
@@ -1436,6 +1432,7 @@ impl Entry {
         match self {
             Entry::Grant => backend.grant(operation.clone(), GrantKind::Hot).map(|_| ()),
             Entry::Apply => backend.apply(operation.clone()),
+            Entry::Plant => backend.plant(operation.object()),
         }
     }
 }

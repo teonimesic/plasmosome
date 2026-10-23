@@ -1633,4 +1633,42 @@ mod tests {
             assert_eq!(backend.snapshot_os_state(), Ok(failed));
         }
     }
+
+    #[test]
+    fn the_exact_removal_of_one_owners_unfinished_effect_keeps_every_other_owners() {
+        let owners = [
+            cell_owner("cell-1", "doomed"),
+            cell_owner("cell-1", "network"),
+            cell_owner("cell-2", "doomed"),
+        ];
+        let drains = [
+            DrainSpec::graceful(Duration::from_millis(2)),
+            DrainSpec::forcing(),
+        ];
+        for (capability, drain) in capabilities()
+            .into_iter()
+            .flat_map(|capability| drains.map(|drain| (capability.clone(), drain)))
+        {
+            for (entry, reversed) in [(Entry::Grant, false), (Entry::Apply, true)] {
+                let mut backend = FakeBackend::new();
+                let mut ops = owners
+                    .clone()
+                    .map(|owner| fixtures::op(GrantId::new(), owner, capability.clone()));
+                for op in &ops {
+                    backend.fail_after_effect_for_owner(op.owner().clone(), PROBE);
+                    assert_eq!(create(&mut backend, entry, op), Err(incomplete(op, PROBE)));
+                }
+                if reversed {
+                    ops.reverse();
+                }
+                for (index, op) in ops.iter().enumerate() {
+                    backend
+                        .apply_removal(op.removal(), op.owner(), drain)
+                        .unwrap();
+                    let left: Vec<&UniverseOp> = ops[index + 1..].iter().collect();
+                    assert_eq!(backend.snapshot_os_state(), Ok(account(&[], &[], &left)));
+                }
+            }
+        }
+    }
 }

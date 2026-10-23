@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 
 use plasmosome_core::{InstanceRoot, LockError, WriterLock};
 
+#[path = "support/private_root.rs"]
+mod private_root;
+
 const ROOT_VARIABLE: &str = "PLASMOSOME_LOCK_CHILD_ROOT";
 const LOCKED: &str = "plasmosome-test-writer-lock-held";
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -72,7 +75,7 @@ fn lock_holder_child() {
 
 #[test]
 fn process_death_releases_the_writer_lock() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
+    let dir = private_root::private_root();
     let root = dir
         .path()
         .canonicalize()

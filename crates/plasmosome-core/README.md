@@ -22,7 +22,7 @@ one.
 | `kill_budget` | `cell.kill`'s deadlines under spec 023 §7, with no IO. The lock reserve is a tenth of the kill's deadline D, from 1 ms to 3 s, fixed for the request and not rounded. Each step's share is measured from what is left of D past that reserve when the step starts: the workload stop, which is `Skipped` with `now`, the withdrawal with its drain, effect and publication parts, and the guest stop's `DrainSpec` and answer wait. Each share is whole milliseconds and at least 1 ms, or `NoBudget`. `Incomplete` is the reply's closed set, and a reply is a retirement exactly when it lacks `teardown`. With `now` it records only `teardown` |
 | `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
-| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's cell ID allocation, `supervisor.lock` and `membraned.log`, its `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
+| `instance` | The instance root, opened through the no-follow walk and refused when an ancestor or the root itself could be replaced: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's cell ID allocation, `supervisor.lock` and `membraned.log`, its `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
 | `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. A lock the controller cannot test is its own fact, `Untestable`, and `decide` sets that cell aside as `lock_untestable` whatever its marker and journal. `LockFact` serializes as spec 001's `lock` values, and each `SetAsideReason` as spec 001's name for that reason. It has six of spec 001's eight reasons: `retire_unlogged` and `retire_failed` come with plasmosome-66wy. Callers gather the facts and carry out the outcome |
 | `supervisor_start` | Spec 023 §4's start: `start_supervisor` runs one cell's `membraned` detached, with an exact argv, an empty environment and only descriptors 0 to 4, and then writes it the config record. Nothing calls it yet |
 | `closure` | What removing a plugin takes, with no IO. `AttachmentGraph` holds one cell's attached plugins, the providers each one directly requires, and which ones were asked for by name; a provider is attached before its requirers. `stranded_by` lists the plugins that directly require a given one, which `plasmid.remove` must refuse to strand. `removal_closure` gives that plugin, every plugin that transitively requires it, and every unnamed provider required only by plugins it takes, followed down the chain. Spec 011's `plasmid.remove` and spec 028's expiry are to share it, so the two cannot take different sets; nothing calls it yet |
@@ -153,9 +153,9 @@ gets `scope = { path_scope = [...] }`, written in place of `scope`, not of the f
 
 Paths, the plasmid ID, refused values and fixes are written as TOML: a key that is not bare, and
 every string, is a basic string on one line. Every control character is escaped, and so are the
-line and paragraph separators U+2028 and U+2029 and the bidi controls U+200E, U+200F, U+202A to
-U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A command's
-refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
+line and paragraph separators U+2028 and U+2029 and the bidi controls U+061C, U+200E, U+200F,
+U+202A to U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A
+command's refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
 could not be read), `ManifestError::Parse` (the text is not TOML), `ManifestError::TooLarge`
 (the declaration is over 1 MiB) and `ManifestError::TooDeep` (the declaration nests more than 32
 levels deep) carry no field. For `Parse`, the TOML parser reports a position,
@@ -463,6 +463,9 @@ rules are spec 025 §6's. Exits 2 and 1 are unchanged.
   path must pass the private-socket boundary in [Socket ownership](#socket-ownership).
 - `instance_root` is required and absolute. The trusted operator supplies it (spec 008); it is
   never inferred from `control_socket`, even when the socket sits in the usual instance layout.
+  `InstanceRoot::open` refuses a root reached through a symlink, one under a sticky `/tmp`, and
+  one that it or a directory above it lets another user replace, as a socket under it would be
+  refused.
 - `recovery_deadline_ms` is required: a whole number of milliseconds, at least 1.
 - `registry_root` is optional and absolute when given. Without it the daemon is purely local;
   no other path, `HOME` or request supplies a default.
@@ -664,14 +667,18 @@ The integration tests make each private root where every ancestor passes:
   whatever `TMPDIR` says;
 - on Linux, under `XDG_RUNTIME_DIR` when it is set, else under `CARGO_TARGET_TMPDIR`.
 
-`tests/private_socket.rs` has its own copy of that rule; the daemon's integration tests take it
-from `tests/support/private_root.rs`. The daemon's unit tests follow it too, but on Linux they
-fall back to the test binary's directory, because Cargo sets `CARGO_TARGET_TMPDIR` only for
-integration tests.
+`tests/private_socket.rs` has its own copy of that rule. The other integration tests that make a
+private or instance root, and `plasmosome-membrane`'s `tests/cell_start.rs`, take it from
+`tests/support/private_root.rs`. The unit tests follow it too, but on Linux they fall back to
+the test binary's directory, because Cargo sets `CARGO_TARGET_TMPDIR` only for integration
+tests.
 
 If no base passes, the tests fail and name each base with the ancestor that refused it. Each
 test root is removed when its test ends, even after a panic: modes are opened up and, on macOS,
-ACLs stripped before removal.
+ACLs stripped before removal. `plasmosome-membrane`'s `tests/cell_start.rs` takes `private_dir`
+instead, which only removes the root. Its tests plant no ACL and leave directories removable;
+some hold a lock descriptor without close-on-exec, which a `/bin/chmod` started to strip ACLs
+would inherit.
 
 The distinct-UID test is ignored by default. It runs with `--ignored` and
 `PLASMOSOME_OTHER_UID_PREFIX` set to a command prefix that runs its arguments as another UID
@@ -732,8 +739,9 @@ its start.
   write or all, whoever it names. On Linux it is always false: such a POSIX ACL entry shows in
   the group bits, which a mode check reads.
 
-`PrivateDir` and `list_trusted_dir` run on this walk, each with its own rule for the last
-directory.
+`PrivateDir`, `list_trusted_dir` and `InstanceRoot::open` run on this walk. `PrivateDir` has its
+own rule for the last directory. The other two share `Walk::open_trusted_directory`, which holds
+the last directory to the rule every directory above it meets.
 
 `Walk::identities` is spec 022 §3 rule 1's walk alone, and it is crate-private. It opens every
 component, the last as a directory, without following a symlink, and judges no directory. It
