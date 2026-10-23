@@ -28,9 +28,10 @@ const USAGE: &str = "expected ALL.json HOSTS.json CRATE [RANGE]: the cargo metad
 /// package that builds on a host through [`SOURCE_LIMIT`].
 ///
 /// Returns 0 when the lines are written. Returns 1 when not exactly one locked third-party
-/// package matches the name and range, when a file cannot be read or is not what cargo writes, or
-/// when `out` cannot be written; nothing is written to `out` then. Returns 2 unless `args` holds
-/// three or four arguments. Each failure is one line on `err`.
+/// package matches the name and range, when a file cannot be read or is not what cargo writes,
+/// or when writing or flushing `out` fails. Input failures write nothing to `out`; an output
+/// failure can leave a prefix there. Returns 2 unless `args` holds three or four arguments.
+/// Failures are reported on `err`.
 pub fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let (all, hosts, name, wanted) = match args {
         [all, hosts, name] => (all, hosts, name, None),

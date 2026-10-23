@@ -14,9 +14,6 @@ const BUILD: &[Option<&str>] = &[Some("build")];
 const DEV: &[Option<&str>] = &[Some("dev")];
 const APP: &str = "path+file:///app#0.1.0";
 
-/// A pair of `cargo metadata` files with the workspace member `app` and any added with `member`.
-/// Each package added has a manifest directory of its own under a scratch directory. As cargo's
-/// `--filter-platform` does, `hosts.json` holds only the packages the members reach on the hosts.
 struct Fixture {
     dir: tempfile::TempDir,
     packages: Vec<Value>,
@@ -55,14 +52,12 @@ impl Fixture {
         self.nodes.push(json!({"id": id, "deps": []}));
     }
 
-    /// Adds a registry package and returns its id.
     fn package(&mut self, name: &str, version: &str) -> String {
         let id = format!("{REGISTRY}#{name}@{version}");
         self.add(&id, name, version, json!(REGISTRY));
         id
     }
 
-    /// Adds a workspace member, a package without a source, and returns its id.
     fn member(&mut self, name: &str) -> String {
         let id = format!("path+file:///{name}#0.1.0");
         self.add(&id, name, "0.1.0", Value::Null);
@@ -98,13 +93,11 @@ impl Fixture {
             .push(json!({"pkg": to, "dep_kinds": kinds}));
     }
 
-    /// An edge only the all-platform resolve holds, such as a `cfg(any())` dependency.
     fn edge_off_hosts(&mut self, from: &str, to: &str) {
         self.edge(from, to, NORMAL);
         self.off_hosts.push((from.to_owned(), Some(to.to_owned())));
     }
 
-    /// A package only the all-platform resolve holds, such as a dependency for another OS.
     fn node_off_hosts(&mut self, id: &str) {
         self.off_hosts.push((id.to_owned(), None));
     }
@@ -163,7 +156,6 @@ impl Fixture {
     }
 }
 
-/// The ids the members reach over every edge of `nodes`, the members included.
 fn reached(nodes: &[Value], members: &[String]) -> HashSet<String> {
     let mut seen: HashSet<String> = members.iter().cloned().collect();
     let mut stack = members.to_vec();
@@ -216,7 +208,6 @@ impl Outcome {
     }
 }
 
-/// `app` depends on a package named `root`, which brings what the row adds.
 fn rooted(version: &str, kinds: &[Option<&str>]) -> (Fixture, String) {
     let mut fixture = Fixture::new();
     let root = fixture.package("root", version);
@@ -269,8 +260,6 @@ fn dev_edges_are_not_followed_in_brings() {
     );
 }
 
-/// cargo tree -e normal,build prints nothing for tempfile, which the members reach only through
-/// dev edges, but tempfile's record lists its whole closure.
 #[test]
 fn a_crate_the_members_reach_only_through_dev_edges_brings_its_closure() {
     let (mut fixture, root) = rooted("3.0.0", DEV);
@@ -286,7 +275,6 @@ fn a_crate_the_members_reach_only_through_dev_edges_brings_its_closure() {
     );
 }
 
-/// proptest's brings begins with autocfg, which it reaches only through num-traits' build edge.
 #[test]
 fn a_build_edge_is_followed() {
     let (mut fixture, root) = rooted("1.0.0", DEV);
@@ -308,7 +296,6 @@ fn a_build_edge_is_followed() {
     );
 }
 
-/// serde_core reaches serde_derive through a cfg(any()) dependency, which never builds.
 #[test]
 fn a_cfg_any_edge_is_in_brings_and_not_in_build_time_code() {
     let (mut fixture, root) = rooted("1.0.229", NORMAL);
@@ -487,7 +474,6 @@ fn the_leaves_line_says_none_it_stays_when_another_path_keeps_the_crate() {
     );
 }
 
-/// Cargo refuses a normal cycle, but the block left the crate out of its own closure.
 #[test]
 fn the_crate_is_not_in_its_own_brings() {
     let (mut fixture, root) = rooted("1.0.0", NORMAL);
@@ -529,8 +515,6 @@ fn a_package_two_paths_reach_is_brought_once() {
     );
 }
 
-/// Each member has a direct edge to the crate and a package only it reaches, so a walk that
-/// starts from one member alone lists the other member's package.
 #[test]
 fn the_leaves_walk_starts_from_every_member() {
     let (mut fixture, root) = rooted("1.0.0", NORMAL);
@@ -549,7 +533,6 @@ fn the_leaves_walk_starts_from_every_member() {
     );
 }
 
-/// The leaves come from the all-platform resolve, so a package no host builds leaves too.
 #[test]
 fn a_package_no_host_builds_leaves_with_the_crate() {
     let (mut fixture, root) = rooted("1.0.0", NORMAL);

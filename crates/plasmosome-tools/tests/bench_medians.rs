@@ -180,7 +180,6 @@ fn a_repeated_key_is_read_at_its_last_value() {
     }
 }
 
-/// Python's `json` decodes every key's escapes, so an escape in another key changes nothing.
 #[test]
 fn a_key_with_an_escape_is_read() {
     let criterion = criterion();

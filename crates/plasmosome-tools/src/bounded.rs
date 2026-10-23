@@ -7,8 +7,9 @@ use std::path::Path;
 ///
 /// The last component of `path` is opened without following a symbolic link and without waiting
 /// for a writer, so a link, a FIFO, a device or a directory is refused, not read. A file longer
-/// than `limit` bytes is refused. The error is one line that names `path`. A caller that must
-/// follow a link the person named resolves it first, with `std::fs::canonicalize`.
+/// than `limit` bytes is refused. The error names `path` as the file system gives it, so it is
+/// one line unless `path` holds a line break. A caller that must follow a link the person named
+/// resolves it first, with `std::fs::canonicalize`.
 pub fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     let shown = path.display();
     let cannot = |error: std::io::Error| format!("cannot read {shown}: {error}");
