@@ -6,8 +6,8 @@ The client logic of the `plasmosome` command line, as a library the binary calls
 it without spawning a process. Decision 009 named the trigger for this crate and spec 025 §1
 pulled it. Today it holds spec 025's JSON scanner and writers, its reply reader and reply rules,
 its envelopes, its client codes, its command table, the order the command line is read in, the
-grammar of a served command's own flags, spec 025 §5's instance selection, and the one served
-command, `status`. It is `publish = false` and
+grammar of a served command's own flags, spec 025 §5's instance selection, the one path every
+served command runs through, and the one served command, `status`. It is `publish = false` and
 never ships on its own.
 
 ## Hard rules
@@ -82,13 +82,18 @@ never ships on its own.
   full backlog refuses connections too.
 - **The peer check comes before the first byte.** `exchange` calls `check_peer_uid` before it
   writes, and every write and read waits only `Deadline::left`. A write before the check sends
-  the request to a daemon of another user.
+  the request to a daemon of another user. A verb's `deadline_ms` is worked out after the check,
+  so it counts the time the connection and the check took.
+- **Once a state change's first byte is written, a lost answer is exit 3.** A failed write
+  after that byte, a missing or oversized answer and a failed write of the answer to stdout are
+  each `outcome_unknown`. Nothing is retried: one command sends one request on one connection.
 - **What the client measures, it measures before connecting.** The path's length, the path
   boundary and the request line's size are refused with no connection made, so a refused command
-  never reaches a daemon. Default selection builds its request after it connects, since the name
-  comes from `instances/`. The candidate's socket path has passed the client's own `sun_path`
-  check, so its name is at most 72 bytes, that line stays far under the bound, and `status`
-  treats a line over it as a bug.
+  never reaches a daemon. The request line is measured before `HOME` is read, with the widest
+  `deadline_ms` the call can send and the name as given, or a 1-byte name when default selection
+  will find it, so a line refused there is over whatever name is found. Default selection
+  measures the line again with the name it found, after judging and before connecting. Only that
+  line and the instance's name wait for the socket to be chosen before they are refused.
 - **No `unsafe` and no direct third-party dependency.** The package keeps `lints.workspace = true`.
   Its one normal dependency is `plasmosome-core`, for `InstanceName` and the private-socket
   checks, and that brings third-party dependencies of its own into the library's build,
@@ -117,4 +122,11 @@ under `/tmp` fails the ancestor check, and a long one overflows `sun_path`. They
 real `~/.plasmosome`. The tests in `tests/cli.rs`, for help, the version, `not_served` and usage
 errors, pass an `Env` that panics when it is read, so a rule that reads the environment there
 fails them. The tests in `tests/flags.rs` read lines against a test-only table that serves a few
-commands with own flags, since no command of `COMMANDS` has any yet.
+commands with own flags, since no command of `COMMANDS` has any yet. The tests in `tests/verb.rs`
+run `handle` against the same kind of table, each entry with a build that makes a test-only
+`VerbCall`, and `FakeDaemon`s. They read the clock through a scripted `Clock` to check
+`deadline_ms`, and `HOME` through an `Env` that records the read. One clock moves when `HOME` is
+read and one when the connection is made, so a `deadline_ms` worked out too early is sent too
+large. A request cut off after 10 bytes, a write that takes nothing, and a refused peer check
+that leaves the clock unread are unit tests in `verb.rs`, over a test-only `Transport` or a
+socket pair.

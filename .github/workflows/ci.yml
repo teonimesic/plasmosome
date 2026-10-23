@@ -77,6 +77,16 @@ jobs:
           key: cargo-deny-0.20.2
           save-if: ${{ github.event_name == 'push' }}
 
+      # Spec 026's record guard, the check after the git-only step. It reads every tracked
+      # Cargo.lock and `cargo metadata` before format, clippy or the tests compile anything else.
+      # The step first compiles plasmosome-guards and its dependencies, so a PR that edits
+      # crates/plasmosome-guards/ or the root Cargo.toml's [workspace] table (members and exclude),
+      # or changes one of those packages in Cargo.lock, runs its own code before the guard judges
+      # anything, and that PR's `record guard` green does not count (spec 026 section 1).
+      # `workspace guards` runs it again with the rest.
+      - name: record guard
+        run: cargo test --locked -p plasmosome-guards --test dependency_records
+
       - name: format
         run: cargo fmt --all -- --check
 

@@ -11,9 +11,10 @@ answer its exit, writes JSON that never carries a raw terminal control, builds t
 lists the client's own error codes with their exits. The `plasmosome` binary in
 `crates/plasmosome` is a thin `main` over `main_with`.
 
-One command is served: `plasmosome status`. Every other command refuses with `not_served`.
-`status` finds its instance as spec 025 §5 says: by `--socket`, else `--kernel`, else
-`PLASMOSOME_KERNEL`, else the one instance under `$HOME/.plasmosome/instances/`.
+One command is served: `plasmosome status`. Every other command refuses with `not_served`. A
+served command runs through one path, `verb::run`, and finds its instance as spec 025 §5 says:
+by `--socket`, else `--kernel`, else `PLASMOSOME_KERNEL`, else the one instance under
+`$HOME/.plasmosome/instances/`.
 
 ## Reading the command line
 
@@ -185,9 +186,6 @@ before the request was written whole. Any other failed write has `cause` `transp
 message says writing failed after part of the request was sent and names the error. The code and
 exit follow `unanswered`'s: `no_reply`, exit 1, or `outcome_unknown`, exit 3.
 
-`reply::request_line` writes `{"id":1,"method":...,"params":{...}}` and a newline through the
-compact writer. It hands the params back when a key repeats among them or inside a value.
-
 ## Writing output
 
 `json::write_compact` writes a value on one line with no whitespace outside strings. A quote and
@@ -273,8 +271,8 @@ to this crate; tests pass their own. Help, the version and `not_served` never re
    `/` is dropped, so `/` and `//` are the root, and `///` is refused. Otherwise the command
    exits 2 with `invalid_home`, no `instance` and nothing looked at. The client never falls back
    to the password database.
-4. A name gives `$HOME/.plasmosome/instances/NAME/control.uds`, which `status` checks as it
-   checks `--socket`'s path, below, with `PathOrigin::Home`.
+4. A name gives `$HOME/.plasmosome/instances/NAME/control.uds`, which the command checks as
+   it checks `--socket`'s path, below, with `PathOrigin::Home`.
 5. With no name, `select::select_default` runs spec 025's default selection over
    `$HOME/.plasmosome/instances`.
 
@@ -296,8 +294,9 @@ contacts no instance:
    `socket_path_too_long`, `path` and `max_bytes`.
 3. No candidate: `no_instance`, exit 1, with `path` `instances/` and `seen`, the stopped
    instances in name order.
-4. One candidate: the client connects, and that connection carries the request. `exchange`
-   checks its peer before the first byte. A connect that fails with `ECONNREFUSED` is
+4. One candidate: `select_default` returns it, the command measures its request line with the
+   candidate's name, and `connect_chosen` connects. That connection carries the request.
+   `exchange` checks its peer before the first byte. A connect that fails with `ECONNREFUSED` is
    `unreachable` with `path`, exit 1, and the entry stays. One that fails with `ENOENT`, the
    socket gone since its path check, is `not_running` with `path`, exit 1. Any other failure is
    `transport` with `path` and `errno`, exit 1. The envelope's `instance` and the request's
@@ -308,56 +307,96 @@ contacts no instance:
    `ambiguous_instance`: `candidates` names every candidate in order, and `unreachable` those
    whose connect failed, left out when none did.
 
-No envelope from default selection has `instance` unless it found exactly one candidate. The request
-line is built after the connection, because the name comes from `instances/`. A candidate's socket
-path has passed the client's own `sun_path` check, so its name is at most 68 bytes on macOS and 72
-on Linux, less the length of `HOME`. The line stays far under the bound. Nothing is written but
-stdout and stderr: the client keeps no cache, state file or history between runs.
+No envelope from default selection has `instance` unless it found exactly one candidate. The name
+comes from `instances/`, so the request line is measured again between judging and connecting,
+below. A candidate's socket path has passed the client's own `sun_path` check, so its name is at
+most 68 bytes on macOS and 72 on Linux, less the length of `HOME`. Nothing is written but stdout
+and stderr: the client keeps no cache, state file or history between runs.
 
-## Serving status
+## Running a served command
 
-`status::run` serves `plasmosome status`. The deadline, `--deadline-ms` or 10,000 ms, is counted
-on the `Context`'s clock from the start of `handle`. In order:
+A served command's entry has a `build`, which turns its `CommandArgs` into a `VerbCall`: the wire
+method, whether the instance's name goes in `name` or `kernel`, the parameters, and whether the
+verb takes `deadline_ms`, with the verb's own maximum. Whether the request changes state is the
+entry's `changes_state`, which help prints too, and no call holds a copy of it. `status`'s build
+is a call of `plasmosome.status` with no parameters. `verb::run` runs every call the same way.
+The deadline, `--deadline-ms` or the entry's `default_deadline_ms`, 10,000 ms on every entry
+today, is counted on the `Context`'s clock from the start of `handle`. In order:
 
-1. It finds the socket, above. A usage error is under `command` `invalid`, and `invalid_home`
-   under `plasmosome.status`.
-2. For a socket from `--socket` or a name, it builds the request line and measures it. A line
-   over 1,048,576 bytes before its newline, spec 001's request limit, is a usage error whose
-   `argument` is `--kernel`'s name, the one argument the line holds, or `PLASMOSOME_KERNEL` when
-   the variable gave the name. The socket is chosen by then, so the error carries `instance`, as
-   `socket_path_too_long` does. With `--socket` alone the line is a fixed 49 bytes
-   before its newline. A name is written with each `"` as two bytes, so half a megabyte of quotes
-   passes the bound. Through a process, macOS's `ARG_MAX` of 1,048,576 bytes covers every
-   argument and the environment together, and Linux caps one argument at 131,072 bytes, so on
-   Linux only a library caller reaches the bound.
-3. A path longer than `sun_path` holds, 103 bytes on macOS and 107 on Linux, is
+1. A call whose parameters repeat a key, use the instance's key or `deadline_ms`, or hold an
+   object that repeats a key is `internal`, exit 70: the build has a bug. A build that refuses its
+   arguments returns a `ClientError`, written under `invalid` when it is `invalid_argument`.
+2. It measures the request line before selection reads `HOME` or anything is opened. The line is
+   written once with the widest `deadline_ms` the call can send, when the verb takes one: step
+   7's formula applied to the whole deadline. The time left is never more than the whole
+   deadline, and the formula never gives less for more time, so the value sent is never longer
+   than the value measured. The name is the one `--kernel` or `PLASMOSOME_KERNEL` gives. With
+   `--socket` alone there is none. When default selection will find the name, a 1-byte name
+   stands in for it, the shortest a name can be, so a line refused here is over the bound
+   whatever name is found. A line over 1,048,576 bytes before its newline, spec 001's request
+   limit, is a usage error. Its `argument` is the argument that contributed the most bytes, as
+   given: a value flag's value, the whole `--mock=MODE` argument, a positional argument's text,
+   or `--` for the argv. Of two that contribute the same, it names the one given first, and a
+   name from `PLASMOSOME_KERNEL`, which is not on the line, comes after every argument. A
+   parameter is refused there and then, with `instance` only when `--socket` gave the socket.
+   The instance's name is refused later, once the socket is chosen. Without `--socket`, choosing
+   it reads `HOME`, so with `HOME` unset that exits 2 with `invalid_home`, not 64. The error
+   carries `instance`, as `socket_path_too_long` does, and names `--kernel`'s name, or
+   `PLASMOSOME_KERNEL` when the variable gave the name. An argument can reach the bound from a
+   shell: a terminal control writes six bytes on the line, so about 175 KB of them fill it, well
+   inside macOS's `ARG_MAX` of 1,048,576 bytes.
+3. It finds the socket, above. A usage error is under `command` `invalid`, and `invalid_home`
+   under the command. Under default selection, once its one candidate is judged and before it
+   connects, the line is measured again with the name found, and a line over the bound is
+   refused as in step 2, with `instance`. So no line over the bound is sent, and a line is
+   refused only when it is over with the widest `deadline_ms` the call can send.
+4. A path longer than `sun_path` holds, 103 bytes on macOS and 107 on Linux, is
    `socket_path_too_long` with `path` and `max_bytes`, exit 2, before any system call.
-4. `check_private_path` with the trusted UID. A refusal goes through `map_refusal` with
+5. `check_private_path` with the trusted UID. A refusal goes through `map_refusal` with
    `PathOrigin::SocketFlag` for `--socket`'s path and `PathOrigin::Home` for one built from
    `$HOME`. So a missing instance directory is `no_instance`, with the missing directory as
    `path`, and one with no socket entry is `not_running`.
-5. It connects. A refused connection is `unreachable` with `path`, exit 1, and the entry stays
+6. It connects. A refused connection is `unreachable` with `path`, exit 1, and the entry stays
    where it is, with no `fix`: on macOS a live daemon whose backlog is full refuses connections
    too. No entry is `not_running`. Any other failure is `transport` with `path` and `errno`.
-6. `exchange` checks the peer, writes the request and reads the reply, below.
-7. The reply goes through `judge_reply` and `kernel_exit`, a missing one through `unanswered`,
-   and a request cut off midway through `cut_off`, each with `changes_state` false.
-8. It writes the envelope. Once a socket is chosen, every envelope has `instance` with
+7. It checks the peer, writes the request and reads the reply, as `exchange` does, below. The
+   line is built after the peer check, right before the first byte, by `verb`'s `request`, the one
+   writer of a request line. For a verb that takes `deadline_ms`, the value is worked out then:
+   with `left` the command's time left in whole milliseconds, it is
+   max(1, min(left - min(1000, left / 10), max_ms)). So 10,000 ms left sends 9,000, 300 sends
+   270 and 1 sends 1. The margin is a tenth of the time left, at most 1,000 ms, and the value is
+   never less than 1. Under 10 ms left the margin is 0, so the daemon's budget can outlast the
+   client's. A verb without it gets none.
+8. The reply goes through `judge_reply` and `kernel_exit`, a missing one through `unanswered`,
+   and a request cut off midway through `cut_off`, each with the entry's `changes_state`.
+9. It writes the envelope. Once a socket is chosen, every envelope has `instance` with
    `socket`, and `name` when a name was known. A failed write to stdout is `local_io` with
-   `errno`, exit 1, on stderr. Rust ignores `SIGPIPE`, so a closed pipe returns `EPIPE`.
+   `errno`, exit 1, on stderr. For a command that changes state it is `outcome_unknown` with
+   `cause` `local_io`, exit 3: the daemon has answered, and only its answer is lost. Rust ignores
+   `SIGPIPE`, so a closed pipe returns `EPIPE`.
+
+So once any byte of a state change is written, a lost answer is exit 3 whatever lost it, and the
+command is never sent twice. As spec 025 says of exit 3, the caller observes the state the command
+would change before it acts again.
 
 `exchange` takes a connected stream, the path it connected to, the trusted UID, the request and
 the deadline. It calls `check_peer_uid` before writing a byte. A peer that runs as another UID,
 or whose UID cannot be read, is `peer_mismatch`, and the stream is closed unread. With no time
 left it is `deadline` with `deadline_ms`, and nothing is written. Each write and each read then
 waits only the time left. A write that fails before any byte is `transport`. A write that fails
-after part of the request is written is `Unreplied::CutOff` with the error. `status` changes no
-state, so the failure is `cut_off`'s `no_reply`, with cause `transport` or `deadline`. The daemon
-may still act on the part it got: plasmosome-core's `serve_connection` acts on a last line that
-has no newline when its input ends, and the client closes the stream after a failed write. So a
-command that changes state maps a cut-off request to `outcome_unknown`, exit 3. On macOS a socket
-whose peer has closed refuses a new timeout with `EINVAL` (measured on Darwin 25.6), so the read
-or write is then made without blocking; such a socket can receive nothing more.
+after part of the request is written is `Unreplied::CutOff` with the error. A call that changes
+no state maps it to `cut_off`'s `no_reply`, with cause `transport` or `deadline`. The daemon may
+still act on the part it got: plasmosome-core's `serve_connection` acts on a last line that has
+no newline when its input ends, and the client closes the stream after a failed write. So a call
+that changes state maps a cut-off request to `outcome_unknown`, exit 3. On macOS a socket whose
+peer has closed refuses a new timeout with `EINVAL` (measured on Darwin 25.6), so the read or
+write is then made without blocking; such a socket can receive nothing more.
+
+`verb::run` builds its line inside the exchange, after the peer check, so `deadline_ms` counts
+from then. After that check, each write and read goes through `Transport`, a crate-private seam
+beside the clock and `Env`. `UnixStream` is the only adapter in the build. A unit test hands the
+exchange a transport that takes 10 bytes and then fails, so a request cut off midway is checked
+with no socket and no timing.
 
 On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it block, and std's
 `UnixStream::connect` takes no timeout, so there the deadline does not bound the connect. Spec
@@ -376,7 +415,6 @@ On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it 
 | `reply::kernel_exit` | A kernel error's exit, by its code |
 | `reply::unanswered` | `no_reply`, `reply_too_large` or `outcome_unknown`, by whether the command changes state |
 | `reply::cut_off` | `no_reply` or `outcome_unknown` for a request cut off midway, by whether the command changes state |
-| `reply::request_line` | The request line, `id` 1, ended with a newline |
 | `json::write_compact` | The JSON form, with every terminal control escaped |
 | `json::write_human` | The human form, with every terminal control shown as `<U+XXXX>` |
 | `Envelope`, `Instance` | Spec 025's success and failure envelopes |
@@ -384,7 +422,8 @@ On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it 
 | `emit` | Writes an envelope to stdout or stderr, never both |
 | `map_refusal`, `PathOrigin` | A private-socket refusal to spec 025 §5's client error, by where the checked path came from |
 | `ClientCode`, `Exit` | The 18 client codes of spec 025 §4 and the six exit statuses they map to |
-| `Command`, `COMMANDS` | Spec 025 §2's command table: words, operands, wire method or registry name, whether it changes state, whether this build serves it, its own flags and whether it takes argv |
+| `Command`, `COMMANDS` | Spec 025 §2's command table: words, operands, wire method or registry name, whether it changes state, whether this build serves it, its own flags, whether it takes argv, its default deadline and its build |
+| `Build`, `VerbCall`, `VerbDeadline`, `InstanceParam` | A served command's build, and the one request it sends: the method, the parameters and the verb's `deadline_ms` |
 | `Flag`, `FlagKind` | A command's own flag: its name, its wire key, and what it takes and sends |
 | `CommandArgs`, `Param`, `ArgSource` | A served command's own flags, operands and argv as the parse read them, each as a wire parameter with where it came from |
 | `read`, `Reading`, `Invocation` | One command line read in spec 025's order, and a served command's checked flags |

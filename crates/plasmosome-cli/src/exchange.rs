@@ -43,18 +43,39 @@ pub fn exchange(
     request: &str,
     deadline: &Deadline<'_>,
 ) -> Result<Vec<u8>, Unreplied> {
+    exchange_with(stream, socket, trusted_uid, deadline, || {
+        request.to_string()
+    })
+}
+
+pub(crate) fn exchange_with(
+    stream: UnixStream,
+    socket: &Path,
+    trusted_uid: u32,
+    deadline: &Deadline<'_>,
+    request: impl FnOnce() -> String,
+) -> Result<Vec<u8>, Unreplied> {
     if let Err(refusal) = check_peer_uid(&stream, trusted_uid) {
         let error = map_refusal(&refusal, socket, PathOrigin::SocketFlag, trusted_uid);
         return Err(Unreplied::NotSent(error));
     }
+    converse(&stream, socket, request().as_bytes(), deadline)
+}
+
+pub(crate) fn converse(
+    transport: &impl Transport,
+    socket: &Path,
+    request: &[u8],
+    deadline: &Deadline<'_>,
+) -> Result<Vec<u8>, Unreplied> {
     let mut writer = Bounded {
-        stream: &stream,
+        transport,
         deadline,
-        set: UnixStream::set_write_timeout,
+        writing: true,
     };
     let mut written = 0;
     while written < request.len() {
-        let error = match writer.write(&request.as_bytes()[written..]) {
+        let error = match writer.write(&request[written..]) {
             Ok(0) => ErrorKind::WriteZero.into(),
             Ok(count) => {
                 written += count;
@@ -66,9 +87,9 @@ pub fn exchange(
         return Err(unsent(written, error, socket, deadline));
     }
     let reader = Bounded {
-        stream: &stream,
+        transport,
         deadline,
-        set: UnixStream::set_read_timeout,
+        writing: false,
     };
     read_reply(&mut BufReader::with_capacity(PIECE, reader)).map_err(Unreplied::Unanswered)
 }
@@ -99,34 +120,64 @@ fn unsent(written: usize, error: io::Error, socket: &Path, deadline: &Deadline<'
     ))
 }
 
-struct Bounded<'a> {
-    stream: &'a UnixStream,
-    deadline: &'a Deadline<'a>,
-    set: fn(&UnixStream, Option<Duration>) -> io::Result<()>,
+pub(crate) trait Transport {
+    fn bound(&self, left: Duration, writing: bool) -> io::Result<()>;
+
+    fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize>;
+
+    fn write_some(&self, bytes: &[u8]) -> io::Result<usize>;
 }
 
-impl Bounded<'_> {
-    fn ready(&self) -> io::Result<&UnixStream> {
+impl Transport for UnixStream {
+    fn bound(&self, left: Duration, writing: bool) -> io::Result<()> {
+        let set = if writing {
+            UnixStream::set_write_timeout
+        } else {
+            UnixStream::set_read_timeout
+        };
+        if set(self, Some(left)).is_err() {
+            self.set_nonblocking(true)?;
+        }
+        Ok(())
+    }
+
+    fn read_some(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut stream = self;
+        stream.read(buffer)
+    }
+
+    fn write_some(&self, bytes: &[u8]) -> io::Result<usize> {
+        let mut stream = self;
+        stream.write(bytes)
+    }
+}
+
+struct Bounded<'a, T> {
+    transport: &'a T,
+    deadline: &'a Deadline<'a>,
+    writing: bool,
+}
+
+impl<T: Transport> Bounded<'_, T> {
+    fn ready(&self) -> io::Result<&T> {
         let left = self.deadline.left();
         if left.is_zero() {
             return Err(ErrorKind::TimedOut.into());
         }
-        if (self.set)(self.stream, Some(left)).is_err() {
-            self.stream.set_nonblocking(true)?;
-        }
-        Ok(self.stream)
+        self.transport.bound(left, self.writing)?;
+        Ok(self.transport)
     }
 }
 
-impl Read for Bounded<'_> {
+impl<T: Transport> Read for Bounded<'_, T> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.ready()?.read(buffer)
+        self.ready()?.read_some(buffer)
     }
 }
 
-impl Write for Bounded<'_> {
+impl<T: Transport> Write for Bounded<'_, T> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.ready()?.write(bytes)
+        self.ready()?.write_some(bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {

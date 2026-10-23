@@ -375,8 +375,8 @@ impl PlasmidManifest {
             .and_then(toml::Value::as_str)
             .ok_or_else(|| id_error("a string id is required"))?
             .to_string();
-        if id.is_empty() {
-            return Err(id_error("the id must not be empty"));
+        if id.trim().is_empty() {
+            return Err(id_error("the id must not be empty or only whitespace"));
         }
         let description = raw
             .get("description")
@@ -606,7 +606,7 @@ fn acted_on(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
-            '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            '\u{061C}' | '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
         )
 }
 
@@ -1880,7 +1880,13 @@ mod tests {
         assert_eq!(tools, expected);
     }
 
-    fn blank_tool_keys() -> [(String, String); 6] {
+    const WHITE_SPACE: [u32; 25] = [
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003,
+        0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F,
+        0x3000,
+    ];
+
+    fn blank_tool_keys() -> [(String, String); 7] {
         [
             ("\"\"".to_string(), String::new()),
             ("\" \"".to_string(), " ".to_string()),
@@ -1905,6 +1911,13 @@ mod tests {
                     concat!("\\", "u205F")
                 ),
                 [0x1680, 0x2029, 0x205F].map(raw).iter().collect(),
+            ),
+            (
+                format!(
+                    "\"{}\"",
+                    WHITE_SPACE.map(|code| format!("\\u{code:04X}")).concat()
+                ),
+                WHITE_SPACE.map(raw).iter().collect(),
             ),
         ]
     }
@@ -3185,6 +3198,70 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     }
 
     #[test]
+    fn a_blank_id_is_refused_naming_id_and_no_plasmid() {
+        let every: Vec<char> = (0..=0x10FFFF)
+            .filter_map(char::from_u32)
+            .filter(|character| character.is_whitespace())
+            .collect();
+        assert_eq!(WHITE_SPACE.map(raw).to_vec(), every);
+        let mut ids = Vec::from(blank_tool_keys());
+        ids.push(("\"\u{3000}\"".to_string(), raw(0x3000).to_string()));
+        for (written, decoded) in ids {
+            for body in [
+                "description = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"",
+                "impl.wasm = \"pr.wasm\"",
+            ] {
+                let declaration = format!("id = {written}\n{body}");
+                let fixture: toml::Table = toml::from_str(&declaration).unwrap();
+                assert_eq!(
+                    fixture["id"].as_str(),
+                    Some(decoded.as_str()),
+                    "{declaration}"
+                );
+                assert!(decoded.trim().is_empty(), "{declaration}");
+                assert_eq!(
+                    field_refusal(&declaration),
+                    (None, "id".into(), "id = \"choose-a-stable-id\"".into()),
+                    "{declaration}"
+                );
+                let text = PlasmidManifest::parse(&declaration)
+                    .unwrap_err()
+                    .to_string();
+                assert!(!text.starts_with("plasmid "), "{text:?}");
+                assert!(!text.contains([0x85, 0x2028].map(raw)), "{text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_id_that_is_not_only_whitespace_is_kept_as_written() {
+        for (written, decoded) in [
+            (" a", " a".to_string()),
+            ("a ", "a ".to_string()),
+            ("\u{3000}a", format!("{}a", raw(0x3000))),
+            ("\\ta", format!("{}a", raw(0x09))),
+            ("\u{feff}", raw(0xFEFF).to_string()),
+            ("\u{200b}", raw(0x200B).to_string()),
+            ("\u{180e}", raw(0x180E).to_string()),
+        ] {
+            let declaration = format!(
+                "id = \"{written}\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\""
+            );
+            let fixture: toml::Table = toml::from_str(&declaration).unwrap();
+            assert_eq!(
+                fixture["id"].as_str(),
+                Some(decoded.as_str()),
+                "{declaration}"
+            );
+            assert_eq!(
+                PlasmidManifest::parse(&declaration).unwrap().id,
+                decoded,
+                "{declaration}"
+            );
+        }
+    }
+
+    #[test]
     fn missing_id_is_rejected() {
         let err = PlasmidManifest::parse("version = \"1\"").unwrap_err();
         assert!(matches!(
@@ -3227,9 +3304,9 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
 
     const RIGHT_TO_LEFT: &str = concat!("\\", "u202E");
 
-    const ACTED_ON: [u32; 13] = [
-        0x2028, 0x2029, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067,
-        0x2068, 0x2069,
+    const ACTED_ON: [u32; 14] = [
+        0x061C, 0x2028, 0x2029, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066,
+        0x2067, 0x2068, 0x2069,
     ];
 
     fn raw(code: u32) -> char {
@@ -3367,6 +3444,18 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             ),
             (
                 "id = \"\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                None,
+                "id",
+                "id = \"choose-a-stable-id\"",
+            ),
+            (
+                "id = \" \"\ndescription = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                None,
+                "id",
+                "id = \"choose-a-stable-id\"",
+            ),
+            (
+                "id = \"\u{3000}\"\ndescription = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
                 None,
                 "id",
                 "id = \"choose-a-stable-id\"",
@@ -5053,6 +5142,8 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
         for (id, written) in [
             ("github-pr".to_string(), "github-pr".to_string()),
             ("two words".to_string(), "\"two words\"".to_string()),
+            (format!("a{}b", raw(0x061C)), "\"a\\u061Cb\"".to_string()),
+            (format!("a{}b", raw(0x200E)), "\"a\\u200Eb\"".to_string()),
             (
                 format!("a\\nb{ESCAPE}c{CSI}"),
                 format!("\"a\\nb{ESCAPE}c{CSI}\""),
