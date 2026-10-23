@@ -48,7 +48,7 @@ CoreFoundation can add `__CF_USER_TEXT_ENCODING` to the live environment before
 main even when exec received an empty vector, so the live environment cannot
 establish what the parent passed.
 The helper checks those descriptors before opening anything, then checks argv,
-environment and the leaf-name loader inputs. It reads at most 1,048,577 recipe
+environment and the leaf-name loader inputs. It accepts at most 1,048,577 recipe
 bytes including the newline and closes 3. It checks its own path, verifies every
 pinned artifact again and retains the open files. It checks the writable root,
 applies the verified host policy and requires both denial probes to return EPERM.
