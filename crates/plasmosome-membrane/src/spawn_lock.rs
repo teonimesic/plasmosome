@@ -11,6 +11,15 @@ static SPAWN_LOCK: RwLock<()> = RwLock::new(());
 static FIXTURE_WRITERS: std::sync::Mutex<Vec<RawFd>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
+type RegistrationPause = Box<dyn FnOnce(RawFd)>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_FIXTURE_REGISTRATION: std::cell::RefCell<Option<RegistrationPause>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
 pub(crate) struct FixtureWriter(Option<OwnedFd>);
 
 #[cfg(test)]
@@ -44,6 +53,11 @@ pub(crate) fn fixture_control_pipe(
 ) -> std::io::Result<(OwnedFd, FixtureWriter)> {
     write_held(&SPAWN_LOCK, || {
         let [read, write] = with_each_descriptor_held(create)?;
+        BEFORE_FIXTURE_REGISTRATION.with(|pause| {
+            if let Some(pause) = pause.take() {
+                pause(write.as_raw_fd());
+            }
+        });
         FIXTURE_WRITERS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -193,6 +207,17 @@ pub(crate) fn hold_fork_side() -> std::sync::RwLockReadGuard<'static, ()> {
 }
 
 #[cfg(test)]
+/// Spawns under the read side and releases it before callers wait or read output.
+pub(crate) fn spawn_guarded(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let held = hold_fork_side();
+    let child = command.spawn();
+    drop(held);
+    child
+}
+
+#[cfg(test)]
 pub(crate) fn waits_for_the_write_side(thread: std::thread::ThreadId) -> bool {
     WAITING_FOR_THE_WRITE_SIDE
         .lock()
@@ -312,6 +337,7 @@ fn fork_holding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vmm::tests::{DEADLINE, SETTLE};
     use crate::vmm::{Launch, SpawnError, VmmChild, VmmState};
     use std::cell::Cell;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -445,6 +471,127 @@ mod tests {
         drop(read);
         let failed = fixture_control_pipe(|_| Err(std::io::Error::from_raw_os_error(libc::EMFILE)));
         assert!(matches!(failed, Err(error) if error.raw_os_error() == Some(libc::EMFILE)));
+    }
+
+    #[test]
+    fn a_fork_snapshot_waits_until_the_fixture_writer_is_registered() {
+        let (paused, at_registration) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (created, fixture) = mpsc::channel();
+        let creating = std::thread::spawn(move || {
+            BEFORE_FIXTURE_REGISTRATION.with_borrow_mut(|pause| {
+                *pause = Some(Box::new(move |writer| {
+                    paused.send(writer).unwrap();
+                    released
+                        .recv_timeout(DEADLINE)
+                        .expect("registration is released");
+                }));
+            });
+            let _ = created.send(fixture_control_pipe(|_| {
+                let (read, write) = UnixStream::pair()?;
+                Ok([read.into(), write.into()])
+            }));
+        });
+        let writer_fd = at_registration
+            .recv_timeout(DEADLINE)
+            .expect("creation pauses");
+        let (attempting, attempted) = mpsc::channel();
+        let (snapshot, observed) = mpsc::channel();
+        let forking = std::thread::spawn(move || {
+            attempting.send(()).unwrap();
+            let _held = hold_fork_side();
+            let writers = FIXTURE_WRITERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let _ = snapshot.send(writers);
+        });
+        attempted
+            .recv_timeout(DEADLINE)
+            .expect("the snapshot thread starts");
+        let early = observed.recv_timeout(SETTLE);
+        release.send(()).expect("registration resumes");
+        let writers = early.clone().or_else(|_| observed.recv_timeout(DEADLINE));
+        let fixture = fixture
+            .recv_timeout(DEADLINE)
+            .expect("registration finishes");
+        creating.join().expect("creation thread ends");
+        forking.join().expect("snapshot thread ends");
+        drop(fixture.expect("the fixture control opens"));
+        assert_eq!(
+            early,
+            Err(RecvTimeoutError::Timeout),
+            "snapshot passed before registration"
+        );
+        assert!(
+            writers
+                .expect("snapshot proceeds after registration")
+                .contains(&writer_fd)
+        );
+    }
+
+    #[test]
+    fn a_guarded_exec_waits_until_descriptor_creation_releases_the_write_side() {
+        let (entered, held) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (created, descriptors) = mpsc::channel();
+        let creating = std::thread::spawn(move || {
+            let _ = created.send(with_each_descriptor_held(|_| {
+                let (read, write) = UnixStream::pair()?;
+                entered.send(()).unwrap();
+                released
+                    .recv_timeout(DEADLINE)
+                    .expect("descriptor creation is released");
+                Ok([OwnedFd::from(read), OwnedFd::from(write)])
+            }));
+        });
+        held.recv_timeout(DEADLINE)
+            .expect("descriptor creation holds the write side");
+        let (attempting, attempted) = mpsc::channel();
+        let (spawned, child) = mpsc::channel();
+        let spawning = std::thread::spawn(move || {
+            attempting.send(()).unwrap();
+            let _ = spawned.send(spawn_guarded(&mut std::process::Command::new(
+                "/usr/bin/true",
+            )));
+        });
+        attempted
+            .recv_timeout(DEADLINE)
+            .expect("the exec thread starts");
+        let early = child.recv_timeout(SETTLE);
+        let blocked = matches!(early, Err(RecvTimeoutError::Timeout));
+        release.send(()).expect("descriptor creation resumes");
+        let mut child = early
+            .or_else(|_| child.recv_timeout(DEADLINE))
+            .expect("spawn proceeds after creation")
+            .expect("true starts");
+        let deadline = Instant::now() + DEADLINE;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => std::thread::yield_now(),
+                _ => {
+                    let _ = child.kill();
+                    child.wait().expect("the exec child is cleaned up");
+                    break None;
+                }
+            }
+        };
+        let descriptors = descriptors
+            .recv_timeout(DEADLINE)
+            .expect("creation finishes");
+        creating.join().expect("creation thread ends");
+        spawning.join().expect("exec thread ends");
+        drop(descriptors.expect("the descriptors open"));
+        assert!(
+            blocked,
+            "exec started before descriptor creation released the write side"
+        );
+        assert!(
+            status
+                .expect("true exits and is reaped within DEADLINE")
+                .success()
+        );
     }
 
     #[test]

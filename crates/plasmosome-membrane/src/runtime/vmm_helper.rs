@@ -2182,15 +2182,13 @@ mod tests {
             } else {
                 command.env_remove(POLICY_CHILD);
             }
-            let child = {
-                let _held = crate::spawn_lock::hold_fork_side();
+            let child = crate::spawn_lock::spawn_guarded(
                 command
                     .stdin(Stdio::null())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("the test binary runs again as a policy child")
-            };
+                    .stderr(Stdio::piped()),
+            )
+            .expect("the test binary runs again as a policy child");
             let pid = child.id();
             let output = child
                 .wait_with_output()

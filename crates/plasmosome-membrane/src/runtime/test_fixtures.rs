@@ -6,8 +6,10 @@ pub(crate) mod fake {
         include!("../../tests/support/runtime_fake.rs");
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) use compiled::owned_wait;
+
     pub(crate) fn runtime_fake(mode: &str) -> std::path::PathBuf {
-        let _held = crate::spawn_lock::hold_fork_side();
         compiled::runtime_fake(mode)
     }
 }
@@ -153,12 +155,13 @@ pub(crate) mod tree {
             open_up(&self.path);
             #[cfg(target_os = "macos")]
             {
-                let _held = crate::spawn_lock::hold_fork_side();
-                let _ = std::process::Command::new("/bin/chmod")
-                    .args(["-R", "-N"])
-                    .arg(&self.path)
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                let _ = crate::spawn_lock::spawn_guarded(
+                    std::process::Command::new("/bin/chmod")
+                        .args(["-R", "-N"])
+                        .arg(&self.path)
+                        .stderr(std::process::Stdio::null()),
+                )
+                .and_then(|mut child| child.wait());
             }
         }
     }
@@ -216,13 +219,14 @@ pub(crate) mod tree {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn add_acl(path: &Path, rule: &str) {
-        let _held = crate::spawn_lock::hold_fork_side();
-        let status = std::process::Command::new("/bin/chmod")
-            .arg("+a")
-            .arg(rule)
-            .arg(path)
-            .status()
-            .expect("chmod +a runs");
+        let status = crate::spawn_lock::spawn_guarded(
+            std::process::Command::new("/bin/chmod")
+                .arg("+a")
+                .arg(rule)
+                .arg(path),
+        )
+        .and_then(|mut child| child.wait())
+        .expect("chmod +a runs");
         assert!(status.success(), "chmod +a {rule:?} failed");
     }
 

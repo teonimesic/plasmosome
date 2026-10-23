@@ -418,13 +418,9 @@ mod darwin {
                 (UNIQUE_IDENTIFIERS_SIZE, 1),
                 "launchd is the first process the kernel starts"
             );
-            let mut child = {
-                let _held = crate::spawn_lock::hold_fork_side();
-                Command::new("/bin/cat")
-                    .stdin(Stdio::piped())
-                    .spawn()
-                    .expect("cat starts")
-            };
+            let mut child =
+                crate::spawn_lock::spawn_guarded(Command::new("/bin/cat").stdin(Stdio::piped()))
+                    .expect("cat starts");
             let pid = child.id().cast_signed();
             let theirs = Darwin.unique_identifiers(pid);
             let (written, record, _) = unique_identifier_record(pid);

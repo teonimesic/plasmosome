@@ -881,7 +881,7 @@ impl Drop for ExitOnUnwind {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::exec::ExecCommand;
     use std::ffi::CString;
@@ -890,8 +890,8 @@ mod tests {
 
     include!("../tests/support/fixture.rs");
 
-    const DEADLINE: Duration = Duration::from_secs(5);
-    const SETTLE: Duration = Duration::from_millis(300);
+    pub(crate) const DEADLINE: Duration = Duration::from_secs(5);
+    pub(crate) const SETTLE: Duration = Duration::from_millis(300);
 
     struct ExitWith(i32);
 

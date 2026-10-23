@@ -1593,10 +1593,8 @@ mod tests {
         use std::process::Command;
 
         fn cc(args: &[&Path]) {
-            let mut child = {
-                let _held = crate::spawn_lock::hold_fork_side();
-                Command::new("cc").args(args).spawn().expect("cc starts")
-            };
+            let mut child =
+                crate::spawn_lock::spawn_guarded(Command::new("cc").args(args)).expect("cc starts");
             let status = child.wait().expect("cc ends");
             assert!(status.success(), "cc {args:?}: {status}");
         }
@@ -1646,15 +1644,13 @@ mod tests {
         fn sysctl(name: &str) -> String {
             use std::io::{Read, Seek};
             let mut stdout = tempfile::tempfile().expect("the sysctl output file opens");
-            let mut child = {
-                let _held = crate::spawn_lock::hold_fork_side();
+            let mut child = crate::spawn_lock::spawn_guarded(
                 Command::new("/usr/sbin/sysctl")
                     .args(["-n", name])
                     .stdout(stdout.try_clone().expect("the output file duplicates"))
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .expect("sysctl starts")
-            };
+                    .stderr(std::process::Stdio::null()),
+            )
+            .expect("sysctl starts");
             assert!(child.wait().expect("sysctl ends").success());
             stdout.rewind().expect("the output file rewinds");
             let mut output = String::new();
