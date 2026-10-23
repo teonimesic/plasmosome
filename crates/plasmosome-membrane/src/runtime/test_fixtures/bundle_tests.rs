@@ -321,8 +321,9 @@ fn killing_the_helper_group_closes_the_workers_diagnostic_writer() {
         .unwrap();
     assert!(worker > 0 && worker != run.child.pid());
     // SAFETY: getpgid only observes the named pid. No signal is sent to that untrusted number.
+    let group = unsafe { libc::getpgid(worker) };
     assert_eq!(
-        unsafe { libc::getpgid(worker) },
+        group,
         run.child.pid(),
         "the named worker is alive in the owned helper group"
     );
@@ -331,11 +332,8 @@ fn killing_the_helper_group_closes_the_workers_diagnostic_writer() {
     assert_eq!(unsafe { libc::kill(run.child.pid(), libc::SIGTERM) }, 0);
     stopped_leader_is_retained(run.child.pid());
     // SAFETY: the terminal leader is retained, not reaped, so this group is still ours.
-    assert_eq!(
-        unsafe { libc::killpg(run.child.pid(), libc::SIGUSR1) },
-        0,
-        "the worker group remains after the leader stops"
-    );
+    let sent = unsafe { libc::killpg(run.child.pid(), libc::SIGUSR1) };
+    assert_eq!(sent, 0, "the worker group remains after the leader stops");
     assert_eq!(
         diagnostic_line(&mut reader),
         format!("writer={worker}\n"),
