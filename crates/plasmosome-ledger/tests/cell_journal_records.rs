@@ -422,6 +422,29 @@ fn invalid_effects_refuse() {
 }
 
 #[test]
+fn recorded_effect_class_accepts_its_string_and_refuses_its_object_form() {
+    let r = base();
+    assert_eq!(
+        parse_record(&cell(), &encode_record(&r).unwrap()),
+        Ok(r.clone())
+    );
+    let pointer = effect(2, "/effect/reversibility/Exact/via/Backend/class");
+    assert_eq!(at(&r, &pointer), json!("UdsPath"));
+    let object = json!({"UdsPath": null});
+    let changed = set(&r, &pointer, object.clone());
+    let mut restored: Value = serde_json::from_slice(&changed).unwrap();
+    assert_eq!(
+        std::mem::replace(restored.pointer_mut(&pointer).unwrap(), json!("UdsPath")),
+        object
+    );
+    assert_eq!(restored, value(&r));
+    assert_eq!(
+        parse_record(&cell(), &changed).unwrap_err().kind,
+        CellJournalFaultKind::InvalidEffect
+    );
+}
+
+#[test]
 fn equal_capabilities_with_two_ids_and_a_crlf_line_parse() {
     let first = file_op("/skills/a.md");
     let mut second = first.clone();

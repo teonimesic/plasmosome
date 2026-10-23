@@ -855,8 +855,13 @@ no-follow device-and-inode identity. The subset this spec covers:
   requested state is lifecycle, not liveness.
 - `membrane.cell.denials` — `{cell, book?, after: u64}`, answered from the membrane's memory with
   no wait and not paged, like `membrane.cell.desired`, as `{cell, book, lines, entries}`. `book`
-  is a UUID the membrane draws when it starts. `lines` are the spec 011 report lines the membrane
-  holds with a number above `after`, at most 64, in order. `entries` are every entry that names a
+  is a UUID the membrane draws when it starts. `lines` are wire objects with exactly
+  `{seq: u64, plasmid?, denied, field, fix, count: u64, at_ms: u64, unlogged?: u64}`: `plasmid`,
+  `denied`, `field` and `fix` are strings; `plasmid` is omitted when unnamed and `unlogged` when
+  zero. Their meanings are spec 011's report fields. `seq` is the membrane's number for the line,
+  called `membrane_seq` in the session log event; `cell` and `book` belong to the page, and `kind`
+  belongs to the log event. The membrane holds lines with a number above `after`, at most 64,
+  in order. `entries` are every entry that names a
   plasmid, as `{plasmid, denials}` with spec 011's `denials` shape, in the order first seen. A
   request whose `book` equals the membrane's drops the lines numbered `after` and below, so a
   line is dropped only after the controller has appended it; a request with no `book` or another
@@ -865,6 +870,8 @@ no-follow device-and-inode identity. The subset this spec covers:
   forgets a plasmid's entries when a published DesiredCell no longer has that plasmid. Spec 011
   gives the bounds. Amended on 2026-10-21: this method is new. §4 named no method that carries
   spec 011's denial report from the membrane to the controller.
+  Amended on 2026-10-23: "`lines` are the spec 011 report lines" did not distinguish the wire
+  line from the session log event; the wire fields are now stated exactly.
 - `membrane.residue.snapshot` — the F9-universe observation taken **from the supervisor/broker
   side** at diff time (86 §4 rule 4). The controller diffs snapshots, never its intentions.
 - `membrane.cell.kill` — drain-then-kill with `DrainSpec { deadline, policy }` carried
