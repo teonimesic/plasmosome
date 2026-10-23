@@ -8,8 +8,8 @@ use crate::digest::{Digest, DigestError};
 mod envelope;
 
 pub use envelope::{
-    BridgeError, InboundRequest, ProtocolCode, RefusalDetail, RequestId, RequestRefusal,
-    encode_failure, encode_request, encode_success, split_request,
+    BridgeError, EncodeError, InboundRequest, ProtocolCode, RefusalDetail, RequestId,
+    RequestRefusal, encode_failure, encode_request, encode_success, split_request,
 };
 
 const GUEST_TEXT_BYTES: usize = 1024;

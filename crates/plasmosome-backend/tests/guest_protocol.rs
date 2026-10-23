@@ -1,10 +1,12 @@
 use plasmosome_backend::DigestError;
 use plasmosome_backend::guest_protocol::{
-    BootToken, BootTokenError, BridgeError, ControlLane, ProtocolCode, RefusalDetail, RequestId,
-    RequestRefusal, encode_failure, encode_request, encode_success, split_request,
+    BootToken, BootTokenError, BridgeError, ControlLane, EncodeError, ProtocolCode, RefusalDetail,
+    RequestId, RequestRefusal, encode_failure, encode_request, encode_success, split_request,
 };
 use proptest::prelude::*;
 use serde::de::DeserializeOwned;
+use serde::{Serialize, Serializer};
+use serde_json::value::RawValue;
 use serde_json::{Value, json};
 
 const BOOT: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
@@ -198,7 +200,8 @@ fn a_request_id_is_echoed_with_its_exact_json_text() {
         let line = format!(r#"{{"id": {id} ,"method":"hello","params":{{}}}}"#);
         let (received, _, _) = split_request(line.as_bytes()).expect("any JSON id is accepted");
         assert_eq!(received.as_json(), id);
-        let success = text(encode_success(&received, &json!({"ok": true})));
+        let success =
+            text(encode_success(&received, &json!({"ok": true})).expect("a result encodes"));
         assert_eq!(success, format!(r#"{{"id":{id},"result":{{"ok":true}}}}"#));
         let failure = text(encode_failure(&received, &error));
         assert_eq!(
@@ -237,17 +240,20 @@ fn request_ids_compare_by_text_and_read_as_u64_only_in_canonical_decimal() {
 
 #[test]
 fn encode_request_writes_id_method_and_params_in_that_order() {
-    let hello = encode_request(1, "hello", &json!({"lane": ControlLane::Normal}));
+    let hello = encode_request(1, "hello", &json!({"lane": ControlLane::Normal}))
+        .expect("hello params encode");
     assert_eq!(
         text(hello),
         r#"{"id":1,"method":"hello","params":{"lane":"normal"}}"#
     );
-    let observe = text(encode_request(u64::MAX, "observe", &json!({})));
+    let observe =
+        text(encode_request(u64::MAX, "observe", &json!({})).expect("empty params encode"));
     assert_eq!(
         observe,
         r#"{"id":18446744073709551615,"method":"observe","params":{}}"#
     );
-    let drain = encode_request(9, "drain", &json!({"grant": "g", "deadline_ms": 3}));
+    let drain = encode_request(9, "drain", &json!({"grant": "g", "deadline_ms": 3}))
+        .expect("drain params encode");
     let params = r#"{"deadline_ms":3,"grant":"g"}"#;
     assert_eq!(
         split(drain),
@@ -256,9 +262,169 @@ fn encode_request_writes_id_method_and_params_in_that_order() {
 }
 
 #[test]
-#[should_panic(expected = "request params must encode as a JSON object")]
-fn encode_request_panics_on_params_that_are_not_an_object() {
-    encode_request(1, "hello", &json!(["lane"]));
+fn encode_request_returns_a_bounded_error_for_params_that_are_not_an_object() {
+    for value in [
+        json!(["lane"]),
+        json!("normal"),
+        json!(null),
+        json!(7),
+        json!(true),
+    ] {
+        let found = value.to_string();
+        let error = encode_request(1, "hello", &value).expect_err("params must be an object");
+        assert_eq!(
+            error,
+            EncodeError::ParamsNotObject {
+                found: found.clone()
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("request params must encode as a JSON object, not {found}")
+        );
+        let erased: &dyn std::error::Error = &error;
+        assert!(erased.source().is_none());
+    }
+    let value = json!(format!("{}{}", "k".repeat(1022), "😀".repeat(40)));
+    let error = encode_request(1, "hello", &value).expect_err("a string is not an object");
+    assert_eq!(
+        error,
+        EncodeError::ParamsNotObject {
+            found: format!("\"{}", "k".repeat(1022))
+        }
+    );
+}
+
+struct Failing;
+
+impl Serialize for Failing {
+    fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("the value refused serialization"))
+    }
+}
+
+#[test]
+fn both_encoders_return_the_callers_serialization_error() {
+    #[derive(Serialize)]
+    struct Record {
+        nested: Failing,
+    }
+    let record = Record { nested: Failing };
+    for error in [
+        encode_request(1, "install", &record),
+        encode_request(1, "install", &Failing),
+        encode_success(&RequestId::number(1), &record),
+        encode_success(&RequestId::number(1), &Failing),
+    ] {
+        let error = error.expect_err("the serializer failed");
+        assert_eq!(
+            error,
+            EncodeError::Serialize {
+                message: "the value refused serialization".into()
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "bridge value failed to encode: the value refused serialization"
+        );
+    }
+}
+
+#[test]
+fn both_encoders_compact_lf_and_cr_in_raw_json_at_every_depth() {
+    #[derive(Serialize)]
+    struct Record<'a> {
+        nested: [&'a RawValue; 1],
+    }
+    for newline in ["\n", "\r", "\r\n"] {
+        let raw = RawValue::from_string(format!("{{{newline}\t\"lane\" : \"normal\" {newline}}}"))
+            .expect("formatted JSON");
+        let nested = Record { nested: [&raw] };
+        for (request, success, compact) in [
+            (
+                encode_request(1, "hello", &raw),
+                encode_success(&RequestId::number(1), &raw),
+                r#"{"lane":"normal"}"#,
+            ),
+            (
+                encode_request(1, "hello", &nested),
+                encode_success(&RequestId::number(1), &nested),
+                r#"{"nested":[{"lane":"normal"}]}"#,
+            ),
+        ] {
+            let request = text(request.expect("object params encode"));
+            let success = text(success.expect("a result encodes"));
+            assert_eq!(
+                request,
+                format!(r#"{{"id":1,"method":"hello","params":{compact}}}"#)
+            );
+            assert_eq!(success, format!(r#"{{"id":1,"result":{compact}}}"#));
+            for line in [request, success] {
+                assert!(!line.contains(['\n', '\r', '\t', ' ']));
+                serde_json::from_str::<Value>(&line).expect("one complete JSON value");
+            }
+        }
+    }
+}
+
+#[test]
+fn both_encoders_keep_string_whitespace_escapes_and_exact_id_text() {
+    let contents = r#"{"text":"a b\n\r\t\" c\\ d\\\" e😀　","tail":"ends\\"}"#;
+    let raw = RawValue::from_string(format!("{{\n\"payload\" : {contents}\r\n}}"))
+        .expect("string escapes are valid JSON");
+    let compact = format!(r#"{{"payload":{contents}}}"#);
+    let id_text = r#"{"key": ["a b\n"] }"#;
+    let incoming = format!(r#"{{"id":{id_text},"method":"m","params":{{}}}}"#);
+    let (id, _, _) = split_request(incoming.as_bytes()).expect("a compound id is valid");
+    let request = text(encode_request(1, "a b\n", &raw).expect("params encode"));
+    let success = text(encode_success(&id, &raw).expect("a result encodes"));
+    assert_eq!(
+        request,
+        format!(r#"{{"id":1,"method":"a b\n","params":{compact}}}"#)
+    );
+    assert_eq!(success, format!(r#"{{"id":{id_text},"result":{compact}}}"#));
+    for line in [request, success] {
+        assert!(!line.contains(['\n', '\r']));
+        let value: Value = serde_json::from_str(&line).expect("a complete JSON value");
+        let payload = value
+            .get("params")
+            .or_else(|| value.get("result"))
+            .expect("a payload");
+        assert_eq!(
+            payload,
+            &serde_json::from_str::<Value>(&compact).expect("expected JSON")
+        );
+    }
+    for result in [json!(null), json!(["a b\n"]), json!(7)] {
+        let line = encode_success(&id, &result).expect("results need not be objects");
+        let value: Value = serde_json::from_slice(&line).expect("a complete reply");
+        assert_eq!(value["result"], result);
+    }
+}
+
+#[test]
+fn encode_failure_escapes_line_breaks_in_all_error_strings() {
+    let message = "a b\n\r\t\"\\".to_owned();
+    for error in [
+        BridgeError::Protocol {
+            code: ProtocolCode::InvalidRequest,
+            message: message.clone(),
+        },
+        BridgeError::Refused {
+            message: message.clone(),
+            detail: RefusalDetail::Rejected {
+                reason: message.clone(),
+            },
+        },
+    ] {
+        let line = text(encode_failure(&RequestId::number(1), &error));
+        assert!(!line.contains(['\n', '\r', '\t']));
+        let value: Value = serde_json::from_str(&line).expect("one complete failure reply");
+        assert_eq!(value["error"]["message"], message);
+        if matches!(error, BridgeError::Refused { .. }) {
+            assert_eq!(value["error"]["detail"]["reason"], message);
+        }
+    }
 }
 
 #[test]
@@ -328,7 +494,7 @@ fn a_refusal_detail_decodes_only_from_its_closed_object() {
 fn a_refusal_message_keeps_at_most_1024_bytes_of_the_line_on_a_character_boundary() {
     for key in [
         "k".repeat(2000),
-        format!("{}{}", "k".repeat(980), "é".repeat(40)),
+        format!("{}{}", "k".repeat(959), "😀".repeat(40)),
     ] {
         let line = json!({"id": 1, "method": "hello", "params": {}, &key: 0}).to_string();
         let Err(RequestRefusal {
@@ -343,6 +509,16 @@ fn a_refusal_message_keeps_at_most_1024_bytes_of_the_line_on_a_character_boundar
         let whole =
             format!("the request is not exactly {{id, method, params}}: unknown field `{key}`");
         assert!(whole.starts_with(&message), "{message}");
+        let prefix = "the request is not exactly {id, method, params}: unknown field `";
+        assert_eq!(prefix.len(), 64);
+        let expected = if key.contains('😀') {
+            assert_eq!(prefix.len() + 959, 1023);
+            assert_eq!('😀'.len_utf8(), 4);
+            format!("{prefix}{}", "k".repeat(959))
+        } else {
+            format!("{prefix}{}", "k".repeat(960))
+        };
+        assert_eq!(message, expected);
     }
 }
 

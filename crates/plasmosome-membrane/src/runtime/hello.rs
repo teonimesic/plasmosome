@@ -370,7 +370,8 @@ mod tests {
     fn the_shared_envelope_writes_and_reads_the_hello_requests_unchanged() {
         use plasmosome_backend::guest_protocol::{RequestId, encode_request, split_request};
         for lane in LANES {
-            let mut encoded = encode_request(request_id(lane), "hello", &json!({"lane": lane}));
+            let mut encoded = encode_request(request_id(lane), "hello", &json!({"lane": lane}))
+                .expect("hello params encode");
             encoded.push(b'\n');
             assert_eq!(encoded, hello_request(lane), "{lane:?}");
             let line = hello_request(lane);

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::value::RawValue;
 
@@ -137,6 +139,32 @@ pub struct RequestRefusal {
     pub error: BridgeError,
 }
 
+/// Why a request or success reply could not be encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodeError {
+    /// Params encoded as something other than an object. `found` keeps at
+    /// most 1,024 bytes of that JSON, ending on a character boundary.
+    ParamsNotObject { found: String },
+    /// The caller's serializer failed with this message.
+    Serialize { message: String },
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ParamsNotObject { found } => {
+                write!(
+                    f,
+                    "request params must encode as a JSON object, not {found}"
+                )
+            }
+            Self::Serialize { message } => write!(f, "bridge value failed to encode: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
 #[derive(Serialize)]
 struct RequestLine<'a> {
     id: u64,
@@ -145,9 +173,9 @@ struct RequestLine<'a> {
 }
 
 #[derive(Serialize)]
-struct SuccessLine<'a, R> {
+struct SuccessLine<'a> {
     id: &'a RequestId,
-    result: &'a R,
+    result: &'a RawValue,
 }
 
 #[derive(Serialize)]
@@ -185,37 +213,49 @@ struct Envelope {
 /// The compact request line `{"id":id,"method":method,"params":{...}}`, with
 /// its keys in that order and no newline: the writer adds one.
 ///
-/// # Panics
+/// # Errors
 ///
-/// When `params` fails to encode or encodes as anything but a JSON object.
-/// Both are caller bugs: spec 001 makes params always an object.
-pub fn encode_request<P: Serialize>(id: u64, method: &str, params: &P) -> Vec<u8> {
-    let params = serde_json::value::to_raw_value(params).expect("request params encode as JSON");
-    assert!(
-        params.get().starts_with('{'),
-        "request params must encode as a JSON object, not {}",
-        cut(params.get())
-    );
-    encode(&RequestLine {
+/// Returns [`EncodeError`] when `params` fails to encode or encodes as
+/// anything but a JSON object. Formatting whitespace in raw JSON values is
+/// removed at every depth; string contents are kept unchanged.
+pub fn encode_request<P: Serialize>(
+    id: u64,
+    method: &str,
+    params: &P,
+) -> Result<Vec<u8>, EncodeError> {
+    let params = compact(params)?;
+    if !params.get().starts_with('{') {
+        return Err(EncodeError::ParamsNotObject {
+            found: cut(params.get()),
+        });
+    }
+    Ok(encode(&RequestLine {
         id,
         method,
         params: &params,
-    })
+    }))
 }
 
 /// The compact success reply `{"id":id,"result":...}`, echoing `id`'s text
 /// unchanged, with no newline.
 ///
-/// # Panics
+/// # Errors
 ///
-/// When `result` fails to encode, which is a caller bug.
-pub fn encode_success<R: Serialize>(id: &RequestId, result: &R) -> Vec<u8> {
-    encode(&SuccessLine { id, result })
+/// Returns [`EncodeError::Serialize`] when `result` fails to encode.
+/// Formatting whitespace in raw JSON values is removed at every depth;
+/// string contents and the id's exact text are kept unchanged.
+pub fn encode_success<R: Serialize>(id: &RequestId, result: &R) -> Result<Vec<u8>, EncodeError> {
+    let result = compact(result)?;
+    Ok(encode(&SuccessLine {
+        id,
+        result: &result,
+    }))
 }
 
 /// The compact failure reply `{"id":id,"error":{...}}`, echoing `id`'s text
 /// unchanged, with the error object exactly as [`BridgeError`] describes and
-/// no newline.
+/// no newline. Its closed error types, strings and validated id cannot fail
+/// to encode; no caller-provided serializer runs.
 pub fn encode_failure(id: &RequestId, error: &BridgeError) -> Vec<u8> {
     match error {
         BridgeError::Protocol { code, message } => encode(&FailureLine {
@@ -289,4 +329,30 @@ fn refused(id: RequestId, code: ProtocolCode, message: &str) -> RequestRefusal {
 
 fn encode(line: &impl Serialize) -> Vec<u8> {
     serde_json::to_vec(line).expect("a bridge line encodes as JSON")
+}
+
+fn compact(value: &impl Serialize) -> Result<Box<RawValue>, EncodeError> {
+    let mut text = serde_json::to_string(value).map_err(|error| EncodeError::Serialize {
+        message: error.to_string(),
+    })?;
+    let mut quoted = false;
+    let mut escaped = false;
+    text.retain(|ch| {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            true
+        } else if ch == '"' {
+            quoted = true;
+            true
+        } else {
+            !matches!(ch, ' ' | '\t' | '\n' | '\r')
+        }
+    });
+    Ok(RawValue::from_string(text).expect("removing JSON formatting keeps valid JSON"))
 }
