@@ -62,6 +62,28 @@ fn calls() -> impl Iterator<Item = ControlCall> {
     })
 }
 
+fn bounded(fault: &ReplyFault) {
+    let text = |text: &str| assert!(text.len() <= 1024, "fault keeps {} guest bytes", text.len());
+    match fault {
+        ReplyFault::NotJson { detail }
+        | ReplyFault::Envelope { detail }
+        | ReplyFault::Result { detail } => text(detail),
+        ReplyFault::WrongId { found, .. } => text(found),
+        ReplyFault::Unattributed(error) | ReplyFault::Refused(error) => match error {
+            BridgeError::Protocol { message, .. } => text(message),
+            BridgeError::Refused {
+                message,
+                detail: RefusalDetail::Rejected { reason },
+            } => {
+                text(message);
+                text(reason);
+            }
+        },
+        ReplyFault::NotUtf8 | ReplyFault::BootChanged { .. } | ReplyFault::GrantMismatch { .. } => {
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,27 +235,5 @@ mod tests {
                 "GrantMismatch"
             ])
         );
-    }
-}
-
-fn bounded(fault: &ReplyFault) {
-    let text = |text: &str| assert!(text.len() <= 1024, "fault keeps {} guest bytes", text.len());
-    match fault {
-        ReplyFault::NotJson { detail }
-        | ReplyFault::Envelope { detail }
-        | ReplyFault::Result { detail } => text(detail),
-        ReplyFault::WrongId { found, .. } => text(found),
-        ReplyFault::Unattributed(error) | ReplyFault::Refused(error) => match error {
-            BridgeError::Protocol { message, .. } => text(message),
-            BridgeError::Refused {
-                message,
-                detail: RefusalDetail::Rejected { reason },
-            } => {
-                text(message);
-                text(reason);
-            }
-        },
-        ReplyFault::NotUtf8 | ReplyFault::BootChanged { .. } | ReplyFault::GrantMismatch { .. } => {
-        }
     }
 }
