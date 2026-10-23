@@ -178,9 +178,9 @@ mod tests {
     use super::*;
     use crate::operator::file::OperatorFile;
 
-    fn manifest(sections: &str) -> PlasmidManifest {
+    fn manifest(id: &str, sections: &str) -> PlasmidManifest {
         PlasmidManifest::parse(&format!(
-            "id = \"p\"\ndescription = \"Resolve one member.\"\nimpl.wasm = \"p.wasm\"\n{sections}"
+            "id = \"{id}\"\ndescription = \"Resolve one member.\"\nimpl.wasm = \"p.wasm\"\n{sections}"
         ))
         .expect("a valid declaration")
     }
@@ -223,14 +223,17 @@ mod tests {
 
     fn network() -> PlasmidManifest {
         manifest(
+            "p",
             "[network]\nhosts = [\"api.example\"]\nports = [443]\n[mock]\nhosts = [\"api.example\"]",
         )
     }
 
     #[test]
     fn four_proxy_maps_keep_every_field_and_get_fresh_ids() {
-        let manifest =
-            manifest("[network]\nhosts = [\"a.example\", \"b.example\"]\nports = [443, 8443]");
+        let manifest = manifest(
+            "p",
+            "[network]\nhosts = [\"a.example\", \"b.example\"]\nports = [443, 8443]",
+        );
         let mut proxies = Vec::new();
         let mut expected = Vec::new();
         for (index, (host, port)) in [
@@ -412,6 +415,7 @@ mod tests {
             }
         }
         let declaration = manifest(
+            "p",
             "[network]\nhosts = [\"api.example\"]\nports = [443]\npin_cidrs = [\"198.51.100.0/24\", \"192.0.2.0/25\"]\n[mock]\nhosts = [\"api.example\"]",
         );
         assert_eq!(
@@ -460,9 +464,13 @@ mod tests {
     #[test]
     fn mock_coverage_precedes_entries_and_names_the_first_unmocked_host() {
         let partial = manifest(
+            "p",
             "[network]\nhosts = [\"a.example\", \"b.example\"]\nports = [443]\n[mock]\nhosts = [\"a.example\"]",
         );
-        let absent = manifest("[network]\nhosts = [\"a.example\", \"b.example\"]\nports = [443]");
+        let absent = manifest(
+            "p",
+            "[network]\nhosts = [\"a.example\", \"b.example\"]\nports = [443]",
+        );
         let file = file(
             vec![
                 proxy(
@@ -519,6 +527,85 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_needs_precede_network_refusals() {
+        for (sections, capability) in [
+            (
+                "[commands.commands.run]\nexec = [\"run\"]",
+                "unsupported:commands:run",
+            ),
+            (
+                "[secrets]\nrefs = [{id = \"custom/key\", consumer = \"wasm\"}]",
+                "unsupported:credential:custom/key",
+            ),
+            (
+                "[model]\nendpoint = \"https://model.example\"",
+                "unsupported:credential:model-provider/key",
+            ),
+        ] {
+            let declaration = manifest(
+                "p",
+                &format!("[network]\nhosts = [\"api.example\"]\nports = [443]\n{sections}"),
+            );
+            for mode in [MockMode::Simulate, MockMode::Capture, MockMode::Passthrough] {
+                assert_eq!(
+                    resolve(&declaration, &OperatorFile::empty(), mode),
+                    Err(missing(capability))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mock_coverage_keeps_non_alphabetical_declaration_order() {
+        let declaration = manifest(
+            "p",
+            "[network]\nhosts = [\"z.example\", \"a.example\", \"b.example\"]\nports = [443]",
+        );
+        for mode in [MockMode::Simulate, MockMode::Capture] {
+            assert_eq!(
+                resolve(&declaration, &OperatorFile::empty(), mode),
+                Err(MemberRefusal::Unmocked {
+                    plasmid: "p".into(),
+                    host: "z.example".into(),
+                    fix: "[mock]\nhosts = [\"z.example\"]".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn every_refusal_names_its_manifest_member() {
+        for id in ["p", "member-two"] {
+            let declaration = manifest(id, "[network]\nhosts = [\"api.example\"]\nports = [443]");
+            assert_eq!(
+                resolve(&declaration, &OperatorFile::empty(), MockMode::Simulate),
+                Err(MemberRefusal::Unmocked {
+                    plasmid: id.into(),
+                    host: "api.example".into(),
+                    fix: "[mock]\nhosts = [\"api.example\"]".into(),
+                })
+            );
+            assert_eq!(
+                resolve(&declaration, &OperatorFile::empty(), MockMode::Passthrough),
+                Err(MemberRefusal::Uncovered {
+                    plasmid: id.into(),
+                    capability: "entry:network:api.example:443".into(),
+                })
+            );
+            let file = file_with_all_modes();
+            let mut entry = file.entry("p").unwrap().clone();
+            entry.proxy_maps[0].route = "bad\0route".into();
+            assert_eq!(
+                resolve_member(&declaration, Some(&entry), MockMode::Passthrough),
+                Err(MemberRefusal::Invalid {
+                    plasmid: id.into(),
+                    error: RecipeError::ContainsNul { field: "route" },
+                })
+            );
+        }
+    }
+
+    #[test]
     fn unsupported_needs_name_the_first_command_then_secret_then_model() {
         let cases = [
             (
@@ -541,20 +628,24 @@ mod tests {
         for (sections, capability) in cases {
             for mode in [MockMode::Simulate, MockMode::Capture, MockMode::Passthrough] {
                 assert_eq!(
-                    resolve(&manifest(sections), &OperatorFile::empty(), mode),
+                    resolve(&manifest("p", sections), &OperatorFile::empty(), mode),
                     Err(missing(capability))
                 );
             }
         }
         let all = format!("{}\n{}\n{}", cases[0].0, cases[1].0, cases[2].0);
         assert_eq!(
-            resolve(&manifest(&all), &OperatorFile::empty(), MockMode::Simulate),
+            resolve(
+                &manifest("p", &all),
+                &OperatorFile::empty(),
+                MockMode::Simulate
+            ),
             Err(missing(cases[0].1))
         );
         let secrets_and_model = format!("{}\n{}", cases[1].0, cases[2].0);
         assert_eq!(
             resolve(
-                &manifest(&secrets_and_model),
+                &manifest("p", &secrets_and_model),
                 &OperatorFile::empty(),
                 MockMode::Simulate
             ),
@@ -571,25 +662,26 @@ mod tests {
                 "/Work Space",
             ),
         ] {
-            let manifest = manifest(sections);
+            let manifest = manifest("p", sections);
             for (access, expected) in [
                 ("read_only", FileAccess::ReadOnly),
                 ("read_write", FileAccess::ReadWrite),
             ] {
-                let file = file(
-                    vec![],
-                    vec![mount("/wrong", "read_write"), mount(target, access)],
-                );
-                for mode in [MockMode::Simulate, MockMode::Capture, MockMode::Passthrough] {
-                    let result = resolve(&manifest, &file, mode).unwrap();
-                    assert_eq!(
-                        capabilities(&result),
-                        [Capability::Mount {
-                            source: "/Src Path/project".into(),
-                            target: target.into(),
-                            recipe: MountRecipe { access: expected },
-                        }]
-                    );
+                for source in ["/Src Path/project", "/another/project"] {
+                    let mut selected = mount(target, access);
+                    selected["source"] = json!(source);
+                    let file = file(vec![], vec![mount("/wrong", "read_write"), selected]);
+                    for mode in [MockMode::Simulate, MockMode::Capture, MockMode::Passthrough] {
+                        let result = resolve(&manifest, &file, mode).unwrap();
+                        assert_eq!(
+                            capabilities(&result),
+                            [Capability::Mount {
+                                source: source.into(),
+                                target: target.into(),
+                                recipe: MountRecipe { access: expected },
+                            }]
+                        );
+                    }
                 }
             }
             for file in [
@@ -625,13 +717,16 @@ mod tests {
 
     #[test]
     fn no_needs_yields_nothing_even_with_operator_entries() {
-        let declaration = manifest("[provides.\"p:tools\".tools]\nread = \"Read a thing.\"");
+        let declaration = manifest(
+            "p",
+            "[provides.\"p:tools\".tools]\nread = \"Read a thing.\"",
+        );
         for file in [OperatorFile::empty(), file_with_all_modes()] {
             for mode in [MockMode::Simulate, MockMode::Capture, MockMode::Passthrough] {
                 assert!(resolve(&declaration, &file, mode).unwrap().is_empty());
             }
         }
-        let mut empty_commands = manifest("");
+        let mut empty_commands = manifest("p", "");
         empty_commands.commands = Some(crate::manifest::CommandsSpec {
             address_plan: "10.29.0.0/24".into(),
             commands: vec![],
@@ -655,13 +750,13 @@ mod tests {
         );
         assert_eq!(
             resolve(
-                &manifest("[workspace]\nmount = {}"),
+                &manifest("p", "[workspace]\nmount = {}"),
                 &file,
                 MockMode::Passthrough
             ),
             Err(missing("entry:workspace:/workspace"))
         );
-        let p = manifest("[network]\nhosts = [\"p.example\"]\nports = [443]");
+        let p = manifest("p", "[network]\nhosts = [\"p.example\"]\nports = [443]");
         assert_eq!(
             resolve_member(&p, file.entry("r"), MockMode::Passthrough),
             Err(missing("entry:network:p.example:443"))
@@ -694,7 +789,7 @@ mod tests {
                 })
             );
         }
-        let declaration = manifest("[workspace]\nmount = {}");
+        let declaration = manifest("p", "[workspace]\nmount = {}");
         let file = super::tests::file(vec![], vec![mount("/workspace", "read_only")]);
         let mut entry = file.entry("p").unwrap().clone();
         entry.mounts[0].source = "/src/../private".into();
