@@ -802,6 +802,26 @@ mod tests {
     }
 
     #[test]
+    fn accepted_field_strings_keep_their_exact_spelling() {
+        let mut proxy = proxy_map("api.example", 443, &["capture"], "tcp");
+        proxy["destination"] = json!("API.Example");
+        proxy["route"] = json!(" Route ");
+        let mut declared = entry(json!([proxy]), json!([mount("/Work Space", "/Src Path")]));
+        declared["declaration"] = json!("/Decl Path/P.toml");
+        let file = parsed(&plasmids(json!({"p": declared})));
+        let declared = file.entry("p").expect("the entry is kept");
+        assert_eq!(
+            declared.declaration.as_deref(),
+            Some(Path::new("/Decl Path/P.toml"))
+        );
+        assert_eq!(declared.proxy_maps[0].host, "api.example");
+        assert_eq!(declared.proxy_maps[0].route, " Route ");
+        assert_eq!(declared.proxy_maps[0].recipe.destination, "API.Example");
+        assert_eq!(declared.mounts[0].target, "/Work Space");
+        assert_eq!(declared.mounts[0].source, Path::new("/Src Path"));
+    }
+
+    #[test]
     fn empty_is_no_entries() {
         let empty = OperatorFile::empty();
         assert_eq!(empty.entry("github-pr"), None);
