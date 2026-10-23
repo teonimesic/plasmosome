@@ -24,7 +24,9 @@ pub const EXEC_FAILED: i32 = 127;
 
 /// The pinned VMM helper, laid out in the parent so that a child forked by
 /// `VmmChild::spawn` execs it with exactly what spec 001 §4.2 names: argv
-/// `[helper.path, "--runtime-fd=3"]`, an empty environment, descriptors 0
+/// `[helper.path, "--runtime-fd=3"]`, an empty environment
+/// (the helper checks the original exec environment vector, since system
+/// initializers can change the live environment before main), descriptors 0
 /// and 1 on `/dev/null`, 2 on the diagnostic pipe, 3 on a pipe that holds the
 /// recipe's one ndjson line and then end of file, and no other descriptor.
 ///
@@ -41,10 +43,11 @@ pub const EXEC_FAILED: i32 = 127;
 /// threads. It exits [`SETUP_FAILED`] when its setup fails and
 /// [`EXEC_FAILED`] when `execve` returns. On Linux, 127 is a hint: glibc's
 /// dynamic loader also exits 127, after a successful `execve`, when a library
-/// the helper needs cannot be loaded. Both differ from the helper's own codes,
-/// 64 to 69 and 86, and from `VmmChild`'s 70 and 71. The pinned libkrun's
-/// implicit init also exits 125 to 127 when it fails, but spec 001 §4.2 has
-/// the helper disable it.
+/// the helper needs cannot be loaded. The helper uses 64 to 70, 72 and 86.
+/// Exit 70 is shared with `VmmChild`'s panic exit: the helper's
+/// `refused descriptors` line distinguishes it. Exit 71 is `VmmChild`'s
+/// setsid refusal. After `calling krun_start_enter`, an exit is the workload's,
+/// not a helper refusal; pinned libkrun reports init failures as 125 to 127.
 pub struct HelperExec {
     program: CString,
     dev_null: OwnedFd,
@@ -102,7 +105,7 @@ impl HelperExec {
     /// line and then end of file. A line the pipe cannot take whole refuses
     /// with [`LaunchRefusal::RecipeExceedsPipe`]. A pipe takes about 64 KiB
     /// on the supported hosts, so this also keeps the line within the
-    /// 1,048,576 bytes, newline included, that the helper reads, the bound
+    /// 1,048,577 bytes, newline included, that the helper reads, the bound
     /// `RuntimeRecipe::to_ndjson` leaves to its launcher.
     ///
     /// It does not open, check or hash the helper or any artifact: verify

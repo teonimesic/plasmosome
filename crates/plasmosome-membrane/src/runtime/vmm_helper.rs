@@ -130,7 +130,8 @@ fn refuse(exit: HelperExit, detail: impl Into<String>) -> HelperRefusal {
 }
 
 /// Checks the helper's own invocation: `args`, its program name first, must be that name and
-/// [`RUNTIME_FD_ARG`] alone, and `env_is_empty` must hold. Refuses `Invocation`.
+/// [`RUNTIME_FD_ARG`] alone, and `env_is_empty` must describe the vector the parent passed
+/// at exec, before system initializers can change the live environment. Refuses `Invocation`.
 pub fn judge_invocation(args: &[OsString], env_is_empty: bool) -> Result<(), HelperRefusal> {
     if !matches!(args, [_, flag] if flag == RUNTIME_FD_ARG) {
         return Err(refuse(
