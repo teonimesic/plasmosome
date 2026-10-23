@@ -3,9 +3,10 @@
 //! `GrantKind::{Hot, GenerationBound}`, `DrainSpec`, `OsState`/`Diff`).
 //!
 //! It also holds vocabulary that guest, membrane and controller share: the
-//! SHA-256 [`Digest`], spec 001's observation pages in [`paging`], spec 027's
-//! pinned software trees in [`software`], and spec 028's lifetime values in
-//! [`lifetime`] with the [`Clock`] they are read on.
+//! SHA-256 [`Digest`], spec 001's observation pages in [`paging`] and guest bridge
+//! records in [`guest_protocol`], spec 027's pinned software trees in
+//! [`software`], and spec 028's lifetime values in [`lifetime`] with the
+//! [`Clock`] they are read on.
 
 #![doc(test(attr(forbid(unsafe_code))))]
 
@@ -14,6 +15,7 @@ pub mod clock;
 pub mod composite;
 pub mod digest;
 pub mod fake;
+pub mod guest_protocol;
 pub mod lifetime;
 pub mod paging;
 pub mod recipe;
