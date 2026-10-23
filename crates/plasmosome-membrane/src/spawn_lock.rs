@@ -531,7 +531,37 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn a_guarded_exec_waits_until_descriptor_creation_releases_the_write_side() {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
+        let [monitor, child_sync] = with_each_descriptor_held(|_| {
+            let (monitor, child_sync) = UnixStream::pair()?;
+            Ok([monitor.into(), child_sync.into()])
+        })
+        .expect("the pre-exec handoff opens");
+        let mut monitor = UnixStream::from(monitor);
+        let mut ready = libc::pollfd {
+            fd: child_sync.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout = DEADLINE.as_millis().try_into().unwrap();
+        let mut command = std::process::Command::new("/usr/bin/true");
+        // SAFETY: The child only writes, polls, reads and calls _exit on failure. The captured
+        // descriptor stays open in the parent through spawn; all buffers are fixed local storage.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 1_u8;
+                if libc::write(ready.fd, (&raw const byte).cast(), 1) != 1
+                    || libc::poll(&raw mut ready, 1, timeout) != 1
+                    || libc::read(ready.fd, (&raw mut byte).cast(), 1) != 1
+                {
+                    libc::_exit(3);
+                }
+                Ok(())
+            });
+        }
         let (entered, held) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let (created, descriptors) = mpsc::channel();
@@ -551,18 +581,41 @@ mod tests {
         let (spawned, child) = mpsc::channel();
         let spawning = std::thread::spawn(move || {
             attempting.send(()).unwrap();
-            let _ = spawned.send(spawn_guarded(&mut std::process::Command::new(
-                "/usr/bin/true",
-            )));
+            let _ = spawned.send(spawn_guarded(&mut command));
         });
         attempted
             .recv_timeout(DEADLINE)
             .expect("the exec thread starts");
-        let early = child.recv_timeout(SETTLE);
-        let blocked = matches!(early, Err(RecvTimeoutError::Timeout));
+        monitor.set_read_timeout(Some(SETTLE)).unwrap();
+        let mut byte = [0];
+        let early = monitor.read_exact(&mut byte);
+        let blocked = matches!(&early, Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut));
         release.send(()).expect("descriptor creation resumes");
-        let mut child = early
-            .or_else(|_| child.recv_timeout(DEADLINE))
+        monitor.set_read_timeout(Some(DEADLINE)).unwrap();
+        if early.is_err() {
+            monitor
+                .read_exact(&mut byte)
+                .expect("the child reaches pre-exec");
+        }
+        let (acquired, writer) = mpsc::channel();
+        let (attempting, attempted) = mpsc::channel();
+        let writing = std::thread::spawn(move || {
+            attempting.send(()).unwrap();
+            with_descriptors_held(|_| {
+                acquired.send(()).unwrap();
+                close_on_exec_null()
+            })
+            .unwrap();
+        });
+        attempted
+            .recv_timeout(DEADLINE)
+            .expect("the second writer starts");
+        let during_spawn = writer.recv_timeout(SETTLE);
+        monitor
+            .write_all(&[1])
+            .expect("the pre-exec child is released");
+        let mut child = child
+            .recv_timeout(DEADLINE)
             .expect("spawn proceeds after creation")
             .expect("true starts");
         let deadline = Instant::now() + DEADLINE;
@@ -582,7 +635,14 @@ mod tests {
             .expect("creation finishes");
         creating.join().expect("creation thread ends");
         spawning.join().expect("exec thread ends");
+        let after_spawn = during_spawn.or_else(|_| writer.recv_timeout(DEADLINE));
+        writing.join().expect("the second writer ends");
         drop(descriptors.expect("the descriptors open"));
+        drop(child_sync);
+        assert!(
+            during_spawn == Err(RecvTimeoutError::Timeout) && after_spawn.is_ok(),
+            "the read side must remain held throughout Command::spawn"
+        );
         assert!(
             blocked,
             "exec started before descriptor creation released the write side"
