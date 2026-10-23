@@ -1,13 +1,16 @@
 use std::fs::File;
 use std::io::{self, Read, Seek};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::LazyLock;
-use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "owned_wait.rs"]
+mod owned_wait;
+use owned_wait::{SETUP_BOUND, exit_within};
+
 const DAEMON: &str = env!("CARGO_BIN_EXE_membraned");
-const BOUND: Duration = Duration::from_secs(60);
+const BOUND: Duration = SETUP_BOUND;
 const STDERR_LIMIT: u64 = 4096;
 
 static WARM_UP: LazyLock<Result<(), String>> =
@@ -55,29 +58,6 @@ fn run_once(daemon: &str, mut command: Command, bound: Duration) -> Result<(), S
         Err(error) => Err(format!(
             "the state of the warm-up of {daemon} is unreadable: {error}; its stderr: {said:?}"
         )),
-    }
-}
-
-fn exit_within(child: &mut Child, bound: Duration) -> io::Result<Option<ExitStatus>> {
-    let deadline = Instant::now() + bound;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(Some(status)),
-            Ok(None) => {}
-            Err(error) => {
-                if error.raw_os_error() != Some(libc::ECHILD) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                return Err(error);
-            }
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        thread::sleep(Duration::from_millis(25));
     }
 }
 
