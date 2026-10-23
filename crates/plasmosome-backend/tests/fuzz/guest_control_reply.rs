@@ -183,6 +183,7 @@ mod tests {
                     "Result", "Result", "Result", "Result", "Result", "Result", "Success",
                 ],
             ),
+            ("seed-too-deep", ["NotJson"; 7]),
             ("seed-wrong-id", ["WrongId"; 7]),
         ];
         let dir = Path::new(concat!(
