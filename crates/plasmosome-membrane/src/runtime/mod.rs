@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod cell;
 pub mod cell_directory;
 pub mod closure;
 pub mod confinement;
