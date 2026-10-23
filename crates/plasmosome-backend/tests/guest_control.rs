@@ -68,6 +68,21 @@ fn calls() -> Vec<ControlCall> {
             deadline_ms,
         }),
         ControlCall::Shutdown(ShutdownParams { deadline_ms }),
+        ControlCall::Exec(ExecParams {
+            argv: vec!["true".into()],
+            request_key: None,
+            deadline_ms,
+        }),
+        ControlCall::ExecStatus(ExecStatusParams {
+            exec_id: ExecId::new(1).unwrap(),
+            wait: false,
+            deadline_ms,
+        }),
+        ControlCall::ExecOutput(ExecOutputParams {
+            exec_id: ExecId::new(1).unwrap(),
+            deadline_ms,
+        }),
+        ControlCall::WorkloadStop(WorkloadStopParams { deadline_ms }),
     ];
     calls.extend(operations().into_iter().map(|operation| {
         ControlCall::Install(InstallParams {
@@ -161,7 +176,17 @@ fn method_names_are_exact_strings() {
     assert_eq!(
         ControlMethod::ALL.map(ControlMethod::name),
         [
-            "hello", "observe", "install", "activate", "drain", "remove", "shutdown"
+            "hello",
+            "observe",
+            "install",
+            "activate",
+            "drain",
+            "remove",
+            "shutdown",
+            "exec",
+            "exec_status",
+            "exec_output",
+            "workload_stop"
         ]
     );
     for method in ControlMethod::ALL {
@@ -187,16 +212,7 @@ fn method_names_are_exact_strings() {
 
 #[test]
 fn unknown_method_is_method_not_found() {
-    for name in [
-        "unknown",
-        "Hello",
-        "hello ",
-        "",
-        "exec",
-        "exec_status",
-        "exec_output",
-        "workload_stop",
-    ] {
+    for name in ["unknown", "Hello", "hello ", ""] {
         assert_eq!(ControlMethod::from_name(name), None);
         for state in [LaneState::AwaitingHello, NORMAL, WITHDRAWAL] {
             refusal(
@@ -352,7 +368,7 @@ fn params_are_closed_and_required() {
                 ProtocolCode::InvalidParams,
                 "7",
             );
-            if key != "address" {
+            if key != "address" && key != "request_key" {
                 let mut null = body.clone();
                 null[key] = Value::Null;
                 refusal(
@@ -406,6 +422,20 @@ fn params_are_closed_and_required() {
                 body["deadline_ms"].clone(),
             ],
             ControlCall::Shutdown(_) => vec![body["deadline_ms"].clone()],
+            ControlCall::Exec(_) => vec![
+                body["argv"].clone(),
+                body["request_key"].clone(),
+                body["deadline_ms"].clone(),
+            ],
+            ControlCall::ExecStatus(_) => vec![
+                body["exec_id"].clone(),
+                body["wait"].clone(),
+                body["deadline_ms"].clone(),
+            ],
+            ControlCall::ExecOutput(_) => {
+                vec![body["exec_id"].clone(), body["deadline_ms"].clone()]
+            }
+            ControlCall::WorkloadStop(_) => vec![body["deadline_ms"].clone()],
         });
         for value in [positional, Value::Null, json!(1), json!("params")] {
             match call {
@@ -417,6 +447,10 @@ fn params_are_closed_and_required() {
                 }
                 ControlCall::Remove(_) => refuses_both::<RemoveParams>(value),
                 ControlCall::Shutdown(_) => refuses_both::<ShutdownParams>(value),
+                ControlCall::Exec(_) => refuses_both::<ExecParams>(value),
+                ControlCall::ExecStatus(_) => refuses_both::<ExecStatusParams>(value),
+                ControlCall::ExecOutput(_) => refuses_both::<ExecOutputParams>(value),
+                ControlCall::WorkloadStop(_) => refuses_both::<WorkloadStopParams>(value),
             }
         }
     }
@@ -477,7 +511,13 @@ fn every_call_round_trips() {
         assert_eq!(decoded.call, call);
         let selected = !matches!(
             call,
-            ControlCall::Hello(_) | ControlCall::Observe(_) | ControlCall::Shutdown(_)
+            ControlCall::Hello(_)
+                | ControlCall::Observe(_)
+                | ControlCall::Shutdown(_)
+                | ControlCall::Exec(_)
+                | ControlCall::ExecStatus(_)
+                | ControlCall::ExecOutput(_)
+                | ControlCall::WorkloadStop(_)
         );
         assert_eq!(call.grant(), selected.then_some(grant));
     }

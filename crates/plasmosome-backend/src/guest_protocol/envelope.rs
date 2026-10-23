@@ -3,9 +3,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::value::RawValue;
 
-use super::{BootToken, cut};
+use super::{BootToken, ExecId, NotRetainedWhat, cut};
 use crate::universe::GrantId;
-use crate::wire::{ObjectOnly, object_serde};
+use crate::wire::ObjectOnly;
 
 const REFUSED: i64 = 105;
 const REFUSED_FROM: &str = "guest_request";
@@ -93,7 +93,7 @@ impl ProtocolCode {
 /// In JSON it is an object whose `kind` names the variant, for example
 /// `{"kind": "rejected", "reason": "..."}`. Decoding refuses an array, an
 /// unknown kind, and a missing, repeated or unknown field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
     remote = "Self",
     tag = "kind",
@@ -104,10 +104,70 @@ pub enum RefusalDetail {
     /// The guest refused hello, observe, install, activate, drain, remove or
     /// shutdown (spec 001 §4.2). `reason` is for people: a caller never
     /// branches on it.
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
+    InvalidArgv,
+    ExecLimit,
+    SpawnFailed {
+        errno: i32,
+    },
+    Busy,
+    KeyConflict,
+    Stopped,
+    WorkloadRemains {
+        count: u32,
+    },
+    NotRetained {
+        exec_id: String,
+        what: NotRetainedWhat,
+    },
 }
 
-object_serde!(RefusalDetail through RefusalDetail);
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RefusalWire {
+    Rejected {
+        reason: String,
+    },
+    InvalidArgv {},
+    ExecLimit {},
+    SpawnFailed {
+        errno: i32,
+    },
+    Busy {},
+    KeyConflict {},
+    Stopped {},
+    WorkloadRemains {
+        count: u32,
+    },
+    NotRetained {
+        exec_id: String,
+        what: NotRetainedWhat,
+    },
+}
+
+impl Serialize for RefusalDetail {
+    fn serialize<S: Serializer>(&self, writer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, writer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RefusalDetail {
+    fn deserialize<D: serde::Deserializer<'de>>(reader: D) -> Result<Self, D::Error> {
+        Ok(match RefusalWire::deserialize(ObjectOnly::new(reader))? {
+            RefusalWire::Rejected { reason } => Self::Rejected { reason },
+            RefusalWire::InvalidArgv {} => Self::InvalidArgv,
+            RefusalWire::ExecLimit {} => Self::ExecLimit,
+            RefusalWire::SpawnFailed { errno } => Self::SpawnFailed { errno },
+            RefusalWire::Busy {} => Self::Busy,
+            RefusalWire::KeyConflict {} => Self::KeyConflict,
+            RefusalWire::Stopped {} => Self::Stopped,
+            RefusalWire::WorkloadRemains { count } => Self::WorkloadRemains { count },
+            RefusalWire::NotRetained { exec_id, what } => Self::NotRetained { exec_id, what },
+        })
+    }
+}
 
 /// The error object of a failed bridge request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +416,10 @@ pub enum ReplyFault {
         expected: GrantId,
         found: GrantId,
     },
+    ExecMismatch {
+        expected: ExecId,
+        found: ExecId,
+    },
 }
 
 #[derive(Deserialize)]
@@ -420,13 +484,13 @@ fn decode_error(text: &str) -> Result<BridgeError, String> {
         && string_is(&error.to, REFUSED_TO)
         && let Some(detail) = error.detail
     {
-        let RefusalDetail::Rejected { reason } =
-            serde_json::from_str(detail.get()).map_err(|error| error.to_string())?;
+        let mut detail = serde_json::from_str(detail.get()).map_err(|error| error.to_string())?;
+        if let RefusalDetail::Rejected { reason } = &mut detail {
+            *reason = cut(reason);
+        }
         return Ok(BridgeError::Refused {
             message: cut(&error.message),
-            detail: RefusalDetail::Rejected {
-                reason: cut(&reason),
-            },
+            detail,
         });
     }
     Err("error fields do not match a protocol error or a guest refusal".to_owned())
