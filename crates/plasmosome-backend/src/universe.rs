@@ -220,13 +220,44 @@ impl<'de> Deserialize<'de> for GrantId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Encodes as its PascalCase name in a string. Other names and shapes refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum UniverseClass {
     SessionFile,
     UdsPath,
     ProxyMap,
     BrokerPid,
     Mount,
+}
+
+impl<'de> Deserialize<'de> for UniverseClass {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Class;
+
+        impl Visitor<'_> for Class {
+            type Value = UniverseClass;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a UniverseClass string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<Self::Value, E> {
+                match name {
+                    "SessionFile" => Ok(UniverseClass::SessionFile),
+                    "UdsPath" => Ok(UniverseClass::UdsPath),
+                    "ProxyMap" => Ok(UniverseClass::ProxyMap),
+                    "BrokerPid" => Ok(UniverseClass::BrokerPid),
+                    "Mount" => Ok(UniverseClass::Mount),
+                    _ => Err(E::unknown_variant(
+                        name,
+                        &["SessionFile", "UdsPath", "ProxyMap", "BrokerPid", "Mount"],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(Class)
+    }
 }
 
 impl UniverseClass {
