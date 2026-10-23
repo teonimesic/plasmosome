@@ -80,4 +80,19 @@ are in field order. A field of the wrong type is refused with a message that nam
 field's name and the quoted text. Kinds and populations sort by their text, as catalog search
 does.
 
+`plasmosome_ledger::cell_journal` holds spec 008's per-cell journal, format 1, which is not the
+single-plugin log above. `parse_record` reads one line as one record of the cell the caller names,
+and every embedded operation must be owned by that cell and its change's plugin. `encode_record`
+writes one compact JSON object and a final LF. The records have no serde of their own; only
+`AttachmentSource`, the one shared source record, has. Every field is required, `force`,
+`replacement` and `operation` even when null. Unknown fields, variants and formats are refused,
+and so is a record or nested record written as an array. `CellJournalFaultKind` holds spec 008's
+ten kinds, but this codec does not produce `InvalidClosure` or `InvalidLifetime` yet: they come
+with a replacement's closure and lifetime fields. Until plasmosome-dlyi, plasmosome-i4z2 and
+plasmosome-p67m add those fields, a replacement holding `lifetime`, `named`, `requires` or
+`provides` is refused as `Unparseable`, and one lacking them is accepted; spec 008's
+`InvalidClosure` rule for a missing field is theirs. No writer exists yet, so no journal holds
+either form. Reading a whole journal file, and the order of its generations and events, come
+with plasmosome-avh.
+
 Tests: `cargo test -p plasmosome-ledger`

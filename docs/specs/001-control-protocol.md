@@ -1279,6 +1279,10 @@ Every bridge stream uses §1's UTF-8 ndjson envelope, matching request IDs and m
 Their method/parameter/result records are closed: all fields below are required, unknown fields
 or methods refuse, and failures use `{code:105,message,from:"guest_request",to:"refused",detail}`
 rather than a success-shaped empty result. Framing failures retain §1's protocol codes.
+The guest's refusal of hello, observe, install, activate, drain, remove or shutdown carries
+`detail:{kind:"rejected",reason:String}`; `reason` is text for people, and no caller branches on it.
+Amended on 2026-10-22: no `detail` kind was defined for these seven verbs, so their refusals could
+not meet §1's 105 row, which requires a kind spec 001 defines.
 `deadline_ms` is a positive remaining
 budget, never renewed internally. `boot` is the original association's opaque nonempty token.
 
