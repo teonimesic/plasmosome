@@ -2306,6 +2306,7 @@ mod tests {
         })
         .expect("the fixture leader forks");
         drop(control_write);
+        wait_readable(&ready_read, DEADLINE);
         assert_eof_within(&ready_read, DEADLINE);
         assert_eq!(
             child.wait_terminal(DEADLINE),
