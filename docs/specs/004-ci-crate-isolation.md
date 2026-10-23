@@ -114,12 +114,15 @@ fails the step.
 
 ### What the matrix does and does not prove
 
-`cargo -p` inside a workspace still shares the lockfile, and features unify per invocation. With
-no feature flags declared anywhere today, the matrix catches the real current risks: a crate
+`cargo -p` inside a workspace still shares the lockfile, and features unify per invocation. The
+backend declares a `test-fixture` feature; the matrix catches the real current risks: a crate
 whose tests only compile because a sibling's dev-dependency happens to be in the graph, and a
 crate that breaks alone but not in a workspace-wide build. It is not full standalone packaging —
 that is `cargo package`, deferred to spec 007. This limit is stated here so nobody mistakes the
 matrix for the packaging check.
+
+Corrected on 2026-10-23: this said no feature flags were declared, although the backend declares
+`test-fixture`. The matrix's promise and its limits are unchanged.
 
 One entry proves less than the rest: a green `crate (plasmosome-guards)` does not show that crate
 standing on its own. Its tests shell out to `cargo` and run it against the workspace root, so they

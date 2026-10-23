@@ -19,6 +19,7 @@ permissions:
 # `rustup toolchain install`, which reads that file; `--no-self-update` stops rustup replacing
 # itself with whatever release is newest. With auto-install off, a job that skips the install
 # fails before it builds anything, instead of downloading a toolchain no step names.
+# `msrv` is the one exception: it installs 1.96.0 by name and names it on every command.
 env:
   RUSTUP_AUTO_INSTALL: "0"
 
@@ -53,6 +54,7 @@ jobs:
 
   gates:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -351,3 +353,73 @@ jobs:
           name: lcov
           path: lcov.info
           if-no-files-found: error
+
+  # Spec 004: one entry per workspace member, in Cargo.toml order. The guard
+  # ci_matrix_matches_workspace_members keeps this list in step with the members.
+  crate:
+    name: crate (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - plasmosome
+          - plasmosome-backend
+          - plasmosome-ledger
+          - plasmosome-core
+          - plasmosome-membrane
+          - plasmid
+          - plasmid-sdk
+          - plasmosome-guards
+          - plasmosome-testkit
+          - plasmosome-cli
+          - plasmosome-lanes
+          - plasmosome-tools
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+
+      - name: toolchain in use
+        run: rustup show active-toolchain --verbose
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.crate }}
+          save-if: ${{ github.event_name == 'push' }}
+
+      - name: build
+        env:
+          CRATE: ${{ matrix.crate }}
+        run: cargo build --locked -p "$CRATE" --all-targets
+
+      - name: tests
+        env:
+          CRATE: ${{ matrix.crate }}
+        run: cargo test --locked -p "$CRATE"
+
+  # Spec 004: rust-toolchain.toml outranks a default, so every compiler command names 1.96.0.
+  # No rust-cache step: it runs bare rustc and cargo commands to build its key.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: install Rust 1.96.0
+        run: rustup toolchain install 1.96.0 --profile minimal --no-self-update
+
+      - name: toolchain in use
+        run: rustc +1.96.0 --version
+
+      - name: check
+        run: cargo +1.96.0 check --locked --workspace --all-targets
