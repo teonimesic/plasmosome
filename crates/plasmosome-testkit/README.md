@@ -115,13 +115,30 @@ return `IncompleteEffect`; the fake factories arm this with
 with real resources. For each sample capability, drain and entry point, the clause checks that
 an invalid doomed operation is refused before any effect; that the unfinished operation is
 reported exactly, with no standing object and no record; that a retry through either entry point
-returns `IncompleteEffect` again; that another owner's grant or apply, a plant, a revoke, and a
-removal naming another owner or capability are refused and change nothing; and that, of two equal
-unfinished effects, each exact removal clears its own and nothing else. It removes them in grant
-order and in reverse, and each order has its own defective backend. It compares an
-`IncompleteEffect` by class and address, never by its detail. Each step has its own defective
-backend. A withdrawal that fails after its release has no clause, because no reserved owner arms
-it: `FakeBackend`'s tests, the ledger's detach test and `tests/attach_detach_residue.rs` cover it.
+returns `IncompleteEffect` again; that a plant of its object and a revoke of its handle are
+refused; that five other operations at its address are each refused through grant, apply and
+plant, and so is the removal each one names: those of another plugin in the doomed cell, the same
+plugin in another cell, another plugin in another cell, and the doomed owner with another
+capability (another key, or another source for a mount) or with another recipe; that the account
+is unchanged after each of these calls; and that, of two equal unfinished effects, each exact
+removal clears its own and nothing else. It removes them in grant order and in reverse. It
+compares an `IncompleteEffect` by class and address, never by its detail. Each message names what
+the other operation changes, so a failure says which of the five it was.
+
+Each check of that clause has its own defective backend, and so does each entry point, drain and
+order, and each call of the invalid and conflict steps for each of the five other operations. The
+invalid refusal's witness is `AcceptsInvalidOperations`, which other clauses use too. The account
+check after each kind of refusal has a witness, `RefusalChangesTheAccountUntilTheNextCall`: it
+changes the account during that refusal and undoes the change at the next call, so only the check
+right after the refusal sees it. A change that lasts fails later checks too. Each of these
+witnesses fails at the first refusal of its kind, not at every one. Only one doomed owner is
+reserved, so no pass holds two owners' unfinished effects; the tests of `FakeBackend` and
+`CompositeBackend` check, under both drains, that the exact removal of one owner's unfinished
+effect keeps every other owner's. Two failures have no clause, because no reserved owner arms
+them. A withdrawal that fails after its release is covered by `FakeBackend`'s tests, the ledger's
+detach test and `tests/attach_detach_residue.rs`. A graceful cleanup of an unfinished effect that
+times out must keep the marker (spec 017); `FakeBackend`'s
+`an_incomplete_effect_keeps_its_marker_through_a_timeout_and_a_failed_cleanup` covers it.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012
@@ -152,8 +169,8 @@ untrusted file before it allocates anything. One function, `as_core`, turns the 
 into core's. A row the two callers disagree on is a defect in one of them, not in the table.
 
 The third is the **membrane differential** of spec 027 §6, a test fixture that no product path
-uses. It holds the probe manifest and the comparator. `differential::load` reads the manifest
-from JSON and refuses it, naming what is wrong, before anything is compared:
+uses. It holds the probe manifest, the comparator and the results writer. `differential::load`
+reads the manifest from JSON and refuses it, naming what is wrong, before anything is compared:
 
 - a channel of spec 027 §5 with fewer than three probes, or a reach kind with fewer than three
   reach probes, none included;
@@ -258,6 +275,35 @@ differ.
 belongs with the code that runs the lanes, and spec 027 §6 says which numbers that reader must
 refuse.
 
+`differential::write_results` writes §6's dated results file, `<date>-<name>.md`, into the
+directory it is given, such as `docs/benchmarks/`, and never overwrites one. It takes an
+`Outcome`: a manifest `load` refused, so no lane ran; a reader's refusal of a lane's output, so
+no run was read; or the runs as read. It judges the runs itself, so the file cannot claim a
+verdict the runs do not support, and it writes every refusal of the runs, by `load`, a reader or
+`judge`, as a failed run with its reason. The file states how many probes the manifest declares.
+A manifest with none is one `judge` refuses, so it reads `fail` with 0 probes, and no probes
+never reads as no differences. The file holds each lane's configuration; the SHA-256 of the
+image, kernel, libkrun, fixtures, harness, session, probe suite and manifest; the manifest's
+rules as run; and every probe's status and observation, and the transcript and its status, in
+every run of every lane, as run and not normalized. Every name and value from the manifest, the
+runs, a reader or a configuration goes inside a JSON or text block, and the date, the name and
+the digests outside them are checked first, so none can break the file apart. The text goes to a
+temporary name in the same directory, and is linked to its name only once it is whole and
+synced, so a write that fails leaves no file at the name, and a retry can write it. Three edges
+fail closed, with nothing left at the name: on a filesystem without hard links every write
+fails; the temporary name is about 15 bytes longer than the final name, so a name near the
+255-byte limit is refused; and a writer killed mid-write can leave a hidden `.tmp` file, which
+`.gitignore` does not cover. A write whose temporary cannot be removed leaves one too, beside
+the whole file it linked to the name.
+
+It writes nothing, and names what is wrong, for a date that is not a calendar date written
+`YYYY-MM-DD`, a name other than lowercase letters, digits and hyphens, a lane with runs or a
+refused read but no configuration, two configurations for one lane, a configuration with no
+settings, a digest that is not 64 lowercase hex digits, or no harness or session digest when a
+run carries a transcript or a reader refused one. A lane with no runs needs no configuration, and
+runs with no transcript need no harness or session digest, so the reference lanes can be written
+before a cell boots or a harness runs.
+
 ## What's inside
 
 | Module | Holds |
@@ -265,7 +311,7 @@ refuse.
 | `builders` | `PlasmidManifest`, capabilities, prepared grants (`GrantClosure`, `PreparedGrant`), `Effect`s and `DesiredState` — a test states only what it is about |
 | `conformance` | Fourteen clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
-| `differential` | Spec 027 §6's probe manifest for the membrane differential, its refusals, and `judge`, which compares the lanes' runs and gives the verdict |
+| `differential` | Spec 027 §6's probe manifest for the membrane differential, its refusals, `judge`, which compares the lanes' runs and gives the verdict, and `write_results`, which writes the dated results file |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
 Nothing here ships: the crate is `publish = false`, and a guard keeps it out of every other

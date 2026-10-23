@@ -224,14 +224,18 @@ impl PrivateListener {
     /// `dir` is walked and judged again before the socket is created, and again after it is
     /// bound; if that second check fails, its error is returned and the socket at the temporary
     /// name in the held directory is removed, but only if the effective UID owns it.
-    /// `BindEscaped` means no socket owned by the effective UID is at the temporary name in the
-    /// held directory after bind. `BadName` holds `name` itself, not a path. `PathTooLong`,
-    /// `AddressInUse` and the other failures before `bind` name `name`'s path. The directory
-    /// checks' errors name the directory component that broke the rule. Every other error from
-    /// `bind` on names the temporary's path. A hard exit before the rename leaves the temporary,
-    /// which nothing removes. The socket's own address, as `getsockname` reports it, is the
-    /// temporary name. A caller that forks from another thread must hold its descriptor lock
-    /// around this call, because on macOS the socket is created before it is marked
+    /// `BindEscaped` means that after bind the temporary name in the held directory holds no
+    /// socket owned by the effective UID, or holds an entry other than the one found there just
+    /// after bind. Until the socket's mode is set, a failed look at that name, for example with
+    /// `EACCES`, is also `BindEscaped`, though the socket may still be there. If the socket goes
+    /// after it is found there and before `fchmodat` reaches it, or after its mode is checked, the
+    /// result is `Io` from `fchmodat` or from the rename. `BadName` holds `name` itself, not a
+    /// path. `PathTooLong`, `AddressInUse` and the other failures before `bind` name `name`'s
+    /// path. The directory checks' errors name the directory component that broke the rule. Every
+    /// other error from `bind` on names the temporary's path. A hard exit before the rename leaves
+    /// the temporary, which nothing removes. The socket's own address, as `getsockname` reports
+    /// it, is the temporary name. A caller that forks from another thread must hold its descriptor
+    /// lock around this call, because on macOS the socket is created before it is marked
     /// close-on-exec.
     pub fn bind(
         dir: PrivateDir,
@@ -790,15 +794,23 @@ fn publish(
     };
     recheck?;
     restrict_to_owner(&bound)?;
-    let facts = stat_at(&bound.dir.dir, &bound.name)
-        .map_err(|errno| no_socket_or_io(errno, &bound.entry.path))?;
-    if facts.dev != created.dev || facts.ino != created.ino {
-        return Err(PrivateSocketError::BindEscaped {
-            path: bound.entry.path.clone(),
-        });
-    }
-    judge_socket(&facts, owner, &bound.entry.path)?;
     (seam.observe)(Step::Restricted);
+    let facts = match stat_at(&bound.dir.dir, &bound.name) {
+        Ok(facts) if facts.dev == created.dev && facts.ino == created.ino => facts,
+        Err(errno) if errno != libc::ENOENT => {
+            return Err(PrivateSocketError::Io {
+                op: "fstatat",
+                path: bound.entry.path.clone(),
+                errno,
+            });
+        }
+        _ => {
+            return Err(PrivateSocketError::BindEscaped {
+                path: bound.entry.path.clone(),
+            });
+        }
+    };
+    judge_socket(&facts, owner, &bound.entry.path)?;
     // SAFETY: listen takes no pointer, and `socket` keeps its descriptor open for the call.
     if unsafe { libc::listen(socket.as_raw_fd(), LISTEN_BACKLOG) } != 0 {
         return Err(io_failure(
@@ -1888,6 +1900,75 @@ mod tests {
             b"planted"
         );
         assert_eq!(entries(&cell), vec![temporary]);
+    }
+
+    #[test]
+    fn publish_reports_bind_escaped_when_the_temporary_goes_after_its_mode_is_set() {
+        for plant in [false, true] {
+            let (_root, cell, dir) = private_cell();
+            let temporary = cell.join(DRAWN);
+            let mut mode = None;
+            let mut planted = None;
+            let refusal = refusal_of(publish_drawing(
+                dir,
+                "sock",
+                effective_uid(),
+                &[DRAWN],
+                |step| {
+                    if step == Step::Restricted {
+                        mode = Some(fs::symlink_metadata(&temporary).expect("stat").mode());
+                        fs::remove_file(&temporary).expect("unlink");
+                        if plant {
+                            let other = UnixListener::bind(&temporary).expect("bind another");
+                            set_mode(&temporary, 0o600);
+                            let ino = fs::symlink_metadata(&temporary).expect("stat").ino();
+                            planted = Some((other, ino));
+                        }
+                    }
+                },
+            ));
+            assert_eq!(mode.map(|mode| mode & 0o7777), Some(0o600));
+            assert_eq!(
+                refusal,
+                PrivateSocketError::BindEscaped {
+                    path: temporary.clone()
+                },
+                "plant: {plant}"
+            );
+            match planted {
+                Some((_other, ino)) => {
+                    let left = fs::symlink_metadata(&temporary).expect("the other socket stays");
+                    assert_eq!((left.file_type().is_socket(), left.ino()), (true, ino));
+                    assert_eq!(left.mode() & 0o7777, 0o600);
+                    assert_eq!(entries(&cell), vec![temporary]);
+                }
+                None => assert_eq!(entries(&cell), Vec::<PathBuf>::new()),
+            }
+        }
+    }
+
+    #[test]
+    fn publish_reports_io_and_leaves_the_temporary_when_it_cannot_inspect_it_after_the_chmod() {
+        let (_root, cell, dir) = private_cell();
+        let outcome = publish_drawing(dir, "sock", effective_uid(), &[DRAWN], |step| {
+            if step == Step::Restricted {
+                set_mode(&cell, 0o600);
+            }
+        });
+        set_mode(&cell, 0o700);
+        if effective_uid() == 0 {
+            assert!(outcome.is_ok(), "root ignores the mode");
+            return;
+        }
+        assert_eq!(
+            refusal_of(outcome),
+            PrivateSocketError::Io {
+                op: "fstatat",
+                path: cell.join(DRAWN),
+                errno: libc::EACCES
+            }
+        );
+        assert_eq!(entries(&cell), vec![cell.join(DRAWN)]);
     }
 
     #[test]
