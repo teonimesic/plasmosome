@@ -2,16 +2,19 @@
 id: NNN
 title: short name for the thing wanted
 status: draft
+served:
 date: YYYY-MM-DD
 originator: who asked for it
 outcome:
 ---
 
-What you want, and what made you want it — your own words, unedited.
-No design and no solution; those belong in a spec.
+Your goal and why, in your own unedited words. No design or solution: use a spec.
 
-It does not matter who writes this. Who may set `status: approved`, and when, is in
-`docs/intents/README.md`.
+Approval follows `docs/intents/README.md`.
+
+## What is served
+
+How much of this goal exists, and what is left? Name what is missing, not specs or tasks.
 
 ## Outcome
 
