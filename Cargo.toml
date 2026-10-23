@@ -1,6 +1,5 @@
 [workspace]
 resolver = "2"
-exclude = ["crates/msrv-throwaway"]
 members = [
     "crates/plasmosome",
     "crates/plasmosome-backend",

@@ -7,7 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-msrv-throwaway = { path = "../msrv-throwaway" }
 plasmosome-core = { workspace = true }
 
 [dev-dependencies]
