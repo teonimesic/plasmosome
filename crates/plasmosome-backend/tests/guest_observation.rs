@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fmt::Debug;
 
 use plasmosome_backend::GrantId;
@@ -331,39 +330,93 @@ fn decoding_runs_validate() {
 
 #[test]
 fn projections_and_grants_cover_every_kind() {
-    let o = full();
-    let expected = BTreeSet::from([
-        ProjectionKind::FsMounts,
-        ProjectionKind::FsHandles,
-        ProjectionKind::SocketListeners,
-        ProjectionKind::SocketStreams,
-        ProjectionKind::DnsListeners,
-        ProjectionKind::Tuns,
-        ProjectionKind::Routes,
-        ProjectionKind::ProxyRules,
-        ProjectionKind::TcpFlows,
-        ProjectionKind::UdpFlows,
-    ]);
-    let projections: Vec<_> = o.projections().collect();
-    let grants: Vec<_> = o.grants().collect();
-    assert_eq!(projections.len(), 10);
-    assert_eq!(grants.len(), 10);
-    assert_eq!(
-        projections.iter().map(|row| row.0).collect::<BTreeSet<_>>(),
-        expected
-    );
-    assert_eq!(
-        grants.iter().map(|row| row.0).collect::<BTreeSet<_>>(),
-        expected
-    );
-    for ((kind, projection), (grant_kind, id, grant)) in projections.into_iter().zip(grants) {
-        assert_eq!(kind, grant_kind);
-        assert_eq!(projection.id(), id);
-        match projection {
-            ProjectionRef::Object(p) => assert_eq!(p.bindings[0].grant, grant),
-            ProjectionRef::Stream(p) => assert_eq!(p.grant, grant),
+    use ProjectionKind::*;
+    let mut o = empty();
+    for (inventory, ids) in [
+        (&mut o.fs_mounts, ["mount-0", "mount-1"]),
+        (&mut o.fs_handles, ["handle-0", "handle-1"]),
+        (&mut o.socket_listeners, ["listener-0", "listener-1"]),
+        (&mut o.network.dns_listeners, ["dns-0", "dns-1"]),
+        (&mut o.network.tuns, ["tun-0", "tun-1"]),
+        (&mut o.network.routes, ["route-0", "route-1"]),
+        (&mut o.network.proxy_rules, ["proxy-0", "proxy-1"]),
+        (&mut o.network.tcp_flows, ["tcp-0", "tcp-1"]),
+        (&mut o.network.udp_flows, ["udp-0", "udp-1"]),
+    ] {
+        for id in ids {
+            let mut p = object();
+            p.id = id.into();
+            inventory.push(p);
         }
     }
+    o.fs_handles[1].bindings.push(GuestBinding {
+        grant: GrantId::new(),
+        admission: GuestAdmission::Revoked,
+    });
+    for id in ["stream-0", "stream-1"] {
+        let mut p = stream();
+        p.id = id.into();
+        p.ends[0].id = format!("{id}-accepted");
+        p.ends[1].id = format!("{id}-relay");
+        o.socket_streams.push(p);
+    }
+    o.software.held = full().software.held;
+    assert_eq!(o.validate(), Ok(()));
+    assert_eq!(
+        o.projections()
+            .map(|(kind, projection)| (kind, projection.id().to_owned()))
+            .collect::<Vec<_>>(),
+        [
+            (FsMounts, "mount-0"),
+            (FsMounts, "mount-1"),
+            (FsHandles, "handle-0"),
+            (FsHandles, "handle-1"),
+            (SocketListeners, "listener-0"),
+            (SocketListeners, "listener-1"),
+            (DnsListeners, "dns-0"),
+            (DnsListeners, "dns-1"),
+            (Tuns, "tun-0"),
+            (Tuns, "tun-1"),
+            (Routes, "route-0"),
+            (Routes, "route-1"),
+            (ProxyRules, "proxy-0"),
+            (ProxyRules, "proxy-1"),
+            (TcpFlows, "tcp-0"),
+            (TcpFlows, "tcp-1"),
+            (UdpFlows, "udp-0"),
+            (UdpFlows, "udp-1"),
+            (SocketStreams, "stream-0"),
+            (SocketStreams, "stream-1"),
+        ]
+        .map(|(kind, id)| (kind, id.to_owned()))
+    );
+    let grant = |p: &GuestProjection| p.bindings[0].grant;
+    assert_eq!(
+        o.grants().collect::<Vec<_>>(),
+        [
+            (FsMounts, "mount-0", grant(&o.fs_mounts[0])),
+            (FsMounts, "mount-1", grant(&o.fs_mounts[1])),
+            (FsHandles, "handle-0", grant(&o.fs_handles[0])),
+            (FsHandles, "handle-1", grant(&o.fs_handles[1])),
+            (FsHandles, "handle-1", o.fs_handles[1].bindings[1].grant),
+            (SocketListeners, "listener-0", grant(&o.socket_listeners[0])),
+            (SocketListeners, "listener-1", grant(&o.socket_listeners[1])),
+            (DnsListeners, "dns-0", grant(&o.network.dns_listeners[0])),
+            (DnsListeners, "dns-1", grant(&o.network.dns_listeners[1])),
+            (Tuns, "tun-0", grant(&o.network.tuns[0])),
+            (Tuns, "tun-1", grant(&o.network.tuns[1])),
+            (Routes, "route-0", grant(&o.network.routes[0])),
+            (Routes, "route-1", grant(&o.network.routes[1])),
+            (ProxyRules, "proxy-0", grant(&o.network.proxy_rules[0])),
+            (ProxyRules, "proxy-1", grant(&o.network.proxy_rules[1])),
+            (TcpFlows, "tcp-0", grant(&o.network.tcp_flows[0])),
+            (TcpFlows, "tcp-1", grant(&o.network.tcp_flows[1])),
+            (UdpFlows, "udp-0", grant(&o.network.udp_flows[0])),
+            (UdpFlows, "udp-1", grant(&o.network.udp_flows[1])),
+            (SocketStreams, "stream-0", o.socket_streams[0].grant),
+            (SocketStreams, "stream-1", o.socket_streams[1].grant),
+        ]
+    );
     assert_eq!(
         serde_json::from_str::<GuestObservation>(&serde_json::to_string(&o).unwrap()).unwrap(),
         o
