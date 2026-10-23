@@ -53,10 +53,22 @@ fn build_layout() -> Layout {
         .current_dir(dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let mut pipe = child.stderr.take().unwrap();
+    let output = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).unwrap();
+        String::from_utf8(bytes).unwrap()
+    });
     assert_eq!(wait(&mut child, Duration::from_secs(60)).code(), Some(70));
+    let text = output.join().unwrap();
+    assert_eq!(
+        text,
+        "plasmosome-vmm: refused descriptors exit=70: descriptor 3 is not open\n"
+    );
+    assert!(!text.contains("calling krun_"), "{text}");
     Layout { binary, _dir: dir }
 }
 
@@ -77,6 +89,54 @@ fn wait(child: &mut Child, budget: Duration) -> std::process::ExitStatus {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn a_timed_out_owned_child_is_reaped() {
+    const TOKEN: &str = "PLASMOSOME_VMM_WAIT_PAUSE_PARENT";
+    // SAFETY: getppid has no preconditions and keeps no pointers.
+    let parent = unsafe { libc::getppid() };
+    if std::env::var(TOKEN).ok().as_deref() == Some(parent.to_string().as_str()) {
+        std::thread::sleep(Duration::from_secs(60));
+        return;
+    }
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "a_timed_out_owned_child_is_reaped"])
+        .env(TOKEN, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id().cast_signed();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait(&mut child, Duration::from_secs(5))
+    }));
+    let mut status = 0;
+    // SAFETY: pid names only this test's direct child; WNOHANG cannot block and status is writable.
+    let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    if waited == 0 {
+        let _ = child.kill();
+        wait(&mut child, Duration::from_secs(5));
+    }
+    let panic = result.expect_err("the harmless child must reach the timeout branch");
+    let message = panic.downcast_ref::<String>().unwrap();
+    assert!(
+        message.contains("owned helper exceeded 5s; killed and reaped"),
+        "{message}"
+    );
+    assert_eq!(
+        (waited, errno),
+        (-1, Some(libc::ECHILD)),
+        "timeout left child {pid} waitable"
+    );
+}
+
+#[test]
+fn warm_up_keeps_descriptor_refusal_evidence() {
+    let _layout = build_layout();
 }
 
 #[derive(Clone, Copy, Default)]

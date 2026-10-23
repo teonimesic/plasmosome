@@ -1,24 +1,16 @@
+mod diagnostics;
 #[cfg(target_os = "macos")]
 mod libkrun;
 #[cfg(target_os = "macos")]
 mod loader;
+#[cfg(target_os = "macos")]
+mod pre_native;
 
 use plasmosome_membrane::runtime::vmm_helper::{HelperExit, HelperRefusal};
 use std::io::Write;
 
-fn diagnostic_line(message: impl std::fmt::Display) -> String {
-    let mut line = format!("plasmosome-vmm: {message}").replace(['\n', '\r'], " ");
-    let mut end = line.len().min(1023);
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    line.truncate(end);
-    line.push('\n');
-    line
-}
-
 fn diagnostic(message: impl std::fmt::Display) {
-    let _ = std::io::stderr().write_all(diagnostic_line(message).as_bytes());
+    let _ = std::io::stderr().write_all(diagnostics::line(message).as_bytes());
 }
 
 fn main() {
@@ -76,48 +68,57 @@ fn run() -> Result<std::convert::Infallible, HelperRefusal> {
     apply_host_policy(&policy)?;
     probe_denials()?;
     diagnostic("host_policy ok");
-    for artifact in [
-        &verified.kernel,
-        &verified.initramfs,
-        &verified.root_image,
-        &verified.helper,
-    ]
-    .into_iter()
-    .chain(&verified.libraries)
-    .chain([&verified.host_policy, &verified.guest_policy])
-    {
-        artifact
-            .reconfirm()
-            .map_err(|e| refuse(HelperExit::Verify, &e))?;
-    }
-    reconfirm_writable_root(recipe.writable_root(), &facts)?;
-    loader::refuse_loader_inputs()?;
-    // SAFETY: before any libkrun call only this helper thread runs. otool shows no
-    // __mod_init_func or __init_offsets in either pinned libkrun or this linked helper.
-    // Clean sealed system libraries are the platform boundary. No firmware
-    // leaf-name load happens before create, so O-4/O-6's later planting window is irrelevant here.
-    let images = unsafe { loaded_images() };
-    judge_loaded_images(&images, &recipe)?;
-    diagnostic("inventory ok");
-    Err(run_plan(
-        &krun_plan(&recipe),
-        |step, context| {
-            diagnostic(format_args!("calling {}", step.name()));
-            libkrun::call(step, context)
-        },
+    pre_native::finish(
         || {
-            // SAFETY: the helper starts no thread before start_enter. Pinned libkrun 1.19.4
-            // init_log/create start none, import no dlclose, and retain firmware in a static.
-            // This holds provided no foreign image entered between the leaf check and create.
-            // A Homebrew-rpath writer has the helper's UID (O-4); the cryptex parent may admit any
-            // local user (unmeasured O-6, outside O-4). Such an image's initializers already ran
-            // with the helper's authority; the unload race adds none. Main accepts that proviso
-            // under both gates. The inventory still refuses the foreign image after the fact.
-            judge_loaded_images(&unsafe { loaded_images() }, &recipe)?;
-            diagnostic("inventory after_create ok");
+            for artifact in [
+                &verified.kernel,
+                &verified.initramfs,
+                &verified.root_image,
+                &verified.helper,
+            ]
+            .into_iter()
+            .chain(&verified.libraries)
+            .chain([&verified.host_policy, &verified.guest_policy])
+            {
+                artifact
+                    .reconfirm()
+                    .map_err(|e| refuse(HelperExit::Verify, &e))?;
+            }
+            reconfirm_writable_root(recipe.writable_root(), &facts)
+        },
+        loader::refuse_loader_inputs,
+        || {
+            // SAFETY: before any libkrun call only this helper thread runs. otool shows no
+            // __mod_init_func or __init_offsets in either pinned libkrun or this linked helper.
+            // Clean sealed system libraries are the platform boundary. No firmware
+            // leaf-name load happens before create, so O-4/O-6's later planting window is irrelevant here.
+            let images = unsafe { loaded_images() };
+            judge_loaded_images(&images, &recipe)?;
+            diagnostic("inventory ok");
             Ok(())
         },
-    ))
+        || {
+            run_plan(
+                &krun_plan(&recipe),
+                |step, context| {
+                    diagnostic(format_args!("calling {}", step.name()));
+                    libkrun::call(step, context)
+                },
+                || {
+                    // SAFETY: the helper starts no thread before start_enter. Pinned libkrun 1.19.4
+                    // init_log/create start none, import no dlclose, and retain firmware in a static.
+                    // This holds provided no foreign image entered between the leaf check and create.
+                    // A Homebrew-rpath writer has the helper's UID (O-4); the cryptex parent may admit any
+                    // local user (unmeasured O-6, outside O-4). Such an image's initializers already ran
+                    // with the helper's authority; the unload race adds none. Main accepts that proviso
+                    // under both gates. The inventory still refuses the foreign image after the fact.
+                    judge_loaded_images(&unsafe { loaded_images() }, &recipe)?;
+                    diagnostic("inventory after_create ok");
+                    Ok(())
+                },
+            )
+        },
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -171,25 +172,5 @@ fn close_recipe(source: std::fs::File) -> Result<(), HelperRefusal> {
             exit: HelperExit::Recipe,
             detail: std::io::Error::last_os_error().to_string(),
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn diagnostic_has_a_utf8_boundary_within_one_kib() {
-        for detail in [
-            "é".repeat(1024),
-            "x".repeat(2048),
-            "a\nb\rc".into(),
-            String::new(),
-        ] {
-            let line = super::diagnostic_line(detail);
-            assert!(line.len() <= 1024);
-            assert!(line.starts_with("plasmosome-vmm: "));
-            assert!(line.ends_with('\n'));
-            assert_eq!(line.lines().count(), 1);
-            assert!(!line.contains('\r'));
-        }
     }
 }

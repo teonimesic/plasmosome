@@ -36,6 +36,7 @@ bench = false
 name = "plasmosome-vmm"
 path = "src/bin/plasmosome-vmm/main.rs"
 required-features = ["vmm-helper"]
+test = false
 bench = false
 
 [lints.rust]

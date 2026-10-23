@@ -39,6 +39,19 @@ no rpath. The shipped pinned dylib still has an rpath, so the supervisor's
 pre-exec closure audit refuses today's bundle. The successor bundle belongs to
 native task `plasmosome-jab`. The helper is not connected to cell startup yet.
 
+The feature tests need only the same build-time library directory, even with an
+empty Cargo target directory:
+
+```shell
+PLASMOSOME_LIBKRUN_DIR=<bundle>/lib cargo test --locked -j 4 -p plasmosome-membrane --features vmm-helper
+```
+
+The binary has no unit-test executable. An integration test includes its pure
+modules without the native FFI. Process tests copy their own temporary runtime
+layout and refuse before native calls. Recording adapters check reconfirmation,
+the late loader refusal, inventory and native dispatch in order. Separate process
+witnesses check timeout reaping and the warm-up's descriptor-refusal diagnostics.
+
 The supervisor supplies exactly `--runtime-fd=3`, an empty environment, `/dev/null`
 on 0 and 1, diagnostics on pipe 2 and one recipe followed by EOF on pipe 3.
 The environment check reads the kernel-supplied vector following argv on the
