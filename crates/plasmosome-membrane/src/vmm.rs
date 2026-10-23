@@ -2309,13 +2309,15 @@ mod tests {
             kept: [ready_write, control_read],
         })
         .expect("the fixture leader forks");
-        drop(control_write);
         wait_readable(&ready_read, DEADLINE);
         assert_eof_within(&ready_read, DEADLINE);
-        assert_eq!(
-            child.wait_terminal(DEADLINE),
-            Ok(VmmState::Exited { code: 0 })
-        );
+        let pid = child.pid();
+        reset_reap_record();
+        child
+            .kill()
+            .expect("the still-live fixture leader is killed and reaped");
+        assert_reaped_by_handle(pid);
+        drop(control_write);
     }
 
     #[cfg(target_os = "macos")]
