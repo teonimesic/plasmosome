@@ -92,7 +92,17 @@ with a replacement's closure and lifetime fields. Until plasmosome-dlyi, plasmos
 plasmosome-p67m add those fields, a replacement holding `lifetime`, `named`, `requires` or
 `provides` is refused as `Unparseable`, and one lacking them is accepted; spec 008's
 `InvalidClosure` rule for a missing field is theirs. No writer exists yet, so no journal holds
-either form. Reading a whole journal file, and the order of its generations and events, come
-with plasmosome-avh.
+either form.
+
+`CellHistory` checks generation, transaction order and exact identities across a cell's history.
+`check` and `admit` take individually validated records; refusal leaves the history unchanged.
+Commit publishes complete replacements before finish, abort preserves prior attachments, and
+retired addresses remain recorded. The whole-file readers return every record or the first
+fault, never a decoded prefix, and require a final LF even after complete JSON. Production
+recovery passes the regular file opened by core's directory-relative `CellDir::open_journal` to
+`read_cell_journal_from`; its path is diagnostic only. `read_cell_journal(path)` also exists for
+trusted caller paths: it refuses a final-component symlink, directory or FIFO without waiting,
+but does not validate ancestor directories or ACL policy. Neither reader changes the file.
+Appending, cleanup, cross-cell identity checks and recovery adoption remain separate work.
 
 Tests: `cargo test -p plasmosome-ledger`
