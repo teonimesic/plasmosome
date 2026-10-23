@@ -582,7 +582,10 @@ mod tests {
         }
     }
 
-    impl Launch for Connects {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch makes a socket, connects it to the address the parent laid out,
+    // then calls pause forever or _exit. All four calls are async-signal-safe.
+    unsafe impl Launch for Connects {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
@@ -609,7 +612,10 @@ mod tests {
         sent: libc::c_int,
     }
 
-    impl Launch for WritesOnInherited {
+    #[allow(unsafe_code)]
+    // SAFETY: In the child, launch writes one byte of a static on up to two inherited descriptors,
+    // then calls pause forever or _exit. All three calls are async-signal-safe.
+    unsafe impl Launch for WritesOnInherited {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let byte = b"x";
