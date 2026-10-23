@@ -7,6 +7,90 @@ use std::sync::{PoisonError, RwLock};
 
 static SPAWN_LOCK: RwLock<()> = RwLock::new(());
 
+#[cfg(test)]
+static FIXTURE_WRITERS: std::sync::Mutex<Vec<RawFd>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+type RegistrationPause = Box<dyn FnOnce(RawFd)>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_FIXTURE_REGISTRATION: std::cell::RefCell<Option<RegistrationPause>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct FixtureWriter(Option<OwnedFd>);
+
+#[cfg(test)]
+impl AsRawFd for FixtureWriter {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+            .as_ref()
+            .expect("the fixture writer is open")
+            .as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+impl Drop for FixtureWriter {
+    fn drop(&mut self) {
+        write_held(&SPAWN_LOCK, || {
+            let fd = self.as_raw_fd();
+            FIXTURE_WRITERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .retain(|writer| *writer != fd);
+            self.0.take();
+        });
+    }
+}
+
+#[cfg(test)]
+/// Opens and registers a fixture's control writer before a fork can inherit it.
+pub(crate) fn fixture_control_pipe(
+    create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<[OwnedFd; 2]>,
+) -> std::io::Result<(OwnedFd, FixtureWriter)> {
+    write_held(&SPAWN_LOCK, || {
+        let [read, write] = with_each_descriptor_held(create)?;
+        BEFORE_FIXTURE_REGISTRATION.with(|pause| {
+            if let Some(pause) = pause.take() {
+                pause(write.as_raw_fd());
+            }
+        });
+        FIXTURE_WRITERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(write.as_raw_fd());
+        Ok((read, FixtureWriter(Some(write))))
+    })
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+fn fork_closing_fixture_writers() -> libc::pid_t {
+    let writers = std::mem::ManuallyDrop::new(
+        FIXTURE_WRITERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone(),
+    );
+    // SAFETY: fork calls this while holding SPAWN_LOCK's read side, so registered descriptors
+    // cannot open, close or be reused between the snapshot and fork. In the child only close
+    // and iteration over prepared storage run here; ManuallyDrop prevents freeing that storage.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        for &fd in writers.iter() {
+            // SAFETY: The read lock protects each inherited descriptor number until fork, and
+            // this child has opened nothing. close is async-signal-safe and keeps no pointer.
+            unsafe { libc::close(fd) };
+        }
+    } else {
+        drop(std::mem::ManuallyDrop::into_inner(writers));
+    }
+    pid
+}
+
 thread_local! {
     static CREATING_DESCRIPTORS: Cell<bool> = const { Cell::new(false) };
 }
@@ -123,6 +207,17 @@ pub(crate) fn hold_fork_side() -> std::sync::RwLockReadGuard<'static, ()> {
 }
 
 #[cfg(test)]
+/// Spawns under the read side and releases it before callers wait or read output.
+pub(crate) fn spawn_guarded(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let held = hold_fork_side();
+    let child = command.spawn();
+    drop(held);
+    child
+}
+
+#[cfg(test)]
 pub(crate) fn waits_for_the_write_side(thread: std::thread::ThreadId) -> bool {
     WAITING_FOR_THE_WRITE_SIDE
         .lock()
@@ -143,9 +238,9 @@ fn close_on_exec_or_closed<T: OwnsDescriptor>(created: T) -> std::io::Result<T> 
 #[allow(unsafe_code)]
 pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // SAFETY: This function's doc binds every caller to do only async-signal-safe work in
-    // Forked::Child and never return or unwind there. Its one caller, VmmChild::spawn, calls only
-    // setsid and _exit itself, and its ExitOnUnwind guard exits the child if `launch` panics, after
-    // the panic hook has run. That `launch` does only async-signal-safe work is the Safety contract
+    // Forked::Child and never return or unwind there. VmmChild::spawn calls only setsid and _exit
+    // itself, and its ExitOnUnwind guard exits the child if `launch` panics, after the panic hook
+    // has run. That `launch` does only async-signal-safe work is the Safety contract
     // of Launch, an unsafe trait, so each implementation is an unsafe impl whose SAFETY comment
     // says why it keeps it. The test launcher PanicOnLaunch breaks it on purpose. fork_holding
     // holds the read side of the spawn lock, so no descriptor made inside
@@ -153,7 +248,11 @@ pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // descriptor made in two calls anywhere else, such as a socket or connection std makes on
     // macOS, which has no SOCK_CLOEXEC or accept4. daemon::run's doc gives the order that keeps the
     // daemon's own sockets out of a fork.
-    fork_holding(&SPAWN_LOCK, || unsafe { libc::fork() })
+    #[cfg(not(test))]
+    let fork = || unsafe { libc::fork() };
+    #[cfg(test)]
+    let fork = fork_closing_fixture_writers;
+    fork_holding(&SPAWN_LOCK, fork)
 }
 
 fn write_held<T>(lock: &RwLock<()>, create: impl FnOnce() -> T) -> T {
@@ -238,6 +337,7 @@ fn fork_holding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vmm::tests::{DEADLINE, SETTLE};
     use crate::vmm::{Launch, SpawnError, VmmChild, VmmState};
     use std::cell::Cell;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -346,6 +446,247 @@ mod tests {
             let _ = sent.send(run());
         });
         received.recv_timeout(PATIENCE)
+    }
+
+    #[test]
+    fn fixture_writer_creation_and_registration_hold_the_write_side() {
+        let (read, writer) = fixture_control_pipe(|_held| {
+            assert!(matches!(
+                SPAWN_LOCK.try_read(),
+                Err(TryLockError::WouldBlock)
+            ));
+            let (read, write) = UnixStream::pair()?;
+            Ok([read.into(), write.into()])
+        })
+        .expect("a fixture control opens");
+        let held = hold_fork_side();
+        assert!(
+            FIXTURE_WRITERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&writer.as_raw_fd())
+        );
+        drop(held);
+        drop(writer);
+        drop(read);
+        let failed = fixture_control_pipe(|_| Err(std::io::Error::from_raw_os_error(libc::EMFILE)));
+        assert!(matches!(failed, Err(error) if error.raw_os_error() == Some(libc::EMFILE)));
+    }
+
+    #[test]
+    fn a_fork_snapshot_waits_until_the_fixture_writer_is_registered() {
+        let (paused, at_registration) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (created, fixture) = mpsc::channel();
+        let creating = std::thread::spawn(move || {
+            BEFORE_FIXTURE_REGISTRATION.with_borrow_mut(|pause| {
+                *pause = Some(Box::new(move |writer| {
+                    paused.send(writer).unwrap();
+                    released
+                        .recv_timeout(DEADLINE)
+                        .expect("registration is released");
+                }));
+            });
+            let _ = created.send(fixture_control_pipe(|_| {
+                let (read, write) = UnixStream::pair()?;
+                Ok([read.into(), write.into()])
+            }));
+        });
+        let writer_fd = at_registration
+            .recv_timeout(DEADLINE)
+            .expect("creation pauses");
+        let (attempting, attempted) = mpsc::channel();
+        let (snapshot, observed) = mpsc::channel();
+        let forking = std::thread::spawn(move || {
+            attempting.send(()).unwrap();
+            let _held = hold_fork_side();
+            let writers = FIXTURE_WRITERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let _ = snapshot.send(writers);
+        });
+        attempted
+            .recv_timeout(DEADLINE)
+            .expect("the snapshot thread starts");
+        let early = observed.recv_timeout(SETTLE);
+        release.send(()).expect("registration resumes");
+        let writers = early.clone().or_else(|_| observed.recv_timeout(DEADLINE));
+        let fixture = fixture
+            .recv_timeout(DEADLINE)
+            .expect("registration finishes");
+        creating.join().expect("creation thread ends");
+        forking.join().expect("snapshot thread ends");
+        drop(fixture.expect("the fixture control opens"));
+        assert_eq!(
+            early,
+            Err(RecvTimeoutError::Timeout),
+            "snapshot passed before registration"
+        );
+        assert!(
+            writers
+                .expect("snapshot proceeds after registration")
+                .contains(&writer_fd)
+        );
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn a_guarded_exec_waits_until_descriptor_creation_releases_the_write_side() {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
+        let [monitor, child_sync] = with_each_descriptor_held(|_| {
+            let (monitor, child_sync) = UnixStream::pair()?;
+            Ok([monitor.into(), child_sync.into()])
+        })
+        .expect("the pre-exec handoff opens");
+        let mut monitor = UnixStream::from(monitor);
+        let mut ready = libc::pollfd {
+            fd: child_sync.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout = DEADLINE.as_millis().try_into().unwrap();
+        let mut command = std::process::Command::new("/usr/bin/true");
+        // SAFETY: The child only writes, polls, reads and calls _exit on failure. The captured
+        // descriptor stays open in the parent through spawn; all buffers are fixed local storage.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 1_u8;
+                if libc::write(ready.fd, (&raw const byte).cast(), 1) != 1
+                    || libc::poll(&raw mut ready, 1, timeout) != 1
+                    || libc::read(ready.fd, (&raw mut byte).cast(), 1) != 1
+                {
+                    libc::_exit(3);
+                }
+                Ok(())
+            });
+        }
+        let (entered, held) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (created, descriptors) = mpsc::channel();
+        let creating = std::thread::spawn(move || {
+            let _ = created.send(with_each_descriptor_held(|_| {
+                let (read, write) = UnixStream::pair()?;
+                entered.send(()).unwrap();
+                released
+                    .recv_timeout(DEADLINE)
+                    .expect("descriptor creation is released");
+                Ok([OwnedFd::from(read), OwnedFd::from(write)])
+            }));
+        });
+        held.recv_timeout(DEADLINE)
+            .expect("descriptor creation holds the write side");
+        let (attempting, attempted) = mpsc::channel();
+        let (spawned, child) = mpsc::channel();
+        let spawning = std::thread::spawn(move || {
+            attempting.send(()).unwrap();
+            let _ = spawned.send(spawn_guarded(&mut command));
+        });
+        attempted
+            .recv_timeout(DEADLINE)
+            .expect("the exec thread starts");
+        monitor.set_read_timeout(Some(SETTLE)).unwrap();
+        let mut byte = [0];
+        let early = monitor.read_exact(&mut byte);
+        let blocked = matches!(&early, Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut));
+        release.send(()).expect("descriptor creation resumes");
+        monitor.set_read_timeout(Some(DEADLINE)).unwrap();
+        if early.is_err() {
+            monitor
+                .read_exact(&mut byte)
+                .expect("the child reaches pre-exec");
+        }
+        let (acquired, writer) = mpsc::channel();
+        let (attempting, attempted) = mpsc::channel();
+        let writing = std::thread::spawn(move || {
+            attempting.send(()).unwrap();
+            with_descriptors_held(|_| {
+                acquired.send(()).unwrap();
+                close_on_exec_null()
+            })
+            .unwrap();
+        });
+        attempted
+            .recv_timeout(DEADLINE)
+            .expect("the second writer starts");
+        let during_spawn = writer.recv_timeout(SETTLE);
+        monitor
+            .write_all(&[1])
+            .expect("the pre-exec child is released");
+        let mut child = child
+            .recv_timeout(DEADLINE)
+            .expect("spawn proceeds after creation")
+            .expect("true starts");
+        let deadline = Instant::now() + DEADLINE;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => std::thread::yield_now(),
+                _ => {
+                    let _ = child.kill();
+                    child.wait().expect("the exec child is cleaned up");
+                    break None;
+                }
+            }
+        };
+        let descriptors = descriptors
+            .recv_timeout(DEADLINE)
+            .expect("creation finishes");
+        creating.join().expect("creation thread ends");
+        spawning.join().expect("exec thread ends");
+        let after_spawn = during_spawn.or_else(|_| writer.recv_timeout(DEADLINE));
+        writing.join().expect("the second writer ends");
+        drop(descriptors.expect("the descriptors open"));
+        drop(child_sync);
+        assert!(
+            during_spawn == Err(RecvTimeoutError::Timeout) && after_spawn.is_ok(),
+            "the read side must remain held throughout Command::spawn"
+        );
+        assert!(
+            blocked,
+            "exec started before descriptor creation released the write side"
+        );
+        assert!(
+            status
+                .expect("true exits and is reaped within DEADLINE")
+                .success()
+        );
+    }
+
+    #[test]
+    fn fixture_writer_removal_and_close_wait_while_a_fork_holds_the_read_side() {
+        let (_read, writer) = fixture_control_pipe(|_| {
+            let (read, write) = UnixStream::pair()?;
+            Ok([read.into(), write.into()])
+        })
+        .expect("a fixture control opens");
+        let held = hold_fork_side();
+        let (finished, after) = mpsc::channel();
+        let dropping = std::thread::spawn(move || {
+            drop(writer);
+            let _ = finished.send(());
+        });
+        let deadline = Instant::now() + PATIENCE;
+        let waited = loop {
+            if waits_for_the_write_side(dropping.thread().id()) {
+                break true;
+            }
+            if after.try_recv().is_ok() {
+                break false;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the writer drop never reached the lock"
+            );
+            std::thread::yield_now();
+        };
+        drop(held);
+        dropping.join().expect("the writer drop completes");
+        assert!(
+            waited,
+            "the writer must stay registered and open until a fork finishes"
+        );
     }
 
     #[test]
@@ -509,9 +850,10 @@ mod tests {
                 let mut forked_while_held = false;
                 let forked = fork_holding(lock, || {
                     forked_while_held = !seen.load(Ordering::SeqCst);
-                    // SAFETY: The forked child only reads one descriptor's flags with fcntl and
-                    // calls _exit, both async-signal-safe.
-                    unsafe { libc::fork() }
+                    match super::fork().expect("the fixture-safe fork succeeds") {
+                        Forked::Parent(pid) => pid,
+                        Forked::Child => 0,
+                    }
                 });
                 let outcome = match forked {
                     Ok(Forked::Child) => {

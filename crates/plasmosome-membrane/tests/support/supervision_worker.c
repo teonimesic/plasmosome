@@ -40,7 +40,7 @@ static void check_pipe_ends(int ready, int control, int parent_ready, int parent
 }
 
 static void descriptor_worker(int ready, int control, const char *liveness_path) {
-    int liveness = open(liveness_path, O_WRONLY);
+    int liveness = open(liveness_path, O_WRONLY | O_NONBLOCK);
     if (liveness < 0) {
         _exit(67);
     }

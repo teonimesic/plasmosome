@@ -881,7 +881,7 @@ impl Drop for ExitOnUnwind {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::exec::ExecCommand;
     use std::ffi::CString;
@@ -890,8 +890,8 @@ mod tests {
 
     include!("../tests/support/fixture.rs");
 
-    const DEADLINE: Duration = Duration::from_secs(5);
-    const SETTLE: Duration = Duration::from_millis(300);
+    pub(crate) const DEADLINE: Duration = Duration::from_secs(5);
+    pub(crate) const SETTLE: Duration = Duration::from_millis(300);
 
     struct ExitWith(i32);
 
@@ -1060,7 +1060,7 @@ mod tests {
     struct WorkerFixture {
         child: Option<VmmChild>,
         liveness: PipeEnd,
-        release: Option<PipeEnd>,
+        release: Option<crate::spawn_lock::FixtureWriter>,
         dir: tempfile::TempDir,
     }
 
@@ -1084,11 +1084,17 @@ mod tests {
             assert_eq!(
                 // SAFETY: `byte` is a local and the length 1 matches it. `release` keeps its
                 // descriptor open for the call.
-                unsafe { libc::write(release.0, &byte as *const u8 as *const libc::c_void, 1,) },
+                unsafe {
+                    libc::write(
+                        release.as_raw_fd(),
+                        &byte as *const u8 as *const libc::c_void,
+                        1,
+                    )
+                },
                 1,
                 "the private control descriptor releases the live worker"
             );
-            release.close();
+            drop(release);
             assert_eof_within(&self.liveness, DEADLINE);
         }
 
@@ -1129,9 +1135,15 @@ mod tests {
 
     #[allow(unsafe_code)]
     fn spawn_with_worker(leader_exits: bool) -> WorkerFixture {
+        let executable = {
+            let _held = crate::spawn_lock::hold_fork_side();
+            supervision_fixture()
+        };
         let [ready_read, ready_write] = close_on_exec_ends();
-        let [control_read, control_write] = close_on_exec_ends();
-        let (ready_read, control_write) = (PipeEnd::from(ready_read), PipeEnd::from(control_write));
+        let (control_read, control_write) =
+            crate::spawn_lock::fixture_control_pipe(super::signal_pressure::close_on_exec_pipe)
+                .expect("the control writer is registered under the spawn lock");
+        let ready_read = PipeEnd::from(ready_read);
         let dir = tempfile::tempdir().expect("the fixture owns its directory");
         let liveness_path = dir.path().join(LIVENESS);
         let c_path = CString::new(liveness_path.as_os_str().as_bytes())
@@ -1146,13 +1158,13 @@ mod tests {
         let liveness = open_liveness(&liveness_path);
         let mode = if leader_exits { "exit" } else { "wait" };
         let command = ExecCommand::new(vec![
-            supervision_fixture().display().to_string(),
+            executable.display().to_string(),
             mode.to_string(),
             ready_write.as_raw_fd().to_string(),
             control_read.as_raw_fd().to_string(),
             liveness_path.display().to_string(),
             ready_read.0.to_string(),
-            control_write.0.to_string(),
+            control_write.as_raw_fd().to_string(),
         ])
         .expect("the prebuilt fixture executable resolves before fork");
         let mut child = VmmChild::spawn(KeepAcrossExec {
@@ -1180,7 +1192,7 @@ mod tests {
              worker from ever seeing the control pipe close",
             char::from(byte),
             ready_read.0,
-            control_write.0
+            control_write.as_raw_fd()
         );
         WorkerFixture {
             child: Some(child),
@@ -1388,14 +1400,10 @@ mod tests {
                 let (control_read, control_write) = pipe();
                 let (ready_read, ready_write) = pipe();
                 let leader = group.pids.first().copied().unwrap_or(0);
-                // SAFETY: This test process has other threads. The child runs only close, setpgid,
-                // write, read and _exit, which are async-signal-safe, on its own copies of the
-                // descriptors and on locals, so it cannot deadlock here. It never execs, so it
-                // forks without the spawn lock: that lock only keeps a descriptor from crossing an
-                // exec before it is close-on-exec, and this child keeps every descriptor it
-                // inherits until it exits, with the lock or without it.
-                let pid = unsafe { libc::fork() };
-                assert!(pid >= 0, "the certificate fixture fork succeeds");
+                let pid = match crate::spawn_lock::fork().expect("the certificate fixture forks") {
+                    Forked::Parent(pid) => pid,
+                    Forked::Child => 0,
+                };
                 if pid == 0 {
                     // SAFETY: This is the forked child. Every call here is async-signal-safe, the
                     // descriptors are its own copies, and `byte` and `release` are locals that
@@ -2183,14 +2191,10 @@ mod tests {
     #[allow(unsafe_code)]
     fn immediate_teardown_while_child_is_pre_setsid_reaps_exact_child() {
         let (gate_read, gate_write) = pipe();
-        // SAFETY: This test process has other threads. The child runs only close, read, setsid,
-        // pause and _exit, which are async-signal-safe, on its own copies of the descriptors and on
-        // a local, so it cannot deadlock here. It never execs, so it forks without the spawn lock:
-        // that lock only keeps a descriptor from crossing an exec before it is close-on-exec, and
-        // this child keeps every descriptor it inherits until it dies, with the lock or without
-        // it.
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "the instrumented fork succeeds");
+        let pid = match crate::spawn_lock::fork().expect("the instrumented child forks") {
+            Forked::Parent(pid) => pid,
+            Forked::Child => 0,
+        };
         if pid == 0 {
             // SAFETY: This is the forked child. Every call here is async-signal-safe, `byte` is a
             // local that matches the length 1, and the descriptors are its own copies.
@@ -2247,6 +2251,73 @@ mod tests {
         assert_eof_within(&fixture.liveness, DEADLINE);
         assert_reaped_by_handle(pid);
         fixture.discard_release();
+    }
+
+    #[test]
+    fn a_forked_sibling_cannot_pin_any_live_fixture_worker() {
+        let mut exited_leader = spawn_with_worker(true);
+        let mut live_leader = spawn_with_worker(false);
+        let (sibling, spawned) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sibling.send(VmmChild::spawn(SleepForever));
+        });
+        let mut sibling = spawned
+            .recv_timeout(DEADLINE)
+            .expect("the sibling's spawning thread answers within the existing deadline")
+            .expect("the sibling forks");
+        exited_leader.discard_release();
+        live_leader.discard_release();
+        let exited_pinned = holds_open(&exited_leader.liveness, SETTLE);
+        let live_pinned = holds_open(&live_leader.liveness, SETTLE);
+        sibling
+            .kill()
+            .expect("the probe kills and reaps its sibling");
+        assert_eof_within(&exited_leader.liveness, DEADLINE);
+        assert_eof_within(&live_leader.liveness, DEADLINE);
+        assert!(
+            !exited_pinned && !live_pinned,
+            "the sibling held a worker control writer: exited leader {exited_pinned}, live leader {live_pinned}"
+        );
+    }
+
+    #[test]
+    fn a_worker_without_a_liveness_reader_exits_instead_of_blocking_on_open() {
+        let executable = {
+            let _held = crate::spawn_lock::hold_fork_side();
+            supervision_fixture()
+        };
+        let dir = tempfile::tempdir().expect("the test owns its directory");
+        let liveness = dir.path().join(LIVENESS);
+        crate::runtime::test_fixtures::tree::make_fifo(&liveness);
+        let [ready_read, ready_write] = close_on_exec_ends();
+        let (control_read, control_write) =
+            crate::spawn_lock::fixture_control_pipe(super::signal_pressure::close_on_exec_pipe)
+                .expect("the control writer is registered");
+        let ready_read = PipeEnd::from(ready_read);
+        let command = ExecCommand::new(vec![
+            executable.display().to_string(),
+            "wait".to_owned(),
+            ready_write.as_raw_fd().to_string(),
+            control_read.as_raw_fd().to_string(),
+            liveness.display().to_string(),
+            ready_read.0.to_string(),
+            control_write.as_raw_fd().to_string(),
+        ])
+        .expect("the fixture executable resolves");
+        let mut child = VmmChild::spawn(KeepAcrossExec {
+            command,
+            kept: [ready_write, control_read],
+        })
+        .expect("the fixture leader forks");
+        wait_readable(&ready_read, DEADLINE);
+        assert_eof_within(&ready_read, DEADLINE);
+        let pid = child.pid();
+        reset_reap_record();
+        child
+            .kill()
+            .expect("the still-live fixture leader is killed and reaped");
+        assert_reaped_by_handle(pid);
+        drop(control_write);
     }
 
     #[cfg(target_os = "macos")]
@@ -2367,12 +2438,18 @@ mod signal_pressure {
         _held: &crate::spawn_lock::DescriptorsHeld,
     ) -> std::io::Result<[OwnedFd; 2]> {
         let mut fds = [0; 2];
+        #[cfg(target_os = "linux")]
+        // SAFETY: `fds` has two c_int entries, matching pipe2's output, and O_CLOEXEC is valid.
+        let opened = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+        #[cfg(not(target_os = "linux"))]
         // SAFETY: `fds` is a local array of two c_int, the size pipe writes.
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        let opened = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if opened != 0 {
             return Err(std::io::Error::last_os_error());
         }
         // SAFETY: pipe returned 0, so both entries are new descriptors, and nothing else owns them.
         let ends = fds.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+        #[cfg(not(target_os = "linux"))]
         for end in &ends {
             // SAFETY: fcntl with F_SETFD takes integers only, and `end` keeps its descriptor open
             // for the call. with_each_descriptor_held checks the flag afterwards.
