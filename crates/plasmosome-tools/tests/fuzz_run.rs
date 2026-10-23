@@ -127,7 +127,10 @@ fn a_completed_run_prints_only_numeric_summary() {
 fn crashes_signals_timeouts_and_multiple_inputs_keep_both_streams_private() {
     for (status, inputs) in [
         (256, vec!["crash-one"]),
-        (9, vec!["timeout-one", "oom-two", "crash-three"]),
+        (
+            9,
+            vec!["timeout-one", "oom-two", "crash-three", "leak-four"],
+        ),
     ] {
         let (code, out, err, calls) = scenario(status, &inputs, LOG, &valid_hash(), false);
         assert_eq!(code, 1);
@@ -214,6 +217,19 @@ fn invalid_arguments_and_existing_private_directory_never_spawn() {
         assert_ne!(code, 0);
         assert!(out.is_empty());
     }
+}
+
+#[test]
+fn the_binary_reports_usage_without_spawning() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fuzz-run"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"fuzz-run: expected root, target and new private directory\n"
+    );
 }
 
 #[test]

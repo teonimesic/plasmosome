@@ -110,7 +110,7 @@ fn search(
         let entry = entry.map_err(|_| "cannot list crash inputs")?;
         let name = entry.file_name();
         let name = name.to_str().ok_or("invalid crash entry")?;
-        if !["crash-", "timeout-", "oom-"]
+        if !["crash-", "timeout-", "oom-", "leak-"]
             .iter()
             .any(|prefix| name.starts_with(prefix))
             || !entry
