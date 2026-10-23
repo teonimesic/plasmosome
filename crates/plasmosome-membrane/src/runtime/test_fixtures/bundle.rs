@@ -78,10 +78,10 @@ impl FixtureBundle {
         let host = host_policy::HOST_POLICY.replace(host_policy::WORK_SUBPATH, &work) + "\0";
         bundle.put("host_policy", "policy/host-policy", host.as_bytes(), 0o444);
         use std::os::unix::process::CommandExt;
-        let mut child = std::process::Command::new(bundle.path().join(format!("bin/{mode}")))
-            .arg0("warmup")
-            .spawn()
-            .unwrap();
+        let mut child = crate::spawn_lock::spawn_guarded(
+            std::process::Command::new(bundle.path().join(format!("bin/{mode}"))).arg0("warmup"),
+        )
+        .unwrap();
         let status = fake::owned_wait::exit_within(&mut child, fake::owned_wait::SETUP_BOUND)
             .unwrap()
             .expect("the copied helper exits within the setup bound");

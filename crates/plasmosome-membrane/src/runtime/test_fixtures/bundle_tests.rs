@@ -535,7 +535,7 @@ fn raw_recipe(bundle: &FixtureBundle, bytes: &[u8]) -> i32 {
             }
         });
     }
-    let mut child = command.spawn().unwrap();
+    let mut child = crate::spawn_lock::spawn_guarded(&mut command).unwrap();
     fake::owned_wait::exit_within(&mut child, fake::owned_wait::SETUP_BOUND)
         .unwrap()
         .expect("the raw recipe child exits within the setup bound")
@@ -555,4 +555,53 @@ fn the_fake_reads_to_eof_and_refuses_one_byte_past_its_recipe_cap() {
             usize::from(code == 66)
         );
     }
+}
+
+#[test]
+fn raw_recipe_waits_for_descriptor_creation() {
+    use crate::vmm::tests::{DEADLINE, SETTLE};
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
+    let bundle = FixtureBundle::build("exit-early");
+    let mut bytes = bundle.recipe().to_ndjson();
+    bytes.resize(1 << 20, b' ');
+    let (entered, holding) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let creating = std::thread::spawn(move || {
+        crate::spawn_lock::with_each_descriptor_held(|_| {
+            let (read, write) = UnixStream::pair()?;
+            entered.send(()).unwrap();
+            released.recv_timeout(DEADLINE).expect("creation resumes");
+            Ok([OwnedFd::from(read), OwnedFd::from(write)])
+        })
+    });
+    holding
+        .recv_timeout(DEADLINE)
+        .expect("the write side is held");
+    let (attempting, attempted) = mpsc::channel();
+    let (completed, outcome) = mpsc::channel();
+    let caller = std::thread::spawn(move || {
+        attempting.send(()).unwrap();
+        completed.send(raw_recipe(&bundle, &bytes)).unwrap();
+    });
+    attempted
+        .recv_timeout(DEADLINE)
+        .expect("the real caller starts");
+    let early = outcome.recv_timeout(SETTLE);
+    let blocked = early == Err(mpsc::RecvTimeoutError::Timeout);
+    release.send(()).expect("creation is released");
+    let code = early.or_else(|_| outcome.recv_timeout(DEADLINE));
+    drop(
+        creating
+            .join()
+            .expect("creator ends")
+            .expect("descriptors open"),
+    );
+    caller.join().expect("caller ends");
+    assert!(
+        blocked,
+        "raw_recipe passed descriptor creation before release"
+    );
+    assert_eq!(code.unwrap(), 66);
 }
