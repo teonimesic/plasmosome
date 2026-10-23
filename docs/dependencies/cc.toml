@@ -34,5 +34,6 @@ native_code = [
   that it runs through the preprocessor alone, with -E, to tell clang from gcc. Nothing of cc's \
   is compiled into an object or linked.\
   """,
+  "libc@0.2 links system libiconv on macOS; with its std feature it adds no other library and compiles no native source",
 ]
 verdict = "kept-pending-owner"

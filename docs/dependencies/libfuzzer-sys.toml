@@ -21,6 +21,6 @@ expands_unsafe = [
 ]
 native_code = [
   "libfuzzer-sys@0.4 build.rs compiles top-level libfuzzer/*.cpp as C++17 with cc and links libfuzzer.a and the host C++ runtime on both supported hosts",
-  "libc@0.2 links host system libraries; its build script compiles no native source",
+  "libc@0.2 links system libiconv on macOS; with its std feature it adds no other library and compiles no native source",
 ]
 verdict = "kept-pending-owner"
