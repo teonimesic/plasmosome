@@ -25,7 +25,7 @@ pub(crate) enum SelectRefusal {
     Untrusted(TrustRefusal),
     NotAManifest {
         path: PathBuf,
-        error: ManifestError,
+        error: Box<ManifestError>,
     },
     IdMismatch {
         path: PathBuf,
@@ -69,7 +69,7 @@ pub(crate) fn open_listing(
     };
     let manifest = parse().map_err(|error| SelectRefusal::NotAManifest {
         path: declaration.to_path_buf(),
-        error,
+        error: Box::new(error),
     })?;
     if manifest.id != id {
         return Err(SelectRefusal::IdMismatch {

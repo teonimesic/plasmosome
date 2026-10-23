@@ -232,7 +232,7 @@ fn manifest_refusal(bytes: &[u8]) -> (ManifestError, Value) {
     let wire: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(wire["code"], 108);
     assert_eq!(wire["path"], path.to_str().unwrap());
-    (error, wire)
+    (*error, wire)
 }
 
 #[test]
