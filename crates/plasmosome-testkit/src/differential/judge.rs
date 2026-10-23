@@ -263,7 +263,7 @@ fn not_neutral(manifest: &Manifest, probe: &str, shown: &[&Observation]) -> Vec<
 }
 
 impl MountKey {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             MountKey::Source => "source",
             MountKey::Fstype => "fstype",

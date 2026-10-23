@@ -1,5 +1,6 @@
 mod judge;
 mod normalize;
+mod results;
 #[cfg(test)]
 mod tests;
 
@@ -12,6 +13,9 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 pub use judge::{Finding, MountKey, NeutralName, Reason, RunRefusal, Subject, Verdict, judge};
+pub use results::{
+    Digests, LaneConfig, Outcome, ReadRefusal, Record, ResultsRefusal, write_results,
+};
 
 /// One of spec 027 §5's five ways a workload can observe the membrane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]

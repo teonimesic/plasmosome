@@ -2,7 +2,9 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 
 use plasmosome_cli::json::{Json, write_compact};
-use plasmosome_cli::{COMMANDS, ClientCode, Command, CommandArgs, Flag, FlagKind, Reading, read};
+use plasmosome_cli::{
+    COMMANDS, ClientCode, Command, CommandArgs, Flag, FlagKind, Form, Reading, read,
+};
 
 const CELL: Flag = Flag {
     name: "--cell",
@@ -145,6 +147,12 @@ fn a_served_commands_own_flags_are_read_with_its_words() {
         Some("\"\"")
     );
     assert_eq!(parsed(&["status"]), CommandArgs::default());
+    let past_u128 = "340282366920938463463374607431768211456";
+    assert!(past_u128.parse::<u128>().is_err());
+    for value in [past_u128.to_string(), format!("1{}", "0".repeat(399))] {
+        let args = parsed(&["germinate", "g", "--lease-ms", &value]);
+        assert_eq!(sent(&args, &LEASE), Some(value));
+    }
 }
 
 #[test]
@@ -292,6 +300,17 @@ fn an_unserved_command_reads_none_of_the_flags() {
     }
     let words = ["--signal", "x", "cell", "kill"];
     assert_eq!(named(line(&words)).as_deref(), Some("--signal"));
+    for words in [
+        &["cell", "kill", "--signal", "--human"][..],
+        &["cell", "kill", "--signal", "x", "--human"],
+    ] {
+        let reading = read(&line(words), &table());
+        let Reading::Refuse { error, form, .. } = &reading else {
+            panic!("{words:?} read as {reading:?}");
+        };
+        let read_as = (error.code(), *form);
+        assert_eq!(read_as, (ClientCode::NotServed, Form::Human), "{words:?}");
+    }
 }
 
 #[test]
