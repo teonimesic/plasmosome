@@ -23,7 +23,7 @@ fn refusal(text: &str, expected: &str) -> String {
     assert_eq!(wire["fix"], *fix);
     assert_eq!(wire["plasmid"], "strict");
     assert!(error.to_string().len() <= 4096);
-    fix.clone()
+    wire["fix"].as_str().unwrap().to_string()
 }
 
 fn apply(text: &str, field: &str, fix: &str) -> String {
@@ -60,6 +60,14 @@ fn apply(text: &str, field: &str, fix: &str) -> String {
 
 fn unknowns() -> Vec<(&'static str, &'static str)> {
     vec![
+        (
+            "[provides.'a: b']\ntools = {}\ntypo = true",
+            "provides.\"a: b\".typo",
+        ),
+        (
+            "[commands.commands.'a: b']\nexec = ['git']\ntypo = true",
+            "commands.commands.\"a: b\".typo",
+        ),
         ("typo = true", "typo"),
         ("[impl]\nwasm = 'c.wasm'\ntypo = true", "impl.typo"),
         (
@@ -135,7 +143,7 @@ fn each_table_refuses_unknown_fields_and_the_wire_keeps_the_repair() {
             let repaired = source
                 .replace(", typo = true", "")
                 .replace("typo = true", "");
-            PlasmidManifest::parse(&repaired).unwrap();
+            PlasmidManifest::parse(&format!("{repaired}\n{fix}")).unwrap();
             assert!(fix.starts_with("# "));
         }
     }
@@ -466,4 +474,36 @@ fn the_benchmark_input_and_two_binding_variant_still_parse() {
         PlasmidManifest::parse(&two).unwrap().provides,
         ["github:tools", "github:issues"]
     );
+}
+
+#[test]
+fn positive_corpus_and_readme_declarations_use_only_known_fields() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for name in [
+        "seed-minimal",
+        "seed-bom",
+        "seed-crlf",
+        "seed-dotted-keys",
+        "seed-full-commands",
+        "seed-full-mock-model",
+        "seed-full-secrets",
+        "seed-full-tools",
+        "seed-strings-and-comments",
+        "seed-table-headers",
+    ] {
+        let source =
+            std::fs::read_to_string(root.join("tests/fuzz/corpus/manifest").join(name)).unwrap();
+        PlasmidManifest::parse(&source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        println!("{name}: parses");
+    }
+    let readme = include_str!("../README.md");
+    let source = readme
+        .split("let source = r#\"")
+        .nth(1)
+        .unwrap()
+        .split("\"#;")
+        .next()
+        .unwrap();
+    PlasmidManifest::parse(source).unwrap();
+    println!("core README declaration: parses");
 }

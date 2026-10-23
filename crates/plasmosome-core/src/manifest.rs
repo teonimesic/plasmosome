@@ -1158,10 +1158,9 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
         if exec.is_empty() {
             let detail = match declared {
                 None => "the command declares no exec".to_string(),
-                Some(value) if value.is_array() => {
+                Some(value) => {
                     format!("{} names no program to run", shown(value))
                 }
-                Some(value) => format!("{} is not a list of strings", shown(value)),
             };
             return Err(field_error(
                 plasmid_id,
