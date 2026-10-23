@@ -67,7 +67,7 @@ impl.wasm = "github-pr.wasm"
 }
 ```
 
-Missing or invalid purpose, tool declarations and missing, empty or non-string IDs return
+Missing or invalid purpose, tool declarations and missing, non-string, empty or blank IDs return
 `ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
 repair. Credential-reference refusals use that same form, including the indexed reference and,
 for command credentials, the quoted command key. So does a `ports` value that is not a list, or an
@@ -95,7 +95,9 @@ A `[provides]` binding whose key is empty or only whitespace is refused at its o
 guessed, so following the fix deletes the binding and its tools. A key is blank when every
 character in it is Unicode White_Space, the characters `str::trim` removes. A key made only of
 U+3000 or U+00A0 is blank. A key such as `" a"` is not, and neither is one made only of U+FEFF,
-U+200B or U+180E, which are not White_Space. A tool name blank in the same sense is refused at its
+U+200B or U+180E, which are not White_Space. An ID is blank when it is only Unicode White_Space,
+as for a binding key. It is refused at `id` with no plasmid, before any other field, and an ID such
+as `" a"` is kept as written. A tool name blank in the same sense is refused at its
 own path, such as `provides."a:tools".tools.""`, before its description is checked. Its fix is
 `remove this entry`: no name is guessed, so following the fix deletes the tool. A names list is
 refused as a whole, and its entries have no descriptions. If its first entry is blank, the refusal
@@ -181,8 +183,9 @@ about twice it: a 16-part table header with a key under it counts 33 and is refu
 tree is 17 deep.
 `WireError::manifest_refusal` turns any of them into code 108. A `Field` refusal carries its
 `field` and its `fix`, and its `plasmid` exactly when it names one, as members a client reads
-without parsing `detail`. A refusal of an `id` that is missing, not a string or empty names no
-plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three members.
+without parsing `detail`. A refusal of an `id` that is missing, not a string, empty or only
+whitespace names no plasmid. `Io`, `Parse`, `TooLarge` and `TooDeep` carry none of the three
+members.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description. `PlasmidManifest::provides` lists the `[provides]` binding keys, such as
 `github:tools`, as written. A binding with its own `[provides."<key>"]` header is listed where
@@ -555,9 +558,12 @@ alive), and the file-type check still rejects regular files and symlinks even if
 are recycled. A leaf symlink at the configured path is an entry already there, so it is refused
 before `bind`, which would otherwise follow it. When the check `PrivateListener` repeats after
 `bind` fails, the start is refused and the socket just bound is removed from its temporary name
-only while it is still that socket by device and inode. If no socket owned by the effective UID is
-at the temporary name in that directory after `bind` (`BindEscaped`), the start unlinks nothing and
-can leave the just-bound socket for the operator. `SIGKILL` is the case no destructor covers,
+only while it is still that socket by device and inode. `BindEscaped` means that after `bind` the
+temporary name in that directory holds no socket owned by the effective UID, or holds an entry
+other than the one found there just after `bind`. Until the socket's mode is set, a failed look at
+that name, for example with `EACCES`, is also `BindEscaped`, though the socket may still be there.
+Then the start unlinks nothing and can leave the just-bound socket for the operator. `SIGKILL` is
+the case no destructor covers,
 because a killed process runs none, so the path survives the daemon and the next start refuses it
 and says why. A `SIGKILL` during the start, before the rename, leaves the socket under its
 temporary name instead, which no start refuses and nothing removes.
@@ -583,8 +589,9 @@ socket through it too, as [Socket ownership](#socket-ownership) says, and so do
   - On macOS, an ancestor is also refused when its ACL has an allow entry that grants
     `add_file`, `add_subdirectory`, `delete_child`, `delete`, `writesecurity` or `chown`, or
     the generic write or generic all right that implies them. This holds whoever the entry
-    names, this user included, and for entries that apply only to new children. Extended ACLs do not show in the mode bits. Deny entries and allow entries for
-    reading still pass, such as the home directory's `everyone deny delete`.
+    names, this user included, and for entries that apply only to new children. Extended ACLs do not
+    show in the mode bits. Deny entries and allow entries for reading still pass, such as the home
+    directory's `everyone deny delete`.
   - On Linux, an ACL that grants write raises the mask, which shows in the group bits, so the
     mode rule covers it. Linux reads only POSIX ACLs, so neither rule sees an NFSv4 or CIFS
     ACL.
@@ -687,9 +694,11 @@ The Linux ACL tests fail when the filesystem refuses POSIX ACLs. Set
 The test that lists a name that is not UTF-8 runs on Linux only, because APFS refuses to
 create such a name, with `EILSEQ`.
 
-One test connects to a socket served by another UID and expects the kernel to report that UID,
-not this process's own: `/private/var/run/mDNSResponder` on macOS, the system D-Bus socket or
-the journal's stdout socket on Linux. It fails when none of them accepts a connection. Set
+One test connects to a system daemon's socket and checks only that the kernel reports a peer UID
+other than this process's own: `/private/var/run/mDNSResponder` on macOS, the system D-Bus socket or
+the journal's stdout socket on Linux. On Linux it is the UID of the process that called `listen()`,
+so under systemd socket activation it is systemd's UID 0, not the daemon's. The test skips as root,
+where the peer may be root too. It fails when none of the sockets accepts a connection. Set
 `PLASMOSOME_FOREIGN_PEER_TESTS_UNSUPPORTED=1` to skip it there instead.
 
 On macOS, the generic-rights test writes an ACL entry that holds only a generic right, through

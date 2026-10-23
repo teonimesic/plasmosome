@@ -194,14 +194,7 @@ where
         return verdict_of(halted);
     }
     match read_frame_within(&mut stream, budget, &now, &mut wait) {
-        Ok(Frame::Line { bytes, .. }) => {
-            let verdict = classify(&bytes);
-            match budget.remaining_at(now()) {
-                Ok(_) => Ok(verdict),
-                Err(ProbeStopped::Cancelled) => Err(Cancelled),
-                Err(ProbeStopped::TimedOut) => Ok(spent()),
-            }
-        }
+        Ok(Frame::Line { bytes, .. }) => Ok(classify(&bytes)),
         Ok(Frame::TooLarge(bytes)) => Ok(Readiness::NotReady(NotReady::Malformed {
             line: diagnostic(&bytes),
         })),
@@ -594,11 +587,8 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
-    use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixListener;
     use std::rc::Rc;
-    use std::sync::mpsc;
-    use std::thread;
 
     const DEADLINE: Duration = Duration::from_millis(500);
     const READY_LINE: &[u8] = b"{\"id\":0,\"result\":{\"ready\":true,\"state\":\"serving\"}}\n";
@@ -610,36 +600,129 @@ mod tests {
         Nonsense(&'static str),
     }
 
-    fn serve(socket: PathBuf, answer: Answer) -> mpsc::Receiver<String> {
-        let listener =
-            UnixListener::bind(&socket).expect("the test broker binds its control socket");
-        let (requests, received) = mpsc::channel();
-        thread::spawn(move || {
-            let (mut stream, _) = listener
-                .accept()
-                .expect("the test broker accepts its one probe");
-            let mut reader = BufReader::new(stream.try_clone().expect("clone for reading"));
-            let mut line = String::new();
-            let _ = reader.read_line(&mut line);
-            let _ = requests.send(line);
-            let reply = match answer {
-                Answer::Ready(state) => {
-                    format!("{{\"id\":0,\"result\":{{\"ready\":true,\"state\":\"{state}\"}}}}\n")
-                }
-                Answer::NotReady(state) => {
-                    format!("{{\"id\":0,\"result\":{{\"ready\":false,\"state\":\"{state}\"}}}}\n")
-                }
-                Answer::Nonsense(text) => format!("{text}\n"),
-                Answer::Silent => return,
-            };
-            let _ = stream.write_all(reply.as_bytes());
-            let _ = stream.flush();
-        });
-        received
+    impl Answer {
+        fn line(&self) -> Option<String> {
+            match self {
+                Answer::Ready(state) => Some(format!(
+                    "{{\"id\":0,\"result\":{{\"ready\":true,\"state\":\"{state}\"}}}}\n"
+                )),
+                Answer::NotReady(state) => Some(format!(
+                    "{{\"id\":0,\"result\":{{\"ready\":false,\"state\":\"{state}\"}}}}\n"
+                )),
+                Answer::Nonsense(text) => Some(format!("{text}\n")),
+                Answer::Silent => None,
+            }
+        }
     }
 
-    fn a_budget(flag: &AtomicBool) -> ProbeBudget<'_> {
-        ProbeBudget::new(DEADLINE, flag)
+    fn take_what_is_there(stream: &mut UnixStream, into: &mut Vec<u8>) {
+        let mut chunk = [0u8; READ_CHUNK];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(read) => into.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    fn ask_a_test_broker(answer: Answer) -> (Result<Readiness, Cancelled>, Vec<u8>, u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("membraned.control");
+        let listener =
+            UnixListener::bind(&socket).expect("the test broker binds its control socket");
+        listener
+            .set_nonblocking(true)
+            .expect("the test broker never blocks on accept");
+        let clock = FakeClock::new();
+        let flag = AtomicBool::new(false);
+        let budget = clock.budget(DEADLINE, &flag);
+        let accepted: RefCell<Option<UnixStream>> = RefCell::new(None);
+        let received = RefCell::new(Vec::new());
+        let reply = RefCell::new(answer.line());
+
+        let verdict = probe_with(
+            &socket,
+            &budget,
+            |path| {
+                let connected = connect_budgeted(path, &budget);
+                if let Connected::Yes(_) = connected
+                    && let Ok((stream, _)) = listener.accept()
+                {
+                    stream
+                        .set_nonblocking(true)
+                        .expect("the test broker never blocks on its connection");
+                    *accepted.borrow_mut() = Some(stream);
+                }
+                connected
+            },
+            clock.now(),
+            |fd, interest, requested| {
+                if let Some(stream) = accepted.borrow_mut().as_mut() {
+                    let mut received = received.borrow_mut();
+                    take_what_is_there(stream, &mut received);
+                    if received.contains(&b'\n')
+                        && let Some(line) = reply.borrow_mut().take()
+                    {
+                        stream
+                            .write_all(line.as_bytes())
+                            .expect("the test broker writes its answer");
+                    }
+                }
+                let ready = wait_fd(fd, interest, Duration::ZERO);
+                clock.advance(requested);
+                ready
+            },
+        );
+
+        let mut received = received.into_inner();
+        if let Some(mut stream) = accepted.into_inner() {
+            take_what_is_there(&mut stream, &mut received);
+        }
+        (verdict, received, clock.now_ms.get())
+    }
+
+    fn ask_with_the_production_connect(socket: &Path) -> Result<Readiness, Cancelled> {
+        let clock = FakeClock::new();
+        let flag = AtomicBool::new(false);
+        let budget = clock.budget(DEADLINE, &flag);
+        probe_with(
+            socket,
+            &budget,
+            |path| connect_budgeted(path, &budget),
+            clock.now(),
+            fake_wait(&clock, None),
+        )
+    }
+
+    fn assert_one_status_request(received: &[u8]) {
+        let shown = String::from_utf8_lossy(received);
+        assert_eq!(
+            received.iter().filter(|byte| **byte == b'\n').count(),
+            1,
+            "the probe sends exactly one line, got {shown:?}"
+        );
+        assert_eq!(
+            received.last(),
+            Some(&b'\n'),
+            "the probe's one line is all it sent, got {shown:?}"
+        );
+        let request: serde_json::Value = serde_json::from_slice(&received[..received.len() - 1])
+            .unwrap_or_else(|error| {
+                panic!("the probe sends one JSON request per line, got {shown:?}: {error}")
+            });
+        assert_eq!(
+            request.get("method").and_then(serde_json::Value::as_str),
+            Some("membrane.status"),
+            "the probe asks for membrane.status, got {request}"
+        );
+        assert!(
+            request
+                .get("params")
+                .is_some_and(serde_json::Value::is_object),
+            "the probe's request carries an object params, got {request}"
+        );
     }
 
     #[test]
@@ -656,11 +739,7 @@ mod tests {
 
     #[test]
     fn a_control_socket_that_answers_status_is_ready() {
-        let flag = AtomicBool::new(false);
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("membraned.control");
-        serve(socket.clone(), Answer::Ready("serving"));
-        let verdict = probe(&socket, &a_budget(&flag));
+        let (verdict, received, _) = ask_a_test_broker(Answer::Ready("serving"));
         assert_eq!(
             verdict,
             Ok(Readiness::Ready {
@@ -668,22 +747,28 @@ mod tests {
             })
         );
         assert!(verdict.as_ref().is_ok_and(Readiness::is_ready));
+        assert!(
+            received.contains(&b'\n'),
+            "the test broker was sent a request line, got {received:?}"
+        );
     }
 
     #[test]
     fn a_socket_that_accepts_but_never_answers_is_the_half_alive_broker() {
-        let flag = AtomicBool::new(false);
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("membraned.control");
-        serve(socket.clone(), Answer::Silent);
-        assert_eq!(probe(&socket, &a_budget(&flag)), Ok(spent()));
+        let (verdict, received, waited_ms) = ask_a_test_broker(Answer::Silent);
+        assert_eq!(verdict, Ok(spent()));
+        assert_one_status_request(&received);
+        assert_eq!(
+            waited_ms,
+            DEADLINE.as_millis() as u64,
+            "the probe waits out its whole allowance for a broker that never answers"
+        );
     }
 
     #[test]
     fn a_missing_control_socket_is_unreachable_not_ready() {
-        let flag = AtomicBool::new(false);
         let dir = tempfile::tempdir().unwrap();
-        let verdict = probe(&dir.path().join("absent.control"), &a_budget(&flag));
+        let verdict = ask_with_the_production_connect(&dir.path().join("absent.control"));
         assert!(!verdict.as_ref().is_ok_and(Readiness::is_ready));
         match verdict {
             Ok(Readiness::NotReady(NotReady::Unreachable { path })) => {
@@ -695,10 +780,8 @@ mod tests {
 
     #[test]
     fn a_path_too_long_for_a_socket_address_is_unreachable() {
-        let flag = AtomicBool::new(false);
         let dir = tempfile::tempdir().unwrap();
-        let long = dir.path().join("x".repeat(200));
-        let verdict = probe(&long, &a_budget(&flag));
+        let verdict = ask_with_the_production_connect(&dir.path().join("x".repeat(200)));
         assert!(matches!(
             verdict,
             Ok(Readiness::NotReady(NotReady::Unreachable { .. }))
@@ -707,11 +790,7 @@ mod tests {
 
     #[test]
     fn an_answer_without_a_status_payload_is_malformed() {
-        let flag = AtomicBool::new(false);
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("membraned.control");
-        serve(socket.clone(), Answer::Nonsense("{\"id\":0,\"result\":42}"));
-        let verdict = probe(&socket, &a_budget(&flag));
+        let (verdict, _, _) = ask_a_test_broker(Answer::Nonsense("{\"id\":0,\"result\":42}"));
         assert!(!verdict.as_ref().is_ok_and(Readiness::is_ready));
         assert!(matches!(
             verdict,
@@ -721,12 +800,9 @@ mod tests {
 
     #[test]
     fn a_server_reporting_not_ready_is_not_ready_even_though_it_answers() {
-        let flag = AtomicBool::new(false);
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("membraned.control");
-        serve(socket.clone(), Answer::NotReady("starting"));
+        let (verdict, _, _) = ask_a_test_broker(Answer::NotReady("starting"));
         assert_eq!(
-            probe(&socket, &a_budget(&flag)),
+            verdict,
             Ok(Readiness::NotReady(NotReady::Reported {
                 state: "starting".to_string()
             }))
@@ -734,58 +810,56 @@ mod tests {
     }
 
     #[test]
-    fn the_production_probe_asks_the_broker_socket_and_relays_its_answer() {
+    fn the_production_probe_asks_the_socket_and_times_out_on_the_real_clock() {
         use crate::brokers::Probe;
+        const ALLOWANCE: Duration = Duration::from_millis(100);
 
         let flag = AtomicBool::new(false);
         let dir = tempfile::tempdir().unwrap();
-        let serving = dir.path().join("s.uds");
-        serve(serving.clone(), Answer::Ready("serving"));
-        assert_eq!(
-            ControlSocketProbe.probe(&serving, &a_budget(&flag)),
-            Ok(Readiness::Ready {
-                state: "serving".to_string()
-            })
-        );
+        let socket = dir.path().join("q.uds");
+        let listener =
+            UnixListener::bind(&socket).expect("the test broker binds its control socket");
 
-        let silent = dir.path().join("q.uds");
-        serve(silent.clone(), Answer::Silent);
+        let started = Instant::now();
+        let verdict = ControlSocketProbe.probe(&socket, &ProbeBudget::new(ALLOWANCE, &flag));
+        let elapsed = started.elapsed();
+
         assert_eq!(
-            ControlSocketProbe.probe(&silent, &a_budget(&flag)),
-            Ok(spent())
+            verdict,
+            Ok(spent()),
+            "a socket that never answers is timed out"
         );
+        assert!(
+            elapsed >= ALLOWANCE,
+            "the production probe gave up after {elapsed:?}, before its {ALLOWANCE:?} had passed \
+             on the real clock"
+        );
+        listener
+            .set_nonblocking(true)
+            .expect("the test broker never blocks on accept");
+        let (mut stream, _) = listener
+            .accept()
+            .unwrap_or_else(|error| panic!("the production probe never connected: {error}"));
+        stream
+            .set_nonblocking(true)
+            .expect("the test broker never blocks on its connection");
+        let mut received = Vec::new();
+        take_what_is_there(&mut stream, &mut received);
+        if !received.is_empty() {
+            assert_one_status_request(&received);
+        }
     }
 
     #[test]
     fn the_probe_sends_one_membrane_status_request_per_probe() {
-        let flag = AtomicBool::new(false);
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("membraned.control");
-        let requests = serve(socket.clone(), Answer::Ready("serving"));
+        let (verdict, received, _) = ask_a_test_broker(Answer::Ready("serving"));
         assert_eq!(
-            probe(&socket, &a_budget(&flag)),
+            verdict,
             Ok(Readiness::Ready {
                 state: "serving".to_string()
             })
         );
-        let line = requests
-            .recv_timeout(DEADLINE)
-            .expect("the test broker captured the request the probe sent");
-        let request: serde_json::Value =
-            serde_json::from_str(line.trim()).unwrap_or_else(|error| {
-                panic!("the probe sends one JSON request per line, got {line:?}: {error}")
-            });
-        assert_eq!(
-            request.get("method").and_then(serde_json::Value::as_str),
-            Some("membrane.status"),
-            "the probe asks for membrane.status, got {request}"
-        );
-        assert!(
-            request
-                .get("params")
-                .is_some_and(serde_json::Value::is_object),
-            "the probe's request carries an object params, got {request}"
-        );
+        assert_one_status_request(&received);
     }
 
     struct Scripted {
@@ -899,6 +973,10 @@ mod tests {
 
         fn set(&self, ms: u64) {
             self.now_ms.set(ms);
+        }
+
+        fn advance(&self, by: Duration) {
+            self.now_ms.set(self.now_ms.get() + by.as_millis() as u64);
         }
 
         fn budget<'a>(&self, allowance: Duration, flag: &'a AtomicBool) -> ProbeBudget<'a> {
