@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read, Seek};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,10 @@ use owned_wait::{SETUP_BOUND, exit_within};
 const DAEMON: &str = env!("CARGO_BIN_EXE_membraned");
 const BOUND: Duration = SETUP_BOUND;
 const STDERR_LIMIT: u64 = 4096;
+
+fn spawn_guarded(command: &mut Command) -> io::Result<Child> {
+    command.spawn()
+}
 
 static WARM_UP: LazyLock<Result<(), String>> =
     LazyLock::new(|| run_once("membraned", Command::new(DAEMON), BOUND));
