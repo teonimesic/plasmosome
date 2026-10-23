@@ -157,7 +157,7 @@ A `fix` over 1,024 bytes is left out of `detail`, which gives its length in byte
 A `fix` can be several times the declaration's size, since it writes each control character as
 a six-byte escape: the largest 108 measured for a 1 MiB declaration is 8,485,465 bytes (8.49 MB),
 under the 16,777,216 bytes spec 025's client reads. Amended on 2026-10-23: `detail` and `message`
-had no bound, and a 1 MiB declaration could produce a 108 of 31 MB.
+had no bound.
 
 **Control-socket lifecycle, as delivered (both daemons).** Each daemon binds the control socket
 named by its config and never unlinks a path it did not create. A start whose path already
