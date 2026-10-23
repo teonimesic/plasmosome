@@ -265,6 +265,22 @@ non-ASCII ID on HFS+ at creation.
 
 ## Cell markers and retirement
 
+The instance root and every object `InstanceRoot` or `CellDir` opens or creates under it must
+carry no ACL entry. Each check reads the opened descriptor before a file is read, locked or
+written, and before its mode is set through that descriptor. After EACCES, the directory-open
+retry may first set mode 0700 by name. Inherited and inherit-only entries are also refused:
+0700 and 0600 modes alone do not restrict ACL access. macOS uses the same ACL reader as
+`PrivateDir`; Linux checks POSIX access and default ACLs through that shared helper.
+
+The root check follows the trusted walk. An ACL that permits replacement already fails the
+walk as `Untrusted`; other root entries are `Acl`. An unsafe `cells/` aborts discovery as
+`CellsAcl`. An ACL on a cell directory or journal refuses only that cell, while clean siblings
+remain recoverable. A held directory is not checked again, but each object opened beneath it is.
+
+Nothing repairs an ACL. A refused object stays in place for the operator to clear with
+`chmod -N`, and its next open refuses it again. Existing temporary-file cleanup still applies:
+`supervisor.lock.tmp` is removed on failure, and the next marker write removes `launched.tmp`.
+
 Spec 023 §3 puts two marker files and a runtime directory in a cell directory, beside the
 journal, and §7 moves an ended cell out of `cells/`. `CellDir` and `InstanceRoot` create, read
 and move them through opened directories (the cell directory, `cells/` and `retired/`), never by

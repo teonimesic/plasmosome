@@ -64,8 +64,11 @@ The controller opens the root by walking its path from `/` without following a s
 judges every directory on the way, the root included, by the rule a membrane's socket check
 applies to them under spec 001 §4.1; a root that fails is refused before anything is created
 under it. Amended on 2026-10-22: this did not say how the root is opened, so a root whose path
-the socket check's ancestor rule refuses could still be opened. An inheritable ACL entry that
-replaces nothing still passes; refusing it is plasmosome-zfgs's.
+the socket check's ancestor rule refuses could still be opened.
+Amended on 2026-10-23: the instance root and every object the controller opens or creates under
+it must carry no ACL entry, including inherited and inherit-only entries; a refused object is
+left in place except for existing temporary-file cleanup, because private modes alone do not
+restrict inherited ACL access.
 Private supervisor sockets additionally require spec001 §4.1's owner/mode, kernel peer-UID and
 workload-confinement boundary. A trusted path or writer lock alone does not authorize an RPC.
 

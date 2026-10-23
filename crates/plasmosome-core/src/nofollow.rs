@@ -429,6 +429,30 @@ pub fn acl_grants_write(fd: BorrowedFd<'_>) -> io::Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn acl_present(fd: BorrowedFd<'_>) -> Result<bool, (&'static str, i32)> {
+    darwin_acl::has_entries(fd)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+pub(crate) fn acl_present(fd: BorrowedFd<'_>) -> Result<bool, (&'static str, i32)> {
+    for attribute in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+        // SAFETY: `attribute` is a static NUL-terminated name, and `fd` keeps its descriptor open.
+        // A null buffer of size 0 asks only for the size, so nothing is written.
+        let size =
+            unsafe { libc::fgetxattr(fd.as_raw_fd(), attribute.as_ptr(), std::ptr::null_mut(), 0) };
+        if size >= 0 {
+            return Ok(true);
+        }
+        let errno = last_errno();
+        if errno != libc::ENODATA && errno != libc::ENOTSUP {
+            return Err(("fgetxattr", errno));
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
 fn grants_write(fd: BorrowedFd<'_>) -> io::Result<bool> {
     darwin_acl::grants_write(fd).map_err(|(_, errno)| io::Error::from_raw_os_error(errno))
 }
