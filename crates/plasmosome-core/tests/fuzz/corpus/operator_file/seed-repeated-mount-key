@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "plasmids": {
+    "github-pr": {
+      "declaration": "/Users/operator/plasmids/github-pr/plasmid.toml",
+      "proxy_maps": [
+        {"host": "api.github.com", "port": 443, "modes": ["passthrough"], "route": "github-api",
+         "transport": "tcp", "destination": "140.82.112.6", "allow_private": false},
+        {"host": "api.github.com", "port": 443, "modes": ["simulate"], "route": "github-mock",
+         "transport": "tcp", "destination": "127.0.0.1", "allow_private": true}
+      ],
+      "mounts": []
+    },
+    "workspace": {
+      "declaration": "/Users/operator/plasmids/workspace/plasmid.toml",
+      "proxy_maps": [],
+      "mounts": [{"target": "/workspace", "source": "/Users/operator/src/project",
+                  "access": "read_write", "access": "read_write"}]
+    }
+  }
+}

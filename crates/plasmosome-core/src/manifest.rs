@@ -602,7 +602,7 @@ fn visible_lines(text: &str) -> String {
     lines.join("\n")
 }
 
-fn acted_on(character: char) -> bool {
+pub(crate) fn acted_on(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
