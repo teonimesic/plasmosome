@@ -2276,6 +2276,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_worker_without_a_liveness_reader_exits_instead_of_blocking_on_open() {
+        let executable = {
+            let _held = crate::spawn_lock::hold_fork_side();
+            supervision_fixture()
+        };
+        let dir = tempfile::tempdir().expect("the test owns its directory");
+        let liveness = dir.path().join(LIVENESS);
+        crate::runtime::test_fixtures::tree::make_fifo(&liveness);
+        let [ready_read, ready_write] = close_on_exec_ends();
+        let (control_read, control_write) =
+            crate::spawn_lock::fixture_control_pipe(super::signal_pressure::close_on_exec_pipe)
+                .expect("the control writer is registered");
+        let ready_read = PipeEnd::from(ready_read);
+        let command = ExecCommand::new(vec![
+            executable.display().to_string(),
+            "wait".to_owned(),
+            ready_write.as_raw_fd().to_string(),
+            control_read.as_raw_fd().to_string(),
+            liveness.display().to_string(),
+            ready_read.0.to_string(),
+            control_write.as_raw_fd().to_string(),
+        ])
+        .expect("the fixture executable resolves");
+        let mut child = VmmChild::spawn(KeepAcrossExec {
+            command,
+            kept: [ready_write, control_read],
+        })
+        .expect("the fixture leader forks");
+        drop(control_write);
+        assert_eof_within(&ready_read, DEADLINE);
+        assert_eq!(
+            child.wait_terminal(DEADLINE),
+            Ok(VmmState::Exited { code: 0 })
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[allow(unsafe_code)]
