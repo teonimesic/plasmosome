@@ -179,6 +179,9 @@ object and `entry.removal()` its inverse. No second copy of the ID is added to t
 `Handle::raw()` and numeric-handle constructors disappear; handles support equality, ordering,
 hashing, display, and serde, not
 arithmetic. Knowing an address is not authentication: the existing backend seam is trusted.
+Amended on 2026-10-23: a `UniverseClass` is encoded as its PascalCase name in a JSON string and
+any other form, including a single-key object, is refused; format3's writer has only ever written
+the string form, so this records the existing format and needs no version transition.
 
 Every `UniverseOp` carries required `id: GrantId` and `owner: CellOwner`. The broker variant is
 `SpawnBroker { id, name, launch: BrokerLaunch, owner }`; each other variant additionally carries

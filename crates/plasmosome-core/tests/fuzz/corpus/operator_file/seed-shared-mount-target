@@ -1,0 +1,1 @@
+{"version":1,"plasmids":{"p":{"proxy_maps":[],"mounts":[{"target":"/work","source":"/one","access":"read_only"},{"target":"/work","source":"/two","access":"read_write"}]}}}
