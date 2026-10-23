@@ -575,7 +575,7 @@ pub(crate) fn diagnostic_key(name: &str) -> String {
     }
 }
 
-fn toml_string(text: &str) -> String {
+pub(crate) fn toml_string(text: &str) -> String {
     let mut quoted = String::from('"');
     for character in text.chars() {
         if matches!(character, '"' | '\\') {

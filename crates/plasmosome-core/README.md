@@ -16,6 +16,7 @@ one.
 | Module | Responsibility |
 | --- | --- |
 | `manifest` | The plasmid declaration grammar: purpose, tool descriptions, capabilities, scopes, credential delivery, mock mode |
+| `denial` | One cell's bounded denial book, declaration-entry repairs, strict wire records and session log payloads, without IO; callers decide attribution |
 | `registry` | Tool names, their registered owners and author-written descriptions |
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |

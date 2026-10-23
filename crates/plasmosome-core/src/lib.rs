@@ -13,6 +13,7 @@ pub mod clock;
 pub mod closure;
 pub mod control;
 pub mod daemon;
+pub mod denial;
 pub mod gatekeeper;
 pub mod instance;
 pub mod kill_budget;
