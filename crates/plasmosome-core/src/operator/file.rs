@@ -788,6 +788,20 @@ mod tests {
     }
 
     #[test]
+    fn accepted_plasmid_ids_keep_their_exact_spelling() {
+        let empty = entry(json!([]), json!([]));
+        let file = parsed(&plasmids(json!({
+            "p": empty.clone(),
+            " p ": empty.clone(),
+            "P": empty,
+        })));
+        for id in ["p", " p ", "P"] {
+            assert!(file.entry(id).is_some(), "{id:?} is kept");
+        }
+        assert_eq!(file.plasmids.len(), 3);
+    }
+
+    #[test]
     fn empty_is_no_entries() {
         let empty = OperatorFile::empty();
         assert_eq!(empty.entry("github-pr"), None);
