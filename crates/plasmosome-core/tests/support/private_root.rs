@@ -108,7 +108,7 @@ pub fn private_root() -> TestRoot {
 
 /// Makes the same directory as [`private_root`], as a plain `TempDir`. Dropping it only removes
 /// it: it opens up no mode and, on macOS, starts no `/bin/chmod` to strip ACLs. Use it where the
-/// tests change no mode and plant no ACL, and where one of them holds a descriptor without
+/// tests leave directories removable and plant no ACL, and where one holds a descriptor without
 /// close-on-exec, which a process another test started would inherit.
 pub fn private_dir() -> TempDir {
     let mut refusals = Vec::new();

@@ -669,8 +669,9 @@ tests.
 If no base passes, the tests fail and name each base with the ancestor that refused it. Each
 test root is removed when its test ends, even after a panic: modes are opened up and, on macOS,
 ACLs stripped before removal. `plasmosome-membrane`'s `tests/cell_start.rs` takes `private_dir`
-instead, which only removes the root. Its tests change no mode and plant no ACL, and some hold a
-lock descriptor without close-on-exec, which a `/bin/chmod` started to strip ACLs would inherit.
+instead, which only removes the root. Its tests plant no ACL and leave directories removable;
+some hold a lock descriptor without close-on-exec, which a `/bin/chmod` started to strip ACLs
+would inherit.
 
 The distinct-UID test is ignored by default. It runs with `--ignored` and
 `PLASMOSOME_OTHER_UID_PREFIX` set to a command prefix that runs its arguments as another UID
