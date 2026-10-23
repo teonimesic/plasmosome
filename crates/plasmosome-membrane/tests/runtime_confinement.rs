@@ -6,22 +6,10 @@ use plasmosome_membrane::runtime::digest::Digest;
 #[path = "support/fixture.rs"]
 mod fixture;
 
-const HOST_POLICY: &str = "(version 1)
-(deny default)
-(allow file-read*)
-(allow file-write* (subpath \"/usr/local/var/plasmosome/work\"))
-(allow network-outbound (remote unix-socket))
-(allow mach-lookup)
-(allow mach-register)
-(allow process-info*)
-(allow sysctl-read)
-(allow system-socket)
-(deny file-write*)
-(deny network*)
-(deny process-exec)
-";
-const HOST_POLICY_SHA256: &str = "d4e3f9a296a4577f54bd51899d3bf6fac439e47e2b559c5df955825d60cd7c34";
-const WORK_SUBPATH: &str = "(subpath \"/usr/local/var/plasmosome/work\")";
+#[path = "support/host_policy.rs"]
+mod host_policy;
+
+use host_policy::{HOST_POLICY, HOST_POLICY_SHA256, WORK_SUBPATH};
 
 fn own_pid() -> libc::pid_t {
     libc::pid_t::try_from(std::process::id()).expect("this process's id fits a pid_t")
