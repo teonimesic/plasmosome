@@ -340,9 +340,9 @@ mod tests {
         }
     }
 
-    impl Probe for Rc<CostlyProbe> {
+    impl<P: Probe> Probe for Rc<P> {
         fn probe(&self, socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
-            CostlyProbe::probe(self, socket, budget)
+            P::probe(self, socket, budget)
         }
     }
 
@@ -399,12 +399,6 @@ mod tests {
                 "the real clock never spent the budget in {EXPIRY_SLEEPS} sleeps of what was left of it"
             );
             Ok(ready())
-        }
-    }
-
-    impl Probe for Rc<ExpiryAwaitingProbe> {
-        fn probe(&self, socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
-            ExpiryAwaitingProbe::probe(self, socket, budget)
         }
     }
 
@@ -878,6 +872,254 @@ mod tests {
         fn probe(&self, _socket: &Path, _budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
             self.flag.store(true, Ordering::Relaxed);
             Err(Cancelled)
+        }
+    }
+
+    struct AnsweringProbe {
+        raises: Option<Arc<AtomicBool>>,
+        answer: Result<Readiness, Cancelled>,
+        asked: Mutex<Vec<PathBuf>>,
+    }
+
+    impl AnsweringProbe {
+        fn answering(answer: Result<Readiness, Cancelled>) -> AnsweringProbe {
+            AnsweringProbe {
+                raises: None,
+                answer,
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn raising(flag: &Arc<AtomicBool>, answer: Readiness) -> AnsweringProbe {
+            AnsweringProbe {
+                raises: Some(Arc::clone(flag)),
+                ..AnsweringProbe::answering(Ok(answer))
+            }
+        }
+
+        fn asked(&self) -> Vec<PathBuf> {
+            self.asked
+                .lock()
+                .expect("the record of asked sockets is uncontended")
+                .clone()
+        }
+    }
+
+    impl Probe for AnsweringProbe {
+        fn probe(&self, socket: &Path, _budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            self.asked
+                .lock()
+                .expect("the record of asked sockets is uncontended")
+                .push(socket.to_path_buf());
+            if let Some(flag) = &self.raises {
+                flag.store(true, Ordering::Relaxed);
+            }
+            self.answer.clone()
+        }
+    }
+
+    #[test]
+    fn a_shutdown_seen_before_a_probe_cancels_the_status_and_asks_no_broker() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(true);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let clock = Clock::moving_only_when_advanced();
+        let prober = Rc::new(AnsweringProbe::answering(Ok(ready())));
+        let set =
+            BrokerSet::spawn(specs, forking(), Rc::clone(&prober)).expect("every broker forks");
+
+        let status = set.status_with(DEADLINE, &flag, clock.now());
+
+        assert_eq!(
+            status,
+            Err(Cancelled),
+            "shutdown was raised before the status began, so it has no verdict"
+        );
+        assert_eq!(
+            prober.asked(),
+            Vec::<PathBuf>::new(),
+            "no broker may be asked once shutdown has been seen"
+        );
+    }
+
+    #[test]
+    fn a_shutdown_raised_inside_a_probe_refuses_whatever_the_broker_answered() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let only = spec(dir.path(), "egressd");
+        for answer in [ready(), starting(), gone(&only.control_socket)] {
+            let flag = Arc::new(AtomicBool::new(false));
+            let clock = Clock::moving_only_when_advanced();
+            let prober = Rc::new(AnsweringProbe::raising(&flag, answer.clone()));
+            let set = BrokerSet::spawn(vec![only.clone()], forking(), Rc::clone(&prober))
+                .expect("the broker forks");
+
+            let status = set.status_with(DEADLINE, &flag, clock.now());
+
+            assert_eq!(
+                status,
+                Err(Cancelled),
+                "shutdown was raised while `egressd` answered {answer:?}, so the status must not carry that answer"
+            );
+            assert_eq!(
+                prober.asked(),
+                std::slice::from_ref(&only.control_socket),
+                "`egressd` is the set's one broker and is asked once"
+            );
+        }
+    }
+
+    #[test]
+    fn a_probe_that_reports_cancelled_stops_the_status_before_the_next_broker() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let first = specs[0].control_socket.clone();
+        let clock = Clock::moving_only_when_advanced();
+        let prober = Rc::new(AnsweringProbe::answering(Err(Cancelled)));
+        let set =
+            BrokerSet::spawn(specs, forking(), Rc::clone(&prober)).expect("every broker forks");
+
+        let status = set.status_with(DEADLINE, &flag, clock.now());
+
+        assert_eq!(
+            status,
+            Err(Cancelled),
+            "`egressd`'s probe reported cancelled, so the status has no verdict"
+        );
+        assert_eq!(
+            prober.asked(),
+            [first],
+            "no broker after `egressd` may be asked"
+        );
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "the shared flag stayed clear, so the probe's own answer decided the status"
+        );
+    }
+
+    #[test]
+    fn a_shutdown_seen_between_two_brokers_gives_no_verdict_for_the_one_that_answered() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let first = specs[0].control_socket.clone();
+        let clock = Clock::moving_only_when_advanced();
+        let prober = Rc::new(AnsweringProbe::answering(Ok(ready())));
+        let set =
+            BrokerSet::spawn(specs, forking(), Rc::clone(&prober)).expect("every broker forks");
+        let readings = Cell::new(0);
+        let read = clock.now();
+
+        let status = set.status_with(DEADLINE, &flag, || {
+            readings.set(readings.get() + 1);
+            if readings.get() == 4 {
+                flag.store(true, Ordering::Relaxed);
+            }
+            read()
+        });
+
+        assert_eq!(
+            status,
+            Err(Cancelled),
+            "shutdown was seen after `egressd` answered ready and before `dnsd` was asked, so the status has no verdict, not even a partial one"
+        );
+        assert_eq!(
+            prober.asked(),
+            [first],
+            "`dnsd` may not be asked once shutdown has been seen"
+        );
+        assert_eq!(
+            readings.get(),
+            4,
+            "the flag must rise at the check before `dnsd`: the budget's start, the checks before and after `egressd`, then that one"
+        );
+    }
+
+    struct ReadyAfterProbe {
+        after: Duration,
+        reads: Mutex<Vec<(Option<Duration>, Instant)>>,
+    }
+
+    impl ReadyAfterProbe {
+        fn reads(&self) -> Vec<(Option<Duration>, Instant)> {
+            self.reads
+                .lock()
+                .expect("the record of budget reads is uncontended")
+                .clone()
+        }
+    }
+
+    impl Probe for ReadyAfterProbe {
+        fn probe(&self, _socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            let left = budget.remaining();
+            let read_at = Instant::now();
+            self.reads
+                .lock()
+                .expect("the record of budget reads is uncontended")
+                .push((left.ok(), read_at));
+            std::thread::sleep(self.after);
+            Ok(ready())
+        }
+    }
+
+    #[test]
+    fn status_hands_the_first_probe_the_whole_deadline_and_spends_it_on_the_real_clock() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let deadline = Duration::from_millis(200);
+        let prober = Rc::new(ReadyAfterProbe {
+            after: Duration::from_millis(120),
+            reads: Mutex::new(Vec::new()),
+        });
+        let set = BrokerSet::spawn(
+            vec![spec(dir.path(), "egressd")],
+            forking(),
+            Rc::clone(&prober),
+        )
+        .expect("the broker forks");
+
+        let called = Instant::now();
+        let status = set.status(deadline, &flag);
+        let took = called.elapsed();
+
+        let never_asked = Ok(SetStatus::DeadlineSpent {
+            unreached: "egressd".to_string(),
+            asked: Vec::new(),
+        });
+        let timed_out = Ok(SetStatus::NotReady {
+            broker: "egressd".to_string(),
+            reason: NotReady::TimedOut,
+        });
+        assert!(
+            status == Ok(SetStatus::Ready) || status == timed_out || status == never_asked,
+            "`egressd` answers ready, so `status` can only be ready, {timed_out:?} or {never_asked:?}, got {status:?}"
+        );
+        let reads = prober.reads();
+        if status == never_asked {
+            assert!(
+                reads.is_empty(),
+                "a stall before the first check spent the budget, so no probe may have been asked, but it read {reads:?}"
+            );
+        } else {
+            let [(left, read_at)] = reads.as_slice() else {
+                panic!("`egressd` must be asked once, but the budget was read {reads:?}");
+            };
+            let left = left.unwrap_or_default();
+            assert!(
+                left <= deadline,
+                "`egressd` was handed {left:?}, more than the {deadline:?} its caller allowed"
+            );
+            let since_call = read_at.duration_since(called);
+            assert!(
+                left + since_call >= deadline,
+                "`egressd` was handed {left:?} at {since_call:?} after the call, which adds up to less than the {deadline:?} deadline, so `status` did not hand out the whole deadline"
+            );
+        }
+        if status != Ok(SetStatus::Ready) {
+            assert!(
+                took >= deadline,
+                "`status` said {status:?} after {took:?} of real time, before the {deadline:?} it was given had passed"
+            );
         }
     }
 
