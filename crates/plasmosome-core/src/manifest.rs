@@ -606,7 +606,7 @@ fn acted_on(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
-            '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            '\u{061C}' | '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
         )
 }
 
@@ -3304,9 +3304,9 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
 
     const RIGHT_TO_LEFT: &str = concat!("\\", "u202E");
 
-    const ACTED_ON: [u32; 13] = [
-        0x2028, 0x2029, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067,
-        0x2068, 0x2069,
+    const ACTED_ON: [u32; 14] = [
+        0x061C, 0x2028, 0x2029, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066,
+        0x2067, 0x2068, 0x2069,
     ];
 
     fn raw(code: u32) -> char {
@@ -5142,6 +5142,8 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
         for (id, written) in [
             ("github-pr".to_string(), "github-pr".to_string()),
             ("two words".to_string(), "\"two words\"".to_string()),
+            (format!("a{}b", raw(0x061C)), "\"a\\u061Cb\"".to_string()),
+            (format!("a{}b", raw(0x200E)), "\"a\\u200Eb\"".to_string()),
             (
                 format!("a\\nb{ESCAPE}c{CSI}"),
                 format!("\"a\\nb{ESCAPE}c{CSI}\""),

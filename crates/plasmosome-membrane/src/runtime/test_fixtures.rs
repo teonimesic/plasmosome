@@ -5,6 +5,11 @@ pub(crate) mod fake {
     include!("../../tests/support/runtime_fake.rs");
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) mod host_policy {
+    include!("../../tests/support/host_policy.rs");
+}
+
 pub(crate) mod newc;
 
 pub(crate) fn artifact(path: &str, digit: char) -> Value {
