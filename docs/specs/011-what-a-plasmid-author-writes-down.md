@@ -468,7 +468,9 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
     all, and 32 naming none. A denial with no room gets no entry and no line. A distinct denial
     writes at most 64 lines, a cell at most 4,096 over its life, and at most 256 wait for the
     controller. A denial past these bounds writes no line, still raises its entry's `count`, and
-    is counted in the cell's next line's `unlogged`. So a looping workload adds at most about
+    is counted in the cell's next line's `unlogged`.
+    Amended on 2026-10-23: a denial whose line would be over 1,024 bytes as written writes no line in the same way, so a plasmid ID too long for a line still reaches the plasmid's `denials` and every count.
+    So a looping workload adds at most about
     4 MiB to the log for a cell, and at most 16 entries to a plasmid's object.
   - *A failed append.* A denial line that cannot be appended refuses nothing and changes no reply:
     the denial is already enforced, and no verb waits on its line. The line stays with the

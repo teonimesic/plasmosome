@@ -7,6 +7,13 @@ use crate::digest::{Digest, DigestError};
 
 mod envelope;
 
+pub mod observation;
+pub use observation::{
+    GuestAdmission, GuestBinding, GuestNetworkObservation, GuestObservation, GuestObservationFault,
+    GuestProjection, ProjectionKind, ProjectionRef, SocketStreamEnd, SocketStreamProjection,
+    SoftwareObservation, SoftwareTree, StreamSide, TreeReference,
+};
+
 pub use envelope::{
     BridgeError, EncodeError, InboundRequest, ProtocolCode, RefusalDetail, RequestId,
     RequestRefusal, encode_failure, encode_request, encode_success, split_request,
