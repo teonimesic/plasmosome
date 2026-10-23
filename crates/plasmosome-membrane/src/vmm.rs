@@ -2257,9 +2257,13 @@ mod tests {
     fn a_forked_sibling_cannot_pin_any_live_fixture_worker() {
         let mut exited_leader = spawn_with_worker(true);
         let mut live_leader = spawn_with_worker(false);
-        let mut sibling = std::thread::spawn(|| VmmChild::spawn(SleepForever))
-            .join()
-            .expect("the sibling's spawning thread finishes")
+        let (sibling, spawned) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sibling.send(VmmChild::spawn(SleepForever));
+        });
+        let mut sibling = spawned
+            .recv_timeout(DEADLINE)
+            .expect("the sibling's spawning thread answers within the existing deadline")
             .expect("the sibling forks");
         exited_leader.discard_release();
         live_leader.discard_release();
