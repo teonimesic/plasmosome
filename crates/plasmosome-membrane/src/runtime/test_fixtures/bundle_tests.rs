@@ -246,7 +246,12 @@ fn killing_the_helper_group_closes_the_workers_diagnostic_writer() {
     let transcript = run.finish();
     assert!(transcript.eof, "a worker retained the diagnostic pipe");
     let text = std::str::from_utf8(&transcript.bytes).unwrap();
-    let worker: i32 = text.strip_prefix("worker=").unwrap().trim().parse().unwrap();
+    let worker: i32 = text
+        .strip_prefix("worker=")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     assert!(worker > 0 && worker != run.child.pid());
 }
 
