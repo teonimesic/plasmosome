@@ -69,7 +69,7 @@ fn run_on(line: Vec<OsString>, clock: &'static dyn Clock) -> Ran {
 }
 
 fn run(line: Vec<OsString>) -> Ran {
-    run_on(line, &SystemClock)
+    run_on(line, clock_reading(&[0]))
 }
 
 fn one_line(bytes: &[u8]) -> Value {
@@ -495,7 +495,7 @@ fn a_closed_stdout_is_local_io() {
         version: "0.0.0",
         commands: COMMANDS,
         trusted_uid: effective_uid(),
-        clock: &SystemClock,
+        clock: clock_reading(&[0]),
         env: &Vars::default(),
     };
     let mut stderr = Vec::new();
@@ -770,7 +770,8 @@ fn a_request_line_over_the_bound_is_refused_before_connecting() {
 }
 
 fn send(stream: UnixStream, request: &str) -> Result<Vec<u8>, Unreplied> {
-    let deadline = Deadline::new(&SystemClock, SystemClock.now(), 10_000);
+    let clock = clock_reading(&[0]);
+    let deadline = Deadline::new(clock, clock.now(), 10_000);
     exchange(
         stream,
         Path::new("/x/control.uds"),
@@ -807,7 +808,8 @@ fn a_request_the_deadline_cuts_off_is_cut_off() {
         let _ = finished.recv_timeout(PATIENCE);
     });
     let request = format!("{}\n", "x".repeat(MAX_REQUEST_BYTES));
-    let deadline = Deadline::new(&SystemClock, SystemClock.now(), 300);
+    let clock = clock_reading(&[0]);
+    let deadline = Deadline::new(clock, clock.now(), 300);
     let outcome = exchange(
         ours,
         Path::new("/x/control.uds"),
