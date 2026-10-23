@@ -5534,6 +5534,24 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     }
 
     #[test]
+    fn a_refusal_propagates_an_io_errors_formatting_failure() {
+        #[derive(Debug)]
+        struct Unformattable;
+
+        impl fmt::Display for Unformattable {
+            fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+
+        impl std::error::Error for Unformattable {}
+
+        let error = ManifestError::Io(std::io::Error::other(Unformattable));
+        let mut text = String::new();
+        assert!(fmt::write(&mut text, format_args!("{error}")).is_err());
+    }
+
+    #[test]
     fn a_parse_refusal_of_a_mebibyte_of_nul_writes_at_most_4096_bytes() {
         let error = PlasmidManifest::parse(&"\0".repeat(MAX_MANIFEST_BYTES)).unwrap_err();
         let ManifestError::Parse(parser) = &error else {
