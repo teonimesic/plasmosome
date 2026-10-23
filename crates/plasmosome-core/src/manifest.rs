@@ -1308,15 +1308,16 @@ fn hosts_named(hosts: &[String]) -> String {
 
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
     for decl in &commands.commands {
+        let command_subject_blank = decl
+            .subject
+            .as_deref()
+            .is_none_or(|subject| subject.trim().is_empty());
         for (index, secret) in decl.secrets.iter().enumerate() {
             if secret
                 .subject
                 .as_deref()
                 .is_none_or(|subject| subject.trim().is_empty())
-                && decl
-                    .subject
-                    .as_deref()
-                    .is_none_or(|subject| subject.trim().is_empty())
+                && command_subject_blank
             {
                 return Err(field_error(
                     id,
@@ -4315,6 +4316,116 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 .collect::<Vec<_>>();
             assert_eq!(distinct(&names), expected);
         });
+    }
+
+    fn commands_with_subjects(subject: Option<&str>, subjects: &[Option<&str>]) -> CommandsSpec {
+        CommandsSpec {
+            address_plan: "explicit".into(),
+            commands: vec![CommandDecl {
+                id: "git".into(),
+                exec: vec!["git".into()],
+                subject: subject.map(String::from),
+                network: None,
+                secrets: subjects
+                    .iter()
+                    .map(|subject| SecretRef {
+                        id: "example:token".into(),
+                        consumer: SecretConsumer::Http,
+                        delivery: vec![DeliveryMode::Mint],
+                        scope: None,
+                        ttl: None,
+                        subject: subject.map(String::from),
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_command_subject_inherited_by_6000_credentials_is_checked_within_30_seconds() {
+        within(30, "command subject inherited by 6000 credentials", || {
+            let subject = format!("{}x", " ".repeat(524_288));
+            let commands = commands_with_subjects(Some(&subject), &vec![None; 6_000]);
+            validate_commands("github-pr", &commands).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_blank_command_subject_accepts_credentials_with_their_own_subjects() {
+        let commands = commands_with_subjects(Some("   "), &[Some("first"), Some("second")]);
+        validate_commands("github-pr", &commands).unwrap();
+    }
+
+    #[test]
+    fn a_blank_command_subject_refuses_the_third_credential_without_a_subject() {
+        let commands = commands_with_subjects(Some("   "), &[Some("first"), Some("second"), None]);
+        let ManifestError::Field {
+            field, fix, detail, ..
+        } = validate_commands("github-pr", &commands).unwrap_err()
+        else {
+            panic!("expected a field refusal");
+        };
+        assert_eq!(field, "commands.commands.git.secrets.refs[2].subject");
+        assert_eq!(fix, "subject = \"git\"");
+        assert_eq!(
+            detail,
+            "a command credential requires a nonblank ref or command subject"
+        );
+    }
+
+    #[test]
+    fn an_absent_command_subject_refuses_the_first_credential_with_a_blank_subject() {
+        let commands = commands_with_subjects(None, &[Some("   "), Some("second")]);
+        let ManifestError::Field {
+            field, fix, detail, ..
+        } = validate_commands("github-pr", &commands).unwrap_err()
+        else {
+            panic!("expected a field refusal");
+        };
+        assert_eq!(field, "commands.commands.git.secrets.refs[0].subject");
+        assert_eq!(fix, "subject = \"git\"");
+        assert_eq!(
+            detail,
+            "a command credential requires a nonblank ref or command subject"
+        );
+    }
+
+    #[test]
+    fn mock_refusal_details_keep_the_first_of_each_host_in_the_authors_order() {
+        let mut mock = MockSpec {
+            hosts: ["c.example", "a.example", "b.example", "c.example"]
+                .map(String::from)
+                .into(),
+            kind: "recorded".into(),
+            api: "example".into(),
+            source: "fixtures/example".into(),
+        };
+        let ManifestError::Field { detail, .. } =
+            validate_mock("github-pr", &mock, None).unwrap_err()
+        else {
+            panic!("expected a field refusal");
+        };
+        assert_eq!(
+            detail,
+            "[mock] stands in for \"c.example\", \"a.example\" and \"b.example\", and there is no [network]"
+        );
+        mock.hosts = ["b.example", "c.example", "b.example", "a.example"]
+            .map(String::from)
+            .into();
+        let network = CommandNetwork {
+            hosts: vec!["a.example".into()],
+            ports: vec![],
+            pin_cidrs: vec![],
+        };
+        let ManifestError::Field { detail, .. } =
+            validate_mock("github-pr", &mock, Some(&network)).unwrap_err()
+        else {
+            panic!("expected a field refusal");
+        };
+        assert_eq!(
+            detail,
+            "[mock] stands in for \"b.example\" and \"c.example\", which [network] does not declare, and [network] declares no port"
+        );
     }
 
     fn large_mock() -> MockSpec {
