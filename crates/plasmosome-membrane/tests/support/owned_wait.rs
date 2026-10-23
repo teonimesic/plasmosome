@@ -31,6 +31,7 @@ pub fn exit_within(child: &mut Child, bound: Duration) -> io::Result<Option<Exit
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn hanging_setup_is_bounded_killed_and_reaped() {
     use std::os::unix::process::ExitStatusExt;
     let mut child = std::process::Command::new("sleep")
@@ -39,6 +40,12 @@ fn hanging_setup_is_bounded_killed_and_reaped() {
         .unwrap();
     let started = Instant::now();
     let outcome = exit_within(&mut child, Duration::from_millis(50));
+    let mut raw = 0;
+    // SAFETY: raw is writable local storage. This exact-child wait sends no signal.
+    let waited = unsafe { libc::waitpid(child.id() as libc::pid_t, &mut raw, libc::WNOHANG) };
+    let error = io::Error::last_os_error();
+    assert_eq!(waited, -1, "exit_within already reaped its child");
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
     let reaped = child.try_wait().unwrap();
     assert!(
         matches!(outcome, Ok(None)),
