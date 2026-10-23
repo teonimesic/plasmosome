@@ -367,6 +367,20 @@ mod tests {
     }
 
     #[test]
+    fn encode_hello_matches_the_shim_bytes() {
+        use plasmosome_backend::guest_protocol::{
+            ControlCall, HelloParams, encode_control_request,
+        };
+        for lane in LANES {
+            let call = ControlCall::Hello(HelloParams { lane });
+            let mut encoded =
+                encode_control_request(request_id(lane), &call).expect("hello encodes");
+            encoded.push(b'\n');
+            assert_eq!(encoded, hello_request(lane));
+        }
+    }
+
+    #[test]
     fn the_shared_envelope_writes_and_reads_the_hello_requests_unchanged() {
         use plasmosome_backend::guest_protocol::{RequestId, encode_request, split_request};
         for lane in LANES {
