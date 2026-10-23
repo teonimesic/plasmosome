@@ -879,6 +879,53 @@ mod tests {
     }
 
     #[test]
+    fn the_exact_removal_of_one_owners_unfinished_effect_keeps_the_other_owners_in_its_leaf() {
+        let owners = [cell_owner("doomed"), cell_owner("network")];
+        let armed = || -> Box<dyn EnforcementBackend> {
+            let mut leaf = FakeBackend::new();
+            for owner in &owners {
+                leaf.fail_after_effect_for_owner(owner.clone(), "leaf readiness failed");
+            }
+            Box::new(leaf)
+        };
+        let drains = [
+            DrainSpec::graceful(Duration::from_millis(2)),
+            DrainSpec::forcing(),
+        ];
+        for (capability, drain) in LEAVES
+            .into_iter()
+            .flat_map(own_capabilities)
+            .flat_map(|capability| drains.map(|drain| (capability.clone(), drain)))
+        {
+            for reversed in [false, true] {
+                let mut backend = CompositeBackend::new(armed(), armed(), armed()).unwrap();
+                let mut ops = owners
+                    .clone()
+                    .map(|owner| fixtures::op(GrantId::new(), owner, capability.clone()));
+                for op in &ops {
+                    assert!(matches!(
+                        backend.grant(op.clone(), GrantKind::Hot),
+                        Err(BackendError::IncompleteEffect { .. })
+                    ));
+                }
+                if reversed {
+                    ops.reverse();
+                }
+                for (index, op) in ops.iter().enumerate() {
+                    backend
+                        .apply_removal(op.removal(), op.owner(), drain)
+                        .unwrap();
+                    let left = ops[index + 1..].iter().map(unfinished).collect();
+                    assert_eq!(
+                        backend.snapshot_os_state(),
+                        Ok(EnforcementSnapshot::new(OsState::new(), Vec::new(), left).unwrap())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_withdrawal_that_fails_in_a_leaf_keeps_its_record_until_a_revoke_through_the_composite() {
         let mut network = FakeBackend::new();
         let entry = network
