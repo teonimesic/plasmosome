@@ -381,6 +381,22 @@ mod tests {
     }
 
     #[test]
+    fn judge_accepts_an_encoded_hello_result() {
+        use plasmosome_backend::guest_protocol::{
+            ControlResult, HelloResult, RequestId, encode_control_result,
+        };
+        for lane in LANES {
+            let result = ControlResult::Hello(HelloResult {
+                boot: boot(BOOT),
+                policy: guest_policy(),
+            });
+            let encoded =
+                encode_control_result(&RequestId::number(request_id(lane)), &result).unwrap();
+            assert_eq!(judge_on(lane, &encoded), Ok(boot(BOOT)));
+        }
+    }
+
+    #[test]
     fn the_shared_envelope_writes_and_reads_the_hello_requests_unchanged() {
         use plasmosome_backend::guest_protocol::{RequestId, encode_request, split_request};
         for lane in LANES {
