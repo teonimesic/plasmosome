@@ -23,7 +23,12 @@ impl std::fmt::Display for LookupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LookupError::UnknownTool { cell, tool } => {
-                write!(f, "cell '{cell}' has no tool '{tool}' in the registry")
+                write!(
+                    f,
+                    "cell '{}' has no tool '{}' in the registry",
+                    cell.as_str().escape_debug(),
+                    tool.escape_debug()
+                )
             }
         }
     }
@@ -45,7 +50,10 @@ impl std::fmt::Display for RegisterError {
         match self {
             RegisterError::ToolHeld { cell, tool, holder } => write!(
                 f,
-                "tool '{tool}' in cell '{cell}' is already held by plasmid '{holder}'"
+                "tool '{}' in cell '{}' is already held by plasmid '{}'",
+                tool.escape_debug(),
+                cell.as_str().escape_debug(),
+                holder.as_str().escape_debug()
             ),
         }
     }
@@ -464,6 +472,38 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_names_the_first_conflict_in_input_order_and_registers_nothing() {
+        let registry = ToolRegistry::new();
+        registry
+            .register(&owner("cell-1", "a-holder"), &[tool("z", "Last by name.")])
+            .unwrap();
+        registry
+            .register(&owner("cell-1", "b-holder"), &[tool("a", "First by name.")])
+            .unwrap();
+
+        assert_eq!(
+            registry.register(
+                &owner("cell-1", "requester"),
+                &[
+                    tool("fresh", "Not held."),
+                    tool("z", "First conflict."),
+                    tool("a", "Second conflict."),
+                ],
+            ),
+            Err(RegisterError::ToolHeld {
+                cell: CellId::from("cell-1"),
+                tool: "z".into(),
+                holder: PluginId::from("a-holder"),
+            })
+        );
+        assert_eq!(
+            registry.lookup(&CellId::from("cell-1"), "fresh"),
+            unknown("cell-1", "fresh")
+        );
+        assert_eq!(registry.list(&CellId::from("cell-1")), vec!["a", "z"]);
+    }
+
+    #[test]
     fn a_refused_plasmid_holds_nothing_and_the_name_frees_on_withdrawal() {
         let registry = refused_other_pr();
 
@@ -551,6 +591,74 @@ mod tests {
             .to_string(),
             "tool 'pr.read' in cell 'cell-1' is already held by plasmid 'github-pr'"
         );
+    }
+
+    #[test]
+    fn unknown_tool_display_escapes_names_and_preserves_the_original_fields() {
+        for (name, escaped) in escaped_name_cases() {
+            let error = ToolRegistry::new()
+                .lookup(&CellId::from(name), name)
+                .unwrap_err();
+            let displayed = error.to_string();
+            assert_eq!(
+                displayed,
+                format!("cell '{escaped}' has no tool '{escaped}' in the registry")
+            );
+            assert!(
+                displayed
+                    .chars()
+                    .all(|c| !c.is_control() && c != '\u{202e}')
+            );
+            assert_eq!(
+                error,
+                LookupError::UnknownTool {
+                    cell: CellId::from(name),
+                    tool: name.into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn tool_held_display_escapes_names_and_preserves_the_original_fields() {
+        for (name, escaped) in escaped_name_cases() {
+            let registry = ToolRegistry::new();
+            registry
+                .register(&owner(name, name), &[tool(name, "Original.")])
+                .unwrap();
+            let error = registry
+                .register(&owner(name, "requester"), &[tool(name, "Refused.")])
+                .unwrap_err();
+            let displayed = error.to_string();
+            assert_eq!(
+                displayed,
+                format!(
+                    "tool '{escaped}' in cell '{escaped}' is already held by plasmid '{escaped}'"
+                )
+            );
+            assert!(
+                displayed
+                    .chars()
+                    .all(|c| !c.is_control() && c != '\u{202e}')
+            );
+            assert_eq!(
+                error,
+                RegisterError::ToolHeld {
+                    cell: CellId::from(name),
+                    tool: name.into(),
+                    holder: PluginId::from(name),
+                }
+            );
+        }
+    }
+
+    fn escaped_name_cases() -> [(&'static str, &'static str); 4] {
+        [
+            ("name\nsuffix", "name\\nsuffix"),
+            ("name'suffix", "name\\'suffix"),
+            ("name\u{1b}suffix", "name\\u{1b}suffix"),
+            ("name\u{202e}suffix", "name\\u{202e}suffix"),
+        ]
     }
 
     #[test]
