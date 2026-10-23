@@ -43,6 +43,17 @@ An end-to-end test drives the real binaries as black boxes over their control so
 nothing replaced. Performance tests are their own specs because they need their own harnesses
 and their own honesty rules.
 
+**Fuzzing belongs to the unit layer, and runs two ways.** A fuzz target feeds arbitrary bytes to
+one parser through its crate's API. Its minimized corpus, committed in the owning crate, replays
+as an ordinary test, so `cargo test -p <crate>` answers for those saved inputs and finds nothing
+new. The open-ended search runs on a schedule in CI and reports rather than gates, because its
+findings do not depend on the PR under test.
+[Spec 026](026-security-standard.md#5-bytes-from-a-less-trusted-side) says which parsers need a
+target.
+
+Amended on 2026-10-23, as [spec 026](026-security-standard.md#spec-003-where-fuzzing-sits)
+requires: the paragraph above is new.
+
 ### The seam inventory
 
 Every place the kernel touches the world outside the process, and the trait that guards it:

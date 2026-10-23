@@ -1,0 +1,26 @@
+name = "libfuzzer-sys"
+range = "0.4"
+reason = "Drives the seven non-shipping fuzz targets with LLVM's coverage-guided libFuzzer engine."
+write_it_instead.lines = 8500
+write_it_instead.how = """\
+  On 2026-10-23, at main c9242fd9 with this fuzz workspace, `git grep -l libfuzzer_sys -- '*.rs' | \
+  wc -l` finds seven wrappers. `wc -l libfuzzer/*.cpp src/lib.rs build.rs` in the locked \
+  libfuzzer-sys 0.4.13 source totals 8585 lines: 7787 of top-level C++, 752 of Rust glue with \
+  docs, and 46 of build script. A replacement needs coverage feedback, corpus scheduling and \
+  mutations (5000 lines), crash/timeout handling and process control (1000), sanitizer and \
+  platform integration (2000), and Rust bindings (500): 8500 lines. No in-house parser harness \
+  replaces the search engine. The fuzz derivation says removing it drops arbitrary@1 and \
+  libfuzzer-sys@0.4; cc remains because the membrane uses it.\
+  """
+exception = ""
+brings = ["arbitrary@1","cc@1","cfg-if@1","find-msvc-tools@0.1","getrandom@0.4","jobserver@0.1","libc@0.2","r-efi@6","shlex@2"]
+build_time_code = ["libc@0.2 build script","libfuzzer-sys@0.4 build script"]
+expands_unsafe = [
+  "libfuzzer-sys@0.4 fuzz_target! emits no_mangle LLVMFuzzerInitialize and rust_fuzzer_test_input; unsafe pointer conversion stays in dependency test_input_wrap",
+  "libfuzzer-sys@0.4 fuzz_mutator! and fuzz_crossover! emit unsafe exported functions and raw-pointer conversions; our wrappers call neither",
+]
+native_code = [
+  "libfuzzer-sys@0.4 build.rs compiles top-level libfuzzer/*.cpp as C++17 with cc and links libfuzzer.a and the host C++ runtime on both supported hosts",
+  "libc@0.2 links system libiconv on macOS; with its std feature it adds no other library and compiles no native source",
+]
+verdict = "kept-pending-owner"

@@ -2,9 +2,10 @@ name = "toml_edit"
 range = "0.22"
 reason = """\
   Parses TOML into a document that keeps its formatting, so that a test can apply a refusal's fix \
-  as an edit to the author's text and read the edited text back.\
+  as an edit to the author's text and read the edited text back. Also reads the manifest fuzz \
+  input into an independent tree to check its depth.\
   """
-write_it_instead.lines = 540
+write_it_instead.lines = 600
 write_it_instead.how = """\
   On 2026-10-20, at main c3d850d, `git grep -l toml_edit -- '*.rs' | wc -l` gives 1 file, \
   crates/plasmosome-core/tests/fix_following.rs, and `git grep -n toml_edit -- '*.rs'` shows it \
@@ -24,7 +25,12 @@ write_it_instead.how = """\
   one entry (20): 540 lines. Replacing it removes nothing from Cargo.lock: toml brings toml_edit \
   too. Replacing toml and toml_edit together removes 9 packages from Cargo.lock: equivalent@1, \
   hashbrown@0.17, indexmap@2, serde_spanned@0.6, toml@0.8, toml_datetime@0.6, toml_edit@0.22, \
-  toml_write@0.1 and winnow@0.7.\
+  toml_write@0.1 and winnow@0.7. On 2026-10-23, at main c9242fd9 plus the fuzz workspace, \
+  `git grep -l toml_edit -- '*.rs' | wc -l` finds four files. In addition to the formatting \
+  editor above, tests and the manifest fuzz body use ImDocument, Item and Value for depth; \
+  protocol tests parse diagnostic keys. A replacement tree walk over toml's values (60 lines) \
+  plus the original editor and key parser (540): 600 lines. Neither derivation removes a \
+  package when toml_edit stops being direct: toml still reaches it.\
   """
 exception = ""
 brings = [

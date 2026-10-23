@@ -11,9 +11,9 @@ use serde_json::{Map, Value};
 use crate::manifest::acted_on;
 use crate::runtime::strict_json::{StrictJsonError, parse_value};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzzing"))]
 #[path = "../../tests/fuzz/operator_file.rs"]
-mod operator_file;
+pub(crate) mod operator_file;
 #[cfg(test)]
 #[path = "../../tests/fuzz/replay.rs"]
 mod replay;

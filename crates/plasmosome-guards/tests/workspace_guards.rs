@@ -1350,19 +1350,19 @@ fn matrix_grammar_refuses_non_lf_line_breaks() {
     for (separator, expected) in [
         (
             "\r",
-            "workflow line 379 is refused (unsupported line break): `        # display\r        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+            "workflow line 388 is refused (unsupported line break): `        # display\r        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
         ),
         (
             "\u{85}",
-            "workflow line 379 is refused (unsupported line break): `        # display\u{85}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+            "workflow line 388 is refused (unsupported line break): `        # display\u{85}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
         ),
         (
             "\u{2028}",
-            "workflow line 379 is refused (unsupported line break): `        # display\u{2028}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+            "workflow line 388 is refused (unsupported line break): `        # display\u{2028}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
         ),
         (
             "\u{2029}",
-            "workflow line 379 is refused (unsupported line break): `        # display\u{2029}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+            "workflow line 388 is refused (unsupported line break): `        # display\u{2029}        exclude: [{crate: plasmosome-tools}]`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
         ),
     ] {
         let workflow = real_matrix_workflow().replacen(
@@ -1394,49 +1394,49 @@ fn matrix_grammar_accepts_crlf_line_endings() {
 #[test]
 fn matrix_grammar_refuses_the_single_quoted_workflow_witness() {
     let workflow = quoted_name_workflow('\'');
-    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (quoted scalar does not close on its line): `    name: 'display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 369 is refused (quoted scalar does not close on its line): `    name: 'display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
 #[test]
 fn matrix_grammar_refuses_the_double_quoted_workflow_witness() {
     let workflow = quoted_name_workflow('"');
-    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (quoted scalar does not close on its line): `    name: \"display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 369 is refused (quoted scalar does not close on its line): `    name: \"display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
 #[test]
 fn matrix_grammar_refuses_a_quoted_structural_key() {
     let workflow = real_matrix_workflow().replacen("    strategy:", "    \"strategy\":", 1);
-    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 363 is refused (quoted key): `    \"strategy\":`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 372 is refused (quoted key): `    \"strategy\":`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
 #[test]
 fn matrix_grammar_refuses_a_multiline_flow_sequence() {
     let workflow = multiline_flow_workflow();
-    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 365 is refused (flow collection does not close on its line): `        include: [`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 374 is refused (flow collection does not close on its line): `        include: [`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
 #[test]
 fn matrix_grammar_refuses_a_plain_scalar_continuation() {
     let workflow = full_workflow_name("    name: display\n      continued");
-    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 361 is refused (plain-scalar continuation): `      continued`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 370 is refused (plain-scalar continuation): `      continued`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
 #[test]
 fn matrix_grammar_refuses_tab_indentation() {
     let workflow = full_workflow_name("    \tname: display");
-    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (tab in indentation): `    \tname: display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 369 is refused (tab in indentation): `    \tname: display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
 #[test]
 fn matrix_grammar_refuses_an_unrecognised_line() {
     let workflow = full_workflow_name("    ? name");
-    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (unrecognised line form): `    ? name`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 369 is refused (unrecognised line form): `    ? name`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
 #[test]
 fn matrix_grammar_refuses_scalar_properties_before_a_quoted_value() {
     let workflow = full_workflow_name("    name: &display 'open");
-    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (unrecognised line form): `    name: &display 'open`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 369 is refused (unrecognised line form): `    name: &display 'open`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
 }
 
 #[test]

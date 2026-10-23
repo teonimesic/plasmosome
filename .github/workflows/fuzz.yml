@@ -1,0 +1,44 @@
+# Spec 026 sections 3 and 5: weekly search reports failures without gating pull requests.
+# Child logs and inputs stay private to the runner; no artifact or raw crash text is uploaded.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_AUTO_INSTALL: "0"
+  TOOLCHAIN: nightly-2026-10-14
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [control_line, manifest, readiness_reply, hello_reply, cli_reply, guest_control_reply, operator_file]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: install the fuzz toolchain
+        run: rustup toolchain install "$TOOLCHAIN" --profile minimal --no-self-update
+      - name: toolchain in use
+        run: rustc +"$TOOLCHAIN" --version
+      - name: install cargo-fuzz
+        run: cargo +"$TOOLCHAIN" install cargo-fuzz --version 0.13.2 --locked
+      - name: fetch the locked dependencies
+        run: cargo +"$TOOLCHAIN" fetch --locked --manifest-path fuzz/Cargo.toml
+      - name: fuzz for ten minutes with private output
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo +"$TOOLCHAIN" run --locked --release -q -p plasmosome-tools --bin fuzz-run -- "$GITHUB_WORKSPACE" "$TARGET" "$RUNNER_TEMP/fuzz-$TARGET"
+      - name: the lockfiles are unchanged
+        if: ${{ !cancelled() }}
+        run: git diff --exit-code -- Cargo.lock fuzz/Cargo.lock

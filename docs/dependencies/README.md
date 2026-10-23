@@ -102,14 +102,15 @@ How the lists are made:
   closure holds serde_derive through a `cfg(any())` dependency that never builds, so
   serde_derive is in its `brings` and not in its `build_time_code`.
 - **`--all-features`** adds the features of workspace members that no default turns on. Today
-  one member declares such a feature, plasmosome-backend's `test-fixture`, and it turns on
-  nothing else. So the resolve is the same as without the flag, apart from that one feature.
+  backend declares `test-fixture` and core declares `fuzzing`; neither adds a dependency.
+  The resolve therefore adds no dependency through those features.
 
-**The fuzz workspace.** Today the records describe the root Cargo.lock only. Once
-`fuzz/Cargo.lock` exists, derive each record again with `--manifest-path fuzz/Cargo.toml` on both
-commands. Its `brings` and `build_time_code` are then the union of the two derivations. If the two
-lockfiles lock different ranges of one crate, the PR that adds the fuzz workspace decides how the
-record shows that.
+**The fuzz workspace.** The records describe both the root Cargo.lock and fuzz/Cargo.lock.
+Derive each record again with `--manifest-path fuzz/Cargo.toml` on both metadata commands.
+Its `brings` and `build_time_code` are the union of the two derivations. Both lockfiles keep
+the same version of every shared package, so each record keeps one range. A PR changing a shared
+package updates both lockfiles together; use `cargo update -p <crate> --manifest-path
+fuzz/Cargo.toml` for the fuzz graph.
 
 ## The fields written by hand
 
