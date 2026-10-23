@@ -82,6 +82,22 @@ fn empty_attachment_and_removal_consume_generations() {
 }
 
 #[test]
+fn removing_one_plugin_preserves_other_attachment() {
+    let mut h = empty();
+    settle(
+        &mut h,
+        prepare(1, vec![attach("p", vec![]), attach("q", vec![])]),
+        Event::Commit,
+    );
+    let unchanged = h.committed()[&PluginId::from("q")].clone();
+    assert_eq!(h.committed().len(), 2);
+    settle(&mut h, prepare(2, vec![remove()]), Event::Commit);
+    assert_eq!(h.committed().len(), 1);
+    assert_eq!(h.committed()[&PluginId::from("q")], unchanged);
+    assert_eq!(h.last_generation(), 2);
+}
+
+#[test]
 fn generation_and_event_order_faults() {
     let p = start;
     let r = record;
@@ -173,6 +189,28 @@ fn generation_and_event_order_faults() {
 
 #[test]
 fn identity_faults_and_atomic_admission() {
+    let shared = backend();
+    let bad = prepare(
+        1,
+        vec![attach("p", vec![shared.clone()]), attach("q", vec![shared])],
+    );
+    let mut h = empty();
+    let before = h.clone();
+    assert_eq!(h.check(&bad).unwrap_err().kind, Kind::InvalidEffect);
+    assert_eq!(h.admit(&bad).unwrap_err().kind, Kind::InvalidEffect);
+    assert_eq!(h, before);
+    let bytes = plasmosome_ledger::cell_journal::encode_record(&bad).unwrap();
+    let fault = plasmosome_ledger::cell_journal::read_cell_journal_from(
+        &bytes[..],
+        std::path::Path::new("diagnostic-only"),
+        &CellId::from("c"),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (fault.kind, fault.line, fault.lines_parsed),
+        (Kind::InvalidEffect, Some(1), 0)
+    );
+
     let effect = exact_uds("c", "p");
     let mut changed = effect.clone();
     changed.effect.description.push_str(" changed");
@@ -258,6 +296,50 @@ fn identity_faults_and_atomic_admission() {
             .unwrap_err()
             .kind,
         Kind::InvalidEffect
+    );
+}
+
+#[test]
+fn changed_recipe_refuses_the_whole_prepare() {
+    let effect = exact_uds("c", "p");
+    let mut changed = effect.clone();
+    let op = changed.operation.as_mut().unwrap();
+    let plasmosome_backend::UniverseOp::BindUds { recipe, .. } = op else {
+        unreachable!()
+    };
+    recipe.upstream = "/run/other-upstream.sock".into();
+    changed.effect = Effect::exact(
+        effect.effect.description.clone(),
+        InverseVia::Universe(op.removal()),
+    );
+    let prefix = [
+        prepare(1, vec![attach("p", vec![effect])]),
+        record(1, Event::Commit),
+        record(1, Event::Finish),
+    ];
+    let mut h = empty();
+    for r in &prefix {
+        h.admit(r).unwrap();
+    }
+    let bad = prepare(2, vec![attach("p", vec![exact_uds("c", "p"), changed])]);
+    let before = h.clone();
+    assert_eq!(h.check(&bad).unwrap_err().kind, Kind::InvalidEffect);
+    assert_eq!(h.admit(&bad).unwrap_err().kind, Kind::InvalidEffect);
+    assert_eq!(h, before);
+    let bytes: Vec<_> = prefix
+        .iter()
+        .chain([&bad])
+        .flat_map(|r| plasmosome_ledger::cell_journal::encode_record(r).unwrap())
+        .collect();
+    let fault = plasmosome_ledger::cell_journal::read_cell_journal_from(
+        &bytes[..],
+        std::path::Path::new("diagnostic-only"),
+        &CellId::from("c"),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (fault.kind, fault.line, fault.lines_parsed),
+        (Kind::InvalidEffect, Some(4), 3)
     );
 }
 
