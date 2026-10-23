@@ -22,9 +22,19 @@ fn padded(length: usize) -> String {
 }
 
 fn written(dir: &Path, bytes: &[u8]) -> PathBuf {
+    file_size_signal_ignored();
     let path = dir.join("plasmid.toml");
     fs::write(&path, bytes).expect("the declaration is written");
     path
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn file_size_signal_ignored() {
+    // SAFETY: signal takes integer constants and SIG_IGN. Ignoring SIGXFSZ in this binary makes
+    // writes past ulimit -f return EFBIG in every test instead of killing the binary.
+    let previous = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+    assert_ne!(previous, libc::SIG_ERR, "SIGXFSZ can be ignored");
 }
 
 fn refused_for_size(outcome: Result<PlasmidManifest, ManifestError>, what: &str) {
@@ -113,14 +123,27 @@ fn load_refuses_a_symlink_to_dev_urandom() {
 #[cfg(unix)]
 #[test]
 fn load_refuses_a_sparse_file_far_over_the_bound_without_reserving_its_length() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let path = dir.path().join("plasmid.toml");
-    let file = fs::File::create(&path).expect("the declaration is created");
+    use std::os::fd::AsRawFd;
+
+    file_size_signal_ignored();
+    let file = tempfile::tempfile().expect("an unnamed declaration file");
+    let path = PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+    let mut cause = None;
     let length = [1_u64 << 48, 1 << 43]
         .into_iter()
-        .find(|length| file.set_len(*length).is_ok())
-        .expect("the filesystem holds a sparse file of 8 TiB or more");
-    drop(file);
+        .find(|length| match file.set_len(*length) {
+            Ok(()) => true,
+            Err(error) => {
+                cause = Some(error);
+                false
+            }
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "ulimit -f or the filesystem refuses a sparse file of 8 TiB or more: {}",
+                cause.unwrap()
+            )
+        });
     refused_for_size(
         load_within_patience(path),
         &format!("a sparse file of {length} bytes"),
@@ -205,6 +228,70 @@ fn a_declaration_one_byte_over_the_bound_is_refused_not_parsed_from_its_first_me
         PlasmidManifest::load(&written(dir.path(), text.as_bytes())),
         "load of a file of 1 MiB plus one byte",
     );
+}
+
+#[test]
+fn parse_and_load_refuse_a_full_mebibyte_followed_by_whitespace() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    for suffix in [" ", "\t", "\n", "\r\n"] {
+        let text = padded(BOUND) + suffix;
+        refused_for_size(
+            PlasmidManifest::parse(&text),
+            &format!("parse with suffix {suffix:?}"),
+        );
+        refused_for_size(
+            PlasmidManifest::load(&written(dir.path(), text.as_bytes())),
+            &format!("load with suffix {suffix:?}"),
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn load_waits_on_a_fifo_whose_writer_delivers_exactly_the_bound_and_holds_it_open() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let fifo = dir.path().join("plasmid.toml");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (delivered, delivery) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let writer_path = fifo.clone();
+    let writer = thread::spawn(move || {
+        let mut end = fs::OpenOptions::new()
+            .write(true)
+            .open(writer_path)
+            .unwrap();
+        delivered
+            .send(end.write_all(padded(BOUND).as_bytes()))
+            .unwrap();
+        let _ = released.recv();
+    });
+    let (result, loaded) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let _ = result.send(PlasmidManifest::load(&fifo));
+    });
+    delivery
+        .recv_timeout(PATIENCE)
+        .expect("the writer delivers within patience")
+        .unwrap();
+    let before_close = loaded.recv_timeout(Duration::from_secs(1));
+    release.send(()).expect("release the writer");
+    writer.join().unwrap();
+    assert!(
+        matches!(before_close, Err(RecvTimeoutError::Timeout)),
+        "load waits for an extra byte or EOF: {before_close:?}"
+    );
+    let manifest = loaded
+        .recv_timeout(PATIENCE)
+        .expect("load returns after EOF")
+        .unwrap();
+    reader.join().unwrap();
+    assert_eq!(manifest.id, "github-pr");
 }
 
 #[test]

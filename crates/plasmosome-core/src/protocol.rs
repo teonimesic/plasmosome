@@ -641,6 +641,112 @@ mod tests {
 
     type Named = Option<(&'static str, &'static str)>;
 
+    fn large_host_refusal() -> ManifestError {
+        let hosts = (0..130_000)
+            .map(|mut index| {
+                let name: String = (0..4)
+                    .map(|_| {
+                        let letter = char::from(b'a' + (index % 26) as u8);
+                        index /= 26;
+                        letter
+                    })
+                    .collect();
+                format!("\"{name}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        PlasmidManifest::parse(&format!(
+            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nnetwork = [{hosts}]"
+        ))
+        .unwrap_err()
+    }
+
+    #[test]
+    fn a_108_detail_is_at_most_4096_bytes_and_its_message_repeats_it() {
+        for error in [
+            PlasmidManifest::parse(&"\0".repeat(MAX_MANIFEST_BYTES)).unwrap_err(),
+            large_host_refusal(),
+        ] {
+            let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
+            let detail = wire.detail.as_ref().unwrap();
+            assert_eq!(detail, &error.to_string());
+            assert!(detail.len() <= crate::manifest::MAX_REFUSAL_BYTES);
+            assert_eq!(
+                wire.message,
+                format!("`{DECLARATION_PATH}` is not a valid manifest: {detail}")
+            );
+            if let ManifestError::Field {
+                field,
+                fix,
+                plasmid,
+                ..
+            } = &error
+            {
+                assert_eq!(wire.field.as_ref(), Some(field));
+                assert_eq!(wire.fix.as_ref(), Some(fix));
+                assert_eq!(&wire.plasmid, plasmid);
+                assert!(fix.len() > 1024);
+            }
+        }
+    }
+
+    #[test]
+    fn the_largest_known_108_for_a_mebibyte_declaration_fits_the_clients_reply_bound() {
+        let mut declaration =
+            String::from("id = \"github-pr\"\ndescription = \"Read pull requests.\"\ncommands = [");
+        let mut sections = Vec::new();
+        for index in 0.. {
+            let name: String = (0..4)
+                .map(|k| char::from_u32(0x80 + ((index >> (k * 5)) & 31)).unwrap())
+                .collect();
+            let entry = format!("\"{name}\", ");
+            if declaration.len() + entry.len() + 3 > MAX_MANIFEST_BYTES {
+                break;
+            }
+            declaration.push_str(&entry);
+            let escaped: String = name
+                .chars()
+                .map(|c| format!("\\u{:04X}", u32::from(c)))
+                .collect();
+            sections.push(format!(
+                "[commands.commands.\"{escaped}\"]\nexec = [\"{escaped}\"]"
+            ));
+        }
+        declaration.push_str("]\n#");
+        declaration.extend(std::iter::repeat_n(
+            '#',
+            MAX_MANIFEST_BYTES - declaration.len(),
+        ));
+        assert_eq!(declaration.len(), MAX_MANIFEST_BYTES);
+        let error = PlasmidManifest::parse(&declaration).unwrap_err();
+        let ManifestError::Field {
+            fix,
+            field,
+            plasmid,
+            ..
+        } = &error
+        else {
+            panic!("a field refusal");
+        };
+        assert_eq!(field, "commands");
+        assert_eq!(plasmid.as_deref(), Some("github-pr"));
+        assert_eq!(fix, &sections.join("\n"));
+        let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
+        assert_eq!(wire.fix.as_ref(), Some(fix));
+        let response = Response::Failure {
+            id: RawValue::from_string("7".to_string()).unwrap(),
+            error: wire,
+        };
+        let bytes = serde_json::to_vec(&response).unwrap();
+        eprintln!(
+            "MEASURED 108={} bytes; declaration={} bytes; commands={}",
+            bytes.len(),
+            declaration.len(),
+            sections.len()
+        );
+        assert!(bytes.len() <= 16_777_216, "{} bytes", bytes.len());
+    }
+
     fn declaration_refusals() -> [(ManifestError, Named, Option<&'static str>); 7] {
         [
             (
