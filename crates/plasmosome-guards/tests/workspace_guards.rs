@@ -1000,6 +1000,25 @@ fn matrix_read_error(line: &str, why: &str) -> String {
     )
 }
 
+fn workflow_block_scalar_indent(line: &str) -> Option<usize> {
+    let text = line.trim();
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let header = text.split_once(" #").map_or(text, |(header, _)| header);
+    let field = header.split_once(':');
+    let value = field
+        .map(|(_, value)| value.trim_start())
+        .unwrap_or_else(|| header.strip_prefix("- ").unwrap_or(header));
+    let indicator = value
+        .split_whitespace()
+        .find(|word| !word.starts_with(['&', '!']))
+        .unwrap_or("");
+    (indicator.starts_with(['|', '>'])
+        && indicator[1..]
+            .bytes()
+            .all(|byte| matches!(byte, b'+' | b'-' | b'1'..=b'9')))
+    .then_some(indent + usize::from(text.starts_with("- ") && field.is_some()) * 2)
+}
+
 fn matrix_structure_lines(workflow: &str) -> Vec<&str> {
     let mut scalar_indent = None;
     let mut lines = Vec::new();
@@ -1018,26 +1037,150 @@ fn matrix_structure_lines(workflow: &str) -> Vec<&str> {
         if text.starts_with('#') {
             continue;
         }
-        let header = text.split_once(" #").map_or(text, |(header, _)| header);
-        let field = header.split_once(':');
-        let value = field
-            .map(|(_, value)| value.trim_start())
-            .unwrap_or_else(|| header.strip_prefix("- ").unwrap_or(header));
-        let indicator = value
-            .split_whitespace()
-            .find(|word| !word.starts_with(['&', '!']))
-            .unwrap_or("");
-        if indicator.starts_with(['|', '>'])
-            && indicator[1..]
-                .bytes()
-                .all(|byte| matches!(byte, b'+' | b'-' | b'1'..=b'9'))
-        {
-            scalar_indent =
-                Some(indent + usize::from(text.starts_with("- ") && field.is_some()) * 2);
-        }
+        scalar_indent = workflow_block_scalar_indent(line);
         lines.push(line);
     }
     lines
+}
+
+fn workflow_line_error(number: usize, line: &str, cause: &str) -> String {
+    format!(
+        "workflow line {number} is refused ({cause}): `{line}`. The matrix guard accepts only \
+         blank lines, comments, plain-key mappings and sequence entries with values complete \
+         on one line, and block scalars. A reader that guessed could report a matrix it did not read."
+    )
+}
+
+fn workflow_value_end(value: &str) -> Result<(), &'static str> {
+    let mut chars = value.char_indices().peekable();
+    let Some((_, first)) = chars.next() else {
+        return Ok(());
+    };
+    let mut quote = match first {
+        '\'' | '"' => Some(first),
+        _ => None,
+    };
+    let mut closers = match first {
+        '[' => vec![']'],
+        '{' => vec!['}'],
+        _ if quote.is_none() => return Ok(()),
+        _ => Vec::new(),
+    };
+    let quoted = quote.is_some();
+    while let Some((index, character)) = chars.next() {
+        if let Some(delimiter) = quote {
+            if delimiter == '"' && character == '\\' {
+                chars.next();
+                continue;
+            }
+            if character != delimiter {
+                continue;
+            }
+            if delimiter == '\'' && chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                chars.next();
+                continue;
+            }
+            quote = None;
+        } else {
+            match character {
+                '\'' | '"' => quote = Some(character),
+                '[' => closers.push(']'),
+                '{' => closers.push('}'),
+                ']' | '}' if closers.pop() != Some(character) => {
+                    return Err("mismatched flow collection");
+                }
+                '#' if value[..index].ends_with(char::is_whitespace) => break,
+                _ => {}
+            }
+        }
+        if quote.is_none() && closers.is_empty() {
+            let rest = &value[index + character.len_utf8()..];
+            return if rest.trim().is_empty()
+                || (rest.starts_with(char::is_whitespace) && rest.trim_start().starts_with('#'))
+            {
+                Ok(())
+            } else {
+                Err("text after a complete value")
+            };
+        }
+    }
+    Err(if quoted {
+        "quoted scalar does not close on its line"
+    } else {
+        "flow collection does not close on its line"
+    })
+}
+
+fn workflow_line_grammar(workflow: &str) -> Result<(), String> {
+    let mut scalar_parent = None;
+    let mut block_parent = None;
+    for (index, line) in workflow.lines().enumerate() {
+        let number = index + 1;
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let text = &line[indent..];
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(parent) = block_parent {
+            if indent > parent || text.is_empty() {
+                continue;
+            }
+            block_parent = None;
+        }
+        let refuse = |cause| workflow_line_error(number, line, cause);
+        if text.starts_with('\t') {
+            return Err(refuse("tab in indentation"));
+        }
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+        if scalar_parent.is_some_and(|parent| indent > parent) {
+            return Err(refuse("plain-scalar continuation"));
+        }
+        let (content, key_indent, sequence) = match text.strip_prefix("- ") {
+            Some(content) => (content, indent + 2, true),
+            None => (text, indent, false),
+        };
+        let field = content
+            .split_once(':')
+            .filter(|(_, value)| value.is_empty() || value.starts_with(char::is_whitespace))
+            .filter(|_| {
+                !(sequence
+                    && content.starts_with(['\'', '"'])
+                    && workflow_value_end(content).is_ok())
+            });
+        let value = if let Some((key, value)) = field {
+            if key.starts_with(['\'', '"']) {
+                return Err(refuse("quoted key"));
+            }
+            if key.is_empty()
+                || !key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+            {
+                return Err(refuse("unrecognised line form"));
+            }
+            value.trim_start()
+        } else if sequence {
+            content
+        } else {
+            return Err(refuse("unrecognised line form"));
+        };
+        workflow_value_end(value).map_err(refuse)?;
+        block_parent = workflow_block_scalar_indent(line);
+        if value.starts_with(['&', '!'])
+            && value.split_whitespace().count() > 1
+            && block_parent.is_none()
+        {
+            return Err(refuse("unrecognised line form"));
+        }
+        scalar_parent = if value.is_empty() || value.starts_with('#') || block_parent.is_some() {
+            None
+        } else {
+            Some(if field.is_some() { key_indent } else { indent })
+        };
+    }
+    Ok(())
 }
 
 fn matrix_block<'a>(
@@ -1081,6 +1224,7 @@ fn matrix_block<'a>(
 }
 
 fn crate_matrix_entries(workflow: &str) -> Result<Vec<String>, String> {
+    workflow_line_grammar(workflow)?;
     let lines = matrix_structure_lines(workflow);
     let Some(jobs) = matrix_block(&lines, 0, "jobs")? else {
         return Ok(Vec::new());
@@ -1137,6 +1281,184 @@ fn matrix_fixture(entries: &str) -> String {
 
 fn matrix_names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_string()).collect()
+}
+
+#[test]
+fn matrix_grammar_accepts_the_real_workflow() {
+    check_workspace(|root| {
+        let workflow = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+        assert_eq!(workflow_line_grammar(&workflow), Ok(()));
+    });
+}
+
+const REAL_MATRIX_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+
+fn full_workflow_name(name: &str) -> String {
+    REAL_MATRIX_WORKFLOW.replacen("    name: crate (${{ matrix.crate }})", name, 1)
+}
+
+fn multiline_flow_workflow() -> String {
+    let strategy = REAL_MATRIX_WORKFLOW
+        .split_once("    strategy:\n")
+        .unwrap()
+        .1
+        .split_once("    steps:\n")
+        .unwrap()
+        .0;
+    REAL_MATRIX_WORKFLOW.replacen(
+        strategy,
+        "      matrix:\n        include: [\n          {crate: plasmosome}\n        ]\n",
+        1,
+    )
+}
+
+fn quoted_name_workflow(quote: char) -> String {
+    let matrix = REAL_MATRIX_WORKFLOW
+        .split_once("    strategy:\n")
+        .unwrap()
+        .1
+        .split_once("    steps:\n")
+        .unwrap()
+        .0;
+    let real_strategy = format!("    strategy:\n{matrix}");
+    let workflow = REAL_MATRIX_WORKFLOW.replacen(
+        &real_strategy,
+        "    \"strategy\":\n      fail-fast: false\n      matrix:\n        crate:\n          - plasmosome\n",
+        1,
+    );
+    let display_matrix = matrix.replace("      fail-fast: false\n", "");
+    workflow.replacen(
+        "    name: crate (${{ matrix.crate }})",
+        &format!("    name: {quote}display\n    strategy:\n{display_matrix}    {quote}"),
+        1,
+    )
+}
+
+#[test]
+fn matrix_grammar_refuses_the_single_quoted_workflow_witness() {
+    let workflow = quoted_name_workflow('\'');
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (quoted scalar does not close on its line): `    name: 'display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+}
+
+#[test]
+fn matrix_grammar_refuses_the_double_quoted_workflow_witness() {
+    let workflow = quoted_name_workflow('"');
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (quoted scalar does not close on its line): `    name: \"display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+}
+
+#[test]
+fn matrix_grammar_refuses_a_quoted_structural_key() {
+    let workflow = REAL_MATRIX_WORKFLOW.replacen("    strategy:", "    \"strategy\":", 1);
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 363 is refused (quoted key): `    \"strategy\":`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+}
+
+#[test]
+fn matrix_grammar_refuses_a_multiline_flow_sequence() {
+    let workflow = multiline_flow_workflow();
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 365 is refused (flow collection does not close on its line): `        include: [`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+}
+
+#[test]
+fn matrix_grammar_refuses_a_plain_scalar_continuation() {
+    let workflow = full_workflow_name("    name: display\n      continued");
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 361 is refused (plain-scalar continuation): `      continued`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+}
+
+#[test]
+fn matrix_grammar_refuses_tab_indentation() {
+    let workflow = full_workflow_name("    \tname: display");
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (tab in indentation): `    \tname: display`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+}
+
+#[test]
+fn matrix_grammar_refuses_an_unrecognised_line() {
+    let workflow = full_workflow_name("    ? name");
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (unrecognised line form): `    ? name`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+}
+
+#[test]
+fn matrix_grammar_refuses_scalar_properties_before_a_quoted_value() {
+    let workflow = full_workflow_name("    name: &display 'open");
+    assert_eq!(crate_matrix_entries(&workflow), Err("workflow line 360 is refused (unrecognised line form): `    name: &display 'open`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.".to_string()));
+}
+
+#[test]
+fn matrix_grammar_pins_remaining_line_refusals() {
+    for (workflow, expected) in [
+        (
+            "\t# comment\n",
+            "workflow line 1 is refused (tab in indentation): `\t# comment`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+        (
+            ": value\n",
+            "workflow line 1 is refused (unrecognised line form): `: value`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+        (
+            "bad key: value\n",
+            "workflow line 1 is refused (unrecognised line form): `bad key: value`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+        (
+            "key: [}\n",
+            "workflow line 1 is refused (mismatched flow collection): `key: [}`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+        (
+            "key: 'closed' more\n",
+            "workflow line 1 is refused (text after a complete value): `key: 'closed' more`. The matrix guard accepts only blank lines, comments, plain-key mappings and sequence entries with values complete on one line, and block scalars. A reader that guessed could report a matrix it did not read.",
+        ),
+    ] {
+        assert_eq!(workflow_line_grammar(workflow), Err(expected.to_string()));
+    }
+}
+
+#[test]
+fn matrix_grammar_values_must_end_on_their_line() {
+    for value in [
+        "",
+        "null",
+        "cargo test -p \"$CRATE\"",
+        "'it''s complete'",
+        "\"escaped \\\" quote\" # note",
+        "[]",
+        "{}",
+        "[main, {key: ['value', \"other\"]}] # note",
+        "'complete'  ",
+        "\"\"",
+        "'single \\ slash'",
+    ] {
+        assert_eq!(workflow_value_end(value), Ok(()), "{value}");
+    }
+    for (value, expected) in [
+        ("'open", "quoted scalar does not close on its line"),
+        ("\"open\\", "quoted scalar does not close on its line"),
+        ("[main,", "flow collection does not close on its line"),
+        ("{key: value,", "flow collection does not close on its line"),
+        ("[main # ]", "flow collection does not close on its line"),
+        ("['open]", "flow collection does not close on its line"),
+        ("[}", "mismatched flow collection"),
+        ("'closed' more", "text after a complete value"),
+        ("{}more", "text after a complete value"),
+        ("\"closed\"#comment", "text after a complete value"),
+    ] {
+        assert_eq!(workflow_value_end(value), Err(expected), "{value}");
+    }
+}
+
+#[test]
+fn matrix_grammar_accepts_complete_values_and_block_scalar_bodies() {
+    for display in [
+        "    name: 'display' # complete",
+        "    name: \"display \\\"quoted\\\"\"",
+        "    name: [display, {key: 'value'}]",
+        "    name: |\n      \tfree form\n      \t# scalar text\n      \"quoted\": [\n      ? anything",
+    ] {
+        assert_eq!(workflow_line_grammar(&full_workflow_name(display)), Ok(()));
+    }
+    assert_eq!(
+        workflow_line_grammar(
+            "\n # comment\nplain_key.0-: # comment\n  - key: value\n    next: other\n  - 'complete'\n"
+        ),
+        Ok(())
+    );
 }
 
 #[test]
@@ -1364,27 +1686,45 @@ fn matrix_reader_refuses_an_empty_matrix() {
 fn matrix_reader_refuses_non_block_strategy() {
     for (workflow, expected) in [
         (
-            matrix_fixture("          - a").replace("    strategy:", "    strategy: {}"),
+            matrix_fixture("          - a").replace(
+                "    strategy:\n      matrix:\n        crate:\n          - a",
+                "    strategy: {}",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: {}` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("    strategy:", "    strategy: &anchor"),
+            matrix_fixture("          - a").replace(
+                "    strategy:\n      matrix:\n        crate:\n          - a",
+                "    strategy: &anchor",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: &anchor` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("    strategy:", "    strategy: *alias"),
+            matrix_fixture("          - a").replace(
+                "    strategy:\n      matrix:\n        crate:\n          - a",
+                "    strategy: *alias",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: *alias` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("    strategy:", "    strategy: !!map"),
+            matrix_fixture("          - a").replace(
+                "    strategy:\n      matrix:\n        crate:\n          - a",
+                "    strategy: !!map",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: !!map` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("    strategy:", "    strategy: |"),
+            matrix_fixture("          - a").replace(
+                "    strategy:\n      matrix:\n        crate:\n          - a",
+                "    strategy: |",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: |` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("    strategy:", "    strategy: >-"),
+            matrix_fixture("          - a").replace(
+                "    strategy:\n      matrix:\n        crate:\n          - a",
+                "    strategy: >-",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: >-` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
     ] {
@@ -1396,27 +1736,45 @@ fn matrix_reader_refuses_non_block_strategy() {
 fn matrix_reader_refuses_non_block_matrix() {
     for (workflow, expected) in [
         (
-            matrix_fixture("          - a").replace("      matrix:", "      matrix: {}"),
+            matrix_fixture("          - a").replace(
+                "      matrix:\n        crate:\n          - a",
+                "      matrix: {}",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: {}` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("      matrix:", "      matrix: &anchor"),
+            matrix_fixture("          - a").replace(
+                "      matrix:\n        crate:\n          - a",
+                "      matrix: &anchor",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: &anchor` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("      matrix:", "      matrix: *alias"),
+            matrix_fixture("          - a").replace(
+                "      matrix:\n        crate:\n          - a",
+                "      matrix: *alias",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: *alias` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("      matrix:", "      matrix: !!map"),
+            matrix_fixture("          - a").replace(
+                "      matrix:\n        crate:\n          - a",
+                "      matrix: !!map",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: !!map` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("      matrix:", "      matrix: |"),
+            matrix_fixture("          - a").replace(
+                "      matrix:\n        crate:\n          - a",
+                "      matrix: |",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: |` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace("      matrix:", "      matrix: >-"),
+            matrix_fixture("          - a").replace(
+                "      matrix:\n        crate:\n          - a",
+                "      matrix: >-",
+            ),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: >-` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
     ] {
