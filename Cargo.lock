@@ -487,6 +487,7 @@ dependencies = [
  "tempfile",
  "toml",
  "toml_edit",
+ "uuid",
 ]
 
 [[package]]
