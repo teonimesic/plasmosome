@@ -1593,8 +1593,11 @@ mod tests {
         use std::process::Command;
 
         fn cc(args: &[&Path]) {
-            let _held = crate::spawn_lock::hold_fork_side();
-            let status = Command::new("cc").args(args).status().expect("cc runs");
+            let mut child = {
+                let _held = crate::spawn_lock::hold_fork_side();
+                Command::new("cc").args(args).spawn().expect("cc starts")
+            };
+            let status = child.wait().expect("cc ends");
             assert!(status.success(), "cc {args:?}: {status}");
         }
 
@@ -1641,15 +1644,22 @@ mod tests {
         }
 
         fn sysctl(name: &str) -> String {
-            let _held = crate::spawn_lock::hold_fork_side();
-            let output = Command::new("/usr/sbin/sysctl")
-                .args(["-n", name])
-                .output()
-                .expect("sysctl runs");
-            String::from_utf8(output.stdout)
-                .expect("UTF-8")
-                .trim_end()
-                .to_owned()
+            use std::io::{Read, Seek};
+            let mut stdout = tempfile::tempfile().expect("the sysctl output file opens");
+            let mut child = {
+                let _held = crate::spawn_lock::hold_fork_side();
+                Command::new("/usr/sbin/sysctl")
+                    .args(["-n", name])
+                    .stdout(stdout.try_clone().expect("the output file duplicates"))
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("sysctl starts")
+            };
+            assert!(child.wait().expect("sysctl ends").success());
+            stdout.rewind().expect("the output file rewinds");
+            let mut output = String::new();
+            stdout.read_to_string(&mut output).expect("UTF-8 output");
+            output.trim_end().to_owned()
         }
 
         #[test]
