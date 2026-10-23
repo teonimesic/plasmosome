@@ -1,6 +1,9 @@
 use std::fmt::Debug;
 
-use plasmosome_backend::{GrantId, Handle, UniverseClass};
+use plasmosome_backend::{
+    Capability, CellOwner, EnforcementSnapshot, GrantId, GrantKind, Handle, LedgerEntry, OsState,
+    UniverseClass,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
@@ -93,5 +96,59 @@ fn class_names_and_non_string_shapes_are_closed() {
             serde_json::from_str::<UniverseClass>(&refused.to_string()).is_err(),
             "{refused}"
         );
+    }
+}
+
+fn entries() -> impl Iterator<Item = LedgerEntry> {
+    [
+        json!({"SessionFile": {"path": "/session", "recipe": {
+            "contents": [], "mode": "read_only", "guest_path": "/guest/session"
+        }}}),
+        json!({"UdsSocket": {"path": "/socket", "recipe": {
+            "upstream": "/upstream", "guest_path": "/guest/socket"
+        }}}),
+        json!({"ProxyMap": {"host": "api.example.com", "route": "route", "recipe": {
+            "transport": "tcp", "destination": "upstream.example.com", "port": 443,
+            "allow_private": false
+        }}}),
+        json!({"Broker": {"name": "broker", "launch": {
+            "command": ["/bin/broker"], "control_socket": "/control", "data_socket": "/data"
+        }}}),
+        json!({"Mount": {"source": "/source", "target": "/target", "recipe": {
+            "access": "read_only"
+        }}}),
+    ]
+    .into_iter()
+    .map(|encoded| {
+        let capability: Capability = serde_json::from_value(encoded).unwrap();
+        LedgerEntry {
+            handle: Handle {
+                class: capability.class(),
+                id: GrantId::new(),
+            },
+            owner: CellOwner {
+                cell: "cell".into(),
+                plugin: "plugin".into(),
+            },
+            capability,
+            kind: GrantKind::Hot,
+        }
+    })
+}
+
+#[test]
+fn issued_entry_classes_accept_strings_and_refuse_objects() {
+    for (entry, (_, name)) in entries().zip(CLASSES) {
+        class_forms(entry, "/handle/class", name);
+    }
+}
+
+#[test]
+fn snapshot_grant_classes_accept_strings_and_refuse_objects() {
+    for (entry, (_, name)) in entries().zip(CLASSES) {
+        let mut state = OsState::new();
+        state.insert(entry.object()).unwrap();
+        let snapshot = EnforcementSnapshot::new(state, vec![entry], Vec::new()).unwrap();
+        class_forms(snapshot, "/grants/0/handle/class", name);
     }
 }
