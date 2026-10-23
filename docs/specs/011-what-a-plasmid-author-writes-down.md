@@ -343,7 +343,9 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   declared need leads on this host (the real destination, the host directory and its access), and
   can leave a need unmet, never add one.
 - **`[workspace].mount.backend` is optional, has no default and selects nothing.** A
-  declaration may write it or leave it out, and either way parses to the same declaration.
+  declaration may write a string or leave it out, and either way parses to the same declaration.
+  A written value that is not a string is refused at `workspace.mount.backend`, with `fix`
+  exactly `remove this entry`. Amended on 2026-10-23: this accepted any written value.
   Every Mount is realized through the mediated guest filesystem (spec 017), and spec 001 §4.2
   forbids a virtiofs export, so no value of `backend` says how a workspace reaches the cell.
   `dst` and its default are spec 022 §6's. Amended on 2026-10-21: before this, no text here

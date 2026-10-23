@@ -121,20 +121,37 @@ fn refused_on_each_stack(text: &str, what: &str) {
     }
 }
 
-fn accepted_on_each_stack(text: &str, what: &str) {
+fn field_refused_on_each_stack(text: &str, what: &str, expected: &str) {
     for stack in STACKS {
         match parsed_on(stack, text) {
-            Ok(manifest) => assert_eq!(manifest.id, "github-pr", "{what}"),
+            Err(ManifestError::Field {
+                field,
+                plasmid,
+                fix,
+                ..
+            }) => {
+                assert_eq!(field, expected, "{what}");
+                assert_eq!(plasmid.as_deref(), Some("github-pr"));
+                assert!(fix.starts_with("# "));
+            }
             Err(error) => panic!(
-                "{what} parses on a {} MiB stack, but was refused as {error:?}",
+                "{what} reaches field validation on a {} MiB stack, but was refused as {error:?}",
                 stack >> 20
             ),
+            Ok(manifest) => panic!("unknown field accepted: {manifest:?}"),
         }
     }
 }
 
 fn at_and_past_the_bound(at: Nesting, past: Nesting, what: &str) {
-    accepted_on_each_stack(&at.counting(BOUND), &format!("{what} counting 32"));
+    let field = if at.array_tables > 0 {
+        "nested"
+    } else if at.table_parts > 0 {
+        "table"
+    } else {
+        "leaf"
+    };
+    field_refused_on_each_stack(&at.counting(BOUND), &format!("{what} counting 32"), field);
     let past = past.counting(BOUND + 1);
     refused_on_each_stack(&past, &format!("{what} counting 33"));
     refused_on_each_stack(
