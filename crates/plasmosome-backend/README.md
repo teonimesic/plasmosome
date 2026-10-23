@@ -213,6 +213,15 @@ stops a guest under that drain (spec 023 §7). It is a tenth of the drain deadli
 would be left: then no `shutdown` is sent and the helper is killed at the drain deadline. It
 lives here, beside `DrainSpec`, because it reads only the drain's deadline and policy.
 
+`guest_protocol::GuestObservation` is the strict guest inventory from spec 001 §4.2. Every
+inventory is required, even when empty. Decoding checks object and binding identities and stream
+end structure; callers changing public fields call `validate` before use. `projections` visits
+all ten kinds through `ProjectionRef`, and `grants` returns each kind, projection ID and grant,
+including streams. Neither accessor includes software references. `SoftwareObservation` requires
+both `trees` and `held`; `TreeReference.exec_id` is required even when null. While spec 027
+reserves the software journal record and attach wire, `SoftwareTree` has no values and `trees`
+accepts only an empty array. Host association, authority and policy checks remain the caller's.
+
 ## What's inside
 
 | Piece | Responsibility |
