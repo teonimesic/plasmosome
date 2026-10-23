@@ -13,11 +13,12 @@ use serde::{Deserialize, Deserializer, forward_to_deserialize_any};
 /// nested record must refuse a sequence itself.
 ///
 /// Wrap only a derived struct with named fields, or an enum that serde tags externally (the
-/// default). Anything else is read as a map and refused even when valid: an untagged or internally
-/// tagged enum, an `Option`, a sequence. It reads a struct with `deserialize_map`, not
-/// `deserialize_struct`, so it needs a self-describing format such as JSON or TOML. The derived
-/// visitor is reached only through `visit_map`, so a format that answers `deserialize_map` with an
-/// array, as TOML does, is refused too.
+/// default) or internally (`tag = "..."`): an internally tagged enum decodes from a map and refuses
+/// a sequence. Anything else is read as a map: an untagged enum decodes only a variant whose value
+/// is a map, and an `Option` or a sequence is refused even when valid. It reads a struct with
+/// `deserialize_map`, not `deserialize_struct`, so it needs a self-describing format such as JSON
+/// or TOML. The derived visitor is reached only through `visit_map`, so a format that answers
+/// `deserialize_map` with an array, as TOML does, is refused too.
 pub struct ObjectOnly<D>(D);
 
 impl<D> ObjectOnly<D> {
@@ -507,6 +508,43 @@ mod tests {
                 Ok(expected),
                 "{text}"
             );
+        }
+    }
+
+    fn through_object_only<T: DeserializeOwned>(value: Value) -> [Result<T, String>; 2] {
+        let text = value.to_string();
+        let mut reader = serde_json::Deserializer::from_str(&text);
+        [
+            T::deserialize(ObjectOnly::new(&mut reader)).map_err(|error| error.to_string()),
+            T::deserialize(ObjectOnly::new(value)).map_err(|error| error.to_string()),
+        ]
+    }
+
+    #[test]
+    fn an_internally_tagged_enum_decodes_from_a_map_and_refuses_a_sequence() {
+        #[derive(Clone, Debug, PartialEq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Tagged {
+            Rejected { reason: String },
+        }
+        let rejected = Tagged::Rejected {
+            reason: "r".to_string(),
+        };
+        for outcome in through_object_only(json!({"kind": "rejected", "reason": "r"})) {
+            assert_eq!(outcome, Ok(rejected.clone()));
+        }
+        for (value, expected) in [
+            (json!(["rejected", "r"]), "invalid type: sequence"),
+            (
+                json!({"kind": "rejected", "reason": "r", "x": 1}),
+                "unknown field `x`",
+            ),
+            (json!({"kind": "other", "reason": "r"}), "unknown variant"),
+        ] {
+            for outcome in through_object_only::<Tagged>(value.clone()) {
+                let error = outcome.expect_err(&value.to_string());
+                assert!(error.contains(expected), "{value}: {error}");
+            }
         }
     }
 

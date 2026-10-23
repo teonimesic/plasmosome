@@ -6,6 +6,7 @@ The typed reversibility ledger: per-plasmid stacks of effects, each carrying its
 Detach replays them LIFO and the result is verified against observed system state.
 The `artifact` module also holds spec 020's registry IDs, release keys and release references,
 as values that only parse, print and compare.
+The `cell_journal` module holds spec 008's per-cell journal records and their strict codec.
 
 ## Hard rules
 
