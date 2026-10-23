@@ -1,3 +1,4 @@
+use crate::spawn_lock::spawn_guarded;
 use std::ffi::OsString;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -52,7 +53,15 @@ impl BuildRecipe {
             .find(|path| path.is_file())
             .and_then(|path| fs::canonicalize(path).ok())
             .expect("the host C compiler has a resolved path");
-        let version = Command::new(&compiler).arg("--version").output().unwrap();
+        let version = spawn_guarded(
+            Command::new(&compiler)
+                .arg("--version")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
         assert!(
             version.status.success(),
             "the C compiler reports its identity"
@@ -209,7 +218,7 @@ fn compile_runtime_fake(root: &Path) -> PathBuf {
             panic!("the runtime fake is linked as mode {mode}: {error}");
         }
     }
-    let mut child = Command::new(&fake).spawn().unwrap_or_else(|error| {
+    let mut child = spawn_guarded(&mut Command::new(&fake)).unwrap_or_else(|error| {
         panic!(
             "the compiled runtime fake {} runs: {error}; if it is stale, run `cargo clean`",
             fake.display()
@@ -240,7 +249,8 @@ fn publish_fake(recipe: &BuildRecipe, fake: &Path) {
         .parent()
         .unwrap()
         .join("lib/libplasmosome-fake.dylib");
-    let compiled = recipe.command(&recipe.helper, &unique, &library).status();
+    let compiled = spawn_guarded(&mut recipe.command(&recipe.helper, &unique, &library))
+        .and_then(|mut child| child.wait());
     let published = match &compiled {
         Ok(status) if status.success() => fs::hard_link(&unique, fake),
         _ => Ok(()),
@@ -290,9 +300,8 @@ fn compile_library(recipe: &BuildRecipe, key: &Path) {
         return;
     }
     let temporary = tempfile::NamedTempFile::new_in(&lib).unwrap();
-    let status = recipe
-        .command(invocation, temporary.path(), &library)
-        .status()
+    let status = spawn_guarded(&mut recipe.command(invocation, temporary.path(), &library))
+        .and_then(|mut child| child.wait())
         .unwrap();
     assert!(status.success(), "the fixture library compiles: {status}");
     if let Err(error) = fs::hard_link(temporary.path(), &library) {
