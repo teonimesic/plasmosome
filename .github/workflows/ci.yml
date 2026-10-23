@@ -92,6 +92,15 @@ jobs:
       - name: format
         run: cargo fmt --all -- --check
 
+      - name: check fuzz targets
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+
+      - name: lint fuzz targets
+        run: cargo clippy --locked --manifest-path fuzz/Cargo.toml --bins -- -D warnings
+
+      - name: format fuzz targets
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+
       - name: cargo-deny check regression
         run: python3 tools/cargo-deny-check-regression.py
 

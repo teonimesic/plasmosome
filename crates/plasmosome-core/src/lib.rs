@@ -27,6 +27,9 @@ pub mod nofollow;
 /// Spec 022's operator declarations: the trusted files the controller reads them from.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod operator;
+
+#[cfg(feature = "fuzzing")]
+pub use operator::file::operator_file::check as fuzz_operator_file;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod private_socket;
 pub mod protocol;

@@ -1,0 +1,72 @@
+[package]
+name = "plasmosome-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+plasmosome-core = { path = "../crates/plasmosome-core", features = ["fuzzing"] }
+plasmosome-membrane = { path = "../crates/plasmosome-membrane" }
+plasmosome-cli = { path = "../crates/plasmosome-cli" }
+plasmosome-backend = { path = "../crates/plasmosome-backend" }
+serde_json = "1"
+toml_edit = { version = "0.22", default-features = false, features = ["parse"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[[bin]]
+name = "control_line"
+path = "fuzz_targets/control_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "readiness_reply"
+path = "fuzz_targets/readiness_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hello_reply"
+path = "fuzz_targets/hello_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cli_reply"
+path = "fuzz_targets/cli_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "guest_control_reply"
+path = "fuzz_targets/guest_control_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "operator_file"
+path = "fuzz_targets/operator_file.rs"
+test = false
+doc = false
+bench = false

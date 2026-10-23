@@ -2,10 +2,10 @@ name = "cc"
 range = "1"
 reason = """\
   Compiles C source with the platform's C compiler from a build script, and tells cargo to link \
-  the result. We have one C file, which reads the macOS process table, and it is built on macOS \
-  only.\
+  the result. Builds the membrane's macOS process-table C file and libFuzzer's C++ engine on \
+  both supported hosts, with parallel compilation in the fuzz graph.\
   """
-write_it_instead.lines = 80
+write_it_instead.lines = 300
 write_it_instead.how = """\
   On 2026-10-20, at main 8fe24e3, `git grep -n 'cc::' -- '*.rs'` finds one use, at \
   crates/plasmosome-membrane/build.rs line 5: Build::new() with one file, \
@@ -14,16 +14,23 @@ write_it_instead.how = """\
   OPT_LEVEL, DEBUG and TARGET, with -std=c11, -Wall, -Wextra, -arch and the deployment target \
   (40 lines); running it on the file and reporting a failure (20); running ar (10); and printing \
   the cargo:rustc-link-search and cargo:rustc-link-lib lines (10): 80 lines. Replacing it \
-  removes 3 packages from Cargo.lock: cc@1, find-msvc-tools@0.1 and shlex@2.\
+  removes 3 packages from the root Cargo.lock: cc@1, find-msvc-tools@0.1 and shlex@2. \
+  On 2026-10-23, at main c9242fd9 plus the fuzz workspace, the same git search still finds \
+  one call. libfuzzer-sys/build.rs also uses Build::file, cpp, std, force_frame_pointer and \
+  warnings. C++ compiler/runtime selection and flags (100 lines), parallel compilation with \
+  jobserver tokens (100), and collecting the engine's source list (20), plus the original \
+  80: 300 lines. The fuzz derivation removes nothing when cc stops being direct; libfuzzer-sys \
+  still uses it.\
   """
 exception = ""
-brings = ["find-msvc-tools@0.1", "shlex@2"]
-build_time_code = []
+brings = ["cfg-if@1","find-msvc-tools@0.1","getrandom@0.4","jobserver@0.1","libc@0.2","r-efi@6","shlex@2"]
+build_time_code = ["libc@0.2 build script"]
 expands_unsafe = "none"
 native_code = [
   """\
   cc@1 runs the host C compiler and archiver over the membrane's own src/darwin_group.c at build \
-  time, on macOS only. Its own C is src/detect_compiler_family.c, 15 lines of #pragma message \
+  time, on macOS only, and libfuzzer-sys's libfuzzer/*.cpp as C++17 on both hosts. Its own C \
+  is src/detect_compiler_family.c, 15 lines of #pragma message \
   that it runs through the preprocessor alone, with -E, to tell clang from gcc. Nothing of cc's \
   is compiled into an object or linked.\
   """,

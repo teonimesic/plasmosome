@@ -30,3 +30,8 @@ bench = false
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "fuzz-run"
+path = "src/bin/fuzz_run.rs"
+bench = false

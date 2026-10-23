@@ -37,6 +37,10 @@ one.
 
 ## Use
 
+The non-default `fuzzing` feature exposes only `fuzz_operator_file(&[u8])`, the existing
+operator-file replay check, for the separate fuzz workspace. It exposes no parser types and
+default builds have no such public item.
+
 A declaration requires a nonblank `description`. Tools are a table of names to nonblank
 descriptions; the former names-only list is refused. Both strings retain the author's text,
 including surrounding whitespace. For example:
