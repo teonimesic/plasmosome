@@ -4,11 +4,13 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
-    BridgeError, ControlLane, EncodeError, InboundRequest, ProtocolCode, RequestRefusal, cut,
-    encode_request, split_request,
+    BootToken, BridgeError, ControlLane, EncodeError, InboundRequest, ProtocolCode, ReplyFault,
+    RequestId, RequestRefusal, Yes, cut, encode_request, encode_success, split_reply,
+    split_request,
 };
 use crate::universe::{CellOwner, GrantId, UniverseOp, UniverseRemoval};
 use crate::wire::{ObjectOnly, object_serde};
+use crate::{digest::Digest, paging::ObservationPage};
 
 /// A canonical IPv4 address in the guest proxy pool, inclusive of both endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -323,4 +325,141 @@ pub fn encode_control_request(id: u64, call: &ControlCall) -> Result<Vec<u8>, En
         ControlCall::Remove(params) => encode_request(id, method, params),
         ControlCall::Shutdown(params) => encode_request(id, method, params),
     }
+}
+
+/// The original boot and the protected guest policy's digest, returned by hello.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct HelloResult {
+    pub boot: BootToken,
+    pub policy: Digest,
+}
+
+/// Acknowledges that this boot installed the selected grant with admission closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct InstalledResult {
+    pub boot: BootToken,
+    pub grant: GrantId,
+    pub installed: Yes,
+}
+
+/// Acknowledges that this boot activated the selected grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct ActiveResult {
+    pub boot: BootToken,
+    pub grant: GrantId,
+    pub active: Yes,
+}
+
+/// Acknowledges that this boot finished waiting for the selected grant's pending requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct DrainedResult {
+    pub boot: BootToken,
+    pub grant: GrantId,
+    pub drained: Yes,
+}
+
+/// Acknowledges that this boot removed the selected grant's guest attachments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct RemovedResult {
+    pub boot: BootToken,
+    pub grant: GrantId,
+    pub guest_removed: Yes,
+}
+
+/// Acknowledges that this boot accepted shutdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", deny_unknown_fields)]
+pub struct ShutdownResult {
+    pub boot: BootToken,
+    pub shutdown_requested: Yes,
+}
+
+object_serde!(HelloResult through HelloResult, InstalledResult through InstalledResult,
+    ActiveResult through ActiveResult, DrainedResult through DrainedResult,
+    RemovedResult through RemovedResult, ShutdownResult through ShutdownResult);
+
+/// A control success without its envelope. Observe is a page whose assembler checks
+/// the account; acknowledgements alone do not prove that a capability is effective.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlResult {
+    Hello(HelloResult),
+    Observe(ObservationPage),
+    Installed(InstalledResult),
+    Active(ActiveResult),
+    Drained(DrainedResult),
+    Removed(RemovedResult),
+    Shutdown(ShutdownResult),
+}
+
+/// Encodes the method's result as a compact success reply with no newline.
+/// Echoes `id` unchanged and propagates the shared encoder's serialization errors.
+pub fn encode_control_result(
+    id: &RequestId,
+    result: &ControlResult,
+) -> Result<Vec<u8>, EncodeError> {
+    match result {
+        ControlResult::Hello(result) => encode_success(id, result),
+        ControlResult::Observe(result) => encode_success(id, result),
+        ControlResult::Installed(result) => encode_success(id, result),
+        ControlResult::Active(result) => encode_success(id, result),
+        ControlResult::Drained(result) => encode_success(id, result),
+        ControlResult::Removed(result) => encode_success(id, result),
+        ControlResult::Shutdown(result) => encode_success(id, result),
+    }
+}
+
+/// Decodes the expected call's closed result, checking its boot when supplied and
+/// its grant against the call. Pass no boot only for the first hello. Observe pages
+/// are returned for the caller's assembler to check. The reader bounds the frame.
+pub fn decode_control_reply(
+    call: &ControlCall,
+    expected_id: u64,
+    boot: Option<&BootToken>,
+    line: &[u8],
+) -> Result<ControlResult, ReplyFault> {
+    let raw = split_reply(expected_id, line)?;
+    let text = raw.get();
+    let result = match call {
+        ControlCall::Hello(_) => serde_json::from_str(text).map(ControlResult::Hello),
+        ControlCall::Observe(_) => serde_json::from_str(text).map(ControlResult::Observe),
+        ControlCall::Install(_) => serde_json::from_str(text).map(ControlResult::Installed),
+        ControlCall::Activate(_) => serde_json::from_str(text).map(ControlResult::Active),
+        ControlCall::Drain(_) => serde_json::from_str(text).map(ControlResult::Drained),
+        ControlCall::Remove(_) => serde_json::from_str(text).map(ControlResult::Removed),
+        ControlCall::Shutdown(_) => serde_json::from_str(text).map(ControlResult::Shutdown),
+    }
+    .map_err(|error| ReplyFault::Result {
+        detail: cut(&error.to_string()),
+    })?;
+    let (found_boot, found_grant) = match &result {
+        ControlResult::Hello(r) => (r.boot, None),
+        ControlResult::Observe(_) => return Ok(result),
+        ControlResult::Installed(r) => (r.boot, Some(r.grant)),
+        ControlResult::Active(r) => (r.boot, Some(r.grant)),
+        ControlResult::Drained(r) => (r.boot, Some(r.grant)),
+        ControlResult::Removed(r) => (r.boot, Some(r.grant)),
+        ControlResult::Shutdown(r) => (r.boot, None),
+    };
+    if let Some(expected) = boot
+        && *expected != found_boot
+    {
+        return Err(ReplyFault::BootChanged {
+            expected: *expected,
+            found: found_boot,
+        });
+    }
+    if let Some(expected) = call.grant()
+        && Some(expected) != found_grant
+    {
+        return Err(ReplyFault::GrantMismatch {
+            expected,
+            found: found_grant.expect("grant result"),
+        });
+    }
+    Ok(result)
 }

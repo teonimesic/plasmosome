@@ -3,7 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::value::RawValue;
 
-use super::cut;
+use super::{BootToken, cut};
+use crate::universe::GrantId;
 use crate::wire::{ObjectOnly, object_serde};
 
 const REFUSED: i64 = 105;
@@ -325,6 +326,181 @@ fn refused(id: RequestId, code: ProtocolCode, message: &str) -> RequestRefusal {
             message: cut(message),
         },
     }
+}
+
+/// Why a reply cannot answer a control call. Guest text is kept at most 1,024 bytes,
+/// ending on a character boundary. Callers match variants, never message text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplyFault {
+    NotUtf8,
+    NotJson {
+        detail: String,
+    },
+    Envelope {
+        detail: String,
+    },
+    WrongId {
+        expected: u64,
+        found: String,
+    },
+    Unattributed(BridgeError),
+    Refused(BridgeError),
+    Result {
+        detail: String,
+    },
+    BootChanged {
+        expected: BootToken,
+        found: BootToken,
+    },
+    GrantMismatch {
+        expected: GrantId,
+        found: GrantId,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyEnvelope {
+    id: Box<RawValue>,
+    #[serde(default, deserialize_with = "present_raw")]
+    result: Option<Box<RawValue>>,
+    #[serde(default, deserialize_with = "present_raw")]
+    error: Option<Box<RawValue>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ErrorObject {
+    code: i64,
+    message: String,
+    #[serde(default, deserialize_with = "present_raw")]
+    from: Option<Box<RawValue>>,
+    #[serde(default, deserialize_with = "present_raw")]
+    to: Option<Box<RawValue>>,
+    #[serde(default, deserialize_with = "present_raw")]
+    detail: Option<Box<RawValue>>,
+}
+
+fn present_raw<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> Result<Option<Box<RawValue>>, D::Error> {
+    Box::<RawValue>::deserialize(reader).map(Some)
+}
+
+fn decode_error(text: &str) -> Result<BridgeError, String> {
+    let mut reader = serde_json::Deserializer::from_str(text);
+    let error = ErrorObject::deserialize(ObjectOnly::new(&mut reader))
+        .map_err(|error| error.to_string())?;
+    let protocol = match error.code {
+        -32700 => Some(ProtocolCode::ParseError),
+        -32600 => Some(ProtocolCode::InvalidRequest),
+        -32601 => Some(ProtocolCode::MethodNotFound),
+        -32602 => Some(ProtocolCode::InvalidParams),
+        -32603 => Some(ProtocolCode::InternalError),
+        _ => None,
+    };
+    if let Some(code) = protocol
+        && error.from.is_none()
+        && error.to.is_none()
+        && error.detail.is_none()
+    {
+        return Ok(BridgeError::Protocol {
+            code,
+            message: cut(&error.message),
+        });
+    }
+    let string_is = |value: &Option<Box<RawValue>>, expected: &str| {
+        value
+            .as_ref()
+            .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
+            .is_some_and(|found| found == expected)
+    };
+    if error.code == REFUSED
+        && string_is(&error.from, REFUSED_FROM)
+        && string_is(&error.to, REFUSED_TO)
+        && let Some(detail) = error.detail
+    {
+        let RefusalDetail::Rejected { reason } =
+            serde_json::from_str(detail.get()).map_err(|error| error.to_string())?;
+        return Ok(BridgeError::Refused {
+            message: cut(&error.message),
+            detail: RefusalDetail::Rejected {
+                reason: cut(&reason),
+            },
+        });
+    }
+    Err("error fields do not match a protocol error or a guest refusal".to_owned())
+}
+
+/// Reads one reply without its newline, returning the result's original JSON text.
+/// The reader enforces `MAX_FRAME_BYTES` and its deadline. JSON nesting is limited
+/// to 128 levels. Exactly `{id, result}` or `{id, error}` is accepted; every field
+/// occurs once. A null-id error is unattributed; other ids must be the expected u64.
+pub fn split_reply(expected_id: u64, line: &[u8]) -> Result<Box<RawValue>, ReplyFault> {
+    let text = std::str::from_utf8(line).map_err(|_| ReplyFault::NotUtf8)?;
+    let not_json = |detail: &str| ReplyFault::NotJson {
+        detail: cut(detail),
+    };
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in text.bytes() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'[' | b'{' => {
+                    depth += 1;
+                    if depth > 128 {
+                        return Err(not_json("recursion limit exceeded"));
+                    }
+                }
+                b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    serde_json::from_str::<&RawValue>(text).map_err(|error| not_json(&error.to_string()))?;
+    let envelope_fault = |detail: &str| ReplyFault::Envelope {
+        detail: cut(detail),
+    };
+    let mut reader = serde_json::Deserializer::from_str(text);
+    let reply = ReplyEnvelope::deserialize(ObjectOnly::new(&mut reader))
+        .map_err(|error| envelope_fault(&error.to_string()))?;
+    if reply.result.is_some() == reply.error.is_some() {
+        return Err(envelope_fault(
+            "exactly one of result and error is required",
+        ));
+    }
+    let error = reply
+        .error
+        .map(|error| decode_error(error.get()))
+        .transpose()
+        .map_err(|detail| envelope_fault(&detail))?;
+    if reply.id.get() == "null"
+        && let Some(error) = &error
+    {
+        return Err(ReplyFault::Unattributed(error.clone()));
+    }
+    if RequestId(reply.id.clone()).as_u64() != Some(expected_id) {
+        return Err(ReplyFault::WrongId {
+            expected: expected_id,
+            found: cut(reply.id.get()),
+        });
+    }
+    if let Some(error) = error {
+        return Err(ReplyFault::Refused(error));
+    }
+    Ok(reply
+        .result
+        .expect("the envelope has exactly one result or error"))
 }
 
 fn encode(line: &impl Serialize) -> Vec<u8> {
