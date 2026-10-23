@@ -141,6 +141,21 @@ fn generation_and_event_order_faults() {
             p(1),
             Kind::GenerationOrder,
         ),
+        (
+            vec![p(1), r(1, Event::Abort)],
+            r(1, Event::Abort),
+            Kind::EventOrder,
+        ),
+        (
+            vec![p(1), r(1, Event::Commit), r(1, Event::Finish), p(2)],
+            r(1, Event::Commit),
+            Kind::GenerationOrder,
+        ),
+        (
+            vec![p(1), r(1, Event::Commit)],
+            r(0, Event::Finish),
+            Kind::GenerationZero,
+        ),
         (vec![], p(0), Kind::GenerationZero),
         (vec![p(1)], r(0, Event::Commit), Kind::GenerationZero),
     ];
@@ -227,6 +242,17 @@ fn identity_faults_and_atomic_admission() {
         prepare(1, vec![attach("p", vec![opaque.clone()])]),
         Event::Commit,
     );
+    let bad = prepare(
+        2,
+        vec![Change {
+            plugin: PluginId::from("q"),
+            replacement: None,
+        }],
+    );
+    let before = h.clone();
+    assert_eq!(h.check(&bad).unwrap_err().kind, Kind::InvalidEffect);
+    assert_eq!(h.admit(&bad).unwrap_err().kind, Kind::InvalidEffect);
+    assert_eq!(h, before);
     assert_eq!(
         h.admit(&prepare(2, vec![attach("q", vec![opaque])]))
             .unwrap_err()

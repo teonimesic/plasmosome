@@ -89,6 +89,52 @@ fn illegal_history_faults_at_its_line_and_preserves_bytes() {
 }
 
 #[test]
+fn repeated_abort_returns_fault_without_records() {
+    let records = vec![
+        prepare(1, vec![attach("p", vec![])]),
+        record(1, Event::Abort),
+        record(1, Event::Abort),
+    ];
+    let path = Path::new("diagnostic-only");
+    let result = read_cell_journal_from(&bytes(&records)[..], path, &CellId::from("c"));
+    assert!(result.is_err(), "illegal history returned records");
+    let fault = result.unwrap_err();
+    assert_eq!(
+        (
+            fault.path.as_path(),
+            fault.kind,
+            fault.line,
+            fault.lines_parsed
+        ),
+        (path, Kind::EventOrder, Some(3), 2)
+    );
+}
+
+#[test]
+fn older_commit_returns_fault_without_records() {
+    let records = vec![
+        prepare(1, vec![attach("p", vec![])]),
+        record(1, Event::Commit),
+        record(1, Event::Finish),
+        prepare(2, vec![attach("p", vec![])]),
+        record(1, Event::Commit),
+    ];
+    let path = Path::new("diagnostic-only");
+    let result = read_cell_journal_from(&bytes(&records)[..], path, &CellId::from("c"));
+    assert!(result.is_err(), "illegal history returned records");
+    let fault = result.unwrap_err();
+    assert_eq!(
+        (
+            fault.path.as_path(),
+            fault.kind,
+            fault.line,
+            fault.lines_parsed
+        ),
+        (path, Kind::GenerationOrder, Some(5), 4)
+    );
+}
+
+#[test]
 fn single_plugin_log_at_cell_path_faults() {
     let temp = tempfile::tempdir().unwrap();
     let path = path(temp.path());
