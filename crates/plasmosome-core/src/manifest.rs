@@ -11,6 +11,8 @@ use plasmosome_backend::{canonical_ip_literal, canonical_path};
 
 use crate::toml_depth;
 
+mod strict;
+
 /// The most bytes a declaration may hold: spec 020's limit for one
 /// declaration. `load` and `parse` refuse a longer one with
 /// `ManifestError::TooLarge`.
@@ -328,7 +330,7 @@ impl std::fmt::Display for ManifestError {
                         fix.len()
                     )
                 } else {
-                    write!(text, "{field}: {detail}; write {fix}")
+                    write!(text, "{field}: {detail}; write {}", visible_lines(fix))
                 }
             }
             ManifestError::TooLarge { limit } => {
@@ -422,6 +424,7 @@ impl PlasmidManifest {
                 )
             })?
             .to_string();
+        strict::check(&id, text, &raw)?;
         let version = raw
             .get("version")
             .and_then(toml::Value::as_str)
@@ -434,7 +437,15 @@ impl PlasmidManifest {
             .map(PathBuf::from);
         let requires = raw
             .get("requires")
-            .map(|r| string_list(r.get("capabilities")))
+            .map(|r| {
+                string_list(
+                    &id,
+                    "requires.capabilities",
+                    r.get("capabilities"),
+                    "capabilities = []",
+                )
+            })
+            .transpose()?
             .unwrap_or_default();
         let provides_tools = raw
             .get("provides")
@@ -517,7 +528,7 @@ impl PlasmidManifest {
             .get("lifecycle")
             .and_then(|l| l.get("drain_ms"))
             .and_then(toml::Value::as_integer)
-            .map(|v| v as u64);
+            .and_then(|v| u64::try_from(v).ok());
         if wasm.is_none()
             && network.is_none()
             && workspace.is_none()
@@ -1138,14 +1149,18 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
             ));
         }
         let declared = decl.get("exec");
-        let exec = string_list(declared);
+        let exec = string_list(
+            plasmid_id,
+            &format!("{path}.exec"),
+            declared,
+            &format!("exec = [{}]", toml_string(&program(declared, id))),
+        )?;
         if exec.is_empty() {
             let detail = match declared {
                 None => "the command declares no exec".to_string(),
-                Some(value) if value.is_array() => {
+                Some(value) => {
                     format!("{} names no program to run", shown(value))
                 }
-                Some(value) => format!("{} is not a list of strings", shown(value)),
             };
             return Err(field_error(
                 plasmid_id,
@@ -1585,17 +1600,40 @@ fn nonzero_port(number: i64) -> Option<u16> {
     u16::try_from(number).ok().filter(|port| *port != 0)
 }
 
-fn string_list(value: Option<&toml::Value>) -> Vec<String> {
-    value
-        .and_then(toml::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(toml::Value::as_str)
-                .map(String::from)
-                .collect()
+fn string_list(
+    id: &str,
+    path: &str,
+    value: Option<&toml::Value>,
+    fix: &str,
+) -> Result<Vec<String>, ManifestError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let items = value.as_array().ok_or_else(|| {
+        field_error(
+            id,
+            path.into(),
+            fix.into(),
+            &format!("{} is not a list of strings", shown(value)),
+        )
+    })?;
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            item.as_str()
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    field_error(
+                        id,
+                        format!("{path}[{index}]"),
+                        REMOVE_ENTRY.into(),
+                        "expected a nonblank string",
+                    )
+                })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 #[cfg(test)]
@@ -3746,8 +3784,8 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             (
                 declared("[commands.commands.git]\nexec = [5]"),
                 github,
-                "commands.commands.git.exec",
-                "exec = [\"git\"]",
+                "commands.commands.git.exec[0]",
+                REMOVAL,
             ),
             (
                 declared("[commands.commands.gh]\nexec = \"/opt/bin/gh\""),

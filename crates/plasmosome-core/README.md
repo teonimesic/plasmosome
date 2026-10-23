@@ -68,6 +68,13 @@ impl.wasm = "github-pr.wasm"
 }
 ```
 
+Unknown fields are refused at their full TOML path, with the author's entry turned into a comment.
+A written value of the wrong type is refused rather than replaced by a default; absent fields
+keep their defaults. Top-level credential refs cannot declare `subject`. Each `requires.capabilities`
+or command `exec` entry must be a nonblank string; a refused entry keeps its original index and
+gets `remove this entry`. Lifecycle `drain_ms` must be an integer from 1 to 30,000. `lease_ms` and
+`idle_ms` must fit u64; their storage and ranges come with the lifetime resolver.
+
 Missing or invalid purpose, tool declarations and missing, non-string, empty or blank IDs return
 `ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
 repair. Credential-reference refusals use that same form, including the indexed reference and,
@@ -147,8 +154,9 @@ that `plasmosome_backend::canonical_path` refuses: relative, `/`, with a trailin
 empty, `.` or `..` component, or with a NUL. Its fix adds a leading `/` to a relative value and
 removes trailing `/`s when that gives a canonical path, such as `dst = "/srv/work"` for
 `srv/work//`, and is `dst = "/workspace"` otherwise. Any other `dst`, such as `/srv/work.d`, is
-kept exactly as written. A `workspace` or `mount` that is not a table is read as before: no
-workspace, or the default `/workspace`.
+kept exactly as written. A `workspace` or `mount` that is not a table is refused at its own field;
+the mount fix writes `mount = { dst = "/workspace" }`. A written `backend` must be a string,
+has no default and selects nothing; a wrong type gets `remove this entry`.
 
 A fix built from a list the author wrote names each entry once, keeping the first:
 `commands = ["gh", "gh"]` gets one `[commands.commands.gh]` section, since TOML refuses a

@@ -46,6 +46,13 @@ fn applied(text: &str, field: &str, fix: &str) -> String {
     let keys =
         Key::parse(path).unwrap_or_else(|error| panic!("{field} is not a TOML path: {error}"));
     let (last, parents) = keys.split_last().unwrap();
+    if fix.starts_with('#') {
+        table_at(&mut document, parents)
+            .unwrap()
+            .remove(last.get())
+            .unwrap();
+        return format!("{document}\n{fix}\n");
+    }
     if fix.starts_with('[') {
         assert_eq!(index, None, "a section fix for the entry {field}");
         if let Some(parent) = table_at(&mut document, parents) {
@@ -541,6 +548,15 @@ fn a_client_following_each_fix_from_the_wire_alone_ends_where_the_parser_does() 
          [network]\nports = [443]\n"
             .to_string(),
     );
+    for tail in [
+        "impl.wasm = 'c.wasm'\nprovenance = 'generated'",
+        "impl.wasm = 'c.wasm'\n[model]\nendpoint = 5",
+        "impl.wasm = 'c.wasm'\n[workspace]\nmount = 5",
+        "impl.wasm = 'c.wasm'\n[lifecycle]\ndrain_ms = -5",
+        "impl.wasm = 'c.wasm'\n[requires]\ncapabilities = 5",
+    ] {
+        starts.push(format!("{DECLARED}{tail}"));
+    }
     for start in starts {
         assert_eq!(followed_from_the_wire(&start), followed(&start), "{start}");
     }
