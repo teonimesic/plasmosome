@@ -849,7 +849,8 @@ fn one_line(text: &str) -> String {
 /// [`judge_denial`]. The first creates `/private/tmp/plasmosome-vmm-probe-<pid>` with
 /// `O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC`; a file it did create is closed and unlinked before
 /// the refusal. The second connects over TCP to 127.0.0.1 port 9, and a refused `socket` call is
-/// its answer too. Refuses `HostPolicy`, naming the first probe that was not denied with `EPERM`.
+/// its answer too. The connect has a one-second allowance; a timeout refuses. Refuses
+/// `HostPolicy`, naming the first probe that was not denied with `EPERM`.
 #[cfg(target_os = "macos")]
 pub fn probe_denials() -> Result<(), HelperRefusal> {
     judge_denial(DeniedProbe::FreshFileWrite, fresh_file_write())?;
@@ -877,7 +878,16 @@ fn fresh_file_write() -> Result<(), i32> {
 
 #[cfg(target_os = "macos")]
 fn tcp_connect() -> Result<(), i32> {
-    std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, 9))
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 9));
+    tcp_connect_to(&address, std::time::Duration::from_secs(1))
+}
+
+#[cfg(target_os = "macos")]
+fn tcp_connect_to(
+    address: &std::net::SocketAddr,
+    allowance: std::time::Duration,
+) -> Result<(), i32> {
+    std::net::TcpStream::connect_timeout(address, allowance)
         .map(drop)
         .map_err(|error| errno(&error))
 }
@@ -894,9 +904,12 @@ fn errno(error: &io::Error) -> i32 {
 /// an absolute path, so the judge refuses it. Each call reads the list again, so a call after
 /// `krun_create_ctx` sees what it loaded. Do not call it while another thread may unload an image
 /// with `dlclose`.
+///
+/// # Safety
+/// The caller must ensure that no thread or callback unloads any image until this call returns.
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-pub fn loaded_images() -> Vec<String> {
+pub unsafe fn loaded_images() -> Vec<String> {
     // SAFETY: _dyld_image_count takes nothing and only reads dyld's image list.
     let count = unsafe { _dyld_image_count() };
     image_names(count, |index| {
@@ -904,9 +917,8 @@ pub fn loaded_images() -> Vec<String> {
         // that is not below the count.
         let name = unsafe { _dyld_get_image_name(index) };
         // SAFETY: a non-null name is a NUL-terminated path dyld keeps while its image is loaded,
-        // and it is copied out at once. Only dlclose unloads an image, an unsafe call whose caller
-        // must know nothing still uses the image, so only another thread's dlclose during the copy
-        // could free it. The helper has one thread.
+        // and the caller guarantees that no thread or callback unloads any image until this call
+        // returns, so the name remains valid throughout this copy.
         (!name.is_null()).then(|| unsafe { CStr::from_ptr(name) }.to_bytes().to_vec())
     })
 }
@@ -1312,6 +1324,13 @@ mod tests {
             let refusal = judge_denial(DeniedProbe::FreshFileWrite, Err(errno));
             let detail = format!(
                 "the host policy did not deny a fresh file write: it failed with errno {errno}, not EPERM"
+            );
+            assert_eq!(refusal, Err(refuse(HostPolicy, detail)));
+        }
+        for errno in [libc::ETIMEDOUT, libc::EIO] {
+            let refusal = judge_denial(DeniedProbe::TcpConnect, Err(errno));
+            let detail = format!(
+                "the host policy did not deny a TCP connect: it failed with errno {errno}, not EPERM"
             );
             assert_eq!(refusal, Err(refuse(HostPolicy, detail)));
         }
@@ -1944,9 +1963,12 @@ mod tests {
         }
 
         #[test]
+        #[allow(unsafe_code)]
         fn loaded_images_include_libsystem() {
             let counted = image_count();
-            let images = loaded_images();
+            // SAFETY: no test in this library test binary calls dlclose or another image unloader;
+            // the only dlopen test retains its handle, so no image unloads during this call.
+            let images = unsafe { loaded_images() };
             assert!(images.len() >= counted, "{images:?}");
             let executable = std::env::current_exe()
                 .and_then(fs::canonicalize)
@@ -1980,19 +2002,99 @@ mod tests {
         }
 
         #[test]
+        #[allow(unsafe_code)]
         fn a_second_inventory_lists_an_image_loaded_after_the_first() {
             let late = c"/usr/lib/libsqlite3.dylib";
             let named =
                 |images: &[String]| images.iter().any(|name| name.as_bytes() == late.to_bytes());
-            let first = loaded_images();
+            // SAFETY: no test in this library test binary calls dlclose or another image unloader;
+            // the only dlopen test retains its handle, so no image unloads during this call.
+            let first = unsafe { loaded_images() };
             assert!(!named(&first), "{late:?} is not loaded yet: {first:?}");
             load(late);
-            let second = loaded_images();
+            // SAFETY: no test in this library test binary calls dlclose or another image unloader;
+            // the only dlopen test retains its handle, so no image unloads during this call.
+            let second = unsafe { loaded_images() };
             assert!(named(&second), "{second:?}");
             assert!(second.len() > first.len());
         }
 
         const POLICY_CHILD: &str = "PLASMOSOME_VMM_POLICY_CHILD";
+
+        #[test]
+        #[allow(unsafe_code)]
+        fn a_pending_tcp_connect_times_out_and_refuses() {
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("an ephemeral loopback listener binds");
+            // SAFETY: the live listener owns this socket descriptor; listen changes only its queue.
+            assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+            let address = listener.local_addr().expect("the listener has an address");
+            let _queued =
+                std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(1))
+                    .expect("one connection fills the queue without an accept");
+            let allowance = std::time::Duration::from_millis(100);
+            let start = std::time::Instant::now();
+            let outcome = tcp_connect_to(&address, allowance);
+            let elapsed = start.elapsed();
+            assert_eq!(outcome, Err(libc::EIO), "{elapsed:?}");
+            assert!(elapsed >= allowance, "the connect waited: {elapsed:?}");
+            assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+            assert_eq!(
+                exit_of(judge_denial(DeniedProbe::TcpConnect, outcome)),
+                HostPolicy
+            );
+        }
+
+        #[test]
+        fn an_existing_probe_name_is_preserved_and_refuses() {
+            let tree = ArtifactTree::new();
+            let sentinel = tree.file("sentinel", b"sentinel", 0o600);
+            let path = PathBuf::from(format!(
+                "/private/tmp/plasmosome-vmm-probe-{}",
+                std::process::id()
+            ));
+            assert!(fs::symlink_metadata(&path).is_err());
+            for kind in ["file", "symlink", "directory"] {
+                match kind {
+                    "file" => fs::write(&path, b"probe").expect("the existing file is made"),
+                    "symlink" => std::os::unix::fs::symlink(&sentinel, &path)
+                        .expect("the existing symlink is made"),
+                    _ => {
+                        fs::create_dir(&path).expect("the existing directory is made");
+                        fs::write(path.join("kept"), b"kept").expect("its content is made");
+                    }
+                }
+                let before = fs::symlink_metadata(&path).expect("the entry exists");
+                let outcome = fresh_file_write();
+                assert_eq!(outcome, Err(libc::EEXIST), "{kind}");
+                assert_eq!(
+                    exit_of(judge_denial(DeniedProbe::FreshFileWrite, outcome)),
+                    HostPolicy
+                );
+                let after = fs::symlink_metadata(&path).expect("the entry remains");
+                assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+                assert_eq!(after.file_type(), before.file_type());
+                assert_eq!(
+                    fs::read(&sentinel).expect("the sentinel remains"),
+                    b"sentinel"
+                );
+                match kind {
+                    "file" => assert_eq!(fs::read(&path).expect("file contents remain"), b"probe"),
+                    "symlink" => {
+                        assert_eq!(fs::read_link(&path).expect("the symlink remains"), sentinel)
+                    }
+                    _ => {
+                        assert_eq!(
+                            fs::read(path.join("kept")).expect("directory contents remain"),
+                            b"kept"
+                        );
+                        fs::remove_dir_all(&path).expect("the directory is removed");
+                        continue;
+                    }
+                }
+                fs::remove_file(&path).expect("the existing entry is removed");
+            }
+        }
 
         fn child_profile(mode: &str) -> String {
             match mode {
@@ -2047,6 +2149,7 @@ mod tests {
         struct ChildRun {
             pid: u32,
             code: Option<i32>,
+            stdout: String,
             stderr: String,
         }
 
@@ -2066,12 +2169,22 @@ mod tests {
         }
 
         fn run_policy_child(mode: &str) -> ChildRun {
+            run_policy_child_token(Some(&format!("{mode}:{}", std::process::id())))
+        }
+
+        fn run_policy_child_token(token: Option<&str>) -> ChildRun {
             let test = "runtime::vmm_helper::tests::macos::policy_child";
-            let child = Command::new(std::env::current_exe().expect("the test binary has a path"))
-                .args(["--exact", test, "--test-threads=1", "--nocapture"])
-                .env(POLICY_CHILD, format!("{mode}:{}", std::process::id()))
+            let mut command =
+                Command::new(std::env::current_exe().expect("the test binary has a path"));
+            command.args(["--exact", test, "--test-threads=1", "--nocapture"]);
+            if let Some(token) = token {
+                command.env(POLICY_CHILD, token);
+            } else {
+                command.env_remove(POLICY_CHILD);
+            }
+            let child = command
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("the test binary runs again as a policy child");
@@ -2082,7 +2195,28 @@ mod tests {
             ChildRun {
                 pid,
                 code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }
+        }
+
+        #[test]
+        fn a_policy_child_without_its_parent_token_returns_through_the_harness() {
+            for token in [
+                None,
+                Some("allow"),
+                Some("allow:not-a-pid"),
+                Some("allow:0"),
+                Some("deny:0"),
+            ] {
+                let run = run_policy_child_token(token);
+                assert_eq!(run.code, Some(0), "{token:?}: {}", run.stderr);
+                assert!(run.stderr.is_empty(), "{token:?}: {}", run.stderr);
+                assert!(
+                    run.stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                    "{token:?}: {}",
+                    run.stdout
+                );
             }
         }
 
