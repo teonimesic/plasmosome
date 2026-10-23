@@ -1722,17 +1722,11 @@ fn matrix_reader_refuses_non_block_strategy() {
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: !!map` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace(
-                "    strategy:\n      matrix:\n        crate:\n          - a",
-                "    strategy: |",
-            ),
+            matrix_fixture("          - a").replace("    strategy:", "    strategy: |"),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: |` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace(
-                "    strategy:\n      matrix:\n        crate:\n          - a",
-                "    strategy: >-",
-            ),
+            matrix_fixture("          - a").replace("    strategy:", "    strategy: >-"),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `    strategy: >-` (strategy must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
     ] {
@@ -1772,17 +1766,11 @@ fn matrix_reader_refuses_non_block_matrix() {
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: !!map` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace(
-                "      matrix:\n        crate:\n          - a",
-                "      matrix: |",
-            ),
+            matrix_fixture("          - a").replace("      matrix:", "      matrix: |"),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: |` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
         (
-            matrix_fixture("          - a").replace(
-                "      matrix:\n        crate:\n          - a",
-                "      matrix: >-",
-            ),
+            matrix_fixture("          - a").replace("      matrix:", "      matrix: >-"),
             "this guard reads the `crate` job's matrix in .github/workflows/ci.yml only as `        crate:` followed by `          - <package>` lines, blank lines and comments allowed, and it met `      matrix: >-` (matrix must be a block mapping). A reader that guessed could report a list it did not read. Write the list in that form, or teach this guard the new form in the same PR, with a test for it.",
         ),
     ] {
